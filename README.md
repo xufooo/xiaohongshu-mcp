@@ -2,9 +2,18 @@
 
 MCP for xiaohongshu.com
 
-## 使用教程
+功能：
 
-### 登录
+1. 登录。第一步必须，小红书需要进行登录。
+2. 发布图文。目前只支持发布图文，后续支持更多的发布功能。
+
+Todos：
+
+- [ ] 搜索功能。
+
+## 1. 使用教程
+
+### 1.1. 登录
 
 第一次需要手动登录，需要保存小红书的登录状态。
 
@@ -14,7 +23,7 @@ MCP for xiaohongshu.com
 go run cmd/login/main.go
 ```
 
-### 启动 MCP 服务
+### 1.2. 启动 MCP 服务
 
 启动 xiaohongshu-mcp 服务。
 
@@ -22,7 +31,7 @@ go run cmd/login/main.go
 go run . -headless=false
 ```
 
-## 验证 MCP
+## 1.3. 验证 MCP
 
 ```bash
 npx @modelcontextprotocol/inspector
@@ -36,7 +45,7 @@ npx @modelcontextprotocol/inspector
 
 按照上面配置 MCP inspector 后，点击 `List Tools` 按钮，查看所有的 Tools。
 
-## 使用 MCP 发布
+## 1.4. 使用 MCP 发布
 
 ### 检查登录状态
 
@@ -48,11 +57,11 @@ npx @modelcontextprotocol/inspector
 
 ![发布图文](./assets/inspect_mcp_publish.gif)
 
-## MCP 集成
+## 2. MCP 集成
 
 各种 MCP 集成工具，都可以使用这个 MCP 服务。
 
-### Claude Cli
+### 2.1. Claude Cli
 
 ```bash
 # localhost 是本机，如果是远程的话，更换成对应的 IP 地址。
@@ -61,7 +70,7 @@ claude mcp add --transport http xiaohongshu-mcp http://localhost:18060/mcp
 
 这里使用 Claude Code With K2 做演示，接入方式参考：[在 software agents 中使用 kimi k2 模型](https://platform.moonshot.cn/docs/guide/agent-support)。
 
-示例：
+**示例：**
 
 以 [Product Hunt 日报](https://product-daily.haha.ai/) 上面的一篇图片为例，使用 Claude Code 进行发布。
 
@@ -78,5 +87,7 @@ claude mcp add --transport http xiaohongshu-mcp http://localhost:18060/mcp
 ![claude-cli 进行发布](./assets/claude_push.gif)
 
 高清版本可以参考：[claude-cli 进行发布](./assets/claude_push.mp4)
+
+**发布结果：**
 
 ![xiaohongshu-mcp 发布结果](./assets/publish_result.jpeg)
