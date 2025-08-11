@@ -91,4 +91,4 @@ claude mcp add --transport http xiaohongshu-mcp http://localhost:18060/mcp
 
 **发布结果：**
 
-![xiaohongshu-mcp 发布结果](./assets/publish_result.jpeg)
+<img src="./assets/publish_result.jpeg" alt="xiaohongshu-mcp 发布结果" width="400">
