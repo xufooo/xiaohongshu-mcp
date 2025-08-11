@@ -39,6 +39,12 @@ type PublishResponse struct {
 	PostID  string `json:"post_id,omitempty"`
 }
 
+// FeedsListResponse Feeds列表响应
+type FeedsListResponse struct {
+	Feeds []xiaohongshu.Feed `json:"feeds"`
+	Count int                `json:"count"`
+}
+
 // CheckLoginStatus 检查登录状态
 func (s *XiaohongshuService) CheckLoginStatus(ctx context.Context) (*LoginStatusResponse, error) {
 	// 使用全局单例浏览器创建新页面
@@ -108,4 +114,27 @@ func (s *XiaohongshuService) publishContent(ctx context.Context, content xiaohon
 
 	// 执行发布
 	return action.Publish(ctx, content)
+}
+
+// ListFeeds 获取Feeds列表
+func (s *XiaohongshuService) ListFeeds(ctx context.Context) (*FeedsListResponse, error) {
+	// 使用全局单例浏览器创建新页面
+	page := browser.NewPage()
+	defer page.Close()
+
+	// 创建 Feeds 列表 action
+	action := xiaohongshu.NewFeedsListAction(page)
+
+	// 获取 Feeds 列表
+	feeds, err := action.GetFeedsList(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	response := &FeedsListResponse{
+		Feeds: feeds,
+		Count: len(feeds),
+	}
+
+	return response, nil
 }
