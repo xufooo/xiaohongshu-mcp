@@ -92,3 +92,7 @@ claude mcp add --transport http xiaohongshu-mcp http://localhost:18060/mcp
 **发布结果：**
 
 <img src="./assets/publish_result.jpeg" alt="xiaohongshu-mcp 发布结果" width="400">
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=xpzouying/xiaohongshu-mcp&type=Date)](https://star-history.com/#xpzouying/xiaohongshu-mcp&Date)
