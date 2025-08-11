@@ -9,7 +9,9 @@
       "Bash(go list:*)",
       "Bash(go test:*)",
       "Bash(rmdir:*)",
-      "Bash(rm:*)"
+      "Bash(rm:*)",
+      "Bash(gofmt:*)",
+      "Bash(goimports:*)"
     ],
     "deny": []
   }
