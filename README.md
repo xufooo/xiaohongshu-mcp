@@ -95,4 +95,4 @@ claude mcp add --transport http xiaohongshu-mcp http://localhost:18060/mcp
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=xpzouying/xiaohongshu-mcp&type=Date)](https://star-history.com/#xpzouying/xiaohongshu-mcp&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=xpzouying/xiaohongshu-mcp&type=Timeline)](https://www.star-history.com/#xpzouying/xiaohongshu-mcp&Timeline)
