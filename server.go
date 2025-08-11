@@ -40,6 +40,9 @@ func setupRouter() *gin.Engine {
 		api.GET("/login/status", checkLoginStatusHandler)
 
 		api.POST("/publish", publishHandler)
+
+		// Feeds 相关路由
+		api.GET("/feeds/list", listFeedsHandler)
 	}
 
 	return router

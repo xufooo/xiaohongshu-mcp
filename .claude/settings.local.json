@@ -11,7 +11,8 @@
       "Bash(rmdir:*)",
       "Bash(rm:*)",
       "Bash(gofmt:*)",
-      "Bash(goimports:*)"
+      "Bash(goimports:*)",
+      "Bash(chmod:*)"
     ],
     "deny": []
   }

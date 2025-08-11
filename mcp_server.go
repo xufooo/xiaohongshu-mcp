@@ -118,6 +118,41 @@ func handlePublishContent(ctx context.Context, args map[string]interface{}) *MCP
 	}
 }
 
+// handleListFeeds 处理获取Feeds列表
+func handleListFeeds(ctx context.Context) *MCPToolResult {
+	logrus.Info("MCP: 获取Feeds列表")
+
+	result, err := xiaohongshuService.ListFeeds(ctx)
+	if err != nil {
+		return &MCPToolResult{
+			Content: []MCPContent{{
+				Type: "text",
+				Text: "获取Feeds列表失败: " + err.Error(),
+			}},
+			IsError: true,
+		}
+	}
+
+	// 格式化输出，转换为JSON字符串
+	jsonData, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return &MCPToolResult{
+			Content: []MCPContent{{
+				Type: "text",
+				Text: fmt.Sprintf("获取Feeds列表成功，但序列化失败: %v", err),
+			}},
+			IsError: true,
+		}
+	}
+
+	return &MCPToolResult{
+		Content: []MCPContent{{
+			Type: "text",
+			Text: string(jsonData),
+		}},
+	}
+}
+
 // handleMCPRequest 处理 MCP 请求
 func handleMCPRequest(w http.ResponseWriter, r *http.Request) {
 	var req JSONRPCRequest
@@ -193,6 +228,14 @@ func handleToolsList(w http.ResponseWriter, req JSONRPCRequest) {
 				"required": []string{"title", "content", "images"},
 			},
 		},
+		{
+			"name":        "list_feeds",
+			"description": "获取小红书首页Feeds列表",
+			"inputSchema": map[string]interface{}{
+				"type":       "object",
+				"properties": map[string]interface{}{},
+			},
+		},
 	}
 
 	result := map[string]interface{}{
@@ -220,6 +263,8 @@ func handleToolsCall(w http.ResponseWriter, r *http.Request, req JSONRPCRequest)
 		result = handleCheckLoginStatus(ctx)
 	case "publish_content":
 		result = handlePublishContent(ctx, toolCall.Arguments)
+	case "list_feeds":
+		result = handleListFeeds(ctx)
 	default:
 		logrus.Warnf("不支持的工具: %s", toolCall.Name)
 		sendJSONRPCError(w, req.ID, -32601, "Tool not found", nil)

@@ -90,6 +90,20 @@ func publishHandler(c *gin.Context) {
 	respondSuccess(c, result, "发布成功")
 }
 
+// listFeedsHandler 获取Feeds列表
+func listFeedsHandler(c *gin.Context) {
+	// 获取 Feeds 列表
+	result, err := xiaohongshuService.ListFeeds(c.Request.Context())
+	if err != nil {
+		respondError(c, http.StatusInternalServerError, "LIST_FEEDS_FAILED",
+			"获取Feeds列表失败", err.Error())
+		return
+	}
+
+	c.Set("account", "ai-report")
+	respondSuccess(c, result, "获取Feeds列表成功")
+}
+
 // healthHandler 健康检查
 func healthHandler(c *gin.Context) {
 	respondSuccess(c, map[string]any{

@@ -31,3 +31,9 @@ go.work.sum
 # .idea/
 # .vscode/
 # .claude/
+
+# Build artifacts
+xiaohongshu-mcp
+
+# Test scripts
+test_*.sh
