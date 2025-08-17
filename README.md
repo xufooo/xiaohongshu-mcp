@@ -29,6 +29,11 @@ go run cmd/login/main.go
 启动 xiaohongshu-mcp 服务。
 
 ```bash
+
+# 默认：无头模式，没有浏览器界面
+go run .
+
+# 非无头模式，有浏览器界面
 go run . -headless=false
 ```
 
