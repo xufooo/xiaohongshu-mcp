@@ -4,6 +4,12 @@ MCP for 小红书/xiaohongshu.com。
 
 - 我的博客文章：[haha.ai/xiaohongshu-mcp](https://www.haha.ai/xiaohongshu-mcp)
 
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=xpzouying/xiaohongshu-mcp&type=Timeline)](https://www.star-history.com/#xpzouying/xiaohongshu-mcp&Timeline)
+
+
 **主要功能**
 
 1. 登录。第一步必须，小红书需要进行登录。
@@ -18,6 +24,27 @@ MCP for 小红书/xiaohongshu.com。
 - （低优先级）可以考虑视频和纯文字的支持。1. 个人感觉这两种会大大增加运营的复杂度；2. 这两类在我的使用场景的价值较低。
 - Tags：马上支持。
 - 根据本人实操，小红书每天的发帖量应该是 **50 篇**。
+- **（非常重要）小红书的同一个账号不允许在多个网页端登录**，如果你登录了当前 xiaohongshu-mcp 后，就不要再在其他的网页端登录该账号，否则就会把当前 MCP 的账号“踢出登录”。你可以使用移动 App 端进行查看当前账号信息。
+
+**风险说明**
+
+1. 该项目是在自己的另外一个项目的基础上开源出来的，原来的项目稳定运行一年多，没有出现过封号的情况，只有出现过 Cookies 过期需要重新登录。
+2. 我是使用 Claude Code 接入，稳定自动化运营数周后，验证没有问题后开源。
+
+该项目是基于学习的目的，禁止一切违法行为。
+
+**实操结果**
+
+第一天点赞/收藏数达到了 999+，
+
+<img width="386" height="278" alt="CleanShot 2025-09-05 at 01 31 55@2x" src="https://github.com/user-attachments/assets/4b5a283b-bd38-45b8-b608-8f818997366c" />
+
+<img width="350" height="280" alt="CleanShot 2025-09-05 at 01 32 49@2x" src="https://github.com/user-attachments/assets/4481e1e7-3ef6-4bbd-8483-dcee8f77a8f2" />
+
+一周左右的成果
+
+<img width="1840" height="582" alt="CleanShot 2025-09-05 at 01 33 13@2x" src="https://github.com/user-attachments/assets/fb367944-dc48-4bbd-8ece-934caa86323e" />
+
 
 ## 1. 使用教程
 
@@ -125,7 +152,3 @@ claude mcp add --transport http xiaohongshu-mcp http://localhost:18060/mcp
 **发布结果：**
 
 <img src="./assets/publish_result.jpeg" alt="xiaohongshu-mcp 发布结果" width="400">
-
-## Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=xpzouying/xiaohongshu-mcp&type=Timeline)](https://www.star-history.com/#xpzouying/xiaohongshu-mcp&Timeline)
