@@ -65,6 +65,8 @@ claude mcp add --transport http xiaohongshu-mcp http://localhost:18060/mcp
 
 ### Cursor
 
+**重要提示**：Cursor 支持三种 MCP 传输方式：stdio、SSE 和 Streamable HTTP。对于 HTTP 服务器，应该使用 `url` 字段而不是 `command` 和 `args`。
+
 #### 配置文件的方式
 
 创建或编辑 MCP 配置文件：
@@ -76,17 +78,8 @@ claude mcp add --transport http xiaohongshu-mcp http://localhost:18060/mcp
 {
   "mcpServers": {
     "xiaohongshu-mcp": {
-      "command": "curl",
-      "args": [
-        "-X",
-        "POST",
-        "http://localhost:18060/mcp",
-        "-H",
-        "Content-Type: application/json",
-        "-d",
-        "@-"
-      ],
-      "description": "小红书内容发布服务"
+      "url": "http://localhost:18060/mcp",
+      "description": "小红书内容发布服务 - MCP Streamable HTTP"
     }
   }
 }
@@ -94,6 +87,13 @@ claude mcp add --transport http xiaohongshu-mcp http://localhost:18060/mcp
 
 **全局配置**：
 在用户目录创建 `~/.cursor/mcp.json` (同样内容)
+
+#### 使用步骤
+
+1. 确保小红书 MCP 服务正在运行
+2. 保存配置文件后，重启 Cursor
+3. 在 Cursor 聊天中，工具应该自动可用
+4. 可以通过聊天界面的 "Available Tools" 查看已连接的 MCP 工具
 
 **Demo**
 
@@ -162,9 +162,10 @@ npx @modelcontextprotocol/inspector
 
 连接成功后，可使用以下 MCP 工具：
 
-- `check_login_status` - 检查小红书登录状态
-- `publish_content` - 发布图文内容到小红书
-- `list_feeds` - 获取小红书首页推荐列表
+- `check_login_status` - 检查小红书登录状态（无参数）
+- `publish_content` - 发布图文内容到小红书（需要：title, content, 可选：images, video）
+- `list_feeds` - 获取小红书首页推荐列表（无参数）
+- `search_feeds` - 搜索小红书内容（需要：keyword）
 
 ## 📝 使用示例
 
@@ -190,6 +191,26 @@ npx @modelcontextprotocol/inspector
 }
 ```
 
+### 获取推荐列表
+
+```json
+{
+  "name": "list_feeds",
+  "arguments": {}
+}
+```
+
+### 搜索内容
+
+```json
+{
+  "name": "search_feeds",
+  "arguments": {
+    "keyword": "搜索关键词"
+  }
+}
+```
+
 ## ⚠️ 注意事项
 
 1. **首次使用需要登录**：运行 `go run cmd/login/main.go` 完成登录
@@ -204,8 +225,21 @@ npx @modelcontextprotocol/inspector
 - 确认端口未被占用
 - 检查防火墙设置
 
+### Cursor 连接问题
+
+- 确保使用正确的配置格式：HTTP 服务器使用 `url` 字段，而不是 `command` + `args`
+- 重启 Cursor 应用以加载新的 MCP 配置
+- 检查是否有 "Available Tools" 显示在聊天界面中
+
+### MCP Inspector 测试
+
+- 使用 MCP Inspector 测试连接：`npx @modelcontextprotocol/inspector`
+- 测试 Ping Server 功能验证连接
+- 检查 List Tools 是否返回 4 个工具
+
 ### 工具调用失败
 
 - 确认已完成小红书登录
 - 检查图片 URL 或路径是否有效
 - 查看服务日志获取详细错误信息
+- 确保工具参数格式正确（特别注意 `list_feeds` 不需要参数）

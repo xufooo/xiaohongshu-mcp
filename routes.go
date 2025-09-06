@@ -20,8 +20,8 @@ func setupRoutes(appServer *AppServer) *gin.Engine {
 	// 健康检查
 	router.GET("/health", healthHandler)
 
-	// MCP 端点 - 使用 SSE 协议
-	mcpHandler := appServer.createMCPHandler()
+	// MCP 端点 - 使用 Streamable HTTP 协议
+	mcpHandler := appServer.StreamableHTTPHandler()
 	router.Any("/mcp", gin.WrapH(mcpHandler))
 	router.Any("/mcp/*path", gin.WrapH(mcpHandler))
 
