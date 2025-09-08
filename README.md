@@ -12,6 +12,8 @@ MCP for 小红书/xiaohongshu.com。
 
 **主要功能**
 
+> 💡 **提示：** 点击下方功能标题可展开查看视频演示
+
 <details>
 <summary><b>1. 登录和检查登录状态</b></summary>
 
@@ -57,6 +59,26 @@ https://github.com/user-attachments/assets/03c5077d-6160-4b18-b629-2e40933a1fd3
 **获取推荐列表演示：**
 
 https://github.com/user-attachments/assets/110fc15d-46f2-4cca-bdad-9de5b5b8cc28
+
+</details>
+
+<details>
+<summary><b>5. 获取帖子详情（包括互动数据和评论）</b></summary>
+
+获取小红书帖子的完整详情，包括：
+- 帖子内容（标题、描述、图片等）
+- 用户信息
+- 互动数据（点赞、收藏、分享、评论数）
+- 评论列表及子评论
+
+**⚠️ 重要提示：**
+- 需要提供帖子ID和xsec_token（两个参数缺一不可）
+- 这两个参数可以从Feed列表或搜索结果中获取
+- 必须先登录才能使用此功能
+
+**获取帖子详情演示：**
+
+https://github.com/user-attachments/assets/76a26130-a216-4371-a6b3-937b8fda092a
 
 </details>
 
