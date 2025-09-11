@@ -417,4 +417,5 @@ npx @modelcontextprotocol/inspector
 
 **申请时务必添加备注。**
 
-![image](https://github.com/user-attachments/assets/7fb867d2-5b66-418c-b1f6-aadc974534e8)
+![WechatIMG111](https://github.com/user-attachments/assets/ae535953-6c8b-4c12-91b6-ac1572ce9032)
+
