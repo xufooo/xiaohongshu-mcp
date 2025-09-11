@@ -409,3 +409,12 @@ npx @modelcontextprotocol/inspector
 **发布结果：**
 
 <img src="./assets/publish_result.jpeg" alt="xiaohongshu-mcp 发布结果" width="400">
+
+
+## 小红书 MCP 互助群
+
+因为项目刚刚启动，会有很多问题，拉一个群大家一起讨论问题，一起为开源项目做贡献。扫我的微信二维码加群讨论技术。
+
+**申请时务必添加备注。**
+
+![image](https://github.com/user-attachments/assets/7fb867d2-5b66-418c-b1f6-aadc974534e8)
