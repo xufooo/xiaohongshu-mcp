@@ -444,4 +444,11 @@ npx @modelcontextprotocol/inspector
 
 **申请时务必添加备注。**
 
+直接扫码进群
+
+![image](https://github.com/user-attachments/assets/5893ef1e-4466-46be-af59-4e8d505c9759)
+
+
+个人微信由于申请人太多，导致微信现在把我封禁掉 7d，直到 9月22日 才能添加我个人微信。
+
 ![WechatIMG111](https://github.com/user-attachments/assets/ae535953-6c8b-4c12-91b6-ac1572ce9032)
