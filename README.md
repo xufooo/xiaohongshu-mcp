@@ -446,4 +446,8 @@ npx @modelcontextprotocol/inspector
 
 换到飞书群，直接扫码进群
 
+【飞书一群】已经满了。
 ![1757903591605_副本](https://github.com/user-attachments/assets/63ad53b9-6e5d-4117-ba61-90a223494501)
+
+【飞书二群】
+![image](https://github.com/user-attachments/assets/779304ae-957d-4e5b-ac00-4dc65cd5ac16)
