@@ -499,4 +499,13 @@ npx @modelcontextprotocol/inspector
 
 <!-- ALL-CONTRIBUTORS-LIST:END -->
 
+
+### ✨ 特别感谢
+
+| 贡献者 |
+| --- |
+| [<img src="https://avatars.githubusercontent.com/wanpengxie" width="100px;"><br>@wanpengxie](https://github.com/wanpengxie) |
+
+
+
 本项目遵循 [all-contributors](https://github.com/all-contributors/all-contributors) 规范。欢迎任何形式的贡献！
