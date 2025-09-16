@@ -144,19 +144,27 @@ https://github.com/user-attachments/assets/cc385b6c-422c-489b-a5fc-63e92c695b80
 
 直接从 [GitHub Releases](https://github.com/xpzouying/xiaohongshu-mcp/releases) 下载对应平台的二进制文件：
 
+**主程序（MCP 服务）：**
 - **macOS Apple Silicon**: `xiaohongshu-mcp-darwin-arm64`
 - **macOS Intel**: `xiaohongshu-mcp-darwin-amd64`
 - **Windows x64**: `xiaohongshu-mcp-windows-amd64.exe`
 - **Linux x64**: `xiaohongshu-mcp-linux-amd64`
 
-下载后直接运行：
+**登录工具：**
+- **macOS Apple Silicon**: `xiaohongshu-login-darwin-arm64`
+- **macOS Intel**: `xiaohongshu-login-darwin-amd64`
+- **Windows x64**: `xiaohongshu-login-windows-amd64.exe`
+- **Linux x64**: `xiaohongshu-login-linux-amd64`
+
+使用步骤：
 ```bash
-# macOS/Linux
+# 1. 首先运行登录工具
+chmod +x xiaohongshu-login-darwin-arm64
+./xiaohongshu-login-darwin-arm64
+
+# 2. 然后启动 MCP 服务
 chmod +x xiaohongshu-mcp-darwin-arm64
 ./xiaohongshu-mcp-darwin-arm64
-
-# Windows
-xiaohongshu-mcp-windows-amd64.exe
 ```
 
 **⚠️ 重要提示**：首次运行时会自动下载无头浏览器（约 150MB），请确保网络连接正常。后续运行无需重复下载。
@@ -193,8 +201,8 @@ Windows 遇到问题首先看这里：[Windows 安装指南](./docs/windows_guid
 
 **使用二进制文件**：
 ```bash
-# 下载 login 工具或使用源码编译
-go run cmd/login/main.go
+# 运行对应平台的登录工具
+./xiaohongshu-login-darwin-arm64
 ```
 
 **使用源码**：

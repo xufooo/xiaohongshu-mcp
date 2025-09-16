@@ -34,17 +34,22 @@ jobs:
 
     - name: Build for multiple platforms
       run: |
+        # 主程序构建
         # macOS ARM64 (Apple Silicon)
         GOOS=darwin GOARCH=arm64 go build -o xiaohongshu-mcp-darwin-arm64 .
+        GOOS=darwin GOARCH=arm64 go build -o xiaohongshu-login-darwin-arm64 ./cmd/login
 
         # macOS Intel
         GOOS=darwin GOARCH=amd64 go build -o xiaohongshu-mcp-darwin-amd64 .
+        GOOS=darwin GOARCH=amd64 go build -o xiaohongshu-login-darwin-amd64 ./cmd/login
 
         # Windows x64
         GOOS=windows GOARCH=amd64 go build -o xiaohongshu-mcp-windows-amd64.exe .
+        GOOS=windows GOARCH=amd64 go build -o xiaohongshu-login-windows-amd64.exe ./cmd/login
 
         # Linux x64
         GOOS=linux GOARCH=amd64 go build -o xiaohongshu-mcp-linux-amd64 .
+        GOOS=linux GOARCH=amd64 go build -o xiaohongshu-login-linux-amd64 ./cmd/login
 
     - name: Create Release
       id: create_release
@@ -64,14 +69,25 @@ jobs:
           - 后续运行无需重复下载浏览器
 
           **下载说明：**
+
+          **主程序（MCP 服务）：**
           - **macOS Apple Silicon**: `xiaohongshu-mcp-darwin-arm64`
           - **macOS Intel**: `xiaohongshu-mcp-darwin-amd64`
           - **Windows x64**: `xiaohongshu-mcp-windows-amd64.exe`
           - **Linux x64**: `xiaohongshu-mcp-linux-amd64`
 
+          **登录工具：**
+          - **macOS Apple Silicon**: `xiaohongshu-login-darwin-arm64`
+          - **macOS Intel**: `xiaohongshu-login-darwin-amd64`
+          - **Windows x64**: `xiaohongshu-login-windows-amd64.exe`
+          - **Linux x64**: `xiaohongshu-login-linux-amd64`
+
           **使用方法：**
           ```bash
-          # 下载对应平台的文件后，直接运行
+          # 1. 首先运行登录工具
+          ./xiaohongshu-login-darwin-arm64
+
+          # 2. 然后启动 MCP 服务
           ./xiaohongshu-mcp-darwin-arm64
 
           # 或指定参数
@@ -120,4 +136,45 @@ jobs:
         upload_url: ${{ steps.create_release.outputs.upload_url }}
         asset_path: ./xiaohongshu-mcp-linux-amd64
         asset_name: xiaohongshu-mcp-linux-amd64
+        asset_content_type: application/octet-stream
+
+    # 登录工具上传
+    - name: Upload Login Tool - macOS ARM64
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: ./xiaohongshu-login-darwin-arm64
+        asset_name: xiaohongshu-login-darwin-arm64
+        asset_content_type: application/octet-stream
+
+    - name: Upload Login Tool - macOS Intel
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: ./xiaohongshu-login-darwin-amd64
+        asset_name: xiaohongshu-login-darwin-amd64
+        asset_content_type: application/octet-stream
+
+    - name: Upload Login Tool - Windows x64
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: ./xiaohongshu-login-windows-amd64.exe
+        asset_name: xiaohongshu-login-windows-amd64.exe
+        asset_content_type: application/octet-stream
+
+    - name: Upload Login Tool - Linux x64
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: ./xiaohongshu-login-linux-amd64
+        asset_name: xiaohongshu-login-linux-amd64
         asset_content_type: application/octet-stream
