@@ -1,0 +1,123 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - '**.go'
+      - 'go.mod'
+      - 'go.sum'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.24'
+
+    - name: Generate version
+      id: version
+      run: |
+        TIMESTAMP=$(date +%Y.%m.%d.%H%M)
+        COMMIT_SHA=$(git rev-parse --short HEAD)
+        VERSION="v${TIMESTAMP}-${COMMIT_SHA}"
+        echo "version=${VERSION}" >> $GITHUB_OUTPUT
+        echo "Generated version: ${VERSION}"
+
+    - name: Build for multiple platforms
+      run: |
+        # macOS ARM64 (Apple Silicon)
+        GOOS=darwin GOARCH=arm64 go build -o xiaohongshu-mcp-darwin-arm64 .
+
+        # macOS Intel
+        GOOS=darwin GOARCH=amd64 go build -o xiaohongshu-mcp-darwin-amd64 .
+
+        # Windows x64
+        GOOS=windows GOARCH=amd64 go build -o xiaohongshu-mcp-windows-amd64.exe .
+
+        # Linux x64
+        GOOS=linux GOARCH=amd64 go build -o xiaohongshu-mcp-linux-amd64 .
+
+    - name: Create Release
+      id: create_release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ steps.version.outputs.version }}
+        release_name: Release ${{ steps.version.outputs.version }}
+        draft: false
+        prerelease: false
+        body: |
+          ## 🚀 新版本发布
+
+          **注意事项：**
+          - 首次运行时会自动下载无头浏览器（约 150MB），请确保网络连接正常
+          - 后续运行无需重复下载浏览器
+
+          **下载说明：**
+          - **macOS Apple Silicon**: `xiaohongshu-mcp-darwin-arm64`
+          - **macOS Intel**: `xiaohongshu-mcp-darwin-amd64`
+          - **Windows x64**: `xiaohongshu-mcp-windows-amd64.exe`
+          - **Linux x64**: `xiaohongshu-mcp-linux-amd64`
+
+          **使用方法：**
+          ```bash
+          # 下载对应平台的文件后，直接运行
+          ./xiaohongshu-mcp-darwin-arm64
+
+          # 或指定参数
+          ./xiaohongshu-mcp-darwin-arm64 -headless=false
+          ```
+
+          **构建信息：**
+          - Commit: ${{ github.sha }}
+          - Go Version: 1.24
+
+    - name: Upload macOS ARM64
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: ./xiaohongshu-mcp-darwin-arm64
+        asset_name: xiaohongshu-mcp-darwin-arm64
+        asset_content_type: application/octet-stream
+
+    - name: Upload macOS Intel
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: ./xiaohongshu-mcp-darwin-amd64
+        asset_name: xiaohongshu-mcp-darwin-amd64
+        asset_content_type: application/octet-stream
+
+    - name: Upload Windows x64
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: ./xiaohongshu-mcp-windows-amd64.exe
+        asset_name: xiaohongshu-mcp-windows-amd64.exe
+        asset_content_type: application/octet-stream
+
+    - name: Upload Linux x64
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: ./xiaohongshu-mcp-linux-amd64
+        asset_name: xiaohongshu-mcp-linux-amd64
+        asset_content_type: application/octet-stream

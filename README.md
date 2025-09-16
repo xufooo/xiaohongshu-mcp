@@ -138,10 +138,33 @@ https://github.com/user-attachments/assets/cc385b6c-422c-489b-a5fc-63e92c695b80
 
 ## 1. 使用教程
 
-### 1.1. 安装
+### 1.1. 快速开始（推荐）
+
+**方式一：下载预编译二进制文件**
+
+直接从 [GitHub Releases](https://github.com/xpzouying/xiaohongshu-mcp/releases) 下载对应平台的二进制文件：
+
+- **macOS Apple Silicon**: `xiaohongshu-mcp-darwin-arm64`
+- **macOS Intel**: `xiaohongshu-mcp-darwin-amd64`
+- **Windows x64**: `xiaohongshu-mcp-windows-amd64.exe`
+- **Linux x64**: `xiaohongshu-mcp-linux-amd64`
+
+下载后直接运行：
+```bash
+# macOS/Linux
+chmod +x xiaohongshu-mcp-darwin-arm64
+./xiaohongshu-mcp-darwin-arm64
+
+# Windows
+xiaohongshu-mcp-windows-amd64.exe
+```
+
+**⚠️ 重要提示**：首次运行时会自动下载无头浏览器（约 150MB），请确保网络连接正常。后续运行无需重复下载。
+
+**方式二：源码编译**
 
 <details>
-<summary>安装配置详情</summary>
+<summary>源码编译安装详情</summary>
 
 依赖 Golang 环境，安装方法请参考 [Golang 官方文档](https://go.dev/doc/install)。
 
@@ -168,8 +191,13 @@ Windows 遇到问题首先看这里：[Windows 安装指南](./docs/windows_guid
 
 第一次需要手动登录，需要保存小红书的登录状态。
 
-运行
+**使用二进制文件**：
+```bash
+# 下载 login 工具或使用源码编译
+go run cmd/login/main.go
+```
 
+**使用源码**：
 ```bash
 go run cmd/login/main.go
 ```
@@ -178,8 +206,17 @@ go run cmd/login/main.go
 
 启动 xiaohongshu-mcp 服务。
 
+**使用二进制文件**：
 ```bash
+# 默认：无头模式，没有浏览器界面
+./xiaohongshu-mcp-darwin-arm64
 
+# 非无头模式，有浏览器界面
+./xiaohongshu-mcp-darwin-arm64 -headless=false
+```
+
+**使用源码**：
+```bash
 # 默认：无头模式，没有浏览器界面
 go run .
 
