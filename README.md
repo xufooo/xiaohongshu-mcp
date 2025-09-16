@@ -474,21 +474,10 @@ npx @modelcontextprotocol/inspector
 | <img src="https://github.com/user-attachments/assets/ca1f5d6e-b1bf-4c15-9975-ff75f339ec9b" alt="qrcode_2qun" width="300"> | <img src="https://github.com/user-attachments/assets/d2c0340c-33e7-4d19-a9f5-cd581b63bd56" alt="WechatIMG119" width="300"> |
 
 
-## 🙏 致谢贡献者
 
-感谢所有为本项目做出贡献的朋友！
+## 🙏 致谢贡献者 ✨
 
-<a href="https://github.com/xpzouying/xiaohongshu-mcp/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=xpzouying/xiaohongshu-mcp" />
-</a>
-
-### ✨ 特别感谢
-
-- [@wanpengxie](https://github.com/wanpengxie)
-
-## Contributors ✨
-
-Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/docs/en/emoji-key)):
+感谢以下所有为本项目做出贡献的朋友！（排名不分先后）
 
 <!-- ALL-CONTRIBUTORS-LIST:START - Do not remove or modify this section -->
 <!-- prettier-ignore-start -->
@@ -506,4 +495,4 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/d
 
 <!-- ALL-CONTRIBUTORS-LIST:END -->
 
-This project follows the [all-contributors](https://github.com/all-contributors/all-contributors) specification. Contributions of any kind welcome!
+本项目遵循 [all-contributors](https://github.com/all-contributors/all-contributors) 规范。欢迎任何形式的贡献！
