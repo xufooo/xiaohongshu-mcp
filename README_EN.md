@@ -482,16 +482,22 @@ Use xiaohongshu-mcp for publishing.
 
 **Publishing Result:**
 
-<img src="./assets/publish_result.jpeg" alt="xiaohongshu-mcp publishing result" width="400">
+<img src="./assets/publish_result.jpeg" alt="xiaohongshu-mcp publishing result" width="300">
 
-## ShowCase
+## 3. 🌟 Community Showcases
 
-Refer directly to user cases: [ShowCase](./examples/README.md)
+> 💡 **Highly Recommended**: These are real-world use cases from community contributors, featuring detailed configuration steps and practical experiences!
 
-1. [n8n Complete Tutorial](./examples/n8n/README.md)
-2. [Cherry Studio Complete Tutorial](./examples/cherrystudio/README.md)
+### 📚 Complete Tutorial List
 
-## RedNote MCP Community Group
+1. **[n8n Complete Integration Tutorial](./examples/n8n/README.md)** - Workflow automation platform integration
+2. **[Cherry Studio Complete Configuration Tutorial](./examples/cherrystudio/README.md)** - Perfect AI client integration
+
+> 🎯 **Tip**: Click the links above to view detailed step-by-step tutorials for quick setup of various integration solutions!
+>
+> 📢 **Contributions Welcome**: If you have new integration cases, feel free to submit a PR to share with the community!
+
+## 4. RedNote MCP Community Group
 
 Since the project has just started, there will be many issues. Let's create a group to discuss problems together and contribute to the open source project. ~~Scan my WeChat QR code to join the technical discussion group~~.
 
