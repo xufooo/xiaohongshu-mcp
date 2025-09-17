@@ -482,16 +482,22 @@ npx @modelcontextprotocol/inspector
 
 **发布结果：**
 
-<img src="./assets/publish_result.jpeg" alt="xiaohongshu-mcp 发布结果" width="400">
+<img src="./assets/publish_result.jpeg" alt="xiaohongshu-mcp 发布结果" width="300">
 
-## ShowCase
+## 3. 🌟 实战案例展示 (Community Showcases)
 
-直接参考大家的使用案例：[ShowCase](./examples/README.md)
+> 💡 **强烈推荐查看**：这些都是社区贡献者的真实使用案例，包含详细的配置步骤和实战经验！
 
-1. [n8n 完整的教程](./examples/n8n/README.md)
-2. [Cherry Studio 完整的教程](./examples/cherrystudio/README.md)
+### 📚 完整教程列表
 
-## 小红书 MCP 互助群
+1. **[n8n 完整集成教程](./examples/n8n/README.md)** - 工作流自动化平台集成
+2. **[Cherry Studio 完整配置教程](./examples/cherrystudio/README.md)** - AI 客户端完美接入
+
+> 🎯 **提示**: 点击上方链接查看详细的图文教程，快速上手各种集成方案！
+>
+> 📢 **欢迎贡献**: 如果你有新的集成案例，欢迎提交 PR 分享给社区！
+
+## 4. 小红书 MCP 互助群
 
 因为项目刚刚启动，会有很多问题，拉一个群大家一起讨论问题，一起为开源项目做贡献。~~扫我的微信二维码加群讨论技术~~。
 
