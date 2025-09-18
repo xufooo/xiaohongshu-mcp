@@ -41,8 +41,20 @@ func NewPublishImageAction(page *rod.Page) (*PublishAction, error) {
 	time.Sleep(1 * time.Second)
 
 	createElems := pp.MustElements("div.creator-tab")
-	slog.Info("foundcreator-tab elements", "count", len(createElems))
+
+	// 过滤掉隐藏的元素
+	var visibleElems []*rod.Element
 	for _, elem := range createElems {
+		if isElementVisible(elem) {
+			visibleElems = append(visibleElems, elem)
+		}
+	}
+
+	if len(visibleElems) == 0 {
+		return nil, errors.New("没有找到上传图文元素")
+	}
+
+	for _, elem := range visibleElems {
 		text, err := elem.Text()
 		if err != nil {
 			slog.Error("获取元素文本失败", "error", err)
@@ -266,4 +278,30 @@ func findTextboxParent(elem *rod.Element) *rod.Element {
 		currentElem = parent
 	}
 	return nil
+}
+
+// isElementVisible 检查元素是否可见
+func isElementVisible(elem *rod.Element) bool {
+
+	// 检查是否有隐藏样式
+	style, err := elem.Attribute("style")
+	if err == nil && style != nil {
+		styleStr := *style
+
+		if strings.Contains(styleStr, "left: -9999px") ||
+			strings.Contains(styleStr, "top: -9999px") ||
+			strings.Contains(styleStr, "position: absolute; left: -9999px") ||
+			strings.Contains(styleStr, "display: none") ||
+			strings.Contains(styleStr, "visibility: hidden") {
+			return false
+		}
+	}
+
+	visible, err := elem.Visible()
+	if err != nil {
+		slog.Warn("无法获取元素可见性", "error", err)
+		return true
+	}
+
+	return visible
 }
