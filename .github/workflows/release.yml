@@ -37,21 +37,37 @@ jobs:
     - name: Build for multiple platforms
       run: |
         # 主程序构建
+        # 禁用 CGO 以生成静态链接的二进制文件，避免 GLIBC 依赖问题
         # macOS ARM64 (Apple Silicon)
-        GOOS=darwin GOARCH=arm64 go build -o xiaohongshu-mcp-darwin-arm64 .
-        GOOS=darwin GOARCH=arm64 go build -o xiaohongshu-login-darwin-arm64 ./cmd/login
+        CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -o xiaohongshu-mcp-darwin-arm64 .
+        CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -o xiaohongshu-login-darwin-arm64 ./cmd/login
 
         # macOS Intel
-        GOOS=darwin GOARCH=amd64 go build -o xiaohongshu-mcp-darwin-amd64 .
-        GOOS=darwin GOARCH=amd64 go build -o xiaohongshu-login-darwin-amd64 ./cmd/login
+        CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -o xiaohongshu-mcp-darwin-amd64 .
+        CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -o xiaohongshu-login-darwin-amd64 ./cmd/login
 
         # Windows x64
-        GOOS=windows GOARCH=amd64 go build -o xiaohongshu-mcp-windows-amd64.exe .
-        GOOS=windows GOARCH=amd64 go build -o xiaohongshu-login-windows-amd64.exe ./cmd/login
+        CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o xiaohongshu-mcp-windows-amd64.exe .
+        CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o xiaohongshu-login-windows-amd64.exe ./cmd/login
 
         # Linux x64
-        GOOS=linux GOARCH=amd64 go build -o xiaohongshu-mcp-linux-amd64 .
-        GOOS=linux GOARCH=amd64 go build -o xiaohongshu-login-linux-amd64 ./cmd/login
+        CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o xiaohongshu-mcp-linux-amd64 .
+        CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o xiaohongshu-login-linux-amd64 ./cmd/login
+
+    - name: Package binaries
+      run: |
+        # 创建压缩包
+        # macOS ARM64
+        tar czf xiaohongshu-mcp-darwin-arm64.tar.gz xiaohongshu-mcp-darwin-arm64 xiaohongshu-login-darwin-arm64
+
+        # macOS Intel
+        tar czf xiaohongshu-mcp-darwin-amd64.tar.gz xiaohongshu-mcp-darwin-amd64 xiaohongshu-login-darwin-amd64
+
+        # Windows x64
+        zip xiaohongshu-mcp-windows-amd64.zip xiaohongshu-mcp-windows-amd64.exe xiaohongshu-login-windows-amd64.exe
+
+        # Linux x64
+        tar czf xiaohongshu-mcp-linux-amd64.tar.gz xiaohongshu-mcp-linux-amd64 xiaohongshu-login-linux-amd64
 
     - name: Clean up old releases
       run: |
@@ -81,25 +97,29 @@ jobs:
 
           ### 📦 下载说明
 
-          **主程序（MCP 服务）：**
-          - **macOS Apple Silicon**: `xiaohongshu-mcp-darwin-arm64`
-          - **macOS Intel**: `xiaohongshu-mcp-darwin-amd64`
-          - **Windows x64**: `xiaohongshu-mcp-windows-amd64.exe`
-          - **Linux x64**: `xiaohongshu-mcp-linux-amd64`
+          选择适合您系统的压缩包下载：
+          - **macOS Apple Silicon (M1/M2/M3)**: `xiaohongshu-mcp-darwin-arm64.tar.gz`
+          - **macOS Intel**: `xiaohongshu-mcp-darwin-amd64.tar.gz`
+          - **Windows x64**: `xiaohongshu-mcp-windows-amd64.zip`
+          - **Linux x64**: `xiaohongshu-mcp-linux-amd64.tar.gz`
 
-          **登录工具：**
-          - **macOS Apple Silicon**: `xiaohongshu-login-darwin-arm64`
-          - **macOS Intel**: `xiaohongshu-login-darwin-amd64`
-          - **Windows x64**: `xiaohongshu-login-windows-amd64.exe`
-          - **Linux x64**: `xiaohongshu-login-linux-amd64`
+          每个压缩包包含：
+          - `xiaohongshu-mcp-*`: MCP 服务主程序
+          - `xiaohongshu-login-*`: 登录工具
 
           ### 🔧 使用方法
 
           ```bash
-          # 1. 首先运行登录工具
+          # 1. 解压文件（macOS/Linux）
+          tar xzf xiaohongshu-mcp-darwin-arm64.tar.gz
+
+          # 或 Windows
+          # 解压 xiaohongshu-mcp-windows-amd64.zip
+
+          # 2. 运行登录工具
           ./xiaohongshu-login-darwin-arm64
 
-          # 2. 然后启动 MCP 服务
+          # 3. 启动 MCP 服务
           ./xiaohongshu-mcp-darwin-arm64
           ```
 
@@ -109,11 +129,7 @@ jobs:
           - **Branch**: main
           - **Build Time**: ${{ steps.version.outputs.version }}
         files: |
-          xiaohongshu-mcp-darwin-arm64
-          xiaohongshu-mcp-darwin-amd64
-          xiaohongshu-mcp-windows-amd64.exe
-          xiaohongshu-mcp-linux-amd64
-          xiaohongshu-login-darwin-arm64
-          xiaohongshu-login-darwin-amd64
-          xiaohongshu-login-windows-amd64.exe
-          xiaohongshu-login-linux-amd64
+          xiaohongshu-mcp-darwin-arm64.tar.gz
+          xiaohongshu-mcp-darwin-amd64.tar.gz
+          xiaohongshu-mcp-windows-amd64.zip
+          xiaohongshu-mcp-linux-amd64.tar.gz
