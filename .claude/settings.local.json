@@ -20,7 +20,9 @@
       "mcp__playwright__browser_navigate",
       "mcp__playwright__browser_click",
       "mcp__playwright__browser_tab_select",
-      "Bash(gh pr merge:*)"
+      "Bash(gh pr merge:*)",
+      "Bash(gh release list:*)",
+      "Bash(awk:*)"
     ],
     "deny": []
   }
