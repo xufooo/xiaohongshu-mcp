@@ -1,4 +1,4 @@
-name: Build
+name: Build and Release
 
 on:
   push:
@@ -7,6 +7,7 @@ on:
       - '**.go'
       - 'go.mod'
       - 'go.sum'
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -25,10 +26,14 @@ jobs:
       with:
         go-version: '1.24'
 
-    - name: Display build info
+    - name: Generate release name
+      id: version
       run: |
-        echo "Building commit: $(git rev-parse --short HEAD)"
-        echo "Build time: $(date +%Y.%m.%d.%H%M)"
+        TIMESTAMP=$(date +%Y.%m.%d.%H%M)
+        COMMIT_SHA=$(git rev-parse --short HEAD)
+        RELEASE_NAME="Build-${TIMESTAMP}-${COMMIT_SHA}"
+        echo "release_name=${RELEASE_NAME}" >> $GITHUB_OUTPUT
+        echo "Generated release: ${RELEASE_NAME}"
 
     - name: Build for multiple platforms
       run: |
@@ -49,11 +54,53 @@ jobs:
         GOOS=linux GOARCH=amd64 go build -o xiaohongshu-mcp-linux-amd64 .
         GOOS=linux GOARCH=amd64 go build -o xiaohongshu-login-linux-amd64 ./cmd/login
 
-    - name: Upload artifacts
-      uses: actions/upload-artifact@v3
+    - name: Create Release (without permanent tag)
+      uses: softprops/action-gh-release@v1
       with:
-        name: binaries-${{ github.sha }}
-        path: |
-          xiaohongshu-mcp-*
-          xiaohongshu-login-*
-        retention-days: 7
+        tag_name: ${{ steps.version.outputs.release_name }}
+        name: ${{ steps.version.outputs.release_name }}
+        draft: false
+        prerelease: true
+        body: |
+          ## 🔧 自动构建版本
+
+          **注意：这是自动构建的预发布版本，用于测试。正式版本请等待手动发布。**
+
+          ### 📦 下载说明
+
+          **主程序（MCP 服务）：**
+          - **macOS Apple Silicon**: `xiaohongshu-mcp-darwin-arm64`
+          - **macOS Intel**: `xiaohongshu-mcp-darwin-amd64`
+          - **Windows x64**: `xiaohongshu-mcp-windows-amd64.exe`
+          - **Linux x64**: `xiaohongshu-mcp-linux-amd64`
+
+          **登录工具：**
+          - **macOS Apple Silicon**: `xiaohongshu-login-darwin-arm64`
+          - **macOS Intel**: `xiaohongshu-login-darwin-amd64`
+          - **Windows x64**: `xiaohongshu-login-windows-amd64.exe`
+          - **Linux x64**: `xiaohongshu-login-linux-amd64`
+
+          ### 🔧 使用方法
+
+          ```bash
+          # 1. 首先运行登录工具
+          ./xiaohongshu-login-darwin-arm64
+
+          # 2. 然后启动 MCP 服务
+          ./xiaohongshu-mcp-darwin-arm64
+          ```
+
+          ### 📊 构建信息
+
+          - **Commit**: ${{ github.sha }}
+          - **Branch**: main
+          - **Build Time**: ${{ steps.version.outputs.release_name }}
+        files: |
+          xiaohongshu-mcp-darwin-arm64
+          xiaohongshu-mcp-darwin-amd64
+          xiaohongshu-mcp-windows-amd64.exe
+          xiaohongshu-mcp-linux-amd64
+          xiaohongshu-login-darwin-arm64
+          xiaohongshu-login-darwin-amd64
+          xiaohongshu-login-windows-amd64.exe
+          xiaohongshu-login-linux-amd64
