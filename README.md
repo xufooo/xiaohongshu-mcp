@@ -1,6 +1,9 @@
 # xiaohongshu-mcp
+
 <!-- ALL-CONTRIBUTORS-BADGE:START - Do not remove or modify this section -->
+
 [![All Contributors](https://img.shields.io/badge/all_contributors-7-orange.svg?style=flat-square)](#contributors-)
+
 <!-- ALL-CONTRIBUTORS-BADGE:END -->
 
 MCP for 小红书/xiaohongshu.com。
@@ -145,18 +148,21 @@ https://github.com/user-attachments/assets/cc385b6c-422c-489b-a5fc-63e92c695b80
 直接从 [GitHub Releases](https://github.com/xpzouying/xiaohongshu-mcp/releases) 下载对应平台的二进制文件：
 
 **主程序（MCP 服务）：**
+
 - **macOS Apple Silicon**: `xiaohongshu-mcp-darwin-arm64`
 - **macOS Intel**: `xiaohongshu-mcp-darwin-amd64`
 - **Windows x64**: `xiaohongshu-mcp-windows-amd64.exe`
 - **Linux x64**: `xiaohongshu-mcp-linux-amd64`
 
 **登录工具：**
+
 - **macOS Apple Silicon**: `xiaohongshu-login-darwin-arm64`
 - **macOS Intel**: `xiaohongshu-login-darwin-amd64`
 - **Windows x64**: `xiaohongshu-login-windows-amd64.exe`
 - **Linux x64**: `xiaohongshu-login-linux-amd64`
 
 使用步骤：
+
 ```bash
 # 1. 首先运行登录工具
 chmod +x xiaohongshu-login-darwin-arm64
@@ -200,12 +206,14 @@ Windows 遇到问题首先看这里：[Windows 安装指南](./docs/windows_guid
 第一次需要手动登录，需要保存小红书的登录状态。
 
 **使用二进制文件**：
+
 ```bash
 # 运行对应平台的登录工具
 ./xiaohongshu-login-darwin-arm64
 ```
 
 **使用源码**：
+
 ```bash
 go run cmd/login/main.go
 ```
@@ -215,6 +223,7 @@ go run cmd/login/main.go
 启动 xiaohongshu-mcp 服务。
 
 **使用二进制文件**：
+
 ```bash
 # 默认：无头模式，没有浏览器界面
 ./xiaohongshu-mcp-darwin-arm64
@@ -224,6 +233,7 @@ go run cmd/login/main.go
 ```
 
 **使用源码**：
+
 ```bash
 # 默认：无头模式，没有浏览器界面
 go run .
@@ -516,25 +526,21 @@ npx @modelcontextprotocol/inspector
   <summary>【微信一群】已满 </summary>
 
   <img src="https://github.com/user-attachments/assets/34c51c3a-d5fd-4086-9d37-a5a5284264c9" alt="WechatIMG119" width="300">
-  
-</details>
 
+</details>
 
 <details>
   <summary>【微信二群】已满 </summary>
 
   <img src="https://github.com/user-attachments/assets/d2c0340c-33e7-4d19-a9f5-cd581b63bd56" alt="WechatIMG119" width="300">
-  
+
 </details>
 
 <!-- 两列排布：飞书二群 | 微信群 -->
 
-| 【飞书二群】：扫码进入                                                                                                    | 【微信群3群】：扫码进入                                                                                                       |
+| 【飞书二群】：扫码进入                                                                                                    | 【微信群 3 群】：扫码进入                                                                                                  |
 | ------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
 | <img src="https://github.com/user-attachments/assets/ca1f5d6e-b1bf-4c15-9975-ff75f339ec9b" alt="qrcode_2qun" width="300"> | <img src="https://github.com/user-attachments/assets/7665056d-be56-4bf3-a9f3-77f967079929" alt="WechatIMG119" width="300"> |
-
-
-
 
 ## 🙏 致谢贡献者 ✨
 
@@ -562,13 +568,22 @@ npx @modelcontextprotocol/inspector
 
 <!-- ALL-CONTRIBUTORS-LIST:END -->
 
-
 ### ✨ 特别感谢
 
-| 贡献者 |
-| --- |
+| 贡献者                                                                                                                      |
+| --------------------------------------------------------------------------------------------------------------------------- |
 | [<img src="https://avatars.githubusercontent.com/wanpengxie" width="100px;"><br>@wanpengxie](https://github.com/wanpengxie) |
 
-
-
 本项目遵循 [all-contributors](https://github.com/all-contributors/all-contributors) 规范。欢迎任何形式的贡献！
+
+## 赞赏支持
+
+欢迎请作者喝杯咖啡～（随缘支持，感谢！）
+
+**支付宝（不展示二维码）：**
+
+通过支付宝向 **xpzouying@gmail.com** 赞赏。
+
+**微信：**
+
+<img src="donate/wechat@2x.png" alt="WeChat Pay QR" width="260" />
