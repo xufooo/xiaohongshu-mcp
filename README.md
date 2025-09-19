@@ -304,6 +304,9 @@ curl -X POST http://localhost:18060/mcp \
 ```bash
 # 添加 HTTP MCP 服务器
 claude mcp add --transport http xiaohongshu-mcp http://localhost:18060/mcp
+
+# 检查 MCP 是否添加成功（确保 MCP 已经启动的前提下，运行下面命令）
+claude mcp list
 ```
 
 ### 2.2. 支持的客户端
@@ -316,6 +319,9 @@ claude mcp add --transport http xiaohongshu-mcp http://localhost:18060/mcp
 ```bash
 # 添加 HTTP MCP 服务器
 claude mcp add --transport http xiaohongshu-mcp http://localhost:18060/mcp
+
+# 检查 MCP 是否添加成功（确保 MCP 已经启动的前提下，运行下面命令）
+claude mcp list
 ```
 
 </details>
