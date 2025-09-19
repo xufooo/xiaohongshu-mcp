@@ -17,7 +17,7 @@
 
 ## 2. 一键安装
 
-直接参考开源项目：[LLM-Red-Team/kimi-cc](https://github.com/LLM-Red-Team/kimi-cc]
+直接参考开源项目：[LLM-Red-Team/kimi-cc](https://github.com/LLM-Red-Team/kimi-cc)
 
 **重点说明：**
 
