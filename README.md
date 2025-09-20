@@ -507,6 +507,7 @@ npx @modelcontextprotocol/inspector
 1. **[n8n 完整集成教程](./examples/n8n/README.md)** - 工作流自动化平台集成
 2. **[Cherry Studio 完整配置教程](./examples/cherrystudio/README.md)** - AI 客户端完美接入
 3. **[Claude Code + Kimi K2 接入教程](./examples/claude-code/claude-code-kimi-k2.md)** - Claude Code 门槛太高，那么就接入 Kimi 国产大模型吧～
+4. **[AnythingLLM 完整指南](./examples/anythingLLM/readme.md)** - AnythingLLM 是一款all-in-one 多模态 AI 客户端，支持workflow定义，支持多种大模型和插件扩展。
 
 > 🎯 **提示**: 点击上方链接查看详细的图文教程，快速上手各种集成方案！
 >
