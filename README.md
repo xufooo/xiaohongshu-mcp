@@ -212,6 +212,61 @@ https://github.com/user-attachments/assets/cc385b6c-422c-489b-a5fc-63e92c695b80
 
 </details>
 
+<details>
+<summary><b>9. 回复评论</b></summary>
+
+回复笔记下的指定评论，支持精准回复特定用户的评论。
+
+**功能说明：**
+
+- 回复指定笔记下的特定评论
+- 支持通过评论 ID 或用户 ID 定位目标评论
+- 需要提供 feed_id、xsec_token、comment_id/user_id 和回复内容
+
+**⚠️ 重要提示：**
+
+- 需要先登录才能使用此功能
+- comment_id 和 user_id 至少提供一个
+- 这些参数可以从帖子详情的评论列表中获取
+
+</details>
+
+<details>
+<summary><b>10. 点赞/取消点赞</b></summary>
+
+为笔记点赞或取消点赞，智能检测当前状态避免重复操作。
+
+**功能说明：**
+
+- 为指定笔记点赞或取消点赞
+- 智能检测：已点赞时跳过点赞，未点赞时跳过取消点赞
+- 需要提供 feed_id 和 xsec_token
+
+**⚠️ 重要提示：**
+
+- 需要先登录才能使用此功能
+- 默认为点赞操作，设置 unlike=true 可取消点赞
+
+</details>
+
+<details>
+<summary><b>11. 收藏/取消收藏</b></summary>
+
+收藏笔记或取消收藏，智能检测当前状态避免重复操作。
+
+**功能说明：**
+
+- 收藏指定笔记或取消收藏
+- 智能检测：已收藏时跳过收藏，未收藏时跳过取消收藏
+- 需要提供 feed_id 和 xsec_token
+
+**⚠️ 重要提示：**
+
+- 需要先登录才能使用此功能
+- 默认为收藏操作，设置 unfavorite=true 可取消收藏
+
+</details>
+
 **小红书基础运营知识**
 
 - **标题：（非常重要）小红书要求标题不超过 20 个字**
@@ -676,7 +731,7 @@ npx @modelcontextprotocol/inspector
 
 - 使用 MCP Inspector 测试连接
 - 测试 Ping Server 功能验证连接
-- 检查 List Tools 是否返回 6 个工具
+- 检查 List Tools 是否返回 13 个工具
 
 </details>
 
@@ -776,15 +831,40 @@ npx mcporter list xiaohongshu-mcp
 连接成功后，可使用以下 MCP 工具：
 
 - `check_login_status` - 检查小红书登录状态（无参数）
+- `get_login_qrcode` - 获取登录二维码，返回 Base64 图片和超时时间（无参数）
+- `delete_cookies` - 删除 cookies 文件，重置登录状态，删除后需要重新登录（无参数）
 - `publish_content` - 发布图文内容到小红书（必需：title, content, images）
-  - `images`: 支持 HTTP 链接或本地绝对路径，推荐使用本地路径
+  - `images`: 图片路径列表（至少1张），支持 HTTP 链接或本地绝对路径，推荐使用本地路径
+  - `tags`: 话题标签列表（可选），如 `["美食", "旅行", "生活"]`
+  - `schedule_at`: 定时发布时间（可选），ISO8601 格式，支持 1 小时至 14 天内
+  - `is_original`: 是否声明原创（可选），默认不声明
+  - `visibility`: 可见范围（可选），支持 `公开可见`（默认）、`仅自己可见`、`仅互关好友可见`
 - `publish_with_video` - 发布视频内容到小红书（必需：title, content, video）
-  - `video`: 仅支持本地视频文件绝对路径
+  - `video`: 本地视频文件绝对路径（仅支持单个视频文件）
+  - `tags`: 话题标签列表（可选），如 `["美食", "旅行", "生活"]`
+  - `schedule_at`: 定时发布时间（可选），ISO8601 格式，支持 1 小时至 14 天内
+  - `visibility`: 可见范围（可选），支持 `公开可见`（默认）、`仅自己可见`、`仅互关好友可见`
 - `list_feeds` - 获取小红书首页推荐列表（无参数）
-- `search_feeds` - 搜索小红书内容（需要：keyword）
-- `get_feed_detail` - 获取帖子详情（需要：feed_id, xsec_token）
-- `post_comment_to_feed` - 发表评论到小红书帖子（需要：feed_id, xsec_token, content）
-- `user_profile` - 获取用户个人主页信息（需要：user_id, xsec_token）
+- `search_feeds` - 搜索小红书内容（必需：keyword）
+  - `filters`: 筛选选项（可选）
+    - `sort_by`: 排序依据 - `综合`（默认）| `最新` | `最多点赞` | `最多评论` | `最多收藏`
+    - `note_type`: 笔记类型 - `不限`（默认）| `视频` | `图文`
+    - `publish_time`: 发布时间 - `不限`（默认）| `一天内` | `一周内` | `半年内`
+    - `search_scope`: 搜索范围 - `不限`（默认）| `已看过` | `未看过` | `已关注`
+    - `location`: 位置距离 - `不限`（默认）| `同城` | `附近`
+- `get_feed_detail` - 获取帖子详情，包括互动数据和评论（必需：feed_id, xsec_token）
+  - `load_all_comments`: 是否加载全部评论（可选），默认 false 仅返回前 10 条一级评论
+  - `limit`: 限制加载的一级评论数量（可选），仅当 load_all_comments=true 时生效，默认 20
+  - `click_more_replies`: 是否展开二级回复（可选），仅当 load_all_comments=true 时生效，默认 false
+  - `reply_limit`: 跳过回复数过多的评论（可选），仅当 click_more_replies=true 时生效，默认 10
+  - `scroll_speed`: 滚动速度（可选），`slow` | `normal` | `fast`，仅当 load_all_comments=true 时生效
+- `post_comment_to_feed` - 发表评论到小红书帖子（必需：feed_id, xsec_token, content）
+- `reply_comment_in_feed` - 回复笔记下的指定评论（必需：feed_id, xsec_token, content，以及 comment_id 或 user_id 至少一个）
+- `like_feed` - 点赞/取消点赞（必需：feed_id, xsec_token）
+  - `unlike`: 是否取消点赞（可选），true 为取消点赞，默认为点赞
+- `favorite_feed` - 收藏/取消收藏（必需：feed_id, xsec_token）
+  - `unfavorite`: 是否取消收藏（可选），true 为取消收藏，默认为收藏
+- `user_profile` - 获取用户个人主页信息（必需：user_id, xsec_token）
 
 ### 2.4. 使用示例
 
