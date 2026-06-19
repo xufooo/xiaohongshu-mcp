@@ -54,14 +54,14 @@ func respondSuccess(c *gin.Context, data any, message string) {
 
 // checkRateLimit 检查速率限制，如果超限则返回 429 并阻止执行。
 // force 参数从查询参数 ?force_rate_limit=true 读取。
-// 注意：必须在 handler 中尽早调用，调用后继续执行需手动 Record。
+// 注意：必须在 handler 中尽早调用，允许执行时会原子预占一次额度。
 func (s *AppServer) checkRateLimit(c *gin.Context) (canProceed bool) {
 	force := c.Query("force_rate_limit") == "true"
 	if s.rateLimiter == nil {
 		return true
 	}
 
-	info, canProceed, err := s.rateLimiter.Check(force)
+	info, wait, canProceed, err := s.rateLimiter.Reserve(force)
 	if err != nil {
 		logrus.Errorf("rate limiter check error: %v", err)
 		c.Set("rate_limit", &info)
@@ -78,14 +78,9 @@ func (s *AppServer) checkRateLimit(c *gin.Context) (canProceed bool) {
 	}
 
 	// 应用冷却延迟（按当前使用率自动调整）
-	if !force && info.Used > 0 {
-		wait := s.rateLimiter.WaitDuration(info)
+	if wait > 0 {
 		logrus.Infof("[ratelimit] cooldown %v before execution", wait)
 		time.Sleep(wait)
-	}
-
-	if info.Used < info.Limit {
-		s.rateLimiter.Record()
 	}
 
 	logrus.Infof("[ratelimit] %s %s - %s", c.Request.Method, c.Request.URL.Path, s.rateLimiter.String())
@@ -105,7 +100,7 @@ func (s *AppServer) checkRateLimitInternal(force bool) checkRateLimitResult {
 		return checkRateLimitResult{CanProceed: true}
 	}
 
-	info, canProceed, err := s.rateLimiter.Check(force)
+	info, wait, canProceed, err := s.rateLimiter.Reserve(force)
 	if err != nil {
 		logrus.Errorf("rate limiter check error: %v", err)
 		return checkRateLimitResult{CanProceed: true, Info: info}
@@ -117,14 +112,9 @@ func (s *AppServer) checkRateLimitInternal(force bool) checkRateLimitResult {
 	}
 
 	// 应用冷却延迟
-	if !force && info.Used > 0 {
-		wait := s.rateLimiter.WaitDuration(info)
+	if wait > 0 {
 		logrus.Infof("[ratelimit] MCP cooldown %v", wait)
 		time.Sleep(wait)
-	}
-
-	if info.Used < info.Limit {
-		s.rateLimiter.Record()
 	}
 
 	logrus.Infof("[ratelimit] MCP - %s", s.rateLimiter.String())

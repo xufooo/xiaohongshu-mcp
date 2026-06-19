@@ -102,7 +102,7 @@ func DefaultConfig() Config {
 			MinSteps:                    8,
 			MaxSteps:                    50,
 			StepDistance:                25,
-			MoveSpeedPxPerSec:           36000,
+			MoveSpeedPxPerSec:           360,
 			SpeedVariance:               0.35,
 			PauseProbability:            0.08,
 			PauseMin:                    80 * time.Millisecond,

@@ -29,8 +29,14 @@ func NewKeyboard(page *rod.Page, cfg Config, mouse *Mouse) *Keyboard {
 func (k *Keyboard) Type(el *rod.Element, text string) error {
 	// Ensure the element is rendered before typing, so the cursor lands on a
 	// visible input area even when the page is long.
-	if err := el.ScrollIntoView(); err != nil {
-		return err
+	if k.mouse == nil {
+		if err := el.ScrollIntoView(); err != nil {
+			return err
+		}
+	} else if k.lastEl == el {
+		if err := k.mouse.ScrollIntoView(el); err != nil {
+			return err
+		}
 	}
 
 	// Move the cursor onto the element and click it, just like a human would

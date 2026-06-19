@@ -873,7 +873,7 @@ npx mcporter list xiaohongshu-mcp
     - `location`: 位置距离 - `不限`（默认）| `同城` | `附近`
 - `get_feed_detail` - 获取帖子详情，包括互动数据和评论（必需：feed_id, xsec_token）
   - `load_all_comments`: 是否加载全部评论（可选），默认 false 仅返回前 10 条一级评论
-  - `limit`: 限制加载的一级评论数量（可选），仅当 load_all_comments=true 时生效，默认 20
+  - `limit`: 限制加载的一级评论数量（可选），仅当 load_all_comments=true 时生效，不传或传 0 表示加载所有
   - `click_more_replies`: 是否展开二级回复（可选），仅当 load_all_comments=true 时生效，默认 false
   - `reply_limit`: 跳过回复数过多的评论（可选），仅当 click_more_replies=true 时生效，默认 10
   - `scroll_speed`: 滚动速度（可选），`slow` | `normal` | `fast`，仅当 load_all_comments=true 时生效
