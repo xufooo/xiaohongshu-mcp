@@ -496,10 +496,6 @@ func (s *AppServer) handleGetFeedDetail(ctx context.Context, args map[string]any
 		}
 	}
 
-	if loadAll && config.MaxCommentItems <= 0 {
-		config.MaxCommentItems = 20
-	}
-
 	if raw, ok := args["scroll_speed"].(string); ok && raw != "" {
 		config.ScrollSpeed = raw
 	}

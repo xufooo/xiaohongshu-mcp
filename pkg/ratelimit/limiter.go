@@ -66,26 +66,25 @@ func hourKey(t time.Time) int64 {
 	return t.Truncate(time.Hour).Unix()
 }
 
-// Check 检查当前是否允许操作。
-// 返回 (info, canProceed, error)
-func (l *Limiter) Check(force bool) (Info, bool, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
+func (l *Limiter) limit() int {
+	limit := l.cfg.MaxPerHour
+	if limit <= 0 {
+		return 30
+	}
+	return limit
+}
 
-	now := time.Now()
-	hk := hourKey(now)
+func (l *Limiter) bucket(hk int64) *bucket {
 	b, exists := l.buckets[hk]
 	if !exists {
 		b = &bucket{}
 		l.buckets[hk] = b
 	}
-	l.cleanup(now)
+	return b
+}
 
-	limit := l.cfg.MaxPerHour
-	if limit <= 0 {
-		limit = 30
-	}
-	used := b.count
+func (l *Limiter) info(now time.Time, hk int64, used int) Info {
+	limit := l.limit()
 	remaining := limit - used
 	if remaining < 0 {
 		remaining = 0
@@ -103,7 +102,6 @@ func (l *Limiter) Check(force bool) (Info, bool, error) {
 	}
 
 	ratio := float64(used) / float64(limit)
-
 	if ratio >= 1.0 {
 		retryAfter := int(resetUnix - now.Unix())
 		if retryAfter < 0 {
@@ -111,6 +109,28 @@ func (l *Limiter) Check(force bool) (Info, bool, error) {
 		}
 		info.RetryAfter = &retryAfter
 		info.Warning = fmt.Sprintf("已达每小时 %d 次上限（防封保护），建议 %d 秒后重试", limit, retryAfter)
+	} else if ratio >= l.cfg.SlowThreshold {
+		info.Warning = fmt.Sprintf("已使用 %d/%d 次额度（%.0f%%），操作将自动减速", used, limit, ratio*100)
+	} else if ratio >= l.cfg.WarnThreshold {
+		info.Warning = fmt.Sprintf("已使用 %d/%d 次额度（%.0f%%），请注意操作频率", used, limit, ratio*100)
+	}
+
+	return info
+}
+
+// Check 检查当前是否允许操作。
+// 返回 (info, canProceed, error)
+func (l *Limiter) Check(force bool) (Info, bool, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	now := time.Now()
+	hk := hourKey(now)
+	l.cleanup(now)
+	b := l.bucket(hk)
+
+	info := l.info(now, hk, b.count)
+	if b.count >= info.Limit {
 		if force {
 			info.Warning = fmt.Sprintf("[强制继续] %s", info.Warning)
 			return info, true, nil
@@ -127,6 +147,40 @@ func (l *Limiter) Check(force bool) (Info, bool, error) {
 	return info, true, nil
 }
 
+// Reserve 原子地检查并预占一次操作额度。
+// 返回的 wait 表示执行前建议等待的冷却时间。
+func (l *Limiter) Reserve(force bool) (Info, time.Duration, bool, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	now := time.Now()
+	hk := hourKey(now)
+	l.cleanup(now)
+	b := l.bucket(hk)
+
+	usedBefore := b.count
+	infoBefore := l.info(now, hk, usedBefore)
+
+	if usedBefore >= infoBefore.Limit && !force {
+		return infoBefore, 0, false, nil
+	}
+
+	var wait time.Duration
+	if !force && usedBefore > 0 {
+		wait = l.waitDuration(infoBefore)
+	}
+
+	b.count++
+	b.lastTouch = now
+
+	info := l.info(now, hk, b.count)
+	if force && usedBefore >= infoBefore.Limit {
+		info.Warning = fmt.Sprintf("[强制继续] %s", info.Warning)
+	}
+
+	return info, wait, true, nil
+}
+
 // Record 记录一次操作
 func (l *Limiter) Record() {
 	l.mu.Lock()
@@ -134,17 +188,21 @@ func (l *Limiter) Record() {
 
 	now := time.Now()
 	hk := hourKey(now)
-	b, exists := l.buckets[hk]
-	if !exists {
-		b = &bucket{}
-		l.buckets[hk] = b
-	}
+	l.cleanup(now)
+	b := l.bucket(hk)
 	b.count++
 	b.lastTouch = now
 }
 
 // WaitDuration 计算操作前需要等待的时间（含随机偏移）
 func (l *Limiter) WaitDuration(info Info) time.Duration {
+	return l.waitDuration(info)
+}
+
+func (l *Limiter) waitDuration(info Info) time.Duration {
+	if info.Limit <= 0 {
+		info.Limit = l.limit()
+	}
 	ratio := float64(info.Used) / float64(info.Limit)
 	base := l.cfg.CooldownBase
 	if base <= 0 {

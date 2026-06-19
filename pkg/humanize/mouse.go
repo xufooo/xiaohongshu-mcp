@@ -84,6 +84,11 @@ func (m *Mouse) Move(target Point) error {
 	})
 }
 
+// MovePoint moves to a viewport-relative point.
+func (m *Mouse) MovePoint(target Point) error {
+	return m.moveTo(target)
+}
+
 // moveTo performs the actual cursor movement without any extra scrolling.
 func (m *Mouse) moveTo(target Point) error {
 	if debugMouse {
@@ -185,6 +190,14 @@ func (m *Mouse) moveTo(target Point) error {
 			time.Sleep(stepDuration / time.Duration(subSteps))
 		}
 
+		if straightDist > 250 && rand.Float64() < m.cfg.Mouse.ScrollDuringMoveProbability {
+			_ = m.scrollRandom()
+			time.Sleep(randDuration(80*time.Millisecond, 180*time.Millisecond))
+		}
+		if rand.Float64() < m.cfg.Mouse.PauseProbability {
+			time.Sleep(randDuration(m.cfg.Mouse.PauseMin, m.cfg.Mouse.PauseMax))
+		}
+
 		last = p
 	}
 	return nil
@@ -236,6 +249,22 @@ func (m *Mouse) ClickNoScroll(el *rod.Element) error {
 	// Human pause before clicking.
 	time.Sleep(randDuration(80*time.Millisecond, 350*time.Millisecond))
 
+	if err := m.page.Mouse.Down(proto.InputMouseButtonLeft, 1); err != nil {
+		return err
+	}
+	time.Sleep(randDuration(40*time.Millisecond, 120*time.Millisecond))
+	if err := m.page.Mouse.Up(proto.InputMouseButtonLeft, 1); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ClickPoint moves to a viewport-relative point and clicks there.
+func (m *Mouse) ClickPoint(target Point) error {
+	if err := m.moveTo(target); err != nil {
+		return err
+	}
+	time.Sleep(randDuration(80*time.Millisecond, 350*time.Millisecond))
 	if err := m.page.Mouse.Down(proto.InputMouseButtonLeft, 1); err != nil {
 		return err
 	}

@@ -114,7 +114,9 @@ func removePopCover(page *hrod.Page) {
 func clickEmptyPosition(page *hrod.Page) {
 	x := 380 + rand.Intn(100)
 	y := 20 + rand.Intn(60)
-	page.Mouse.MustMoveTo(float64(x), float64(y)).MustClick(proto.InputMouseButtonLeft)
+	if err := page.ClickPoint(proto.Point{X: float64(x), Y: float64(y)}); err != nil {
+		logrus.Warnf("点击空白位置失败: %v", err)
+	}
 }
 
 func mustClickPublishTab(page *hrod.Page, tabname string) error {
@@ -1143,7 +1145,7 @@ func searchAndSelectProduct(page *hrod.Page, modal *hrod.Element, keyword string
 	time.Sleep(300 * time.Millisecond)
 
 	// 3. 触发搜索（模拟键盘 Enter）
-	if err := page.Keyboard.Press(input.Enter); err != nil {
+	if err := page.Actor().Keyboard.Press(input.Enter); err != nil {
 		return errors.Wrap(err, "触发搜索失败")
 	}
 

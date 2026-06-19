@@ -774,7 +774,7 @@ After successful connection, you can use the following MCP tools:
     - `location`: Location - `unlimited` (default) | `same city` | `nearby`
 - `get_feed_detail` - Get post details including interaction data and comments (required: feed_id, xsec_token)
   - `load_all_comments`: Whether to load all comments (optional), default false returns only first 10 top-level comments
-  - `limit`: Limit number of top-level comments to load (optional), only effective when load_all_comments=true, default 20
+  - `limit`: Limit number of top-level comments to load (optional), only effective when load_all_comments=true; omit or set 0 to load all
   - `click_more_replies`: Whether to expand nested replies (optional), only effective when load_all_comments=true, default false
   - `reply_limit`: Skip comments with too many replies (optional), only effective when click_more_replies=true, default 10
   - `scroll_speed`: Scroll speed (optional), `slow` | `normal` | `fast`, only effective when load_all_comments=true

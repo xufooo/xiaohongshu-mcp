@@ -57,7 +57,7 @@ func DefaultCommentLoadConfig() CommentLoadConfig {
 	return CommentLoadConfig{
 		ClickMoreReplies:    false,
 		MaxRepliesThreshold: 10,
-		MaxCommentItems:     20,
+		MaxCommentItems:     0,
 		ScrollSpeed:         "normal",
 	}
 }
@@ -426,7 +426,9 @@ func clickElementWithHumanBehavior(page *hrod.Page, el *hrod.Element, text strin
 			if box, err := el.Shape(); err == nil && len(box.Quads) > 0 {
 				x := float64(box.Quads[0][0]+box.Quads[0][4]) / 2
 				y := float64(box.Quads[0][1]+box.Quads[0][5]) / 2
-				page.Mouse.MustMoveTo(x, y)
+				if err := page.MovePoint(proto.Point{X: x, Y: y}); err != nil {
+					return err
+				}
 				sleepRandom(hoverTimeRange.min, hoverTimeRange.max)
 			}
 
