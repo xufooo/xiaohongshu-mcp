@@ -138,12 +138,6 @@ func (l *Limiter) Check(force bool) (Info, bool, error) {
 		return info, false, nil
 	}
 
-	if ratio >= l.cfg.SlowThreshold {
-		info.Warning = fmt.Sprintf("已使用 %d/%d 次额度（%.0f%%），操作将自动减速", used, limit, ratio*100)
-	} else if ratio >= l.cfg.WarnThreshold {
-		info.Warning = fmt.Sprintf("已使用 %d/%d 次额度（%.0f%%），请注意操作频率", used, limit, ratio*100)
-	}
-
 	return info, true, nil
 }
 
