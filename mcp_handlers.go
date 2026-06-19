@@ -27,6 +27,26 @@ func parseVisibility(args map[string]interface{}) string {
 	return ""
 }
 
+// rateLimitMCP MCP handler 速率限制检查。
+func (s *AppServer) rateLimitMCP(name string) *MCPToolResult {
+	r := s.checkRateLimitInternal(false)
+	if !r.CanProceed {
+		msg := r.Info.Warning
+		if msg == "" {
+			msg = "操作频率过高，请稍后重试"
+		}
+		logrus.Warnf("[ratelimit] ⚠️ [%s] 操作超限：%s", name, msg)
+		return &MCPToolResult{
+			Content: []MCPContent{{
+				Type: "text",
+				Text: fmt.Sprintf("操作被限流: %s", msg),
+			}},
+			IsError: true,
+		}
+	}
+	return nil
+}
+
 // handleCheckLoginStatus 处理检查登录状态
 func (s *AppServer) handleCheckLoginStatus(ctx context.Context) *MCPToolResult {
 	logrus.Info("MCP: 检查登录状态")
@@ -122,6 +142,9 @@ func (s *AppServer) handleDeleteCookies(ctx context.Context) *MCPToolResult {
 
 // handlePublishContent 处理发布内容
 func (s *AppServer) handlePublishContent(ctx context.Context, args map[string]interface{}) *MCPToolResult {
+	if blocked := s.rateLimitMCP("发布内容"); blocked != nil {
+		return blocked
+	}
 	logrus.Info("MCP: 发布内容")
 
 	// 解析参数
@@ -196,6 +219,9 @@ func (s *AppServer) handlePublishContent(ctx context.Context, args map[string]in
 
 // handlePublishVideo 处理发布视频内容（仅本地单个视频文件）
 func (s *AppServer) handlePublishVideo(ctx context.Context, args map[string]interface{}) *MCPToolResult {
+	if blocked := s.rateLimitMCP("发布视频"); blocked != nil {
+		return blocked
+	}
 	logrus.Info("MCP: 发布视频内容（本地）")
 
 	title, _ := args["title"].(string)
@@ -268,6 +294,9 @@ func (s *AppServer) handlePublishVideo(ctx context.Context, args map[string]inte
 
 // handleListFeeds 处理获取Feeds列表
 func (s *AppServer) handleListFeeds(ctx context.Context) *MCPToolResult {
+	if blocked := s.rateLimitMCP("获取Feeds列表"); blocked != nil {
+		return blocked
+	}
 	logrus.Info("MCP: 获取Feeds列表")
 
 	result, err := s.xiaohongshuService.ListFeeds(ctx)
@@ -304,6 +333,10 @@ func (s *AppServer) handleListFeeds(ctx context.Context) *MCPToolResult {
 // handleSearchFeeds 处理搜索Feeds
 func (s *AppServer) handleSearchFeeds(ctx context.Context, args SearchFeedsArgs) *MCPToolResult {
 	logrus.Info("MCP: 搜索Feeds")
+
+	if blocked := s.rateLimitMCP("搜索Feeds"); blocked != nil {
+		return blocked
+	}
 
 	if args.Keyword == "" {
 		return &MCPToolResult{
@@ -359,6 +392,9 @@ func (s *AppServer) handleSearchFeeds(ctx context.Context, args SearchFeedsArgs)
 
 // handleGetFeedDetail 处理获取Feed详情
 func (s *AppServer) handleGetFeedDetail(ctx context.Context, args map[string]any) *MCPToolResult {
+	if blocked := s.rateLimitMCP("获取Feed详情"); blocked != nil {
+		return blocked
+	}
 	logrus.Info("MCP: 获取Feed详情")
 
 	// 解析参数
@@ -412,7 +448,18 @@ func (s *AppServer) handleGetFeedDetail(ctx context.Context, args map[string]any
 		}
 	}
 
-	if raw, ok := args["max_replies_threshold"]; ok {
+	if raw, ok := args["reply_limit"]; ok {
+		switch v := raw.(type) {
+		case float64:
+			config.MaxRepliesThreshold = int(v)
+		case string:
+			if parsed, err := strconv.Atoi(v); err == nil {
+				config.MaxRepliesThreshold = parsed
+			}
+		case int:
+			config.MaxRepliesThreshold = v
+		}
+	} else if raw, ok := args["max_replies_threshold"]; ok {
 		switch v := raw.(type) {
 		case float64:
 			config.MaxRepliesThreshold = int(v)
@@ -425,7 +472,7 @@ func (s *AppServer) handleGetFeedDetail(ctx context.Context, args map[string]any
 		}
 	}
 
-	if raw, ok := args["max_comment_items"]; ok {
+	if raw, ok := args["limit"]; ok {
 		switch v := raw.(type) {
 		case float64:
 			config.MaxCommentItems = int(v)
@@ -436,6 +483,21 @@ func (s *AppServer) handleGetFeedDetail(ctx context.Context, args map[string]any
 		case int:
 			config.MaxCommentItems = v
 		}
+	} else if raw, ok := args["max_comment_items"]; ok {
+		switch v := raw.(type) {
+		case float64:
+			config.MaxCommentItems = int(v)
+		case string:
+			if parsed, err := strconv.Atoi(v); err == nil {
+				config.MaxCommentItems = parsed
+			}
+		case int:
+			config.MaxCommentItems = v
+		}
+	}
+
+	if loadAll && config.MaxCommentItems <= 0 {
+		config.MaxCommentItems = 20
 	}
 
 	if raw, ok := args["scroll_speed"].(string); ok && raw != "" {
@@ -477,6 +539,9 @@ func (s *AppServer) handleGetFeedDetail(ctx context.Context, args map[string]any
 
 // handleUserProfile 获取用户主页
 func (s *AppServer) handleUserProfile(ctx context.Context, args map[string]any) *MCPToolResult {
+	if blocked := s.rateLimitMCP("获取用户主页"); blocked != nil {
+		return blocked
+	}
 	logrus.Info("MCP: 获取用户主页")
 
 	// 解析参数
@@ -537,6 +602,9 @@ func (s *AppServer) handleUserProfile(ctx context.Context, args map[string]any) 
 
 // handleLikeFeed 处理点赞/取消点赞
 func (s *AppServer) handleLikeFeed(ctx context.Context, args map[string]interface{}) *MCPToolResult {
+	if blocked := s.rateLimitMCP("点赞"); blocked != nil {
+		return blocked
+	}
 	feedID, ok := args["feed_id"].(string)
 	if !ok || feedID == "" {
 		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "操作失败: 缺少feed_id参数"}}, IsError: true}
@@ -573,6 +641,9 @@ func (s *AppServer) handleLikeFeed(ctx context.Context, args map[string]interfac
 
 // handleFavoriteFeed 处理收藏/取消收藏
 func (s *AppServer) handleFavoriteFeed(ctx context.Context, args map[string]interface{}) *MCPToolResult {
+	if blocked := s.rateLimitMCP("收藏"); blocked != nil {
+		return blocked
+	}
 	feedID, ok := args["feed_id"].(string)
 	if !ok || feedID == "" {
 		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "操作失败: 缺少feed_id参数"}}, IsError: true}
@@ -609,6 +680,9 @@ func (s *AppServer) handleFavoriteFeed(ctx context.Context, args map[string]inte
 
 // handlePostComment 处理发表评论到Feed
 func (s *AppServer) handlePostComment(ctx context.Context, args map[string]interface{}) *MCPToolResult {
+	if blocked := s.rateLimitMCP("发表评论"); blocked != nil {
+		return blocked
+	}
 	logrus.Info("MCP: 发表评论到Feed")
 
 	// 解析参数
@@ -671,6 +745,9 @@ func (s *AppServer) handlePostComment(ctx context.Context, args map[string]inter
 
 // handleReplyComment 处理回复评论
 func (s *AppServer) handleReplyComment(ctx context.Context, args map[string]interface{}) *MCPToolResult {
+	if blocked := s.rateLimitMCP("回复评论"); blocked != nil {
+		return blocked
+	}
 	logrus.Info("MCP: 回复评论")
 
 	// 解析参数

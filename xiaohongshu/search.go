@@ -5,9 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"strings"
 	"time"
 
-	"github.com/go-rod/rod"
+	hrod "github.com/xpzouying/xiaohongshu-mcp/pkg/humanize/rod"
 	"github.com/xpzouying/xiaohongshu-mcp/errors"
 )
 
@@ -156,10 +157,10 @@ func validateInternalFilterOption(filter internalFilterOption) error {
 }
 
 type SearchAction struct {
-	page *rod.Page
+	page *hrod.Page
 }
 
-func NewSearchAction(page *rod.Page) *SearchAction {
+func NewSearchAction(page *hrod.Page) *SearchAction {
 	pp := page.Timeout(60 * time.Second)
 
 	return &SearchAction{page: pp}
@@ -198,14 +199,40 @@ func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...Fi
 		filterButton.MustHover()
 
 		// 等待筛选面板出现
-		page.MustWait(`() => document.querySelector('div.filter-panel') !== null`)
+		page.MustElement(`div.filter-panel`)
 
-		// 应用所有筛选条件
+		// 按文本匹配标签，跳过 aria-hidden 元素（小红书双份渲染，aria-hidden 版 opacity≈0 不可点击）
 		for _, filter := range allInternalFilters {
-			selector := fmt.Sprintf(`div.filter-panel div.filters:nth-child(%d) div.tags:nth-child(%d)`,
-				filter.FiltersIndex, filter.TagsIndex)
-			option := page.MustElement(selector)
-			option.MustClick()
+			filtersSelector := fmt.Sprintf(`div.filter-panel div.filters:nth-of-type(%d)`, filter.FiltersIndex)
+			filtersEl, err := page.Element(filtersSelector)
+			if err != nil {
+				return nil, fmt.Errorf("筛选组 %d (%s) 未找到: %w", filter.FiltersIndex, filter.Text, err)
+			}
+
+			tags, err := filtersEl.Elements("div.tags")
+			if err != nil {
+				return nil, fmt.Errorf("筛选组 %d tags 查找失败: %w", filter.FiltersIndex, err)
+			}
+
+			var matched *hrod.Element
+			for _, tag := range tags {
+				// 跳过 aria-hidden 元素
+				if attr, _ := tag.Attribute("aria-hidden"); attr != nil {
+					continue
+				}
+				txt, err := tag.Text()
+				if err != nil {
+					continue
+				}
+				if strings.TrimSpace(txt) == filter.Text {
+					matched = tag
+					break
+				}
+			}
+			if matched == nil {
+				return nil, fmt.Errorf("筛选组 %d 中未找到文本 %q 的标签", filter.FiltersIndex, filter.Text)
+			}
+			matched.MustClick()
 		}
 
 		// 等待页面更新
