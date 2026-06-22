@@ -323,23 +323,28 @@ func (p *Page) wrapElement(el *rod.Element) *Element {
 	if el == nil {
 		return nil
 	}
-	return NewElement(el, p.actor)
+	return newElement(el, p.actor, p.browser)
 }
 
 // NewElement creates a humanized element from a raw *rod.Element.
 func NewElement(el *rod.Element, actor *humanize.Actor) *Element {
+	return newElement(el, actor, nil)
+}
+
+func newElement(el *rod.Element, actor *humanize.Actor, browser *Browser) *Element {
 	if el == nil {
 		return nil
 	}
-	return &Element{Rod: el, actor: actor}
+	return &Element{Rod: el, actor: actor, browser: browser}
 }
 
 // Element wraps a *rod.Element and adds humanized Click/Input methods.
 // Access the underlying *rod.Element through the exported Rod field when a method
 // is not explicitly wrapped.
 type Element struct {
-	Rod   *rod.Element
-	actor *humanize.Actor
+	Rod     *rod.Element
+	actor   *humanize.Actor
+	browser *Browser
 }
 
 // Actor exposes the underlying humanize actor for advanced use.
@@ -355,7 +360,7 @@ func (el *Element) Page() *Page {
 		Mouse:    rp.Mouse,
 		Keyboard: rp.Keyboard,
 		actor:    el.actor,
-		browser:  nil,
+		browser:  el.browser,
 		cfg:      el.actor.Config(),
 	}
 }
@@ -439,12 +444,12 @@ func (el *Element) Element(selector string) (*Element, error) {
 	if err != nil {
 		return nil, err
 	}
-	return NewElement(child, el.actor), nil
+	return newElement(child, el.actor, el.browser), nil
 }
 
 // MustElement finds a child element and returns a humanized wrapper.
 func (el *Element) MustElement(selector string) *Element {
-	return NewElement(el.Rod.MustElement(selector), el.actor)
+	return newElement(el.Rod.MustElement(selector), el.actor, el.browser)
 }
 
 // ElementR finds a child element by regex and returns a humanized wrapper.
@@ -453,12 +458,12 @@ func (el *Element) ElementR(selector, regex string) (*Element, error) {
 	if err != nil {
 		return nil, err
 	}
-	return NewElement(child, el.actor), nil
+	return newElement(child, el.actor, el.browser), nil
 }
 
 // MustElementR finds a child element by regex and returns a humanized wrapper.
 func (el *Element) MustElementR(selector, regex string) *Element {
-	return NewElement(el.Rod.MustElementR(selector, regex), el.actor)
+	return newElement(el.Rod.MustElementR(selector, regex), el.actor, el.browser)
 }
 
 // ElementX finds a child element by XPath and returns a humanized wrapper.
@@ -467,12 +472,12 @@ func (el *Element) ElementX(xpath string) (*Element, error) {
 	if err != nil {
 		return nil, err
 	}
-	return NewElement(child, el.actor), nil
+	return newElement(child, el.actor, el.browser), nil
 }
 
 // MustElementX finds a child element by XPath and returns a humanized wrapper.
 func (el *Element) MustElementX(xpath string) *Element {
-	return NewElement(el.Rod.MustElementX(xpath), el.actor)
+	return newElement(el.Rod.MustElementX(xpath), el.actor, el.browser)
 }
 
 // Elements returns humanized child elements.
@@ -483,7 +488,7 @@ func (el *Element) Elements(selector string) ([]*Element, error) {
 	}
 	result := make([]*Element, len(children))
 	for i, child := range children {
-		result[i] = NewElement(child, el.actor)
+		result[i] = newElement(child, el.actor, el.browser)
 	}
 	return result, nil
 }
@@ -493,7 +498,7 @@ func (el *Element) MustElements(selector string) []*Element {
 	children := el.Rod.MustElements(selector)
 	result := make([]*Element, len(children))
 	for i, child := range children {
-		result[i] = NewElement(child, el.actor)
+		result[i] = newElement(child, el.actor, el.browser)
 	}
 	return result
 }
@@ -504,7 +509,7 @@ func (el *Element) Parent() (*Element, error) {
 	if err != nil {
 		return nil, err
 	}
-	return NewElement(p, el.actor), nil
+	return newElement(p, el.actor, el.browser), nil
 }
 
 // Next returns the humanized next sibling element.
@@ -513,7 +518,7 @@ func (el *Element) Next() (*Element, error) {
 	if err != nil {
 		return nil, err
 	}
-	return NewElement(next, el.actor), nil
+	return newElement(next, el.actor, el.browser), nil
 }
 
 // Previous returns the humanized previous sibling element.
@@ -522,7 +527,7 @@ func (el *Element) Previous() (*Element, error) {
 	if err != nil {
 		return nil, err
 	}
-	return NewElement(prev, el.actor), nil
+	return newElement(prev, el.actor, el.browser), nil
 }
 
 // Attribute returns the value of an attribute.
@@ -615,10 +620,10 @@ func (el *Element) MustRemove() *Element {
 
 // Timeout returns a humanized clone with the specified timeout.
 func (el *Element) Timeout(d time.Duration) *Element {
-	return NewElement(el.Rod.Timeout(d), el.actor)
+	return newElement(el.Rod.Timeout(d), el.actor, el.browser)
 }
 
 // Context returns a humanized clone with the specified context.
 func (el *Element) Context(ctx context.Context) *Element {
-	return NewElement(el.Rod.Context(ctx), el.actor)
+	return newElement(el.Rod.Context(ctx), el.actor, el.browser)
 }
