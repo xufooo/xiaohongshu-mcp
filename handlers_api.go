@@ -53,15 +53,13 @@ func respondSuccess(c *gin.Context, data any, message string) {
 }
 
 // checkRateLimit 检查速率限制，如果超限则返回 429 并阻止执行。
-// force 参数从查询参数 ?force_rate_limit=true 读取。
 // 注意：必须在 handler 中尽早调用，允许执行时会原子预占一次额度。
 func (s *AppServer) checkRateLimit(c *gin.Context) (canProceed bool) {
-	force := c.Query("force_rate_limit") == "true"
 	if s.rateLimiter == nil {
 		return true
 	}
 
-	info, wait, canProceed, err := s.rateLimiter.Reserve(force)
+	info, wait, canProceed, err := s.rateLimiter.Reserve()
 	if err != nil {
 		logrus.Errorf("rate limiter check error: %v", err)
 		c.Set("rate_limit", &info)
@@ -93,14 +91,13 @@ type checkRateLimitResult struct {
 	Info       ratelimit.Info
 }
 
-// checkRateLimitInternal 通用速率限制检查（供 MCP handler 使用）
-// 无 gin.Context 时调此方法。如需强制越过，传 force=true。
-func (s *AppServer) checkRateLimitInternal(force bool) checkRateLimitResult {
+// checkRateLimitInternal 通用速率限制检查（供 MCP handler 使用）。
+func (s *AppServer) checkRateLimitInternal() checkRateLimitResult {
 	if s.rateLimiter == nil {
 		return checkRateLimitResult{CanProceed: true}
 	}
 
-	info, wait, canProceed, err := s.rateLimiter.Reserve(force)
+	info, wait, canProceed, err := s.rateLimiter.Reserve()
 	if err != nil {
 		logrus.Errorf("rate limiter check error: %v", err)
 		return checkRateLimitResult{CanProceed: true, Info: info}
