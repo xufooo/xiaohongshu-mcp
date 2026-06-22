@@ -145,6 +145,21 @@ func (p *Page) CancelTimeout() *Page {
 	return p.wrapPage(p.Rod.CancelTimeout())
 }
 
+// Sleep waits for d, or returns immediately when this page's context is cancelled.
+func (p *Page) Sleep(d time.Duration) error {
+	return humanize.SleepContext(p.ctx, d, d)
+}
+
+// SleepRandom waits for a random duration in [min, max], or returns when cancelled.
+func (p *Page) SleepRandom(min, max time.Duration) error {
+	return humanize.SleepContext(p.ctx, min, max)
+}
+
+// Err returns the page context error, if it has been cancelled.
+func (p *Page) Err() error {
+	return p.ctx.Err()
+}
+
 // Navigate navigates to the URL.
 func (p *Page) Navigate(url string) error {
 	return p.Rod.Navigate(url)
@@ -350,6 +365,11 @@ type Element struct {
 // Actor exposes the underlying humanize actor for advanced use.
 func (el *Element) Actor() *humanize.Actor {
 	return el.actor
+}
+
+// Sleep waits for d, or returns immediately when the element's actor context is cancelled.
+func (el *Element) Sleep(d time.Duration) error {
+	return el.actor.Sleep(d)
 }
 
 // Page returns the wrapping humanized page.

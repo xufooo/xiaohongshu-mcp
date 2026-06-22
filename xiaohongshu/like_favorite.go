@@ -43,16 +43,18 @@ func newInteractAction(page *hrod.Page) *interactAction {
 	return &interactAction{page: page}
 }
 
-func (a *interactAction) preparePage(ctx context.Context, actionType interactActionType, feedID, xsecToken string) *hrod.Page {
+func (a *interactAction) preparePage(ctx context.Context, actionType interactActionType, feedID, xsecToken string) (*hrod.Page, error) {
 	page := a.page.Context(ctx).Timeout(60 * time.Second)
 	url := makeFeedDetailURL(feedID, xsecToken)
 	logrus.Infof("Opening feed detail page for %s: %s", actionType, url)
 
 	page.MustNavigate(url)
 	page.MustWaitDOMStable()
-	time.Sleep(1 * time.Second)
+	if err := page.Sleep(time.Second); err != nil {
+		return nil, err
+	}
 
-	return page
+	return page, nil
 }
 
 func (a *interactAction) performClick(page *hrod.Page, selector string) {
@@ -85,7 +87,10 @@ func (a *LikeAction) perform(ctx context.Context, feedID, xsecToken string, targ
 		actionType = actionUnlike
 	}
 
-	page := a.preparePage(ctx, actionType, feedID, xsecToken)
+	page, err := a.preparePage(ctx, actionType, feedID, xsecToken)
+	if err != nil {
+		return err
+	}
 
 	liked, _, err := a.getInteractState(page, feedID)
 	if err != nil {
@@ -107,7 +112,9 @@ func (a *LikeAction) perform(ctx context.Context, feedID, xsecToken string, targ
 
 func (a *LikeAction) toggleLike(page *hrod.Page, feedID string, targetLiked bool, actionType interactActionType) error {
 	a.performClick(page, SelectorLikeButton)
-	time.Sleep(3 * time.Second)
+	if err := page.Sleep(3 * time.Second); err != nil {
+		return err
+	}
 
 	liked, _, err := a.getInteractState(page, feedID)
 	if err != nil {
@@ -121,7 +128,9 @@ func (a *LikeAction) toggleLike(page *hrod.Page, feedID string, targetLiked bool
 
 	logrus.Warnf("feed %s %s可能未成功，状态未变化，尝试再次点击", feedID, actionType)
 	a.performClick(page, SelectorLikeButton)
-	time.Sleep(2 * time.Second)
+	if err := page.Sleep(2 * time.Second); err != nil {
+		return err
+	}
 
 	liked, _, err = a.getInteractState(page, feedID)
 	if err != nil {
@@ -161,7 +170,10 @@ func (a *FavoriteAction) perform(ctx context.Context, feedID, xsecToken string, 
 		actionType = actionUnfavorite
 	}
 
-	page := a.preparePage(ctx, actionType, feedID, xsecToken)
+	page, err := a.preparePage(ctx, actionType, feedID, xsecToken)
+	if err != nil {
+		return err
+	}
 
 	_, collected, err := a.getInteractState(page, feedID)
 	if err != nil {
@@ -183,7 +195,9 @@ func (a *FavoriteAction) perform(ctx context.Context, feedID, xsecToken string, 
 
 func (a *FavoriteAction) toggleFavorite(page *hrod.Page, feedID string, targetCollected bool, actionType interactActionType) error {
 	a.performClick(page, SelectorCollectButton)
-	time.Sleep(3 * time.Second)
+	if err := page.Sleep(3 * time.Second); err != nil {
+		return err
+	}
 
 	_, collected, err := a.getInteractState(page, feedID)
 	if err != nil {
@@ -197,7 +211,9 @@ func (a *FavoriteAction) toggleFavorite(page *hrod.Page, feedID string, targetCo
 
 	logrus.Warnf("feed %s %s可能未成功，状态未变化，尝试再次点击", feedID, actionType)
 	a.performClick(page, SelectorCollectButton)
-	time.Sleep(2 * time.Second)
+	if err := page.Sleep(2 * time.Second); err != nil {
+		return err
+	}
 
 	_, collected, err = a.getInteractState(page, feedID)
 	if err != nil {

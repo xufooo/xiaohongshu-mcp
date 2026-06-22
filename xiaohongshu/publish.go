@@ -50,20 +50,26 @@ func NewPublishImageAction(page *hrod.Page) (*PublishAction, error) {
 	if err := pp.WaitLoad(); err != nil {
 		logrus.Warnf("等待页面加载出现问题: %v，继续尝试", err)
 	}
-	time.Sleep(2 * time.Second)
+	if err := pp.Sleep(2 * time.Second); err != nil {
+		return nil, err
+	}
 
 	// 等待页面稳定
 	if err := pp.WaitDOMStable(time.Second, 0.1); err != nil {
 		logrus.Warnf("等待 DOM 稳定出现问题: %v，继续尝试", err)
 	}
-	time.Sleep(1 * time.Second)
+	if err := pp.Sleep(time.Second); err != nil {
+		return nil, err
+	}
 
 	if err := mustClickPublishTab(pp, "上传图文"); err != nil {
 		logrus.Errorf("点击上传图文 TAB 失败: %v", err)
 		return nil, err
 	}
 
-	time.Sleep(1 * time.Second)
+	if err := pp.Sleep(time.Second); err != nil {
+		return nil, err
+	}
 
 	return &PublishAction{
 		page: pp,
@@ -127,25 +133,33 @@ func mustClickPublishTab(page *hrod.Page, tabname string) error {
 		tab, blocked, err := getTabElement(page, tabname)
 		if err != nil {
 			logrus.Warnf("获取发布 TAB 元素失败: %v", err)
-			time.Sleep(200 * time.Millisecond)
+			if err := page.Sleep(200 * time.Millisecond); err != nil {
+				return err
+			}
 			continue
 		}
 
 		if tab == nil {
-			time.Sleep(200 * time.Millisecond)
+			if err := page.Sleep(200 * time.Millisecond); err != nil {
+				return err
+			}
 			continue
 		}
 
 		if blocked {
 			logrus.Info("发布 TAB 被遮挡，尝试移除遮挡")
 			removePopCover(page)
-			time.Sleep(200 * time.Millisecond)
+			if err := page.Sleep(200 * time.Millisecond); err != nil {
+				return err
+			}
 			continue
 		}
 
 		if err := tab.Click(proto.InputMouseButtonLeft, 1); err != nil {
 			logrus.Warnf("点击发布 TAB 失败: %v", err)
-			time.Sleep(200 * time.Millisecond)
+			if err := page.Sleep(200 * time.Millisecond); err != nil {
+				return err
+			}
 			continue
 		}
 
@@ -238,7 +252,9 @@ func uploadImages(page *hrod.Page, imagesPaths []string) error {
 		if err := waitForUploadComplete(page, i+1); err != nil {
 			return errors.Wrapf(err, "第%d张图片上传超时", i+1)
 		}
-		time.Sleep(1 * time.Second)
+		if err := page.Sleep(time.Second); err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -254,7 +270,9 @@ func waitForUploadComplete(page *hrod.Page, expectedCount int) error {
 	for time.Since(start) < maxWaitTime {
 		uploadedImages, err := page.Elements(".img-preview-area .pr")
 		if err != nil {
-			time.Sleep(checkInterval)
+			if err := page.Sleep(checkInterval); err != nil {
+				return err
+			}
 			continue
 		}
 
@@ -269,7 +287,9 @@ func waitForUploadComplete(page *hrod.Page, expectedCount int) error {
 			return nil
 		}
 
-		time.Sleep(checkInterval)
+		if err := page.Sleep(checkInterval); err != nil {
+			return err
+		}
 	}
 
 	return errors.Errorf("第%d张图片上传超时(60s)，请检查网络连接和图片大小", expectedCount)
@@ -285,13 +305,17 @@ func submitPublish(page *hrod.Page, title, content string, tags []string, schedu
 	}
 
 	// 检查标题长度
-	time.Sleep(500 * time.Millisecond)
+	if err := page.Sleep(500 * time.Millisecond); err != nil {
+		return err
+	}
 	if err := checkTitleMaxLength(page); err != nil {
 		return err
 	}
 	slog.Info("检查标题长度：通过")
 
-	time.Sleep(1 * time.Second)
+	if err := page.Sleep(time.Second); err != nil {
+		return err
+	}
 
 	contentElem, ok := getContentElement(page)
 	if !ok {
@@ -307,7 +331,9 @@ func submitPublish(page *hrod.Page, title, content string, tags []string, schedu
 		return err
 	}
 
-	time.Sleep(1 * time.Second)
+	if err := page.Sleep(time.Second); err != nil {
+		return err
+	}
 
 	// 检查正文长度
 	if err := checkContentMaxLength(page); err != nil {
@@ -346,7 +372,9 @@ func submitPublish(page *hrod.Page, title, content string, tags []string, schedu
 		return err
 	}
 
-	time.Sleep(3 * time.Second)
+	if err := page.Sleep(3 * time.Second); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -383,7 +411,9 @@ func waitForPublishButtonClickable(page *hrod.Page, maxWait time.Duration) (*pub
 		btn, disabledReason, err := findPublishButton(page)
 		if err != nil {
 			slog.Warn("查找发布按钮失败，继续等待", "error", err)
-			time.Sleep(interval)
+			if err := page.Sleep(interval); err != nil {
+				return nil, err
+			}
 			continue
 		}
 		if btn != nil && disabledReason == "" {
@@ -392,7 +422,9 @@ func waitForPublishButtonClickable(page *hrod.Page, maxWait time.Duration) (*pub
 		if disabledReason != "" {
 			lastDisabledReason = disabledReason
 		}
-		time.Sleep(interval)
+		if err := page.Sleep(interval); err != nil {
+			return nil, err
+		}
 	}
 
 	if lastDisabledReason != "" {
@@ -486,7 +518,9 @@ func clickPublishWidget(page *hrod.Page, widget *hrod.Element) error {
 // waitAndClickTitleInput 在填写正文后等待 1 秒并回点标题输入框，增强后续交互稳定性
 func waitAndClickTitleInput(titleElem *hrod.Element) error {
 	slog.Info("正文填写完成，准备等待后回点标题输入框")
-	time.Sleep(1 * time.Second)
+	if err := titleElem.Sleep(time.Second); err != nil {
+		return errors.Wrap(err, "等待回点标题输入框时请求已取消")
+	}
 	if err := titleElem.Click(proto.InputMouseButtonLeft, 1); err != nil {
 		return errors.Wrap(err, "回点标题输入框失败")
 	}
@@ -577,7 +611,9 @@ func inputTags(contentElem *hrod.Element, tags []string) error {
 		return nil
 	}
 
-	time.Sleep(1 * time.Second)
+	if err := contentElem.Sleep(time.Second); err != nil {
+		return errors.Wrap(err, "准备输入标签时请求已取消")
+	}
 
 	for i := 0; i < 20; i++ {
 		ka, err := contentElem.KeyActions()
@@ -587,7 +623,9 @@ func inputTags(contentElem *hrod.Element, tags []string) error {
 		if err := ka.Type(input.ArrowDown).Do(); err != nil {
 			return errors.Wrap(err, "按下方向键失败")
 		}
-		time.Sleep(10 * time.Millisecond)
+		if err := contentElem.Sleep(10 * time.Millisecond); err != nil {
+			return errors.Wrap(err, "调整标签输入位置时请求已取消")
+		}
 	}
 
 	ka, err := contentElem.KeyActions()
@@ -598,7 +636,9 @@ func inputTags(contentElem *hrod.Element, tags []string) error {
 		return errors.Wrap(err, "按下回车键失败")
 	}
 
-	time.Sleep(1 * time.Second)
+	if err := contentElem.Sleep(time.Second); err != nil {
+		return errors.Wrap(err, "确认标签输入位置时请求已取消")
+	}
 
 	for _, tag := range tags {
 		tag = strings.TrimLeft(tag, "#")
@@ -613,16 +653,22 @@ func inputTag(contentElem *hrod.Element, tag string) error {
 	if err := contentElem.Input("#"); err != nil {
 		return errors.Wrap(err, "输入#失败")
 	}
-	time.Sleep(200 * time.Millisecond)
+	if err := contentElem.Sleep(200 * time.Millisecond); err != nil {
+		return errors.Wrap(err, "输入标签时请求已取消")
+	}
 
 	for _, char := range tag {
 		if err := contentElem.Input(string(char)); err != nil {
 			return errors.Wrapf(err, "输入字符[%c]失败", char)
 		}
-		time.Sleep(50 * time.Millisecond)
+		if err := contentElem.Sleep(50 * time.Millisecond); err != nil {
+			return errors.Wrap(err, "输入标签时请求已取消")
+		}
 	}
 
-	time.Sleep(1 * time.Second)
+	if err := contentElem.Sleep(time.Second); err != nil {
+		return errors.Wrap(err, "等待标签联想时请求已取消")
+	}
 
 	page := contentElem.Page()
 	topicContainer, err := page.Element("#creator-editor-topic-container")
@@ -641,9 +687,13 @@ func inputTag(contentElem *hrod.Element, tag string) error {
 		return errors.Wrap(err, "点击标签联想选项失败")
 	}
 	slog.Info("成功点击标签联想选项", "tag", tag)
-	time.Sleep(200 * time.Millisecond)
+	if err := contentElem.Sleep(200 * time.Millisecond); err != nil {
+		return errors.Wrap(err, "确认标签联想时请求已取消")
+	}
 
-	time.Sleep(500 * time.Millisecond) // 等待标签处理完成
+	if err := contentElem.Sleep(500 * time.Millisecond); err != nil { // 等待标签处理完成
+		return errors.Wrap(err, "等待标签处理时请求已取消")
+	}
 	return nil
 }
 
@@ -787,7 +837,9 @@ func setVisibility(page *hrod.Page, visibility string) error {
 	if err := dropdown.Click(proto.InputMouseButtonLeft, 1); err != nil {
 		return errors.Wrap(err, "点击可见范围下拉框失败")
 	}
-	time.Sleep(500 * time.Millisecond)
+	if err := page.Sleep(500 * time.Millisecond); err != nil {
+		return err
+	}
 
 	// 在弹窗中查找并点击目标选项
 	opts, err := page.Elements("div.d-options-wrapper div.d-grid-item div.custom-option")
@@ -804,7 +856,9 @@ func setVisibility(page *hrod.Page, visibility string) error {
 				return errors.Wrap(err, "选择可见范围失败")
 			}
 			slog.Info("已设置可见范围", "visibility", visibility)
-			time.Sleep(200 * time.Millisecond)
+			if err := page.Sleep(200 * time.Millisecond); err != nil {
+				return err
+			}
 			return nil
 		}
 	}
@@ -817,13 +871,17 @@ func setSchedulePublish(page *hrod.Page, t time.Time) error {
 	if err := clickScheduleSwitch(page); err != nil {
 		return err
 	}
-	time.Sleep(800 * time.Millisecond)
+	if err := page.Sleep(800 * time.Millisecond); err != nil {
+		return err
+	}
 
 	// 2. 设置日期时间
 	if err := setDateTime(page, t); err != nil {
 		return err
 	}
-	time.Sleep(500 * time.Millisecond)
+	if err := page.Sleep(500 * time.Millisecond); err != nil {
+		return err
+	}
 
 	return nil
 }
@@ -911,7 +969,9 @@ func setOriginal(page *hrod.Page) error {
 			return errors.Wrap(err, "点击原创声明开关失败")
 		}
 
-		time.Sleep(500 * time.Millisecond)
+		if err := page.Sleep(500 * time.Millisecond); err != nil {
+			return err
+		}
 
 		// 处理原创声明确认弹窗
 		if err := confirmOriginalDeclaration(page); err != nil {
@@ -928,7 +988,9 @@ func setOriginal(page *hrod.Page) error {
 // confirmOriginalDeclaration 处理原创声明确认弹窗
 func confirmOriginalDeclaration(page *hrod.Page) error {
 	// 等待确认弹窗出现
-	time.Sleep(800 * time.Millisecond)
+	if err := page.Sleep(800 * time.Millisecond); err != nil {
+		return err
+	}
 
 	// 查找包含"原创声明须知"的 footer 并勾选 checkbox
 	if noticeFooter, err := page.ElementR("div.footer", "原创声明须知"); err == nil {
@@ -946,7 +1008,9 @@ func confirmOriginalDeclaration(page *hrod.Page) error {
 		slog.Warn("未找到原创声明须知弹窗", "error", err)
 	}
 
-	time.Sleep(500 * time.Millisecond)
+	if err := page.Sleep(500 * time.Millisecond); err != nil {
+		return err
+	}
 
 	// 查找包含"声明原创"的 footer
 	confirmFooter, err := page.ElementR("div.footer", "声明原创")
@@ -975,7 +1039,9 @@ func confirmOriginalDeclaration(page *hrod.Page) error {
 				_ = checkbox.Click(proto.InputMouseButtonLeft, 1)
 			}
 		}
-		time.Sleep(300 * time.Millisecond)
+		if err := page.Sleep(300 * time.Millisecond); err != nil {
+			return err
+		}
 		if isDisabled(btn) {
 			return errors.New("声明原创按钮仍处于禁用状态")
 		}
@@ -986,7 +1052,9 @@ func confirmOriginalDeclaration(page *hrod.Page) error {
 	}
 
 	slog.Info("已成功点击声明原创按钮")
-	time.Sleep(300 * time.Millisecond)
+	if err := page.Sleep(300 * time.Millisecond); err != nil {
+		return err
+	}
 
 	return nil
 }
@@ -1003,7 +1071,9 @@ func bindProducts(page *hrod.Page, products []string) error {
 	if err := clickAddProductButton(page); err != nil {
 		return errors.Wrap(err, "点击添加商品按钮失败")
 	}
-	time.Sleep(1 * time.Second)
+	if err := page.Sleep(time.Second); err != nil {
+		return err
+	}
 
 	// 等待商品选择弹窗出现
 	modal, err := waitForProductModal(page)
@@ -1019,7 +1089,9 @@ func bindProducts(page *hrod.Page, products []string) error {
 			slog.Warn("搜索选择商品失败", "keyword", keyword, "error", err)
 			failedProducts = append(failedProducts, keyword)
 		}
-		time.Sleep(500 * time.Millisecond)
+		if err := page.Sleep(500 * time.Millisecond); err != nil {
+			return err
+		}
 	}
 
 	// 点击保存按钮
@@ -1041,7 +1113,9 @@ func bindProducts(page *hrod.Page, products []string) error {
 	}
 
 	slog.Info("商品绑定完成", "total", len(products))
-	time.Sleep(1000 * time.Millisecond)
+	if err := page.Sleep(time.Second); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -1083,7 +1157,9 @@ func clickAddProductButton(page *hrod.Page) error {
 						return errors.Wrap(err, "点击添加商品按钮失败")
 					}
 					slog.Info("已点击添加商品按钮")
-					time.Sleep(300 * time.Millisecond) // 确保弹窗动画开始
+					if err := page.Sleep(300 * time.Millisecond); err != nil { // 确保弹窗动画开始
+						return err
+					}
 					return nil
 				}
 
@@ -1093,7 +1169,9 @@ func clickAddProductButton(page *hrod.Page) error {
 						return errors.Wrap(err, "点击添加商品按钮失败")
 					}
 					slog.Info("已点击添加商品按钮")
-					time.Sleep(300 * time.Millisecond) // 确保弹窗动画开始
+					if err := page.Sleep(300 * time.Millisecond); err != nil { // 确保弹窗动画开始
+						return err
+					}
 					return nil
 				}
 			}
@@ -1116,7 +1194,9 @@ func waitForProductModal(page *hrod.Page) (*hrod.Element, error) {
 				return modal, nil
 			}
 		}
-		time.Sleep(100 * time.Millisecond) // 缩短轮询间隔，更快响应
+		if err := page.Sleep(100 * time.Millisecond); err != nil { // 缩短轮询间隔，更快响应
+			return nil, err
+		}
 	}
 
 	return nil, errors.New("等待商品选择弹窗超时")
@@ -1136,13 +1216,17 @@ func searchAndSelectProduct(page *hrod.Page, modal *hrod.Element, keyword string
 	if err := searchInput.SelectAllText(); err != nil {
 		slog.Warn("选择搜索框文本失败", "error", err)
 	}
-	time.Sleep(100 * time.Millisecond)
+	if err := page.Sleep(100 * time.Millisecond); err != nil {
+		return err
+	}
 
 	// 使用 rod Input 输入关键词
 	if err := searchInput.Input(keyword); err != nil {
 		return errors.Wrap(err, "输入搜索关键词失败")
 	}
-	time.Sleep(300 * time.Millisecond)
+	if err := page.Sleep(300 * time.Millisecond); err != nil {
+		return err
+	}
 
 	// 3. 触发搜索（模拟键盘 Enter）
 	if err := page.Actor().Keyboard.Press(input.Enter); err != nil {
@@ -1150,7 +1234,9 @@ func searchAndSelectProduct(page *hrod.Page, modal *hrod.Element, keyword string
 	}
 
 	// 4. 等待搜索结果加载
-	time.Sleep(1 * time.Second)
+	if err := page.Sleep(time.Second); err != nil {
+		return err
+	}
 
 	// 等待 loading 消失（使用与工作代码相同的选择器）
 	deadline := time.Now().Add(10 * time.Second)
@@ -1163,7 +1249,9 @@ func searchAndSelectProduct(page *hrod.Page, modal *hrod.Element, keyword string
 		if !visible {
 			break
 		}
-		time.Sleep(100 * time.Millisecond)
+		if err := page.Sleep(100 * time.Millisecond); err != nil {
+			return err
+		}
 	}
 
 	// 等待商品列表渲染完成（使用与工作代码相同的选择器）
@@ -1172,9 +1260,13 @@ func searchAndSelectProduct(page *hrod.Page, modal *hrod.Element, keyword string
 		if err == nil && productList != nil {
 			break
 		}
-		time.Sleep(100 * time.Millisecond)
+		if err := page.Sleep(100 * time.Millisecond); err != nil {
+			return err
+		}
 	}
-	time.Sleep(500 * time.Millisecond) // 额外等待确保渲染完成
+	if err := page.Sleep(500 * time.Millisecond); err != nil { // 额外等待确保渲染完成
+		return err
+	}
 
 	// 5. 点击第一个商品的 checkbox（使用与工作代码相同的选择器）
 	checkbox, err := modal.Element(".goods-list-normal .good-card-container .d-checkbox")
@@ -1198,7 +1290,9 @@ func searchAndSelectProduct(page *hrod.Page, modal *hrod.Element, keyword string
 
 	// 6. 随机延迟模拟人为操作（800-1500ms）
 	randomDelay := 800 + rand.Intn(700)
-	time.Sleep(time.Duration(randomDelay) * time.Millisecond)
+	if err := page.Sleep(time.Duration(randomDelay) * time.Millisecond); err != nil {
+		return err
+	}
 
 	slog.Info("已选择商品", "keyword", keyword)
 	return nil
@@ -1244,7 +1338,9 @@ func waitForModalClose(page *hrod.Page) error {
 			slog.Info("弹窗已关闭")
 			return nil
 		}
-		time.Sleep(200 * time.Millisecond)
+		if err := page.Sleep(200 * time.Millisecond); err != nil {
+			return err
+		}
 	}
 
 	return errors.New("等待弹窗关闭超时")

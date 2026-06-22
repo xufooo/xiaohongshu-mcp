@@ -31,7 +31,9 @@ func (f *CommentFeedAction) PostComment(ctx context.Context, feedID, xsecToken, 
 	// 导航到详情页
 	page.MustNavigate(url)
 	page.MustWaitDOMStable()
-	time.Sleep(1 * time.Second)
+	if err := page.Sleep(time.Second); err != nil {
+		return err
+	}
 
 	// 检测页面是否可访问
 	if err := checkPageAccessible(page); err != nil {
@@ -60,7 +62,9 @@ func (f *CommentFeedAction) PostComment(ctx context.Context, feedID, xsecToken, 
 		return fmt.Errorf("无法输入评论内容: %w", err)
 	}
 
-	time.Sleep(1 * time.Second)
+	if err := page.Sleep(time.Second); err != nil {
+		return err
+	}
 
 	submitButton, err := page.Element("div.bottom button.submit")
 	if err != nil {
@@ -73,7 +77,9 @@ func (f *CommentFeedAction) PostComment(ctx context.Context, feedID, xsecToken, 
 		return fmt.Errorf("无法点击提交按钮: %w", err)
 	}
 
-	time.Sleep(1 * time.Second)
+	if err := page.Sleep(time.Second); err != nil {
+		return err
+	}
 
 	logrus.Infof("Comment posted successfully to feed: %s", feedID)
 	return nil
@@ -90,7 +96,9 @@ func (f *CommentFeedAction) ReplyToComment(ctx context.Context, feedID, xsecToke
 	// 导航到详情页
 	page.MustNavigate(url)
 	page.MustWaitDOMStable()
-	time.Sleep(1 * time.Second)
+	if err := page.Sleep(time.Second); err != nil {
+		return err
+	}
 
 	// 检测页面是否可访问
 	if err := checkPageAccessible(page); err != nil {
@@ -98,7 +106,9 @@ func (f *CommentFeedAction) ReplyToComment(ctx context.Context, feedID, xsecToke
 	}
 
 	// 等待评论容器加载
-	time.Sleep(2 * time.Second)
+	if err := page.Sleep(2 * time.Second); err != nil {
+		return err
+	}
 
 	// 使用 Go 实现的查找逻辑
 	commentEl, err := findCommentElement(page, commentID, userID)
@@ -109,7 +119,9 @@ func (f *CommentFeedAction) ReplyToComment(ctx context.Context, feedID, xsecToke
 	// 滚动到评论位置
 	logrus.Info("滚动到评论位置...")
 	commentEl.MustScrollIntoView()
-	time.Sleep(1 * time.Second)
+	if err := page.Sleep(time.Second); err != nil {
+		return err
+	}
 
 	logrus.Info("准备点击回复按钮")
 
@@ -123,7 +135,9 @@ func (f *CommentFeedAction) ReplyToComment(ctx context.Context, feedID, xsecToke
 		return fmt.Errorf("点击回复按钮失败: %w", err)
 	}
 
-	time.Sleep(1 * time.Second)
+	if err := page.Sleep(time.Second); err != nil {
+		return err
+	}
 
 	// 查找回复输入框
 	inputEl, err := page.Element("div.input-box div.content-edit p.content-input")
@@ -136,7 +150,9 @@ func (f *CommentFeedAction) ReplyToComment(ctx context.Context, feedID, xsecToke
 		return fmt.Errorf("输入回复内容失败: %w", err)
 	}
 
-	time.Sleep(500 * time.Millisecond)
+	if err := page.Sleep(500 * time.Millisecond); err != nil {
+		return err
+	}
 
 	// 查找并点击提交按钮
 	submitBtn, err := page.Element("div.bottom button.submit")
@@ -148,7 +164,9 @@ func (f *CommentFeedAction) ReplyToComment(ctx context.Context, feedID, xsecToke
 		return fmt.Errorf("点击提交按钮失败: %w", err)
 	}
 
-	time.Sleep(2 * time.Second)
+	if err := page.Sleep(2 * time.Second); err != nil {
+		return err
+	}
 	logrus.Infof("回复评论成功")
 	return nil
 }
@@ -161,8 +179,12 @@ func findCommentElement(page *hrod.Page, commentID, userID string) (*hrod.Elemen
 	const scrollInterval = 800 * time.Millisecond
 
 	// 先滚动到评论区
-	scrollToCommentsArea(page)
-	time.Sleep(1 * time.Second)
+	if err := scrollToCommentsArea(page); err != nil {
+		return nil, err
+	}
+	if err := page.Sleep(time.Second); err != nil {
+		return nil, err
+	}
 
 	var lastCommentCount = 0
 	stagnantChecks := 0
@@ -215,7 +237,9 @@ func findCommentElement(page *hrod.Page, commentID, userID string) (*hrod.Elemen
 			} else {
 				logrus.Warnf("未找到评论元素: %v", err)
 			}
-			time.Sleep(300 * time.Millisecond)
+			if err := page.Sleep(300 * time.Millisecond); err != nil {
+				return nil, err
+			}
 		}
 
 		// === 5. 继续向下滚动 ===
@@ -224,7 +248,9 @@ func findCommentElement(page *hrod.Page, commentID, userID string) (*hrod.Elemen
 		if err := page.Actor().Mouse.Scroll(0, float64(viewportHeight)*0.8); err != nil {
 			logrus.Warnf("滚动失败: %v", err)
 		}
-		time.Sleep(500 * time.Millisecond)
+		if err := page.Sleep(500 * time.Millisecond); err != nil {
+			return nil, err
+		}
 
 		// === 6. 滚动后立即查找（边滚动边查找）===
 		// 优先通过 commentID 查找（使用 Timeout 避免长时间等待）
@@ -266,7 +292,9 @@ func findCommentElement(page *hrod.Page, commentID, userID string) (*hrod.Elemen
 		logrus.Infof("本次尝试未找到目标评论，继续下一轮...")
 
 		// === 7. 等待内容加载 ===
-		time.Sleep(scrollInterval)
+		if err := page.Sleep(scrollInterval); err != nil {
+			return nil, err
+		}
 	}
 
 	return nil, fmt.Errorf("未找到评论 (commentID: %s, userID: %s), 尝试次数: %d", commentID, userID, maxAttempts)
