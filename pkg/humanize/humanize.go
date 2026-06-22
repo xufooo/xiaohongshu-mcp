@@ -51,6 +51,11 @@ func (a *Actor) SetContext(ctx context.Context) {
 	a.Keyboard.setContext(ctx)
 }
 
+// Ctx returns the actor's context.
+func (a *Actor) Ctx() context.Context {
+	return a.ctx
+}
+
 // Sleep waits for d, or returns immediately when the actor's context is cancelled.
 func (a *Actor) Sleep(d time.Duration) error {
 	return sleepWithContext(a.ctx, d)
