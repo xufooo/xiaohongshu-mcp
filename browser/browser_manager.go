@@ -2,6 +2,7 @@ package browser
 
 import (
 	"context"
+	"errors"
 	"math/rand"
 	"sync/atomic"
 	"time"
@@ -56,6 +57,10 @@ func NewManager(opts ...ManagerOption) *Manager {
 func (m *Manager) Acquire(ctx context.Context) (*hrod.Page, error) {
 	if err := m.lock(ctx); err != nil {
 		return nil, err
+	}
+	if m.closing.Load() {
+		m.unlock()
+		return nil, errors.New("browser manager is closing")
 	}
 
 	// 有操作进来，取消待关闭定时器
