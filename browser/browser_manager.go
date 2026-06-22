@@ -18,6 +18,7 @@ type Manager struct {
 	browser    *hrod.Browser
 	page       *hrod.Page
 	closeTimer *time.Timer
+	idleGen    uint64
 
 	minIdle time.Duration
 	maxIdle time.Duration
@@ -52,6 +53,7 @@ func (m *Manager) Acquire() *hrod.Page {
 	m.mu.Lock()
 
 	// 有操作进来，取消待关闭定时器
+	m.idleGen++
 	if m.closeTimer != nil {
 		m.closeTimer.Stop()
 		m.closeTimer = nil
@@ -75,12 +77,20 @@ func (m *Manager) Acquire() *hrod.Page {
 
 // Release 归还页面，开始随机空闲定时器，超时后自动关闭浏览器。
 func (m *Manager) Release() {
-	wait := time.Duration(rand.Int63n(int64(m.maxIdle-m.minIdle))) + m.minIdle
+	wait := m.minIdle
+	if m.maxIdle > m.minIdle {
+		wait += time.Duration(rand.Int63n(int64(m.maxIdle - m.minIdle)))
+	}
 	logrus.Infof("操作完成，%.0f秒后自动关闭浏览器", wait.Seconds())
 
+	m.idleGen++
+	idleGen := m.idleGen
 	m.closeTimer = time.AfterFunc(wait, func() {
 		m.mu.Lock()
 		defer m.mu.Unlock()
+		if idleGen != m.idleGen {
+			return
+		}
 		if m.browser != nil {
 			logrus.Info("空闲超时，关闭浏览器")
 			m.cleanup()
@@ -95,6 +105,7 @@ func (m *Manager) Release() {
 func (m *Manager) Close() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.idleGen++
 	if m.closeTimer != nil {
 		m.closeTimer.Stop()
 		m.closeTimer = nil
