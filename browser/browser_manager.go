@@ -1,8 +1,8 @@
 package browser
 
 import (
+	"context"
 	"math/rand"
-	"sync"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -14,7 +14,7 @@ import (
 // 所有操作复用同一个页面，操作完成后随机空闲等待 30s~5min 后自动关闭。
 // 下次操作到来时取消关闭，继续使用。
 type Manager struct {
-	mu         sync.Mutex
+	mu         chan struct{}
 	browser    *hrod.Browser
 	page       *hrod.Page
 	closeTimer *time.Timer
@@ -40,17 +40,21 @@ func NewManager(opts ...ManagerOption) *Manager {
 	m := &Manager{
 		minIdle: 30 * time.Second,
 		maxIdle: 5 * time.Minute,
+		mu:      make(chan struct{}, 1),
 	}
+	m.mu <- struct{}{}
 	for _, opt := range opts {
 		opt(m)
 	}
 	return m
 }
 
-// Acquire 获取页面，阻塞直到可用。
+// Acquire 获取页面，阻塞直到可用或上下文取消。
 // 返回后必须调用 Release() 归还，调用序列：acquire→use→release→acquire→...
-func (m *Manager) Acquire() *hrod.Page {
-	m.mu.Lock()
+func (m *Manager) Acquire(ctx context.Context) (*hrod.Page, error) {
+	if err := m.lock(ctx); err != nil {
+		return nil, err
+	}
 
 	// 有操作进来，取消待关闭定时器
 	m.idleGen++
@@ -62,7 +66,7 @@ func (m *Manager) Acquire() *hrod.Page {
 	// 复用已有页面（浏览器还活着）
 	if m.page != nil {
 		if _, err := m.page.Rod.Eval(`1`); err == nil {
-			return m.page
+			return m.page, nil
 		}
 		logrus.Warn("浏览器页面已失效，重新创建")
 		m.cleanup()
@@ -72,7 +76,7 @@ func (m *Manager) Acquire() *hrod.Page {
 	b := NewBrowser(configs.IsHeadless(), WithBinPath(configs.GetBinPath()))
 	m.browser = b
 	m.page = b.NewPage()
-	return m.page
+	return m.page, nil
 }
 
 // Release 归还页面，开始随机空闲定时器，超时后自动关闭浏览器。
@@ -86,8 +90,8 @@ func (m *Manager) Release() {
 	m.idleGen++
 	idleGen := m.idleGen
 	m.closeTimer = time.AfterFunc(wait, func() {
-		m.mu.Lock()
-		defer m.mu.Unlock()
+		_ = m.lock(context.Background())
+		defer m.unlock()
 		if idleGen != m.idleGen {
 			return
 		}
@@ -98,13 +102,13 @@ func (m *Manager) Release() {
 		}
 	})
 
-	m.mu.Unlock()
+	m.unlock()
 }
 
 // Close 立即关闭浏览器（服务关闭时调用）
 func (m *Manager) Close() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	_ = m.lock(context.Background())
+	defer m.unlock()
 	m.idleGen++
 	if m.closeTimer != nil {
 		m.closeTimer.Stop()
@@ -119,4 +123,17 @@ func (m *Manager) cleanup() {
 		m.browser = nil
 		m.page = nil
 	}
+}
+
+func (m *Manager) lock(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-m.mu:
+		return nil
+	}
+}
+
+func (m *Manager) unlock() {
+	m.mu <- struct{}{}
 }

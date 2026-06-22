@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"time"
 
@@ -59,11 +60,11 @@ func (s *AppServer) checkRateLimit(c *gin.Context) (canProceed bool) {
 		return true
 	}
 
-	info, wait, canProceed, err := s.rateLimiter.Reserve()
+	info, wait, canProceed, err := s.rateLimiter.Reserve(c.Request.Context())
 	if err != nil {
 		logrus.Errorf("rate limiter check error: %v", err)
 		c.Set("rate_limit", &info)
-		return true
+		return false
 	}
 
 	c.Set("rate_limit", &info)
@@ -78,7 +79,9 @@ func (s *AppServer) checkRateLimit(c *gin.Context) (canProceed bool) {
 	// 应用冷却延迟（按当前使用率自动调整）
 	if wait > 0 {
 		logrus.Infof("[ratelimit] cooldown %v before execution", wait)
-		time.Sleep(wait)
+		if err := sleepWithContext(c.Request.Context(), wait); err != nil {
+			return false
+		}
 	}
 
 	logrus.Infof("[ratelimit] %s %s - %s", c.Request.Method, c.Request.URL.Path, s.rateLimiter.String())
@@ -92,15 +95,15 @@ type checkRateLimitResult struct {
 }
 
 // checkRateLimitInternal 通用速率限制检查（供 MCP handler 使用）。
-func (s *AppServer) checkRateLimitInternal() checkRateLimitResult {
+func (s *AppServer) checkRateLimitInternal(ctx context.Context) checkRateLimitResult {
 	if s.rateLimiter == nil {
 		return checkRateLimitResult{CanProceed: true}
 	}
 
-	info, wait, canProceed, err := s.rateLimiter.Reserve()
+	info, wait, canProceed, err := s.rateLimiter.Reserve(ctx)
 	if err != nil {
 		logrus.Errorf("rate limiter check error: %v", err)
-		return checkRateLimitResult{CanProceed: true, Info: info}
+		return checkRateLimitResult{CanProceed: false, Info: info}
 	}
 
 	if !canProceed {
@@ -111,11 +114,25 @@ func (s *AppServer) checkRateLimitInternal() checkRateLimitResult {
 	// 应用冷却延迟
 	if wait > 0 {
 		logrus.Infof("[ratelimit] MCP cooldown %v", wait)
-		time.Sleep(wait)
+		if err := sleepWithContext(ctx, wait); err != nil {
+			return checkRateLimitResult{CanProceed: false, Info: info}
+		}
 	}
 
 	logrus.Infof("[ratelimit] MCP - %s", s.rateLimiter.String())
 	return checkRateLimitResult{CanProceed: true, Info: info}
+}
+
+func sleepWithContext(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 // checkLoginStatusHandler 检查登录状态

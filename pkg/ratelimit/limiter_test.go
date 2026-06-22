@@ -1,6 +1,7 @@
 package ratelimit
 
 import (
+	"context"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -17,7 +18,7 @@ func TestReserveIsAtomicUnderConcurrentCallers(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, _, canProceed, err := limiter.Reserve()
+			_, _, canProceed, err := limiter.Reserve(context.Background())
 			if err != nil {
 				t.Errorf("Reserve returned error: %v", err)
 				return
@@ -49,10 +50,10 @@ func TestReserveRejectsWhenLimitReached(t *testing.T) {
 	limiter := New(Config{MaxPerHour: 1})
 	limiter.tokenInterval = time.Millisecond
 
-	if _, _, canProceed, err := limiter.Reserve(); err != nil || !canProceed {
+	if _, _, canProceed, err := limiter.Reserve(context.Background()); err != nil || !canProceed {
 		t.Fatalf("first reservation should proceed, canProceed=%v err=%v", canProceed, err)
 	}
-	info, _, canProceed, err := limiter.Reserve()
+	info, _, canProceed, err := limiter.Reserve(context.Background())
 	if err != nil {
 		t.Fatalf("second reservation returned error: %v", err)
 	}

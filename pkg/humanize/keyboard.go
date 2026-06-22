@@ -1,6 +1,7 @@
 package humanize
 
 import (
+	"context"
 	"math"
 	"math/rand"
 	"time"
@@ -14,13 +15,18 @@ import (
 type Keyboard struct {
 	page     *rod.Page
 	cfg      Config
+	ctx      context.Context
 	mouse    *Mouse
 	lastEl   *rod.Element
 }
 
 // NewKeyboard creates a new humanized keyboard wrapper.
 func NewKeyboard(page *rod.Page, cfg Config, mouse *Mouse) *Keyboard {
-	return &Keyboard{page: page, cfg: cfg, mouse: mouse}
+	return &Keyboard{page: page, cfg: cfg, ctx: context.Background(), mouse: mouse}
+}
+
+func (k *Keyboard) setContext(ctx context.Context) {
+	k.ctx = ctx
 }
 
 // Type types text into el with realistic timing, occasional typos, and corrections.
@@ -82,11 +88,15 @@ func (k *Keyboard) Type(el *rod.Element, text string) error {
 					if err := k.press(input.Key(typo)); err != nil {
 						return err
 					}
-					time.Sleep(cfg.PauseAfterTypo + time.Duration(rand.Float64()*200)*time.Millisecond)
+					if err := sleepWithContext(k.ctx, cfg.PauseAfterTypo+time.Duration(rand.Float64()*200)*time.Millisecond); err != nil {
+						return err
+					}
 					if err := k.pressBackspace(); err != nil {
 						return err
 					}
-					time.Sleep(randDuration(50*time.Millisecond, 150*time.Millisecond))
+					if err := sleepWithContext(k.ctx, randDuration(50*time.Millisecond, 150*time.Millisecond)); err != nil {
+						return err
+					}
 				}
 
 				if err := k.press(input.Key(r)); err != nil {
@@ -98,10 +108,14 @@ func (k *Keyboard) Type(el *rod.Element, text string) error {
 				if delay < 10*time.Millisecond {
 					delay = 10 * time.Millisecond
 				}
-				time.Sleep(delay)
+				if err := sleepWithContext(k.ctx, delay); err != nil {
+					return err
+				}
 
 				if typed%cfg.BurstLength == 0 {
-					time.Sleep(randDuration(cfg.BurstPause, cfg.BurstPause+80*time.Millisecond))
+					if err := sleepWithContext(k.ctx, randDuration(cfg.BurstPause, cfg.BurstPause+80*time.Millisecond)); err != nil {
+						return err
+					}
 				}
 
 				if typed-lastScrollCheck >= 30 {
@@ -123,7 +137,9 @@ func (k *Keyboard) Type(el *rod.Element, text string) error {
 				if pause < 150*time.Millisecond {
 					pause = 150 * time.Millisecond
 				}
-				time.Sleep(pause)
+				if err := sleepWithContext(k.ctx, pause); err != nil {
+					return err
+				}
 				typed += len(segRunes)
 
 				if typed-lastScrollCheck >= 30 {
@@ -142,8 +158,7 @@ func (k *Keyboard) Press(key input.Key) error {
 	if err := k.press(key); err != nil {
 		return err
 	}
-	time.Sleep(randDuration(50*time.Millisecond, 150*time.Millisecond))
-	return nil
+	return sleepWithContext(k.ctx, randDuration(50*time.Millisecond, 150*time.Millisecond))
 }
 
 func (k *Keyboard) press(key input.Key) error {

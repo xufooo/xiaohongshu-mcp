@@ -8,6 +8,8 @@
 package humanize
 
 import (
+	"context"
+
 	"github.com/go-rod/rod"
 )
 
@@ -20,15 +22,28 @@ type Actor struct {
 
 // New creates a humanized actor for the given page.
 func New(page *rod.Page, cfg Config) *Actor {
+	return NewWithContext(page, cfg, context.Background())
+}
+
+// NewWithContext creates a humanized actor for the given page and context.
+func NewWithContext(page *rod.Page, cfg Config, ctx context.Context) *Actor {
 	mouse := NewMouse(page, cfg)
-	return &Actor{
+	actor := &Actor{
 		Mouse:    mouse,
 		Keyboard: NewKeyboard(page, cfg, mouse),
 		cfg:      cfg,
 	}
+	actor.SetContext(ctx)
+	return actor
 }
 
 // Config returns the actor's configuration.
 func (a *Actor) Config() Config {
 	return a.cfg
+}
+
+// SetContext updates the context used by humanized delays.
+func (a *Actor) SetContext(ctx context.Context) {
+	a.Mouse.setContext(ctx)
+	a.Keyboard.setContext(ctx)
 }
