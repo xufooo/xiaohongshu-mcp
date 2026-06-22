@@ -76,6 +76,7 @@ func (b *Browser) wrapPage(p *rod.Page) *Page {
 		actor:    humanize.New(p, b.cfg),
 		browser:  b,
 		cfg:      b.cfg,
+		ctx:      context.Background(),
 	}
 	// Eagerly initialize the cursor position so the first interaction does not
 	// start from rod's default (0,0), which is an obvious automation signature.
@@ -93,6 +94,7 @@ type Page struct {
 	actor    *humanize.Actor
 	browser  *Browser
 	cfg      humanize.Config
+	ctx      context.Context
 }
 
 // Actor exposes the underlying humanize actor for advanced use.
@@ -113,9 +115,10 @@ func (p *Page) wrapPage(rp *rod.Page) *Page {
 		Rod:      rp,
 		Mouse:    rp.Mouse,
 		Keyboard: rp.Keyboard,
-		actor:    humanize.New(rp, p.cfg),
+		actor:    humanize.NewWithContext(rp, p.cfg, p.ctx),
 		browser:  p.browser,
 		cfg:      p.cfg,
+		ctx:      p.ctx,
 	}
 }
 
@@ -126,7 +129,10 @@ func (p *Page) Close() error {
 
 // Context returns a humanized clone with the specified context.
 func (p *Page) Context(ctx context.Context) *Page {
-	return p.wrapPage(p.Rod.Context(ctx))
+	page := p.wrapPage(p.Rod.Context(ctx))
+	page.ctx = ctx
+	page.actor.SetContext(ctx)
+	return page
 }
 
 // Timeout returns a humanized clone with the specified timeout.

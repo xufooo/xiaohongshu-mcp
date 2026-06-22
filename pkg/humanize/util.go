@@ -1,6 +1,7 @@
 package humanize
 
 import (
+	"context"
 	"math/rand"
 	"time"
 )
@@ -15,5 +16,22 @@ func randDuration(min, max time.Duration) time.Duration {
 
 // Sleep pauses for a random short duration, useful between operations.
 func Sleep(min, max time.Duration) {
-	time.Sleep(randDuration(min, max))
+	_ = SleepContext(context.Background(), min, max)
+}
+
+// SleepContext pauses for a random short duration unless ctx is cancelled.
+func SleepContext(ctx context.Context, min, max time.Duration) error {
+	return sleepWithContext(ctx, randDuration(min, max))
+}
+
+func sleepWithContext(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }

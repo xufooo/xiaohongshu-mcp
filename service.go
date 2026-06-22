@@ -103,10 +103,13 @@ func (s *XiaohongshuService) DeleteCookies(ctx context.Context) error {
 
 // CheckLoginStatus 检查登录状态
 func (s *XiaohongshuService) CheckLoginStatus(ctx context.Context) (*LoginStatusResponse, error) {
-	page := s.bm.Acquire()
+	page, err := s.bm.Acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
 	defer s.bm.Release()
 
-	loginAction := xiaohongshu.NewLogin(page)
+	loginAction := xiaohongshu.NewLogin(page.Context(ctx))
 
 	isLoggedIn, err := loginAction.CheckLoginStatus(ctx)
 	if err != nil {
@@ -244,10 +247,13 @@ func (s *XiaohongshuService) processImages(images []string) ([]string, error) {
 
 // publishContent 执行内容发布
 func (s *XiaohongshuService) publishContent(ctx context.Context, content xiaohongshu.PublishImageContent) error {
-	page := s.bm.Acquire()
+	page, err := s.bm.Acquire(ctx)
+	if err != nil {
+		return err
+	}
 	defer s.bm.Release()
 
-	action, err := xiaohongshu.NewPublishImageAction(page)
+	action, err := xiaohongshu.NewPublishImageAction(page.Context(ctx))
 	if err != nil {
 		return err
 	}
@@ -324,10 +330,13 @@ func (s *XiaohongshuService) PublishVideo(ctx context.Context, req *PublishVideo
 
 // publishVideo 执行视频发布
 func (s *XiaohongshuService) publishVideo(ctx context.Context, content xiaohongshu.PublishVideoContent) error {
-	page := s.bm.Acquire()
+	page, err := s.bm.Acquire(ctx)
+	if err != nil {
+		return err
+	}
 	defer s.bm.Release()
 
-	action, err := xiaohongshu.NewPublishVideoAction(page)
+	action, err := xiaohongshu.NewPublishVideoAction(page.Context(ctx))
 	if err != nil {
 		return err
 	}
@@ -337,11 +346,14 @@ func (s *XiaohongshuService) publishVideo(ctx context.Context, content xiaohongs
 
 // ListFeeds 获取Feeds列表
 func (s *XiaohongshuService) ListFeeds(ctx context.Context) (*FeedsListResponse, error) {
-	page := s.bm.Acquire()
+	page, err := s.bm.Acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
 	defer s.bm.Release()
 
 	// 创建 Feeds 列表 action
-	action := xiaohongshu.NewFeedsListAction(page)
+	action := xiaohongshu.NewFeedsListAction(page.Context(ctx))
 
 	// 获取 Feeds 列表
 	feeds, err := action.GetFeedsList(ctx)
@@ -359,10 +371,13 @@ func (s *XiaohongshuService) ListFeeds(ctx context.Context) (*FeedsListResponse,
 }
 
 func (s *XiaohongshuService) SearchFeeds(ctx context.Context, keyword string, filters ...xiaohongshu.FilterOption) (*FeedsListResponse, error) {
-	page := s.bm.Acquire()
+	page, err := s.bm.Acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
 	defer s.bm.Release()
 
-	action := xiaohongshu.NewSearchAction(page)
+	action := xiaohongshu.NewSearchAction(page.Context(ctx))
 
 	feeds, err := action.Search(ctx, keyword, filters...)
 	if err != nil {
@@ -384,11 +399,14 @@ func (s *XiaohongshuService) GetFeedDetail(ctx context.Context, feedID, xsecToke
 
 // GetFeedDetailWithConfig 使用配置获取Feed详情
 func (s *XiaohongshuService) GetFeedDetailWithConfig(ctx context.Context, feedID, xsecToken string, loadAllComments bool, config xiaohongshu.CommentLoadConfig) (*FeedDetailResponse, error) {
-	page := s.bm.Acquire()
+	page, err := s.bm.Acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
 	defer s.bm.Release()
 
 	// 创建 Feed 详情 action
-	action := xiaohongshu.NewFeedDetailAction(page)
+	action := xiaohongshu.NewFeedDetailAction(page.Context(ctx))
 
 	// 获取 Feed 详情
 	result, err := action.GetFeedDetailWithConfig(ctx, feedID, xsecToken, loadAllComments, config)
@@ -406,10 +424,13 @@ func (s *XiaohongshuService) GetFeedDetailWithConfig(ctx context.Context, feedID
 
 // UserProfile 获取用户信息
 func (s *XiaohongshuService) UserProfile(ctx context.Context, userID, xsecToken string) (*UserProfileResponse, error) {
-	page := s.bm.Acquire()
+	page, err := s.bm.Acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
 	defer s.bm.Release()
 
-	action := xiaohongshu.NewUserProfileAction(page)
+	action := xiaohongshu.NewUserProfileAction(page.Context(ctx))
 
 	result, err := action.UserProfile(ctx, userID, xsecToken)
 	if err != nil {
@@ -427,10 +448,13 @@ func (s *XiaohongshuService) UserProfile(ctx context.Context, userID, xsecToken 
 
 // PostCommentToFeed 发表评论到Feed
 func (s *XiaohongshuService) PostCommentToFeed(ctx context.Context, feedID, xsecToken, content string) (*PostCommentResponse, error) {
-	page := s.bm.Acquire()
+	page, err := s.bm.Acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
 	defer s.bm.Release()
 
-	action := xiaohongshu.NewCommentFeedAction(page)
+	action := xiaohongshu.NewCommentFeedAction(page.Context(ctx))
 
 	if err := action.PostComment(ctx, feedID, xsecToken, content); err != nil {
 		return nil, err
@@ -441,10 +465,13 @@ func (s *XiaohongshuService) PostCommentToFeed(ctx context.Context, feedID, xsec
 
 // LikeFeed 点赞笔记
 func (s *XiaohongshuService) LikeFeed(ctx context.Context, feedID, xsecToken string) (*ActionResult, error) {
-	page := s.bm.Acquire()
+	page, err := s.bm.Acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
 	defer s.bm.Release()
 
-	action := xiaohongshu.NewLikeAction(page)
+	action := xiaohongshu.NewLikeAction(page.Context(ctx))
 	if err := action.Like(ctx, feedID, xsecToken); err != nil {
 		return nil, err
 	}
@@ -453,10 +480,13 @@ func (s *XiaohongshuService) LikeFeed(ctx context.Context, feedID, xsecToken str
 
 // UnlikeFeed 取消点赞笔记
 func (s *XiaohongshuService) UnlikeFeed(ctx context.Context, feedID, xsecToken string) (*ActionResult, error) {
-	page := s.bm.Acquire()
+	page, err := s.bm.Acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
 	defer s.bm.Release()
 
-	action := xiaohongshu.NewLikeAction(page)
+	action := xiaohongshu.NewLikeAction(page.Context(ctx))
 	if err := action.Unlike(ctx, feedID, xsecToken); err != nil {
 		return nil, err
 	}
@@ -465,10 +495,13 @@ func (s *XiaohongshuService) UnlikeFeed(ctx context.Context, feedID, xsecToken s
 
 // FavoriteFeed 收藏笔记
 func (s *XiaohongshuService) FavoriteFeed(ctx context.Context, feedID, xsecToken string) (*ActionResult, error) {
-	page := s.bm.Acquire()
+	page, err := s.bm.Acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
 	defer s.bm.Release()
 
-	action := xiaohongshu.NewFavoriteAction(page)
+	action := xiaohongshu.NewFavoriteAction(page.Context(ctx))
 	if err := action.Favorite(ctx, feedID, xsecToken); err != nil {
 		return nil, err
 	}
@@ -477,10 +510,13 @@ func (s *XiaohongshuService) FavoriteFeed(ctx context.Context, feedID, xsecToken
 
 // UnfavoriteFeed 取消收藏笔记
 func (s *XiaohongshuService) UnfavoriteFeed(ctx context.Context, feedID, xsecToken string) (*ActionResult, error) {
-	page := s.bm.Acquire()
+	page, err := s.bm.Acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
 	defer s.bm.Release()
 
-	action := xiaohongshu.NewFavoriteAction(page)
+	action := xiaohongshu.NewFavoriteAction(page.Context(ctx))
 	if err := action.Unfavorite(ctx, feedID, xsecToken); err != nil {
 		return nil, err
 	}
@@ -489,10 +525,13 @@ func (s *XiaohongshuService) UnfavoriteFeed(ctx context.Context, feedID, xsecTok
 
 // ReplyCommentToFeed 回复指定评论
 func (s *XiaohongshuService) ReplyCommentToFeed(ctx context.Context, feedID, xsecToken, commentID, userID, content string) (*ReplyCommentResponse, error) {
-	page := s.bm.Acquire()
+	page, err := s.bm.Acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
 	defer s.bm.Release()
 
-	action := xiaohongshu.NewCommentFeedAction(page)
+	action := xiaohongshu.NewCommentFeedAction(page.Context(ctx))
 
 	if err := action.ReplyToComment(ctx, feedID, xsecToken, commentID, userID, content); err != nil {
 		return nil, err
@@ -527,8 +566,11 @@ func saveCookies(page *hrod.Page) error {
 }
 
 // withBrowserPage 执行需要浏览器页面的操作的通用函数
-func (s *XiaohongshuService) withBrowserPage(fn func(*hrod.Page) error) error {
-	page := s.bm.Acquire()
+func (s *XiaohongshuService) withBrowserPage(ctx context.Context, fn func(*hrod.Page) error) error {
+	page, err := s.bm.Acquire(ctx)
+	if err != nil {
+		return err
+	}
 	defer s.bm.Release()
 
 	return fn(page)
@@ -539,8 +581,8 @@ func (s *XiaohongshuService) GetMyProfile(ctx context.Context) (*UserProfileResp
 	var result *xiaohongshu.UserProfileResponse
 	var err error
 
-	err = s.withBrowserPage(func(page *hrod.Page) error {
-		action := xiaohongshu.NewUserProfileAction(page)
+	err = s.withBrowserPage(ctx, func(page *hrod.Page) error {
+		action := xiaohongshu.NewUserProfileAction(page.Context(ctx))
 		result, err = action.GetMyProfileViaSidebar(ctx)
 		return err
 	})

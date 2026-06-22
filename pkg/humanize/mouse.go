@@ -1,6 +1,7 @@
 package humanize
 
 import (
+	"context"
 	"errors"
 	"math"
 	"math/rand"
@@ -22,12 +23,17 @@ func init() {
 type Mouse struct {
 	page        *rod.Page
 	cfg         Config
+	ctx         context.Context
 	initialized bool
 }
 
 // NewMouse creates a new humanized mouse wrapper.
 func NewMouse(page *rod.Page, cfg Config) *Mouse {
-	return &Mouse{page: page, cfg: cfg}
+	return &Mouse{page: page, cfg: cfg, ctx: context.Background()}
+}
+
+func (m *Mouse) setContext(ctx context.Context) {
+	m.ctx = ctx
 }
 
 // initPosition moves the cursor from the rod default (0,0) to a plausible
@@ -187,15 +193,21 @@ func (m *Mouse) moveTo(target Point, scrollingAllowed bool) error {
 				_ = m.tracePoint(subP.X, subP.Y, i == 0 && j == 0)
 			}
 
-			time.Sleep(stepDuration / time.Duration(subSteps))
+			if err := sleepWithContext(m.ctx, stepDuration/time.Duration(subSteps)); err != nil {
+				return err
+			}
 		}
 
 		if scrollingAllowed && straightDist > 250 && rand.Float64() < m.cfg.Mouse.ScrollDuringMoveProbability {
 			_ = m.scrollRandom()
-			time.Sleep(randDuration(80*time.Millisecond, 180*time.Millisecond))
+			if err := sleepWithContext(m.ctx, randDuration(80*time.Millisecond, 180*time.Millisecond)); err != nil {
+				return err
+			}
 		}
 		if rand.Float64() < m.cfg.Mouse.PauseProbability {
-			time.Sleep(randDuration(m.cfg.Mouse.PauseMin, m.cfg.Mouse.PauseMax))
+			if err := sleepWithContext(m.ctx, randDuration(m.cfg.Mouse.PauseMin, m.cfg.Mouse.PauseMax)); err != nil {
+				return err
+			}
 		}
 
 		last = p
@@ -221,12 +233,16 @@ func (m *Mouse) Click(el *rod.Element) error {
 	}
 
 	// Human pause before clicking.
-	time.Sleep(randDuration(80*time.Millisecond, 350*time.Millisecond))
+	if err := sleepWithContext(m.ctx, randDuration(80*time.Millisecond, 350*time.Millisecond)); err != nil {
+		return err
+	}
 
 	if err := m.page.Mouse.Down(proto.InputMouseButtonLeft, 1); err != nil {
 		return err
 	}
-	time.Sleep(randDuration(40*time.Millisecond, 120*time.Millisecond))
+	if err := sleepWithContext(m.ctx, randDuration(40*time.Millisecond, 120*time.Millisecond)); err != nil {
+		return err
+	}
 	if err := m.page.Mouse.Up(proto.InputMouseButtonLeft, 1); err != nil {
 		return err
 	}
@@ -247,12 +263,16 @@ func (m *Mouse) ClickNoScroll(el *rod.Element) error {
 	}
 
 	// Human pause before clicking.
-	time.Sleep(randDuration(80*time.Millisecond, 350*time.Millisecond))
+	if err := sleepWithContext(m.ctx, randDuration(80*time.Millisecond, 350*time.Millisecond)); err != nil {
+		return err
+	}
 
 	if err := m.page.Mouse.Down(proto.InputMouseButtonLeft, 1); err != nil {
 		return err
 	}
-	time.Sleep(randDuration(40*time.Millisecond, 120*time.Millisecond))
+	if err := sleepWithContext(m.ctx, randDuration(40*time.Millisecond, 120*time.Millisecond)); err != nil {
+		return err
+	}
 	if err := m.page.Mouse.Up(proto.InputMouseButtonLeft, 1); err != nil {
 		return err
 	}
@@ -264,11 +284,15 @@ func (m *Mouse) ClickPoint(target Point) error {
 	if err := m.moveTo(target, false); err != nil {
 		return err
 	}
-	time.Sleep(randDuration(80*time.Millisecond, 350*time.Millisecond))
+	if err := sleepWithContext(m.ctx, randDuration(80*time.Millisecond, 350*time.Millisecond)); err != nil {
+		return err
+	}
 	if err := m.page.Mouse.Down(proto.InputMouseButtonLeft, 1); err != nil {
 		return err
 	}
-	time.Sleep(randDuration(40*time.Millisecond, 120*time.Millisecond))
+	if err := sleepWithContext(m.ctx, randDuration(40*time.Millisecond, 120*time.Millisecond)); err != nil {
+		return err
+	}
 	if err := m.page.Mouse.Up(proto.InputMouseButtonLeft, 1); err != nil {
 		return err
 	}
@@ -292,10 +316,11 @@ func (m *Mouse) Scroll(deltaX, deltaY float64) error {
 		}
 		// Variable scroll speed: faster at start, slower near end.
 		base := 30 + float64(i)*5
-		time.Sleep(time.Duration(base+rand.Float64()*40) * time.Millisecond)
+		if err := sleepWithContext(m.ctx, time.Duration(base+rand.Float64()*40)*time.Millisecond); err != nil {
+			return err
+		}
 	}
-	time.Sleep(randDuration(200*time.Millisecond, 600*time.Millisecond))
-	return nil
+	return sleepWithContext(m.ctx, randDuration(200*time.Millisecond, 600*time.Millisecond))
 }
 
 // ScrollIntoView scrolls the page just enough to bring the element into the
@@ -359,7 +384,9 @@ func (m *Mouse) ScrollIntoView(el *rod.Element) error {
 		if err := m.Scroll(deltaX, deltaY); err != nil {
 			return err
 		}
-		time.Sleep(randDuration(80*time.Millisecond, 200*time.Millisecond))
+		if err := sleepWithContext(m.ctx, randDuration(80*time.Millisecond, 200*time.Millisecond)); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -376,8 +403,7 @@ func (m *Mouse) Hover(el *rod.Element) error {
 	if err := m.moveTo(target, false); err != nil {
 		return err
 	}
-	time.Sleep(randDuration(150*time.Millisecond, 500*time.Millisecond))
-	return nil
+	return sleepWithContext(m.ctx, randDuration(150*time.Millisecond, 500*time.Millisecond))
 }
 
 func (m *Mouse) scrollRandom() error {

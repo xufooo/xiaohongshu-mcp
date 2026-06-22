@@ -7,6 +7,7 @@
 package ratelimit
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"math/rand"
@@ -149,7 +150,13 @@ func (l *Limiter) Check() (Info, bool, error) {
 
 // Reserve 原子地检查并预占一次操作额度。
 // 每次预占都会消耗一个令牌，令牌按固定频率补充，以保证操作间隔。
-func (l *Limiter) Reserve() (Info, time.Duration, bool, error) {
+func (l *Limiter) Reserve(ctx context.Context) (Info, time.Duration, bool, error) {
+	select {
+	case <-ctx.Done():
+		return Info{}, 0, false, ctx.Err()
+	case <-l.tokens:
+	}
+
 	l.mu.Lock()
 
 	now := time.Now()
@@ -162,6 +169,7 @@ func (l *Limiter) Reserve() (Info, time.Duration, bool, error) {
 
 	if usedBefore >= infoBefore.Limit {
 		l.mu.Unlock()
+		l.tokens <- struct{}{}
 		return infoBefore, 0, false, nil
 	}
 
@@ -171,7 +179,6 @@ func (l *Limiter) Reserve() (Info, time.Duration, bool, error) {
 	info := l.info(now, hk, b.count)
 	l.mu.Unlock()
 
-	<-l.tokens
 	time.AfterFunc(l.tokenInterval, func() {
 		l.tokens <- struct{}{}
 	})
