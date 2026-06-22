@@ -155,7 +155,7 @@ func (p *Page) SleepRandom(min, max time.Duration) error {
 	return humanize.SleepContext(p.ctx, min, max)
 }
 
-// Err returns the page context error, if it has been cancelled.
+// Err returns nil if the page's context is still active, or the context error if cancelled.
 func (p *Page) Err() error {
 	return p.ctx.Err()
 }
@@ -382,6 +382,7 @@ func (el *Element) Page() *Page {
 		actor:    el.actor,
 		browser:  el.browser,
 		cfg:      el.actor.Config(),
+		ctx:      el.actor.Ctx(),
 	}
 }
 
