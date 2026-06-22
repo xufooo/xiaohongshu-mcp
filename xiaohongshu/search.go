@@ -230,6 +230,13 @@ func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...Fi
 			}
 		}
 
+		// 记录关闭筛选面板前的 feeds 数据长度，避免直接返回旧的搜索结果。
+		previousFeedsJSONLength := page.MustEval(`() => {
+			const feeds = window.__INITIAL_STATE__?.search?.feeds;
+			const data = feeds?.value !== undefined ? feeds.value : feeds?._value;
+			return Array.isArray(data) ? JSON.stringify(data).length : 0;
+		}`).Int()
+
 		// 关闭筛选面板触发新的搜索请求
 		page.MustEval(`() => {
 			document.querySelector('div.filter')?.dispatchEvent(new MouseEvent('mouseleave', {bubbles: true}));
@@ -237,15 +244,13 @@ func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...Fi
 
 		// 等待搜索请求完成和页面更新
 		page.MustWaitStable()
-		// 等待 feeds 数据更新
-		page.MustWait(`() => {
+		// 等待 feeds 数据更新；超过 5 秒则返回当前可用结果。
+		page.MustWait(`(previousFeedsJSONLength, deadline) => {
 			const feeds = window.__INITIAL_STATE__?.search?.feeds;
-			if (feeds) {
-				const data = feeds.value !== undefined ? feeds.value : feeds._value;
-				return Array.isArray(data) && data.length > 0;
-			}
-			return false;
-		}`)
+			const data = feeds?.value !== undefined ? feeds.value : feeds?._value;
+			return (Array.isArray(data) && JSON.stringify(data).length !== previousFeedsJSONLength) ||
+				Date.now() >= deadline;
+		}`, previousFeedsJSONLength, time.Now().Add(5*time.Second).UnixMilli())
 	}
 
 	result := page.MustEval(`() => {
