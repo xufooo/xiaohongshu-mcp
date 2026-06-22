@@ -2,7 +2,6 @@ package humanize
 
 import (
 	"context"
-	"math"
 	"math/rand"
 	"time"
 
@@ -397,30 +396,3 @@ func randomTypo(intended rune, pool []rune) rune {
 
 	return pool[rand.Intn(len(pool))]
 }
-
-// randomUniform returns a random float in [min, max].
-func randomUniform(min, max float64) float64 {
-	return min + rand.Float64()*(max-min)
-}
-
-// randomNormal returns a normally distributed value with mean and stddev.
-func randomNormal(mean, stddev float64) float64 {
-	return mean + stddev*rand.NormFloat64()
-}
-
-// clamp ensures value is within [min, max].
-func clamp(value, min, max float64) float64 {
-	if value < min {
-		return min
-	}
-	if value > max {
-		return max
-	}
-	return value
-}
-
-// unused helpers kept for future use.
-var _ = randomUniform
-var _ = randomNormal
-var _ = clamp
-var _ = math.Pi
