@@ -342,14 +342,14 @@ func (m *Mouse) ScrollIntoView(el *rod.Element) error {
 
 		var deltaX, deltaY float64
 		if maxX < margin {
-			deltaX = maxX - vp.width + margin
+			deltaX = margin - maxX
 		} else if minX > vp.width-margin {
-			deltaX = minX - margin
+			deltaX = minX - vp.width + margin
 		}
 		if maxY < margin {
-			deltaY = maxY - vp.height + margin
+			deltaY = margin - maxY
 		} else if minY > vp.height-margin {
-			deltaY = minY - margin
+			deltaY = minY - vp.height + margin
 		}
 
 		if deltaX == 0 && deltaY == 0 {
