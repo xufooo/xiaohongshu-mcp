@@ -44,9 +44,11 @@ type Info struct {
 
 // Limiter 速率限制器（goroutine-safe）
 type Limiter struct {
-	mu      sync.Mutex
-	cfg     Config
-	buckets map[int64]*bucket
+	mu            sync.Mutex
+	cfg           Config
+	buckets       map[int64]*bucket
+	tokens        chan struct{}
+	tokenInterval time.Duration
 }
 
 type bucket struct {
@@ -56,22 +58,30 @@ type bucket struct {
 
 // New 创建速率限制器
 func New(cfg Config) *Limiter {
-	return &Limiter{
-		cfg:     cfg,
-		buckets: make(map[int64]*bucket),
+	l := &Limiter{
+		cfg:           cfg,
+		buckets:       make(map[int64]*bucket),
+		tokens:        make(chan struct{}, 1),
+		tokenInterval: time.Hour / time.Duration(limitForConfig(cfg)),
 	}
+	l.tokens <- struct{}{}
+	return l
 }
 
 func hourKey(t time.Time) int64 {
 	return t.Truncate(time.Hour).Unix()
 }
 
-func (l *Limiter) limit() int {
-	limit := l.cfg.MaxPerHour
+func limitForConfig(cfg Config) int {
+	limit := cfg.MaxPerHour
 	if limit <= 0 {
 		return 30
 	}
 	return limit
+}
+
+func (l *Limiter) limit() int {
+	return limitForConfig(l.cfg)
 }
 
 func (l *Limiter) bucket(hk int64) *bucket {
@@ -138,10 +148,9 @@ func (l *Limiter) Check() (Info, bool, error) {
 }
 
 // Reserve 原子地检查并预占一次操作额度。
-// 返回的 wait 表示执行前建议等待的冷却时间。
+// 每次预占都会消耗一个令牌，令牌按固定频率补充，以保证操作间隔。
 func (l *Limiter) Reserve() (Info, time.Duration, bool, error) {
 	l.mu.Lock()
-	defer l.mu.Unlock()
 
 	now := time.Now()
 	hk := hourKey(now)
@@ -152,19 +161,22 @@ func (l *Limiter) Reserve() (Info, time.Duration, bool, error) {
 	infoBefore := l.info(now, hk, usedBefore)
 
 	if usedBefore >= infoBefore.Limit {
+		l.mu.Unlock()
 		return infoBefore, 0, false, nil
-	}
-
-	var wait time.Duration
-	if usedBefore > 0 {
-		wait = l.waitDuration(infoBefore)
 	}
 
 	b.count++
 	b.lastTouch = now
 
 	info := l.info(now, hk, b.count)
-	return info, wait, true, nil
+	l.mu.Unlock()
+
+	<-l.tokens
+	time.AfterFunc(l.tokenInterval, func() {
+		l.tokens <- struct{}{}
+	})
+
+	return info, 0, true, nil
 }
 
 // Record 记录一次操作
