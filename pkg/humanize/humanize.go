@@ -9,6 +9,7 @@ package humanize
 
 import (
 	"context"
+	"time"
 
 	"github.com/go-rod/rod"
 )
@@ -18,6 +19,7 @@ type Actor struct {
 	Mouse    *Mouse
 	Keyboard *Keyboard
 	cfg      Config
+	ctx      context.Context
 }
 
 // New creates a humanized actor for the given page.
@@ -44,6 +46,12 @@ func (a *Actor) Config() Config {
 
 // SetContext updates the context used by humanized delays.
 func (a *Actor) SetContext(ctx context.Context) {
+	a.ctx = ctx
 	a.Mouse.setContext(ctx)
 	a.Keyboard.setContext(ctx)
+}
+
+// Sleep waits for d, or returns immediately when the actor's context is cancelled.
+func (a *Actor) Sleep(d time.Duration) error {
+	return sleepWithContext(a.ctx, d)
 }
