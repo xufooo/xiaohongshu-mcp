@@ -258,61 +258,10 @@ func (k *Keyboard) insertText(text string) error {
 	return proto.InputInsertText{Text: text}.Call(k.page)
 }
 
-// insertCompositionText simulates voice/IME input by dispatching composition
-// and input events, then inserting text into either an input-like element or
-// a contenteditable element.
-func (k *Keyboard) insertCompositionText(el *rod.Element, text string) error {
-	_, err := el.Eval(`(text) => {
-		const el = this;
-		el.focus();
-
-		const isInputLike = el.tagName === 'INPUT' || el.tagName === 'TEXTAREA';
-
-		// Start composition.
-		el.dispatchEvent(new CompositionEvent('compositionstart', {
-			bubbles: true,
-			cancelable: true,
-			data: ''
-		}));
-		el.dispatchEvent(new CompositionEvent('compositionupdate', {
-			bubbles: true,
-			cancelable: true,
-			data: text
-		}));
-		el.dispatchEvent(new InputEvent('beforeinput', {
-			bubbles: true,
-			cancelable: true,
-			inputType: 'insertCompositionText',
-			data: text
-		}));
-
-		if (isInputLike) {
-			const start = el.selectionStart == null ? el.value.length : el.selectionStart;
-			const end = el.selectionEnd == null ? el.value.length : el.selectionEnd;
-			el.value = el.value.slice(0, start) + text + el.value.slice(end);
-			el.selectionStart = el.selectionEnd = start + text.length;
-		} else {
-			// contenteditable: use execCommand to insert at cursor.
-			// If it fails (no selection or command unsupported), fall back to appending.
-			const ok = document.execCommand('insertText', false, text);
-			if (!ok) {
-				el.innerText = (el.innerText || '') + text;
-			}
-		}
-
-		el.dispatchEvent(new InputEvent('input', {
-			bubbles: true,
-			cancelable: true,
-			inputType: 'insertCompositionText',
-			data: text
-		}));
-		el.dispatchEvent(new CompositionEvent('compositionend', {
-			bubbles: true,
-			cancelable: true,
-			data: text
-		}));
-	}`, text)
-	return err
+// insertCompositionText inserts CJK and other IME text through CDP so the
+// browser dispatches the native editing events expected by controlled inputs.
+func (k *Keyboard) insertCompositionText(_ *rod.Element, text string) error {
+	return k.insertText(text)
 }
 
 // isRodKeySupported reports whether r can be sent via rod.Keyboard.Press.
