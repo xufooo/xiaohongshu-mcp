@@ -3,6 +3,7 @@ package browser
 import (
 	"context"
 	"math/rand"
+	"sync/atomic"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -19,6 +20,7 @@ type Manager struct {
 	page       *hrod.Page
 	closeTimer *time.Timer
 	idleGen    uint64
+	closing    atomic.Bool
 
 	minIdle time.Duration
 	maxIdle time.Duration
@@ -81,6 +83,17 @@ func (m *Manager) Acquire(ctx context.Context) (*hrod.Page, error) {
 
 // Release 归还页面，开始随机空闲定时器，超时后自动关闭浏览器。
 func (m *Manager) Release() {
+	if m.closing.Load() {
+		m.idleGen++
+		if m.closeTimer != nil {
+			m.closeTimer.Stop()
+			m.closeTimer = nil
+		}
+		m.cleanup()
+		m.unlock()
+		return
+	}
+
 	wait := m.minIdle
 	if m.maxIdle > m.minIdle {
 		wait += time.Duration(rand.Int63n(int64(m.maxIdle - m.minIdle)))
@@ -90,8 +103,17 @@ func (m *Manager) Release() {
 	m.idleGen++
 	idleGen := m.idleGen
 	m.closeTimer = time.AfterFunc(wait, func() {
-		_ = m.lock(context.Background())
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := m.lock(ctx); err != nil {
+			return
+		}
 		defer m.unlock()
+		if m.closing.Load() {
+			m.cleanup()
+			m.closeTimer = nil
+			return
+		}
 		if idleGen != m.idleGen {
 			return
 		}
@@ -107,7 +129,12 @@ func (m *Manager) Release() {
 
 // Close 立即关闭浏览器（服务关闭时调用）
 func (m *Manager) Close() {
-	_ = m.lock(context.Background())
+	m.closing.Store(true)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := m.lock(ctx); err != nil {
+		return
+	}
 	defer m.unlock()
 	m.idleGen++
 	if m.closeTimer != nil {
