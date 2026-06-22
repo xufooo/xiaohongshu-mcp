@@ -75,6 +75,11 @@ func (s *AppServer) Start(port string) error {
 
 	logrus.Infof("正在关闭服务器...")
 
+	// 关闭浏览器
+	if s.xiaohongshuService.bm != nil {
+		s.xiaohongshuService.bm.Close()
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
