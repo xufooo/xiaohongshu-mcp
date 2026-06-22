@@ -376,13 +376,16 @@ func (m *Mouse) ScrollIntoView(el *rod.Element) error {
 		}
 
 		var deltaX, deltaY float64
+		// CDP wheel: positive delta scrolls down/right, negative scrolls up/left.
+		// Element above/left of viewport → scroll up/left (negative delta).
+		// Element below/right of viewport → scroll down/right (positive delta).
 		if maxX < margin {
-			deltaX = margin - maxX
+			deltaX = maxX - margin
 		} else if minX > vp.width-margin {
 			deltaX = minX - vp.width + margin
 		}
 		if maxY < margin {
-			deltaY = margin - maxY
+			deltaY = maxY - margin
 		} else if minY > vp.height-margin {
 			deltaY = minY - vp.height + margin
 		}
