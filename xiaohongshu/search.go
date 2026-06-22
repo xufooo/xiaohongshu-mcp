@@ -230,10 +230,22 @@ func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...Fi
 			}
 		}
 
-		// 等待页面更新
+		// 关闭筛选面板触发新的搜索请求
+		page.MustEval(`() => {
+			document.querySelector('div.filter')?.dispatchEvent(new MouseEvent('mouseleave', {bubbles: true}));
+		}`)
+
+		// 等待搜索请求完成和页面更新
 		page.MustWaitStable()
-		// 重新等待 __INITIAL_STATE__ 更新
-		page.MustWait(`() => window.__INITIAL_STATE__ !== undefined`)
+		// 等待 feeds 数据更新
+		page.MustWait(`() => {
+			const feeds = window.__INITIAL_STATE__?.search?.feeds;
+			if (feeds) {
+				const data = feeds.value !== undefined ? feeds.value : feeds._value;
+				return Array.isArray(data) && data.length > 0;
+			}
+			return false;
+		}`)
 	}
 
 	result := page.MustEval(`() => {
