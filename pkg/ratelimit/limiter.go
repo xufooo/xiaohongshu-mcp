@@ -3,7 +3,7 @@
 // 三层策略：
 //   - < 80% 容量 → 正常执行，响应附带用量
 //   - >= 80% 容量 → 执行但提醒，操作间自动加延迟
-//   - >= 100% 容量 → 返回错误，除非 force=true
+//   - >= 100% 容量 → 返回错误
 package ratelimit
 
 import (
@@ -120,7 +120,7 @@ func (l *Limiter) info(now time.Time, hk int64, used int) Info {
 
 // Check 检查当前是否允许操作。
 // 返回 (info, canProceed, error)
-func (l *Limiter) Check(force bool) (Info, bool, error) {
+func (l *Limiter) Check() (Info, bool, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -131,10 +131,6 @@ func (l *Limiter) Check(force bool) (Info, bool, error) {
 
 	info := l.info(now, hk, b.count)
 	if b.count >= info.Limit {
-		if force {
-			info.Warning = fmt.Sprintf("[强制继续] %s", info.Warning)
-			return info, true, nil
-		}
 		return info, false, nil
 	}
 
@@ -143,7 +139,7 @@ func (l *Limiter) Check(force bool) (Info, bool, error) {
 
 // Reserve 原子地检查并预占一次操作额度。
 // 返回的 wait 表示执行前建议等待的冷却时间。
-func (l *Limiter) Reserve(force bool) (Info, time.Duration, bool, error) {
+func (l *Limiter) Reserve() (Info, time.Duration, bool, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -155,12 +151,12 @@ func (l *Limiter) Reserve(force bool) (Info, time.Duration, bool, error) {
 	usedBefore := b.count
 	infoBefore := l.info(now, hk, usedBefore)
 
-	if usedBefore >= infoBefore.Limit && !force {
+	if usedBefore >= infoBefore.Limit {
 		return infoBefore, 0, false, nil
 	}
 
 	var wait time.Duration
-	if !force && usedBefore > 0 {
+	if usedBefore > 0 {
 		wait = l.waitDuration(infoBefore)
 	}
 
@@ -168,10 +164,6 @@ func (l *Limiter) Reserve(force bool) (Info, time.Duration, bool, error) {
 	b.lastTouch = now
 
 	info := l.info(now, hk, b.count)
-	if force && usedBefore >= infoBefore.Limit {
-		info.Warning = fmt.Sprintf("[强制继续] %s", info.Warning)
-	}
-
 	return info, wait, true, nil
 }
 
@@ -238,7 +230,7 @@ func (l *Limiter) cleanup(now time.Time) {
 }
 
 func (l *Limiter) String() string {
-	info, _, _ := l.Check(false)
+	info, _, _ := l.Check()
 	ratio := math.Round(float64(info.Used)/float64(info.Limit)*100) / 100
 	resetAt := time.Unix(info.ResetUnix, 0)
 	return fmt.Sprintf("ratelimit[used=%d/%d (%.0f%%), reset=%s]",

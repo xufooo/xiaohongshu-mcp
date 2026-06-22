@@ -29,7 +29,7 @@ func parseVisibility(args map[string]interface{}) string {
 
 // rateLimitMCP MCP handler 速率限制检查。
 func (s *AppServer) rateLimitMCP(name string) *MCPToolResult {
-	r := s.checkRateLimitInternal(false)
+	r := s.checkRateLimitInternal()
 	if !r.CanProceed {
 		msg := r.Info.Warning
 		if msg == "" {
