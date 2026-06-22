@@ -217,6 +217,16 @@ func (m *Mouse) moveTo(target Point, scrollingAllowed bool) error {
 
 // Click scrolls the element into view, moves to its center with random offset, and clicks.
 func (m *Mouse) Click(el *rod.Element) error {
+	return m.ClickWithOptions(el, proto.InputMouseButtonLeft, 1)
+}
+
+// ClickWithOptions scrolls the element into view, moves to its center with a
+// random offset, and clicks it with the requested button and click count.
+func (m *Mouse) ClickWithOptions(el *rod.Element, button proto.InputMouseButton, clickCount int) error {
+	if clickCount < 1 {
+		clickCount = 1
+	}
+
 	// Scroll the target element into view first; its on-screen position may
 	// change after scrolling (fixed/sticky elements or layout shifts).
 	if err := m.ScrollIntoView(el); err != nil {
@@ -237,13 +247,13 @@ func (m *Mouse) Click(el *rod.Element) error {
 		return err
 	}
 
-	if err := m.page.Mouse.Down(proto.InputMouseButtonLeft, 1); err != nil {
+	if err := m.page.Mouse.Down(button, clickCount); err != nil {
 		return err
 	}
 	if err := sleepWithContext(m.ctx, randDuration(40*time.Millisecond, 120*time.Millisecond)); err != nil {
 		return err
 	}
-	if err := m.page.Mouse.Up(proto.InputMouseButtonLeft, 1); err != nil {
+	if err := m.page.Mouse.Up(button, clickCount); err != nil {
 		return err
 	}
 	return nil

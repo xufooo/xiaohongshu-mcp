@@ -362,7 +362,7 @@ func (el *Element) Page() *Page {
 
 // Click performs a human-like click.
 func (el *Element) Click(button proto.InputMouseButton, clickCount int) error {
-	return el.actor.Mouse.Click(el.Rod)
+	return el.actor.Mouse.ClickWithOptions(el.Rod, button, clickCount)
 }
 
 // ClickNoScroll performs a human-like click without scrolling the element into
