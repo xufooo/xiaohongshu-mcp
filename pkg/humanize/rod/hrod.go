@@ -115,7 +115,7 @@ func (p *Page) wrapPage(rp *rod.Page) *Page {
 		Rod:      rp,
 		Mouse:    rp.Mouse,
 		Keyboard: rp.Keyboard,
-		actor:    humanize.NewWithContext(rp, p.cfg, p.ctx),
+		actor:    p.actor,
 		browser:  p.browser,
 		cfg:      p.cfg,
 		ctx:      p.ctx,
