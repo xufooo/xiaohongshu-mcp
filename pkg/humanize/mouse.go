@@ -49,7 +49,7 @@ func (m *Mouse) initPosition() error {
 
 	// Mark initialized before calling moveTo to avoid recursion.
 	m.initialized = true
-	if err := m.moveTo(center); err != nil {
+	if err := m.moveTo(center, false); err != nil {
 		m.initialized = false
 		return err
 	}
@@ -81,16 +81,16 @@ func (m *Mouse) Move(target Point) error {
 	return m.moveTo(Point{
 		X: target.X - vp.scrollX,
 		Y: target.Y - vp.scrollY,
-	})
+	}, true)
 }
 
 // MovePoint moves to a viewport-relative point.
 func (m *Mouse) MovePoint(target Point) error {
-	return m.moveTo(target)
+	return m.moveTo(target, true)
 }
 
 // moveTo performs the actual cursor movement without any extra scrolling.
-func (m *Mouse) moveTo(target Point) error {
+func (m *Mouse) moveTo(target Point, scrollingAllowed bool) error {
 	if debugMouse {
 		m.ensureDebugOverlay()
 	}
@@ -190,7 +190,7 @@ func (m *Mouse) moveTo(target Point) error {
 			time.Sleep(stepDuration / time.Duration(subSteps))
 		}
 
-		if straightDist > 250 && rand.Float64() < m.cfg.Mouse.ScrollDuringMoveProbability {
+		if scrollingAllowed && straightDist > 250 && rand.Float64() < m.cfg.Mouse.ScrollDuringMoveProbability {
 			_ = m.scrollRandom()
 			time.Sleep(randDuration(80*time.Millisecond, 180*time.Millisecond))
 		}
@@ -216,7 +216,7 @@ func (m *Mouse) Click(el *rod.Element) error {
 	if err != nil {
 		return err
 	}
-	if err := m.moveTo(target); err != nil {
+	if err := m.moveTo(target, false); err != nil {
 		return err
 	}
 
@@ -242,7 +242,7 @@ func (m *Mouse) ClickNoScroll(el *rod.Element) error {
 	if err != nil {
 		return err
 	}
-	if err := m.moveTo(target); err != nil {
+	if err := m.moveTo(target, false); err != nil {
 		return err
 	}
 
@@ -261,7 +261,7 @@ func (m *Mouse) ClickNoScroll(el *rod.Element) error {
 
 // ClickPoint moves to a viewport-relative point and clicks there.
 func (m *Mouse) ClickPoint(target Point) error {
-	if err := m.moveTo(target); err != nil {
+	if err := m.moveTo(target, false); err != nil {
 		return err
 	}
 	time.Sleep(randDuration(80*time.Millisecond, 350*time.Millisecond))
@@ -373,7 +373,7 @@ func (m *Mouse) Hover(el *rod.Element) error {
 	if err != nil {
 		return err
 	}
-	if err := m.moveTo(target); err != nil {
+	if err := m.moveTo(target, false); err != nil {
 		return err
 	}
 	time.Sleep(randDuration(150*time.Millisecond, 500*time.Millisecond))
