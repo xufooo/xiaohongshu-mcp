@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
-	"strings"
 	"time"
 
 	hrod "github.com/xpzouying/xiaohongshu-mcp/pkg/humanize/rod"
@@ -199,40 +198,36 @@ func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...Fi
 		filterButton.MustHover()
 
 		// 等待筛选面板出现
-		page.MustElement(`div.filter-panel`)
+		page.MustWait(`() => document.querySelector('div.filter-panel') !== null`)
 
-		// 按文本匹配标签，跳过 aria-hidden 元素（小红书双份渲染，aria-hidden 版 opacity≈0 不可点击）
+		// 使用 JavaScript 注入方式筛选（比 Go-rod 跨进程 DOM 遍历更稳定）
 		for _, filter := range allInternalFilters {
-			filtersSelector := fmt.Sprintf(`div.filter-panel div.filters:nth-of-type(%d)`, filter.FiltersIndex)
-			filtersEl, err := page.Element(filtersSelector)
-			if err != nil {
-				return nil, fmt.Errorf("筛选组 %d (%s) 未找到: %w", filter.FiltersIndex, filter.Text, err)
-			}
-
-			tags, err := filtersEl.Elements("div.tags")
-			if err != nil {
-				return nil, fmt.Errorf("筛选组 %d tags 查找失败: %w", filter.FiltersIndex, err)
-			}
-
-			var matched *hrod.Element
-			for _, tag := range tags {
-				// 跳过 aria-hidden 元素
-				if attr, _ := tag.Attribute("aria-hidden"); attr != nil {
-					continue
+			result := page.MustEval(`(filtersIndex, text) => {
+				const panel = document.querySelector('div.filter-panel');
+				if (!panel) {
+					return '筛选面板不存在';
 				}
-				txt, err := tag.Text()
-				if err != nil {
-					continue
+				const groups = Array.from(panel.querySelectorAll('div.filters'));
+				const group = groups[filtersIndex - 1];
+				if (!group) {
+					return '筛选组不存在';
 				}
-				if strings.TrimSpace(txt) == filter.Text {
-					matched = tag
-					break
+				const tags = Array.from(group.querySelectorAll('div.tags'));
+				const option = tags.find((tag) => {
+					if (tag.getAttribute('aria-hidden') === 'true') {
+						return false;
+					}
+					return tag.innerText.trim() === text;
+				});
+				if (!option) {
+					return '筛选标签不存在';
 				}
+				option.click();
+				return '';
+			}`, filter.FiltersIndex, filter.Text).String()
+			if result != "" {
+				return nil, fmt.Errorf("应用筛选失败: %s: %s", result, filter.Text)
 			}
-			if matched == nil {
-				return nil, fmt.Errorf("筛选组 %d 中未找到文本 %q 的标签", filter.FiltersIndex, filter.Text)
-			}
-			matched.MustClick()
 		}
 
 		// 等待页面更新
@@ -272,7 +267,7 @@ func makeSearchURL(keyword string) string {
 	values.Set("keyword", keyword)
 	values.Set("source", "web_explore_feed")
 
-	//https://www.xiaohongshu.com/search_result?keyword=%25E7%258E%258B%25E5%25AD%2590&source=web_search_result_notes
-	//https://www.xiaohongshu.com/search_result?keyword=%25E7%258E%258B%25E5%25AD%2590&source=web_explore_feed
-	return fmt.Sprintf("https://www.xiaohongshu.com/search_result?%s", values.Encode())
+	// From https://www.xiaohongshu.com/explore, the current search button routes to
+	// /search_result_ai while keeping source=web_explore_feed.
+	return fmt.Sprintf("https://www.xiaohongshu.com/search_result_ai?%s", values.Encode())
 }
