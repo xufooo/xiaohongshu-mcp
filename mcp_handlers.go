@@ -15,6 +15,15 @@ import (
 
 // MCP 工具处理函数
 
+const mcpFeedDetailOperationTimeout = 11 * time.Minute
+
+// newMCPFeedDetailContext returns a bounded context that is intentionally
+// independent from the HTTP request. Loading all comments can take longer than
+// an MCP client's request deadline.
+func newMCPFeedDetailContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), mcpFeedDetailOperationTimeout)
+}
+
 // parseVisibility 从 MCP 参数中解析可见范围
 func parseVisibility(args map[string]interface{}) string {
 	v, ok := args["visibility"]
@@ -502,7 +511,22 @@ func (s *AppServer) handleGetFeedDetail(ctx context.Context, args map[string]any
 
 	logrus.Infof("MCP: 获取Feed详情 - Feed ID: %s, loadAllComments=%v, config=%+v", feedID, loadAll, config)
 
-	result, err := s.xiaohongshuService.GetFeedDetailWithConfig(ctx, feedID, xsecToken, loadAll, config)
+	operationCtx := ctx
+	if loadAll {
+		if deadline, ok := ctx.Deadline(); ok {
+			logrus.Infof("MCP get_feed_detail 请求 deadline: %s；使用独立的 %s 操作超时",
+				deadline.Format(time.RFC3339), mcpFeedDetailOperationTimeout)
+		} else {
+			logrus.Infof("MCP get_feed_detail 请求没有 deadline；使用独立的 %s 操作超时",
+				mcpFeedDetailOperationTimeout)
+		}
+
+		var cancel context.CancelFunc
+		operationCtx, cancel = newMCPFeedDetailContext()
+		defer cancel()
+	}
+
+	result, err := s.xiaohongshuService.GetFeedDetailWithConfig(operationCtx, feedID, xsecToken, loadAll, config)
 	if err != nil {
 		return &MCPToolResult{
 			Content: []MCPContent{{

@@ -451,7 +451,7 @@ Content-Type: application/json
   - `click_more_replies` (boolean): 是否点击"更多回复"按钮
   - `max_replies_threshold` (int): 回复数量阈值，超过这个数量的"更多"按钮将被跳过（0表示不跳过任何）
   - `max_comment_items` (int): 最大加载评论数（.parent-comment 数量），0表示加载所有
-  - `scroll_speed` (string): 滚动速度等级，可选值：`slow`(慢速) | `normal`(正常) | `fast`(快速)
+  - `scroll_speed` (string): 滚动速度等级，可选值：`slow`(慢速) | `normal`(正常) | `fast`(快速)，默认 `fast`
 
 **响应**
 ```json
