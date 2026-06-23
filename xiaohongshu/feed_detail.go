@@ -97,11 +97,17 @@ func (f *FeedDetailAction) GetFeedDetailWithConfig(ctx context.Context, feedID, 
 	logrus.Infof("配置: 点击更多=%v, 回复阈值=%d, 最大评论数=%d, 滚动速度=%s",
 		config.ClickMoreReplies, config.MaxRepliesThreshold, config.MaxCommentItems, config.ScrollSpeed)
 
-	// 使用retry-go处理页面导航和DOM稳定等待
+	// XHS continuously mutates the document after navigation. Waiting for DOM
+	// stability can therefore consume the full request deadline even though the
+	// note state is already available.
 	err := retry.Do(
 		func() error {
-			page.MustNavigate(url)
-			page.MustWaitDOMStable()
+			if err := page.Navigate(url); err != nil {
+				return fmt.Errorf("navigate feed detail: %w", err)
+			}
+			if err := page.WaitLoad(); err != nil {
+				return fmt.Errorf("wait for feed detail load: %w", err)
+			}
 			return nil
 		},
 		retry.Attempts(3),
@@ -290,13 +296,23 @@ func (cl *commentLoader) scrollForMoreComments() error {
 
 	_, err := cl.page.Eval(fmt.Sprintf(`() => {
 		// Keep the last loaded comment in view before advancing. This makes the
-		// page's intersection-based lazy loader reliable without a separate CDP
-		// query or a humanized mouse scroll.
+		// page's intersection-based lazy loader reliable.
 		const comments = document.querySelectorAll(".parent-comment");
 		comments[comments.length - 1]?.scrollIntoView({ block: "end", behavior: "auto" });
 		const distance = Math.max(window.innerHeight * %.1f, 900);
-		window.scrollBy({ top: distance, left: 0, behavior: "auto" });
-		return window.scrollY;
+		const target = document.querySelector(".note-scroller") ||
+			document.querySelector(".interaction-container") ||
+			document.scrollingElement;
+		if (target && target !== document.scrollingElement) {
+			target.scrollBy({ top: distance, left: 0, behavior: "auto" });
+			target.dispatchEvent(new WheelEvent("wheel", {
+				deltaY: distance, deltaMode: WheelEvent.DOM_DELTA_PIXEL,
+				bubbles: true, cancelable: true, view: window,
+			}));
+		} else {
+			window.scrollBy({ top: distance, left: 0, behavior: "auto" });
+		}
+		return true;
 	}`, multiplier))
 	return err
 }

@@ -18,18 +18,19 @@ func NewFeedsListAction(page *hrod.Page) *FeedsListAction {
 	pp := page.Timeout(60 * time.Second)
 
 	pp.MustNavigate("https://www.xiaohongshu.com")
-	pp.MustWaitDOMStable()
+	pp.MustWaitLoad()
 
 	return &FeedsListAction{page: pp}
 }
 
 // GetFeedsList 获取页面的 Feed 列表数据
 func (f *FeedsListAction) GetFeedsList(ctx context.Context) ([]Feed, error) {
-	page := f.page.Context(ctx)
-
-	if err := page.Sleep(time.Second); err != nil {
-		return nil, err
-	}
+	page := f.page.Context(ctx).Timeout(60 * time.Second)
+	page.MustWait(`() => {
+		const feed = window.__INITIAL_STATE__?.feed;
+		const feeds = feed?.feeds;
+		return Array.isArray(feeds?.value) || Array.isArray(feeds?._value);
+	}`)
 
 	result := page.MustEval(`() => {
 		if (window.__INITIAL_STATE__ &&
