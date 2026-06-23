@@ -164,15 +164,9 @@ func NewSearchAction(page *hrod.Page) *SearchAction {
 }
 
 func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...FilterOption) ([]Feed, error) {
+	page := s.page.Context(ctx)
 	searchURL := makeSearchURL(keyword)
-	page, err := navigateUntilReady(s.page, ctx, searchURL, `() => {
-		const feeds = window.__INITIAL_STATE__?.search?.feeds;
-		const data = feeds?.value !== undefined ? feeds.value : feeds?._value;
-		return Array.isArray(data);
-	}`)
-	if err != nil {
-		return nil, err
-	}
+	page.MustNavigate(searchURL).MustWaitLoad()
 
 	// 如果有筛选条件，则应用筛选
 	if len(filters) > 0 {
