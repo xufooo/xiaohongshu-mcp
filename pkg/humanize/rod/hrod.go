@@ -29,6 +29,8 @@ type Browser struct {
 	cfg humanize.Config
 }
 
+const browserCloseTimeout = 10 * time.Second
+
 // NewBrowser wraps an existing *headless_browser.Browser.
 func NewBrowser(hb *headless_browser.Browser, cfg humanize.Config) *Browser {
 	return &Browser{hb: hb, cfg: cfg}
@@ -41,13 +43,14 @@ func (b *Browser) Rod() *headless_browser.Browser {
 
 // Close closes the underlying browser.
 func (b *Browser) Close() error {
-	b.hb.Close()
-	return nil
+	ctx, cancel := context.WithTimeout(context.Background(), browserCloseTimeout)
+	defer cancel()
+	return b.hb.CloseContext(ctx)
 }
 
 // MustClose is the humanized version of MustClose.
 func (b *Browser) MustClose() *Browser {
-	b.hb.Close()
+	_ = b.Close()
 	return b
 }
 

@@ -7,8 +7,8 @@ import (
 	"net/url"
 	"time"
 
-	hrod "github.com/xpzouying/xiaohongshu-mcp/pkg/humanize/rod"
 	"github.com/xpzouying/xiaohongshu-mcp/errors"
+	hrod "github.com/xpzouying/xiaohongshu-mcp/pkg/humanize/rod"
 )
 
 type SearchResult struct {
@@ -160,19 +160,19 @@ type SearchAction struct {
 }
 
 func NewSearchAction(page *hrod.Page) *SearchAction {
-	pp := page.Timeout(60 * time.Second)
-
-	return &SearchAction{page: pp}
+	return &SearchAction{page: page}
 }
 
 func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...FilterOption) ([]Feed, error) {
-	page := s.page.Context(ctx)
-
 	searchURL := makeSearchURL(keyword)
-	page.MustNavigate(searchURL)
-	page.MustWaitStable()
-
-	page.MustWait(`() => window.__INITIAL_STATE__ !== undefined`)
+	page, err := navigateUntilReady(s.page, ctx, searchURL, `() => {
+		const feeds = window.__INITIAL_STATE__?.search?.feeds;
+		const data = feeds?.value !== undefined ? feeds.value : feeds?._value;
+		return Array.isArray(data);
+	}`)
+	if err != nil {
+		return nil, err
+	}
 
 	// 如果有筛选条件，则应用筛选
 	if len(filters) > 0 {
@@ -242,9 +242,10 @@ func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...Fi
 			document.querySelector('div.filter')?.dispatchEvent(new MouseEvent('mouseleave', {bubbles: true}));
 		}`)
 
-		// 等待搜索请求完成和页面更新
-		page.MustWaitStable()
-		// 等待 feeds 数据更新；超过 5 秒则返回当前可用结果。
+		// Wait for the application state instead of page stability. The search
+		// page keeps background requests/DOM updates active, so WaitStable may
+		// never resolve even though results are ready.
+		// 超过 5 秒则返回当前可用结果。
 		page.MustWait(`(previousFeedsJSONLength, deadline) => {
 			const feeds = window.__INITIAL_STATE__?.search?.feeds;
 			const data = feeds?.value !== undefined ? feeds.value : feeds?._value;

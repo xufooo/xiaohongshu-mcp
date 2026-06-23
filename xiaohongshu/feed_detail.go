@@ -11,10 +11,10 @@ import (
 	"time"
 
 	"github.com/avast/retry-go/v4"
-	hrod "github.com/xpzouying/xiaohongshu-mcp/pkg/humanize/rod"
 	"github.com/go-rod/rod/lib/proto"
 	"github.com/sirupsen/logrus"
 	"github.com/xpzouying/xiaohongshu-mcp/errors"
+	hrod "github.com/xpzouying/xiaohongshu-mcp/pkg/humanize/rod"
 )
 
 // ========== 配置常量 ==========
@@ -37,8 +37,8 @@ const (
 )
 
 const (
-	feedDetailPageTimeout  = 10 * time.Minute
-	commentLoadTimeout     = 9 * time.Minute
+	feedDetailPageTimeout = 10 * time.Minute
+	commentLoadTimeout    = 9 * time.Minute
 )
 
 // 延迟时间配置（毫秒）
@@ -1146,7 +1146,7 @@ func readFeedDetailStateOnce(page *hrod.Page, feedID string) (*FeedDetailRespons
 			note: detail.note,
 			comments: detail.comments,
 		}));
-	}`)
+	}`, feedID)
 	if err != nil {
 		return nil, fmt.Errorf("提取Feed详情失败: %w", err)
 	}

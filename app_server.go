@@ -87,7 +87,11 @@ func (s *AppServer) Start(port string) error {
 
 	// 关闭浏览器
 	if s.xiaohongshuService.bm != nil {
-		s.xiaohongshuService.bm.Close()
+		browserCtx, cancelBrowser := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancelBrowser()
+		if err := s.xiaohongshuService.bm.Close(browserCtx); err != nil {
+			logrus.WithError(err).Warn("浏览器管理器未能在关闭期限内释放")
+		}
 	}
 
 	return nil

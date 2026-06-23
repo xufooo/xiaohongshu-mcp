@@ -20,6 +20,8 @@ type Manager struct {
 	closing atomic.Bool
 }
 
+const pageCloseTimeout = 2 * time.Second
+
 // NewManager 创建浏览器管理器
 func NewManager() *Manager {
 	m := &Manager{
@@ -62,21 +64,31 @@ func (m *Manager) Release() {
 	m.unlock()
 }
 
-// Close 立即关闭浏览器（服务关闭时调用）
-func (m *Manager) Close() {
+// Close prevents new acquisitions and closes the managed browser once the
+// active operation has released it. The caller controls how long shutdown may
+// wait for an in-flight operation.
+func (m *Manager) Close(ctx context.Context) error {
 	m.closing.Store(true)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
 	if err := m.lock(ctx); err != nil {
-		return
+		return err
 	}
 	defer m.unlock()
 	m.cleanup()
+	return nil
 }
 
 func (m *Manager) cleanup() {
 	if m.browser != nil {
-		m.browser.Close()
+		if m.page != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), pageCloseTimeout)
+			if err := m.page.Context(ctx).Close(); err != nil {
+				logrus.WithError(err).Debug("关闭浏览器页面失败，继续关闭浏览器")
+			}
+			cancel()
+		}
+		if err := m.browser.Close(); err != nil {
+			logrus.WithError(err).Warn("浏览器未能通过 CDP 正常关闭，已终止其进程组")
+		}
 		m.browser = nil
 		m.page = nil
 	}
