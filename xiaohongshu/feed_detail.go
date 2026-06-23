@@ -1090,28 +1090,62 @@ func readFeedDetailState(page *hrod.Page, feedID string) (*FeedDetailResponse, e
 }
 
 func readFeedDetailStateOnce(page *hrod.Page, feedID string) (*FeedDetailResponse, error) {
-	result, err := page.Eval(`() => {
+	result, err := page.Eval(`(feedID) => {
+		const hasOwn = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
+		const isObject = (value) => value !== null && typeof value === "object";
+
 		const unwrapRef = (value) => {
-			if (!value || typeof value !== "object") return value;
-			if (Object.prototype.hasOwnProperty.call(value, "_value")) return value._value;
-			if (Object.prototype.hasOwnProperty.call(value, "value")) return value.value;
-			return value;
+			const seen = new Set();
+			let current = value;
+			while (isObject(current) && !seen.has(current)) {
+				seen.add(current);
+				if ((current.__v_isReactive || current.__v_isReadonly) &&
+					isObject(current.__v_raw) && current.__v_raw !== current) {
+					current = current.__v_raw;
+					continue;
+				}
+				if (current.__v_isRef === true) {
+					const next = current.value;
+					if (next === current) break;
+					current = next;
+					continue;
+				}
+				if (hasOwn(current, "_value")) {
+					const next = current._value;
+					if (next === current) break;
+					current = next;
+					continue;
+				}
+				if (hasOwn(current, "value")) {
+					const next = current.value;
+					if (next === current) break;
+					current = next;
+					continue;
+				}
+				break;
+			}
+			return current;
+		};
+
+		// JSON.stringify invokes getters and proxy traps. Its replacer also sees
+		// nested refs which are not covered by unwrapping just note/comments.
+		// Parsing the JSON result makes the evaluated value a plain, deep snapshot
+		// before it crosses the Go/CDP boundary.
+		const snapshot = (value) => {
+			const json = JSON.stringify(unwrapRef(value), (_key, nested) => unwrapRef(nested));
+			return json === undefined ? undefined : JSON.parse(json);
 		};
 
 		const state = window.__INITIAL_STATE__;
 		const noteState = unwrapRef(state?.note);
 		const noteDetailMap = unwrapRef(noteState?.noteDetailMap);
-		if (!noteDetailMap) return "";
+		const detail = unwrapRef(noteDetailMap?.[feedID]);
+		if (!detail) return "";
 
-		const normalized = {};
-		for (const [id, rawDetail] of Object.entries(noteDetailMap)) {
-			const detail = unwrapRef(rawDetail);
-			normalized[id] = {
-				note: unwrapRef(detail?.note),
-				comments: unwrapRef(detail?.comments),
-			};
-		}
-		return JSON.stringify(normalized);
+		return JSON.stringify(snapshot({
+			note: detail.note,
+			comments: detail.comments,
+		}));
 	}`)
 	if err != nil {
 		return nil, fmt.Errorf("提取Feed详情失败: %w", err)
@@ -1120,17 +1154,12 @@ func readFeedDetailStateOnce(page *hrod.Page, feedID string) (*FeedDetailRespons
 		return nil, errors.ErrNoFeedDetail
 	}
 
-	var noteDetailMap map[string]struct {
+	var noteDetail struct {
 		Note     FeedDetail  `json:"note"`
 		Comments CommentList `json:"comments"`
 	}
-	if err := json.Unmarshal([]byte(result.Value.Str()), &noteDetailMap); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal noteDetailMap: %w", err)
-	}
-
-	noteDetail, exists := noteDetailMap[feedID]
-	if !exists {
-		return nil, fmt.Errorf("feed %s not found in noteDetailMap", feedID)
+	if err := json.Unmarshal([]byte(result.Value.Str()), &noteDetail); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal feed detail: %w", err)
 	}
 
 	return &FeedDetailResponse{Note: noteDetail.Note, Comments: noteDetail.Comments}, nil
