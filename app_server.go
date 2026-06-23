@@ -75,7 +75,7 @@ func (s *AppServer) Start(port string) error {
 
 	logrus.Infof("正在关闭服务器...")
 
-	// 先停止接收新请求，再关闭浏览器
+	// 先停止接收新请求；每个服务操作自行关闭其浏览器。
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -83,15 +83,6 @@ func (s *AppServer) Start(port string) error {
 		logrus.Warnf("等待连接关闭超时，强制退出: %v", err)
 	} else {
 		logrus.Infof("HTTP 服务器已优雅关闭")
-	}
-
-	// 关闭浏览器
-	if s.xiaohongshuService.bm != nil {
-		browserCtx, cancelBrowser := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancelBrowser()
-		if err := s.xiaohongshuService.bm.Close(browserCtx); err != nil {
-			logrus.WithError(err).Warn("浏览器管理器未能在关闭期限内释放")
-		}
 	}
 
 	return nil
