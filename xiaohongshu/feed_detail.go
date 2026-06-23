@@ -1057,6 +1057,11 @@ func checkPageAccessible(page *hrod.Page) error {
 // ========== 数据提取 ==========
 
 func (f *FeedDetailAction) extractFeedDetail(page *hrod.Page, feedID string) (*FeedDetailResponse, error) {
+	page.MustWait(`(id) => {
+		const s = window.__INITIAL_STATE__;
+		return s?.note?.noteDetailMap?.[id] != null;
+	}`, feedID)
+
 	deadline := time.Now().Add(initialCommentStateTimeout)
 
 	for {
