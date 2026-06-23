@@ -72,3 +72,44 @@ func TestCommentLoadTimeoutLeavesTimeForDetailExtraction(t *testing.T) {
 		t.Fatalf("expected one minute for detail extraction, got %s", got)
 	}
 }
+
+func TestShouldWaitForInitialComments(t *testing.T) {
+	tests := []struct {
+		name     string
+		count    string
+		comments []Comment
+		want     bool
+	}{
+		{name: "reported comments but no state list", count: "7", want: true},
+		{name: "comments are already populated", count: "7", comments: []Comment{{ID: "comment-1"}}, want: false},
+		{name: "reported no comments", count: "0", want: false},
+		{name: "non numeric display count", count: "1.2万", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			response := &FeedDetailResponse{
+				Note:     FeedDetail{InteractInfo: InteractInfo{CommentCount: tt.count}},
+				Comments: CommentList{List: tt.comments},
+			}
+			if got := shouldWaitForInitialComments(response); got != tt.want {
+				t.Fatalf("shouldWaitForInitialComments() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestShouldUseInitialCommentSnapshot(t *testing.T) {
+	withComment := &FeedDetailResponse{Comments: CommentList{List: []Comment{{ID: "comment-1"}}}}
+	empty := &FeedDetailResponse{Comments: CommentList{List: []Comment{}}}
+
+	if !shouldUseInitialCommentSnapshot(withComment, empty) {
+		t.Fatal("expected populated initial snapshot to replace an empty later snapshot")
+	}
+	if shouldUseInitialCommentSnapshot(empty, withComment) {
+		t.Fatal("an empty initial snapshot must not replace populated comments")
+	}
+	if shouldUseInitialCommentSnapshot(nil, empty) {
+		t.Fatal("nil initial snapshot must not be used")
+	}
+}
