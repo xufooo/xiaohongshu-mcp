@@ -30,6 +30,10 @@ const (
 	commentPollInterval    = 100 * time.Millisecond
 	commentProgressTimeout = 3 * time.Second
 	maxNoProgressRounds    = 3
+	// The note is available before the asynchronously populated comment ref on
+	// some versions of the web client. Keep this short: it is only used when
+	// the note reports comments but the state snapshot has none.
+	initialCommentStateTimeout = 5 * time.Second
 )
 
 const (
@@ -118,17 +122,38 @@ func (f *FeedDetailAction) GetFeedDetailWithConfig(ctx context.Context, feedID, 
 	if err := checkPageAccessible(page); err != nil {
 		return nil, err
 	}
-
-	if loadAllComments {
-		// Bound the scroll loop independently so the main page context remains
-		// usable for extracting a partial result after comment loading times out.
-		commentPage := page.Timeout(commentLoadTimeout)
-		if err := f.loadAllCommentsWithConfig(commentPage, config); err != nil {
-			logrus.Warnf("加载全部评论失败: %v", err)
-		}
+	if !loadAllComments {
+		return f.extractFeedDetail(page, feedID)
 	}
 
-	return f.extractFeedDetail(page, feedID)
+	// Keep the server-provided first page before interacting with the comment
+	// area. Scrolling changes the client-side store on some site versions; if
+	// that later snapshot is incomplete, this remains a valid partial result.
+	initialDetail, initialDetailErr := f.extractFeedDetail(page, feedID)
+	if initialDetailErr != nil {
+		logrus.Debugf("加载评论前提取详情失败: %v", initialDetailErr)
+	}
+
+	// Bound the scroll loop independently so the main page context remains
+	// usable for extracting a partial result after comment loading times out.
+	commentPage := page.Timeout(commentLoadTimeout)
+	if err := f.loadAllCommentsWithConfig(commentPage, config); err != nil {
+		logrus.Warnf("加载全部评论失败: %v", err)
+	}
+
+	detail, err := f.extractFeedDetail(page, feedID)
+	if err != nil {
+		if initialDetail != nil {
+			logrus.Warnf("评论加载后提取详情失败，返回加载前快照: %v", err)
+			return initialDetail, nil
+		}
+		return nil, err
+	}
+	if shouldUseInitialCommentSnapshot(initialDetail, detail) {
+		logrus.Warn("评论加载后的状态快照为空，返回加载前的评论列表")
+		return initialDetail, nil
+	}
+	return detail, nil
 }
 
 func normalizeCommentLoadConfig(config CommentLoadConfig) CommentLoadConfig {
@@ -1016,26 +1041,40 @@ func checkPageAccessible(page *hrod.Page) error {
 // ========== 数据提取 ==========
 
 func (f *FeedDetailAction) extractFeedDetail(page *hrod.Page, feedID string) (*FeedDetailResponse, error) {
-	var result string
+	deadline := time.Now().Add(initialCommentStateTimeout)
 
-	// 使用retry-go来处理可能的DOM查询失败
+	for {
+		response, err := readFeedDetailState(page, feedID)
+		if err != nil {
+			return nil, err
+		}
+
+		// A non-zero displayed count with an empty list is a transient state while
+		// the web client hydrates its comments ref. Do not return that incomplete
+		// snapshot as a successful result. A genuinely empty or unavailable list
+		// still returns after the short bounded wait.
+		if !shouldWaitForInitialComments(response) || time.Now().After(deadline) {
+			return response, nil
+		}
+
+		logrus.Debugf("评论状态尚未就绪: note=%s, reported=%s", feedID, response.Note.InteractInfo.CommentCount)
+		if err := page.Sleep(commentPollInterval); err != nil {
+			return nil, err
+		}
+	}
+}
+
+// readFeedDetailState normalizes Vue refs before serializing the state. The
+// site has used both direct values and ref wrappers (value/_value) for
+// noteDetailMap and comments. json.Unmarshal silently turns a wrapped comments
+// value into an empty CommentList, so unwrapping must happen in the page.
+func readFeedDetailState(page *hrod.Page, feedID string) (*FeedDetailResponse, error) {
+	var response *FeedDetailResponse
 	err := retry.Do(
 		func() error {
-			evalResult := page.MustEval(`() => {
-				if (window.__INITIAL_STATE__ &&
-					window.__INITIAL_STATE__.note &&
-					window.__INITIAL_STATE__.note.noteDetailMap) {
-					const noteDetailMap = window.__INITIAL_STATE__.note.noteDetailMap;
-					return JSON.stringify(noteDetailMap);
-				}
-				return "";
-			}`).String()
-
-			if evalResult != "" {
-				result = evalResult
-				return nil
-			}
-			return fmt.Errorf("无法获取初始状态数据")
+			var err error
+			response, err = readFeedDetailStateOnce(page, feedID)
+			return err
 		},
 		retry.Attempts(3),
 		retry.Delay(200*time.Millisecond),
@@ -1044,13 +1083,40 @@ func (f *FeedDetailAction) extractFeedDetail(page *hrod.Page, feedID string) (*F
 			logrus.Debugf("提取Feed详情重试 #%d: %v", n, err)
 		}),
 	)
-
 	if err != nil {
-		logrus.Errorf("提取Feed详情失败: %v", err)
+		return nil, err
+	}
+	return response, nil
+}
+
+func readFeedDetailStateOnce(page *hrod.Page, feedID string) (*FeedDetailResponse, error) {
+	result, err := page.Eval(`() => {
+		const unwrapRef = (value) => {
+			if (!value || typeof value !== "object") return value;
+			if (Object.prototype.hasOwnProperty.call(value, "_value")) return value._value;
+			if (Object.prototype.hasOwnProperty.call(value, "value")) return value.value;
+			return value;
+		};
+
+		const state = window.__INITIAL_STATE__;
+		const noteState = unwrapRef(state?.note);
+		const noteDetailMap = unwrapRef(noteState?.noteDetailMap);
+		if (!noteDetailMap) return "";
+
+		const normalized = {};
+		for (const [id, rawDetail] of Object.entries(noteDetailMap)) {
+			const detail = unwrapRef(rawDetail);
+			normalized[id] = {
+				note: unwrapRef(detail?.note),
+				comments: unwrapRef(detail?.comments),
+			};
+		}
+		return JSON.stringify(normalized);
+	}`)
+	if err != nil {
 		return nil, fmt.Errorf("提取Feed详情失败: %w", err)
 	}
-
-	if result == "" {
+	if result == nil || result.Value.Str() == "" {
 		return nil, errors.ErrNoFeedDetail
 	}
 
@@ -1058,8 +1124,7 @@ func (f *FeedDetailAction) extractFeedDetail(page *hrod.Page, feedID string) (*F
 		Note     FeedDetail  `json:"note"`
 		Comments CommentList `json:"comments"`
 	}
-
-	if err := json.Unmarshal([]byte(result), &noteDetailMap); err != nil {
+	if err := json.Unmarshal([]byte(result.Value.Str()), &noteDetailMap); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal noteDetailMap: %w", err)
 	}
 
@@ -1068,10 +1133,20 @@ func (f *FeedDetailAction) extractFeedDetail(page *hrod.Page, feedID string) (*F
 		return nil, fmt.Errorf("feed %s not found in noteDetailMap", feedID)
 	}
 
-	return &FeedDetailResponse{
-		Note:     noteDetail.Note,
-		Comments: noteDetail.Comments,
-	}, nil
+	return &FeedDetailResponse{Note: noteDetail.Note, Comments: noteDetail.Comments}, nil
+}
+
+func shouldWaitForInitialComments(response *FeedDetailResponse) bool {
+	if len(response.Comments.List) != 0 {
+		return false
+	}
+	commentCount, err := strconv.Atoi(strings.TrimSpace(response.Note.InteractInfo.CommentCount))
+	return err == nil && commentCount > 0
+}
+
+func shouldUseInitialCommentSnapshot(initial, current *FeedDetailResponse) bool {
+	return initial != nil && current != nil &&
+		len(initial.Comments.List) > 0 && len(current.Comments.List) == 0
 }
 
 func makeFeedDetailURL(feedID, xsecToken string) string {
