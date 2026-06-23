@@ -48,8 +48,6 @@ type Limiter struct {
 	mu            sync.Mutex
 	cfg           Config
 	buckets       map[int64]*bucket
-	tokens        chan struct{}
-	tokenInterval time.Duration
 }
 
 type bucket struct {
@@ -60,12 +58,9 @@ type bucket struct {
 // New 创建速率限制器
 func New(cfg Config) *Limiter {
 	l := &Limiter{
-		cfg:           cfg,
-		buckets:       make(map[int64]*bucket),
-		tokens:        make(chan struct{}, 1),
-		tokenInterval: time.Hour / time.Duration(limitForConfig(cfg)),
+		cfg:     cfg,
+		buckets: make(map[int64]*bucket),
 	}
-	l.tokens <- struct{}{}
 	return l
 }
 
@@ -149,12 +144,17 @@ func (l *Limiter) Check() (Info, bool, error) {
 }
 
 // Reserve 原子地检查并预占一次操作额度。
-// 每次预占都会消耗一个令牌，令牌按固定频率补充，以保证操作间隔。
+//
+// This must not wait for a token. The previous implementation admitted one
+// request and then blocked every subsequent request for time.Hour/limit
+// (two minutes with the default configuration), which surfaced as browser and
+// MCP context-deadline failures. Callers may apply the returned optional
+// cooldown themselves; the limiter only accounts for the hourly budget.
 func (l *Limiter) Reserve(ctx context.Context) (Info, time.Duration, bool, error) {
 	select {
 	case <-ctx.Done():
 		return Info{}, 0, false, ctx.Err()
-	case <-l.tokens:
+	default:
 	}
 
 	l.mu.Lock()
@@ -169,7 +169,6 @@ func (l *Limiter) Reserve(ctx context.Context) (Info, time.Duration, bool, error
 
 	if usedBefore >= infoBefore.Limit {
 		l.mu.Unlock()
-		l.tokens <- struct{}{}
 		return infoBefore, 0, false, nil
 	}
 
@@ -178,10 +177,6 @@ func (l *Limiter) Reserve(ctx context.Context) (Info, time.Duration, bool, error
 
 	info := l.info(now, hk, b.count)
 	l.mu.Unlock()
-
-	time.AfterFunc(l.tokenInterval, func() {
-		l.tokens <- struct{}{}
-	})
 
 	return info, 0, true, nil
 }

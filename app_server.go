@@ -27,7 +27,6 @@ type AppServer struct {
 func NewAppServer(xiaohongshuService *XiaohongshuService, opts ...AppServerOption) *AppServer {
 	appServer := &AppServer{
 		xiaohongshuService: xiaohongshuService,
-		rateLimiter:        ratelimit.New(ratelimit.DefaultConfig()),
 	}
 
 	for _, opt := range opts {

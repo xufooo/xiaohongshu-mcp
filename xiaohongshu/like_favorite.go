@@ -49,7 +49,7 @@ func (a *interactAction) preparePage(ctx context.Context, actionType interactAct
 	logrus.Infof("Opening feed detail page for %s: %s", actionType, url)
 
 	page.MustNavigate(url)
-	page.MustWaitDOMStable()
+	page.MustWaitLoad()
 	if err := page.Sleep(time.Second); err != nil {
 		return nil, err
 	}

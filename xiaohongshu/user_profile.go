@@ -24,7 +24,7 @@ func (u *UserProfileAction) UserProfile(ctx context.Context, userID, xsecToken s
 
 	searchURL := makeUserProfileURL(userID, xsecToken)
 	page.MustNavigate(searchURL)
-	page.MustWaitStable()
+	page.MustWaitLoad()
 
 	return u.extractUserProfileData(page)
 }
@@ -114,9 +114,6 @@ func (u *UserProfileAction) GetMyProfileViaSidebar(ctx context.Context) (*UserPr
 	if err := navigate.ToProfilePage(ctx); err != nil {
 		return nil, fmt.Errorf("failed to navigate to profile page via sidebar: %w", err)
 	}
-
-	// 等待页面加载完成并获取 __INITIAL_STATE__
-	page.MustWaitStable()
 
 	return u.extractUserProfileData(page)
 }

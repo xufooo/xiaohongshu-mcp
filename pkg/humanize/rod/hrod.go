@@ -140,7 +140,10 @@ func (p *Page) Context(ctx context.Context) *Page {
 
 // Timeout returns a humanized clone with the specified timeout.
 func (p *Page) Timeout(d time.Duration) *Page {
-	return p.wrapPage(p.Rod.Timeout(d))
+	page := p.wrapPage(p.Rod.Timeout(d))
+	page.ctx, _ = context.WithTimeout(p.ctx, d)
+	page.actor.SetContext(page.ctx)
+	return page
 }
 
 // CancelTimeout returns a humanized clone with the timeout cancelled.
