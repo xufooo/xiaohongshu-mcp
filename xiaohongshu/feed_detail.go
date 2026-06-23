@@ -27,6 +27,14 @@ const (
 	largeScrollTrigger     = 5 // 停滞多少次后触发大滚动
 	buttonClickInterval    = 3 // 每隔多少次尝试点击一次按钮
 	finalSprintPushCount   = 15
+	commentPollInterval    = 100 * time.Millisecond
+	commentProgressTimeout = 3 * time.Second
+	maxNoProgressRounds    = 3
+)
+
+const (
+	feedDetailPageTimeout  = 10 * time.Minute
+	commentLoadTimeout     = 9 * time.Minute
 )
 
 // 延迟时间配置（毫秒）
@@ -58,7 +66,7 @@ func DefaultCommentLoadConfig() CommentLoadConfig {
 		ClickMoreReplies:    false,
 		MaxRepliesThreshold: 10,
 		MaxCommentItems:     0,
-		ScrollSpeed:         "normal",
+		ScrollSpeed:         "fast",
 	}
 }
 
@@ -77,7 +85,8 @@ func (f *FeedDetailAction) GetFeedDetail(ctx context.Context, feedID, xsecToken 
 }
 
 func (f *FeedDetailAction) GetFeedDetailWithConfig(ctx context.Context, feedID, xsecToken string, loadAllComments bool, config CommentLoadConfig) (*FeedDetailResponse, error) {
-	page := f.page.Context(ctx).Timeout(10 * time.Minute)
+	config = normalizeCommentLoadConfig(config)
+	page := f.page.Context(ctx).Timeout(feedDetailPageTimeout)
 	url := makeFeedDetailURL(feedID, xsecToken)
 
 	logrus.Infof("打开 feed 详情页: %s", url)
@@ -111,12 +120,24 @@ func (f *FeedDetailAction) GetFeedDetailWithConfig(ctx context.Context, feedID, 
 	}
 
 	if loadAllComments {
-		if err := f.loadAllCommentsWithConfig(page, config); err != nil {
+		// Bound the scroll loop independently so the main page context remains
+		// usable for extracting a partial result after comment loading times out.
+		commentPage := page.Timeout(commentLoadTimeout)
+		if err := f.loadAllCommentsWithConfig(commentPage, config); err != nil {
 			logrus.Warnf("加载全部评论失败: %v", err)
 		}
 	}
 
 	return f.extractFeedDetail(page, feedID)
+}
+
+func normalizeCommentLoadConfig(config CommentLoadConfig) CommentLoadConfig {
+	switch config.ScrollSpeed {
+	case "slow", "normal", "fast":
+	default:
+		config.ScrollSpeed = DefaultCommentLoadConfig().ScrollSpeed
+	}
+	return config
 }
 
 // ========== 评论加载器 ==========
@@ -140,6 +161,15 @@ type loadState struct {
 	stagnantChecks int
 }
 
+// commentProgress is collected in one browser evaluation. Keeping the check in
+// the browser avoids several round trips per scroll on slower devices.
+type commentProgress struct {
+	Count      int  `json:"count"`
+	Total      int  `json:"total"`
+	AtEnd      bool `json:"atEnd"`
+	NoComments bool `json:"noComments"`
+}
+
 func (f *FeedDetailAction) loadAllCommentsWithConfig(page *hrod.Page, config CommentLoadConfig) error {
 	loader := &commentLoader{
 		page:   page,
@@ -153,31 +183,29 @@ func (f *FeedDetailAction) loadAllCommentsWithConfig(page *hrod.Page, config Com
 
 func (cl *commentLoader) load() error {
 	maxAttempts := cl.calculateMaxAttempts()
-	scrollInterval := getScrollInterval(cl.config.ScrollSpeed)
 
 	logrus.Info("开始加载评论...")
 	if err := scrollToCommentsArea(cl.page); err != nil {
 		return err
 	}
-	if err := sleepRandom(cl.page, humanDelayRange.min, humanDelayRange.max); err != nil {
+
+	progress, err := getCommentProgress(cl.page)
+	if err != nil {
 		return err
 	}
-
-	// 检查是否没有评论
-	if cl.checkNoComments() {
+	if progress.NoComments {
+		logrus.Infof("✓ 检测到无评论区域（这是一片荒地），跳过加载")
+		return nil
+	}
+	if cl.shouldStop(progress) {
+		cl.logComplete(progress)
 		return nil
 	}
 
+	noProgressRounds := 0
+
 	for cl.stats.attempts = 0; cl.stats.attempts < maxAttempts; cl.stats.attempts++ {
 		logrus.Debugf("=== 尝试 %d/%d ===", cl.stats.attempts+1, maxAttempts)
-
-		complete, err := cl.checkComplete()
-		if err != nil {
-			return err
-		}
-		if complete {
-			return nil
-		}
 
 		if cl.shouldClickButtons() {
 			if err := cl.clickButtonsWithRetry(); err != nil {
@@ -185,26 +213,139 @@ func (cl *commentLoader) load() error {
 			}
 		}
 
-		currentCount := getCommentCount(cl.page)
-		cl.updateState(currentCount)
+		if err := cl.scrollForMoreComments(); err != nil {
+			return err
+		}
 
-		if cl.shouldStopAtTarget(currentCount) {
+		next, advanced, err := cl.waitForCommentProgress(progress)
+		if err != nil {
+			return err
+		}
+		progress = next
+		if cl.shouldStop(progress) {
+			cl.logComplete(progress)
 			return nil
 		}
-
-		if err := cl.performScroll(); err != nil {
-			return err
-		}
-		if err := cl.handleStagnation(); err != nil {
-			return err
+		if advanced {
+			noProgressRounds = 0
+			continue
 		}
 
-		if err := cl.page.Sleep(scrollInterval); err != nil {
-			return err
+		noProgressRounds++
+		if noProgressRounds >= maxNoProgressRounds {
+			return fmt.Errorf("加载评论停滞: 已加载 %d 条，页面未报告结束", progress.Count)
 		}
 	}
 
-	return cl.performFinalSprint()
+	return fmt.Errorf("达到评论加载最大尝试次数: 已加载 %d 条", progress.Count)
+}
+
+func (cl *commentLoader) shouldStop(progress commentProgress) bool {
+	if progress.AtEnd {
+		return true
+	}
+	if cl.config.MaxCommentItems > 0 && progress.Count >= cl.config.MaxCommentItems {
+		logrus.Infof("✓ 已达到目标评论数: %d/%d, 停止加载",
+			progress.Count, cl.config.MaxCommentItems)
+		return true
+	}
+	return progress.Total > 0 && progress.Count >= progress.Total
+}
+
+func (cl *commentLoader) logComplete(progress commentProgress) {
+	logrus.Infof("✓ 加载完成: %d/%d 条评论, 尝试次数: %d, 点击: %d, 跳过: %d",
+		progress.Count, progress.Total, cl.stats.attempts, cl.stats.totalClicked, cl.stats.totalSkipped)
+}
+
+// scrollForMoreComments uses a direct browser scroll instead of the humanized
+// scrolling path. Comment loading is a read-only operation; the old path added
+// 300--800ms of artificial delay plus several browser round trips per attempt.
+func (cl *commentLoader) scrollForMoreComments() error {
+	multiplier := commentScrollMultiplier(cl.config.ScrollSpeed)
+
+	_, err := cl.page.Eval(fmt.Sprintf(`() => {
+		// Keep the last loaded comment in view before advancing. This makes the
+		// page's intersection-based lazy loader reliable without a separate CDP
+		// query or a humanized mouse scroll.
+		const comments = document.querySelectorAll(".parent-comment");
+		comments[comments.length - 1]?.scrollIntoView({ block: "end", behavior: "auto" });
+		const distance = Math.max(window.innerHeight * %.1f, 900);
+		window.scrollBy({ top: distance, left: 0, behavior: "auto" });
+		return window.scrollY;
+	}`, multiplier))
+	return err
+}
+
+func commentScrollMultiplier(speed string) float64 {
+	switch speed {
+	case "slow":
+		return 1
+	case "fast":
+		return 3
+	default:
+		return 1.5
+	}
+}
+
+// waitForCommentProgress waits only for a real page update. The observer runs
+// in the browser so slow devices do not pay for a CDP round trip every poll.
+// It returns as soon as a new comment or the end marker appears.
+func (cl *commentLoader) waitForCommentProgress(previous commentProgress) (commentProgress, bool, error) {
+	result, err := cl.page.Eval(fmt.Sprintf(`() => new Promise((resolve) => {
+		const getProgress = () => {
+			const totalText = document.querySelector(".comments-container .total")?.textContent || "";
+			const totalMatch = totalText.match(/共\s*(\d+)\s*条评论/);
+			const endText = document.querySelector(".end-container")?.textContent || "";
+			const noCommentsText = document.querySelector(".no-comments-text")?.textContent || "";
+			return {
+				count: document.querySelectorAll(".parent-comment").length,
+				total: totalMatch ? Number(totalMatch[1]) : 0,
+				atEnd: /THE\s*END/i.test(endText),
+				noComments: noCommentsText.includes("这是一片荒地"),
+			};
+		};
+
+		let done = false;
+		let observer;
+		let timer;
+		const finish = () => {
+			if (done) return;
+			done = true;
+			observer?.disconnect();
+			clearTimeout(timer);
+			resolve(JSON.stringify(getProgress()));
+		};
+		const advanced = () => {
+			const progress = getProgress();
+			return progress.count > %d || progress.atEnd || progress.noComments;
+		};
+		if (advanced()) {
+			finish();
+			return;
+		}
+		observer = new MutationObserver(() => {
+			const progress = getProgress();
+			if (progress.count > %d || progress.atEnd || progress.noComments) finish();
+		});
+		observer.observe(document.body, { childList: true, subtree: true });
+		if (advanced()) {
+			finish();
+			return;
+		}
+		timer = setTimeout(finish, %d);
+	})`, previous.Count, previous.Count, commentProgressTimeout.Milliseconds()))
+	if err != nil {
+		return previous, false, err
+	}
+	if result == nil {
+		return previous, false, fmt.Errorf("等待评论加载状态未返回结果")
+	}
+
+	var next commentProgress
+	if err := json.Unmarshal([]byte(result.Value.Str()), &next); err != nil {
+		return previous, false, fmt.Errorf("解析评论加载状态: %w", err)
+	}
+	return next, next.Count > previous.Count, nil
 }
 
 func (cl *commentLoader) calculateMaxAttempts() int {
@@ -599,21 +740,15 @@ func scrollToCommentsArea(page *hrod.Page) error {
 	if el, err := page.Timeout(2 * time.Second).Element(".comments-container"); err == nil {
 		el.MustScrollIntoView()
 	}
-	// 等待滚动完成
-	if err := page.Sleep(500 * time.Millisecond); err != nil {
+	// Give the browser a short opportunity to activate the comment lazy loader.
+	// This is synchronization, not a humanization delay.
+	if err := page.Sleep(commentPollInterval); err != nil {
 		return err
 	}
 
-	// 触发一次小滚动，激活懒加载机制
-	smartScroll(page, 100)
-	return nil
-}
-
-// smartScroll 使用人化鼠标滚动触发懒加载。
-func smartScroll(page *hrod.Page, delta float64) {
-	if err := page.Actor().Mouse.Scroll(0, delta); err != nil {
-		logrus.Warnf("smartScroll 失败: %v", err)
-	}
+	// 触发一次小滚动，激活懒加载机制。评论读取无需鼠标的人化轨迹。
+	_, err := page.Eval(`() => window.scrollBy({ top: 100, left: 0, behavior: "auto" })`)
+	return err
 }
 
 func scrollToLastComment(page *hrod.Page) {
@@ -628,6 +763,34 @@ func scrollToLastComment(page *hrod.Page) {
 }
 
 // ========== DOM 查询 ==========
+
+func getCommentProgress(page *hrod.Page) (commentProgress, error) {
+	var progress commentProgress
+
+	result, err := page.Eval(`() => {
+		const totalText = document.querySelector(".comments-container .total")?.textContent || "";
+		const totalMatch = totalText.match(/共\s*(\d+)\s*条评论/);
+		const endText = document.querySelector(".end-container")?.textContent || "";
+		const noCommentsText = document.querySelector(".no-comments-text")?.textContent || "";
+
+		return JSON.stringify({
+			count: document.querySelectorAll(".parent-comment").length,
+			total: totalMatch ? Number(totalMatch[1]) : 0,
+			atEnd: /THE\s*END/i.test(endText),
+			noComments: noCommentsText.includes("这是一片荒地"),
+		});
+	}`)
+	if err != nil {
+		return progress, err
+	}
+	if result == nil {
+		return progress, fmt.Errorf("读取评论加载状态未返回结果")
+	}
+	if err := json.Unmarshal([]byte(result.Value.Str()), &progress); err != nil {
+		return progress, fmt.Errorf("解析评论加载状态: %w", err)
+	}
+	return progress, nil
+}
 
 func getScrollTop(page *hrod.Page) int {
 	var result int

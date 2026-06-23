@@ -876,7 +876,7 @@ npx mcporter list xiaohongshu-mcp
   - `limit`: 限制加载的一级评论数量（可选），仅当 load_all_comments=true 时生效，不传或传 0 表示加载所有
   - `click_more_replies`: 是否展开二级回复（可选），仅当 load_all_comments=true 时生效，默认 false
   - `reply_limit`: 跳过回复数过多的评论（可选），仅当 click_more_replies=true 时生效，默认 10
-  - `scroll_speed`: 滚动速度（可选），`slow` | `normal` | `fast`，仅当 load_all_comments=true 时生效
+  - `scroll_speed`: 滚动速度（可选），`slow` | `normal` | `fast`，仅当 load_all_comments=true 时生效；默认 `fast`
 - `post_comment_to_feed` - 发表评论到小红书帖子（必需：feed_id, xsec_token, content）
 - `reply_comment_in_feed` - 回复笔记下的指定评论（必需：feed_id, xsec_token, content，以及 comment_id 或 user_id 至少一个）
 - `like_feed` - 点赞/取消点赞（必需：feed_id, xsec_token）
