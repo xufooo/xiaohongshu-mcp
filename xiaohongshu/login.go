@@ -17,10 +17,8 @@ func NewLogin(page *hrod.Page) *LoginAction {
 }
 
 func (a *LoginAction) CheckLoginStatus(ctx context.Context) (bool, error) {
-	pp, err := navigateUntilReady(a.page, ctx, "https://www.xiaohongshu.com/explore", `() => document.querySelector("div#app") !== null`)
-	if err != nil {
-		return false, err
-	}
+	pp := a.page.Context(ctx)
+	pp.MustNavigate("https://www.xiaohongshu.com/explore").MustWaitLoad()
 
 	if err := pp.Sleep(time.Second); err != nil {
 		return false, err
@@ -40,10 +38,8 @@ func (a *LoginAction) CheckLoginStatus(ctx context.Context) (bool, error) {
 
 func (a *LoginAction) Login(ctx context.Context) error {
 	// 导航到小红书首页，这会触发二维码弹窗
-	pp, err := navigateUntilReady(a.page, ctx, "https://www.xiaohongshu.com/explore", `() => document.querySelector("div#app") !== null`)
-	if err != nil {
-		return err
-	}
+	pp := a.page.Context(ctx)
+	pp.MustNavigate("https://www.xiaohongshu.com/explore").MustWaitLoad()
 
 	// 等待一小段时间让页面完全加载
 	if err := pp.Sleep(2 * time.Second); err != nil {
@@ -65,10 +61,8 @@ func (a *LoginAction) Login(ctx context.Context) error {
 
 func (a *LoginAction) FetchQrcodeImage(ctx context.Context) (string, bool, error) {
 	// 导航到小红书首页，这会触发二维码弹窗
-	pp, err := navigateUntilReady(a.page, ctx, "https://www.xiaohongshu.com/explore", `() => document.querySelector("div#app") !== null`)
-	if err != nil {
-		return "", false, err
-	}
+	pp := a.page.Context(ctx)
+	pp.MustNavigate("https://www.xiaohongshu.com/explore").MustWaitLoad()
 
 	// 等待一小段时间让页面完全加载
 	if err := pp.Sleep(2 * time.Second); err != nil {
