@@ -5,7 +5,6 @@ import (
 	"os"
 
 	"github.com/sirupsen/logrus"
-	"github.com/xpzouying/xiaohongshu-mcp/browser"
 	"github.com/xpzouying/xiaohongshu-mcp/configs"
 )
 
@@ -32,11 +31,8 @@ func main() {
 	configs.InitHeadless(headless)
 	configs.SetBinPath(binPath)
 
-	// 初始化浏览器管理器
-	bm := browser.NewManager()
-
 	// 初始化服务
-	xiaohongshuService := NewXiaohongshuService(bm)
+	xiaohongshuService := NewXiaohongshuService()
 
 	// 创建并启动应用服务器
 	appServer := NewAppServer(xiaohongshuService)
