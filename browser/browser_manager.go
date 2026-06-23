@@ -3,7 +3,6 @@ package browser
 import (
 	"context"
 	"errors"
-	"math/rand"
 	"sync/atomic"
 	"time"
 
@@ -13,42 +12,20 @@ import (
 )
 
 // Manager 管理单个浏览器+页面的生命周期。
-// 所有操作复用同一个页面，操作完成后随机空闲等待 30s~5min 后自动关闭。
-// 下次操作到来时取消关闭，继续使用。
+// 每次操作完成后立即关闭浏览器。
 type Manager struct {
-	mu         chan struct{}
-	browser    *hrod.Browser
-	page       *hrod.Page
-	closeTimer *time.Timer
-	idleGen    uint64
-	closing    atomic.Bool
-
-	minIdle time.Duration
-	maxIdle time.Duration
-}
-
-// ManagerOption 可选配置
-type ManagerOption func(*Manager)
-
-// WithIdleRange 设置空闲关闭的随机范围
-func WithIdleRange(min, max time.Duration) ManagerOption {
-	return func(m *Manager) {
-		m.minIdle = min
-		m.maxIdle = max
-	}
+	mu      chan struct{}
+	browser *hrod.Browser
+	page    *hrod.Page
+	closing atomic.Bool
 }
 
 // NewManager 创建浏览器管理器
-func NewManager(opts ...ManagerOption) *Manager {
+func NewManager() *Manager {
 	m := &Manager{
-		minIdle: 30 * time.Second,
-		maxIdle: 5 * time.Minute,
-		mu:      make(chan struct{}, 1),
+		mu: make(chan struct{}, 1),
 	}
 	m.mu <- struct{}{}
-	for _, opt := range opts {
-		opt(m)
-	}
 	return m
 }
 
@@ -61,13 +38,6 @@ func (m *Manager) Acquire(ctx context.Context) (*hrod.Page, error) {
 	if m.closing.Load() {
 		m.unlock()
 		return nil, errors.New("browser manager is closing")
-	}
-
-	// 有操作进来，取消待关闭定时器
-	m.idleGen++
-	if m.closeTimer != nil {
-		m.closeTimer.Stop()
-		m.closeTimer = nil
 	}
 
 	// 复用已有页面（浏览器还活着）
@@ -86,49 +56,9 @@ func (m *Manager) Acquire(ctx context.Context) (*hrod.Page, error) {
 	return m.page, nil
 }
 
-// Release 归还页面，开始随机空闲定时器，超时后自动关闭浏览器。
+// Release 归还页面并立即关闭浏览器。
 func (m *Manager) Release() {
-	if m.closing.Load() {
-		m.idleGen++
-		if m.closeTimer != nil {
-			m.closeTimer.Stop()
-			m.closeTimer = nil
-		}
-		m.cleanup()
-		m.unlock()
-		return
-	}
-
-	wait := m.minIdle
-	if m.maxIdle > m.minIdle {
-		wait += time.Duration(rand.Int63n(int64(m.maxIdle - m.minIdle)))
-	}
-	logrus.Infof("操作完成，%.0f秒后自动关闭浏览器", wait.Seconds())
-
-	m.idleGen++
-	idleGen := m.idleGen
-	m.closeTimer = time.AfterFunc(wait, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		if err := m.lock(ctx); err != nil {
-			return
-		}
-		defer m.unlock()
-		if m.closing.Load() {
-			m.cleanup()
-			m.closeTimer = nil
-			return
-		}
-		if idleGen != m.idleGen {
-			return
-		}
-		if m.browser != nil {
-			logrus.Info("空闲超时，关闭浏览器")
-			m.cleanup()
-			m.closeTimer = nil
-		}
-	})
-
+	m.cleanup()
 	m.unlock()
 }
 
@@ -141,11 +71,6 @@ func (m *Manager) Close() {
 		return
 	}
 	defer m.unlock()
-	m.idleGen++
-	if m.closeTimer != nil {
-		m.closeTimer.Stop()
-		m.closeTimer = nil
-	}
 	m.cleanup()
 }
 
