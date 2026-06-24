@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"flag"
+	"os"
 
 	"github.com/go-rod/rod"
 	"github.com/sirupsen/logrus"
 	"github.com/xpzouying/xiaohongshu-mcp/browser"
+	"github.com/xpzouying/xiaohongshu-mcp/configs"
 	"github.com/xpzouying/xiaohongshu-mcp/cookies"
 	"github.com/xpzouying/xiaohongshu-mcp/xiaohongshu"
 )
@@ -18,9 +20,22 @@ func main() {
 	)
 	flag.StringVar(&binPath, "bin", "", "浏览器二进制文件路径")
 	flag.Parse()
+	if binPath == "" {
+		binPath = os.Getenv("ROD_BROWSER_BIN")
+	}
+	configs.SetBinPath(binPath)
+	configs.SetProfileDir(os.Getenv("XHS_BROWSER_PROFILE_DIR"))
+	configs.SetBrowserMode(os.Getenv("XHS_BROWSER_MODE"))
+	configs.SetBrowserExtraArgs(configs.BrowserExtraArgsFromEnv())
 
 	// 登录的时候，需要界面，所以不能无头模式
-	b := browser.NewBrowser(false, browser.WithBinPath(binPath))
+	b := browser.NewBrowser(
+		false,
+		browser.WithBinPath(binPath),
+		browser.WithProfileDir(configs.GetProfileDir()),
+		browser.WithCloakBrowser(configs.UseCloakBrowser()),
+		browser.WithExtraArgs(configs.GetBrowserExtraArgs()),
+	)
 	defer b.Close()
 
 	page := b.NewPage()

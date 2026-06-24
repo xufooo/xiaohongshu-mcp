@@ -12,7 +12,10 @@ import (
 )
 
 type browserConfig struct {
-	binPath string
+	binPath      string
+	profileDir   string
+	cloakBrowser bool
+	extraArgs    []string
 }
 
 type Option func(*browserConfig)
@@ -20,6 +23,27 @@ type Option func(*browserConfig)
 func WithBinPath(binPath string) Option {
 	return func(c *browserConfig) {
 		c.binPath = binPath
+	}
+}
+
+// WithProfileDir 设置浏览器持久 profile 目录。
+func WithProfileDir(profileDir string) Option {
+	return func(c *browserConfig) {
+		c.profileDir = profileDir
+	}
+}
+
+// WithCloakBrowser 设置是否使用 CloakBrowser。
+func WithCloakBrowser(enabled bool) Option {
+	return func(c *browserConfig) {
+		c.cloakBrowser = enabled
+	}
+}
+
+// WithExtraArgs 设置附加浏览器启动参数。
+func WithExtraArgs(args []string) Option {
+	return func(c *browserConfig) {
+		c.extraArgs = append([]string(nil), args...)
 	}
 }
 
@@ -48,6 +72,17 @@ func NewBrowser(headless bool, options ...Option) *hrod.Browser {
 	}
 	if cfg.binPath != "" {
 		opts = append(opts, headless_browser.WithChromeBinPath(cfg.binPath))
+	}
+	if cfg.profileDir != "" {
+		opts = append(opts, headless_browser.WithUserDataDir(cfg.profileDir))
+	}
+	if cfg.cloakBrowser {
+		opts = append(opts, headless_browser.WithStealth(false))
+		logrus.Info("using CloakBrowser without go-rod stealth injection")
+	}
+	if len(cfg.extraArgs) > 0 {
+		opts = append(opts, headless_browser.WithExtraArgs(cfg.extraArgs))
+		logrus.Infof("using %d extra browser launch args", len(cfg.extraArgs))
 	}
 
 	// Read proxy from environment variable

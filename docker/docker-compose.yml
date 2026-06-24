@@ -17,5 +17,10 @@ services:
       - HOME=/app/data/home
       - XDG_CACHE_HOME=/app/data/cache
       - XDG_CONFIG_HOME=/app/data/config
+      - XHS_BROWSER_MODE=cloak
+      - XHS_BROWSER_PROFILE_DIR=/app/data/browser-profile
+      - XHS_BROWSER_IDLE_TIMEOUT=5m
+      # 例如：--lang=zh-CN --timezone=Asia/Shanghai
+      # - XHS_BROWSER_EXTRA_ARGS=
     ports:
       - "18060:18060"

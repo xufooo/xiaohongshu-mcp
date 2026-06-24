@@ -6,7 +6,8 @@
 
 - 启动后，会产生一个 `images/` 目录，用于存储发布的图片。它会挂载到 Docker 容器里面。
   如果要使用本地图片发布的话，请确保图片拷贝到 `./images/` 目录下，并且让 MCP 在发布的时候，指定文件夹为：`/app/images`，否则一定失败。
-- Docker 镜像内置 CloakBrowser Chromium，并在构建阶段预下载浏览器。请挂载 `./data:/app/data`，用于持久化 cookies 和运行数据目录。
+- Docker 镜像内置 CloakBrowser Chromium，并在构建阶段预下载浏览器。请挂载 `./data:/app/data`，用于持久化 cookies 和浏览器 profile。树莓派默认使用 headless 模式，不需要 Xvfb。
+- 服务在进程内串行复用一个 Chromium 实例，每次操作只创建并关闭页面；profile 的磁盘缓存限制为 16MB，避免频繁启动浏览器和过度写入 SD 卡。默认空闲 5 分钟会关闭 Chromium 释放内存，可通过 `XHS_BROWSER_IDLE_TIMEOUT` 调整。
 
 ## 1. 获取 Docker 镜像
 
@@ -114,8 +115,24 @@ environment:
   - HOME=/app/data/home
   - XDG_CACHE_HOME=/app/data/cache
   - XDG_CONFIG_HOME=/app/data/config
+  - XHS_BROWSER_MODE=cloak
+  - XHS_BROWSER_PROFILE_DIR=/app/data/browser-profile
+  - XHS_BROWSER_IDLE_TIMEOUT=5m
   - XHS_PROXY=http://user:pass@proxy:port
 ```
+
+### CloakBrowser 启动参数
+
+浏览器参数不固定在代码中，可由部署环境传入。`CLOAK_FLAGS` 和 `XHS_BROWSER_EXTRA_ARGS` 均接受以空白分隔的 Chromium 参数，参数必须写成 `--名称` 或 `--名称=值`；后者优先，可覆盖前者。例如：
+
+```yaml
+environment:
+  - XHS_BROWSER_LANG=zh-CN
+  - XHS_BROWSER_TIMEZONE=Asia/Shanghai
+  - XHS_BROWSER_EXTRA_ARGS=--fingerprint-webrtc-ip=203.0.113.10
+```
+
+`XHS_BROWSER_LANG` 会传递为 `--lang`，`XHS_BROWSER_TIMEZONE` 会传递为 `--timezone`。具体参数是否由当前 CloakBrowser 版本支持，应以容器内浏览器的 `--help` 输出为准。使用代理时，语言、时区和 WebRTC 出口信息应与代理出口一致；程序不会猜测或伪造这些值。
 
 支持 HTTP/HTTPS/SOCKS5 代理。日志中会自动隐藏代理的认证信息，输出示例：
 

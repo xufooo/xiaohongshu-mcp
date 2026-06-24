@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"os"
+	"time"
 
 	"github.com/sirupsen/logrus"
 	"github.com/xpzouying/xiaohongshu-mcp/configs"
@@ -22,6 +23,17 @@ func main() {
 	if len(binPath) == 0 {
 		binPath = os.Getenv("ROD_BROWSER_BIN")
 	}
+	profileDir := os.Getenv("XHS_BROWSER_PROFILE_DIR")
+	browserMode := os.Getenv("XHS_BROWSER_MODE")
+	idleTimeout := 5 * time.Minute
+	if rawTimeout := os.Getenv("XHS_BROWSER_IDLE_TIMEOUT"); rawTimeout != "" {
+		parsed, err := time.ParseDuration(rawTimeout)
+		if err != nil {
+			logrus.Warnf("invalid XHS_BROWSER_IDLE_TIMEOUT %q, using %s", rawTimeout, idleTimeout)
+		} else {
+			idleTimeout = parsed
+		}
+	}
 	if binPath != "" {
 		logrus.Infof("using browser binary: %s", binPath)
 	} else {
@@ -30,6 +42,17 @@ func main() {
 
 	configs.InitHeadless(headless)
 	configs.SetBinPath(binPath)
+	configs.SetProfileDir(profileDir)
+	configs.SetBrowserMode(browserMode)
+	configs.SetBrowserIdleTimeout(idleTimeout)
+	configs.SetBrowserExtraArgs(configs.BrowserExtraArgsFromEnv())
+	if profileDir != "" {
+		logrus.Infof("using persistent browser profile: %s", profileDir)
+	}
+	logrus.Infof("browser idle timeout: %s", idleTimeout)
+	if configs.UseCloakBrowser() {
+		logrus.Info("using CloakBrowser mode")
+	}
 
 	// 初始化服务
 	xiaohongshuService := NewXiaohongshuService()

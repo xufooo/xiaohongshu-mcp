@@ -145,11 +145,8 @@ func (l *Limiter) Check() (Info, bool, error) {
 
 // Reserve 原子地检查并预占一次操作额度。
 //
-// This must not wait for a token. The previous implementation admitted one
-// request and then blocked every subsequent request for time.Hour/limit
-// (two minutes with the default configuration), which surfaced as browser and
-// MCP context-deadline failures. Callers may apply the returned optional
-// cooldown themselves; the limiter only accounts for the hourly budget.
+// 不在限流器内部等待，调用方根据返回的短冷却时间自行等待。
+// 这样既避免按小时均分造成长时间阻塞，也不会让连续操作无间隔执行。
 func (l *Limiter) Reserve(ctx context.Context) (Info, time.Duration, bool, error) {
 	select {
 	case <-ctx.Done():
@@ -178,7 +175,10 @@ func (l *Limiter) Reserve(ctx context.Context) (Info, time.Duration, bool, error
 	info := l.info(now, hk, b.count)
 	l.mu.Unlock()
 
-	return info, 0, true, nil
+	if usedBefore == 0 {
+		return info, 0, true, nil
+	}
+	return info, l.waitDuration(info), true, nil
 }
 
 // Record 记录一次操作
