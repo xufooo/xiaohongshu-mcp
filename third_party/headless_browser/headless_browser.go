@@ -9,6 +9,7 @@ import (
 
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/launcher"
+	"github.com/go-rod/rod/lib/launcher/flags"
 	"github.com/go-rod/rod/lib/proto"
 	"github.com/go-rod/stealth"
 	"github.com/sirupsen/logrus"
@@ -90,10 +91,11 @@ func New(options ...Option) *Browser {
 			logrus.Warn("忽略格式错误的浏览器启动参数")
 			continue
 		}
+		flag := flags.Flag(name)
 		if hasValue {
-			l = l.Set(name, value)
+			l = l.Set(flag, value)
 		} else {
-			l = l.Set(name)
+			l = l.Set(flag)
 		}
 	}
 
