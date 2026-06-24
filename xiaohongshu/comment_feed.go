@@ -2,6 +2,7 @@ package xiaohongshu
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -13,6 +14,12 @@ import (
 // CommentFeedAction 表示 Feed 评论动作
 type CommentFeedAction struct {
 	page *hrod.Page
+}
+
+// sleepForCommentStep adds a small human-like delay while preserving cancellation.
+// Page.SleepRandom delegates to the project's humanize sleep implementation.
+func sleepForCommentStep(page *hrod.Page, min, max time.Duration) error {
+	return page.SleepRandom(min, max)
 }
 
 // NewCommentFeedAction 创建 Feed 评论动作
@@ -30,13 +37,16 @@ func (f *CommentFeedAction) PostComment(ctx context.Context, feedID, xsecToken, 
 	// 导航到详情页
 	page.MustNavigate(url)
 	page.MustWaitLoad()
-	if err := page.Sleep(time.Second); err != nil {
+	if err := sleepForCommentStep(page, 1500*time.Millisecond, 3*time.Second); err != nil {
 		return err
 	}
 
 	// 检测页面是否可访问
 	if err := checkPageAccessible(page); err != nil {
 		return err
+	}
+	if err := browseBeforeComment(page); err != nil {
+		return fmt.Errorf("评论前浏览页面失败: %w", err)
 	}
 
 	elem, err := page.Element("div.input-box div.content-edit span")
@@ -61,8 +71,12 @@ func (f *CommentFeedAction) PostComment(ctx context.Context, feedID, xsecToken, 
 		return fmt.Errorf("无法输入评论内容: %w", err)
 	}
 
-	if err := page.Sleep(time.Second); err != nil {
+	if err := sleepForCommentStep(page, 500*time.Millisecond, 1500*time.Millisecond); err != nil {
 		return err
+	}
+	initialMatchCount, err := countCommentContent(page, content)
+	if err != nil {
+		return fmt.Errorf("提交前检查评论区失败: %w", err)
 	}
 
 	submitButton, err := page.Element("div.bottom button.submit")
@@ -76,8 +90,8 @@ func (f *CommentFeedAction) PostComment(ctx context.Context, feedID, xsecToken, 
 		return fmt.Errorf("无法点击提交按钮: %w", err)
 	}
 
-	if err := page.Sleep(time.Second); err != nil {
-		return err
+	if err := verifyCommentSubmission(page, content, initialMatchCount); err != nil {
+		return fmt.Errorf("评论提交未成功: %w", err)
 	}
 
 	logrus.Infof("Comment posted successfully to feed: %s", feedID)
@@ -94,7 +108,7 @@ func (f *CommentFeedAction) ReplyToComment(ctx context.Context, feedID, xsecToke
 	// 导航到详情页
 	page.MustNavigate(url)
 	page.MustWaitLoad()
-	if err := page.Sleep(time.Second); err != nil {
+	if err := sleepForCommentStep(page, 1500*time.Millisecond, 3*time.Second); err != nil {
 		return err
 	}
 
@@ -102,9 +116,12 @@ func (f *CommentFeedAction) ReplyToComment(ctx context.Context, feedID, xsecToke
 	if err := checkPageAccessible(page); err != nil {
 		return err
 	}
+	if err := browseBeforeComment(page); err != nil {
+		return fmt.Errorf("回复前浏览页面失败: %w", err)
+	}
 
 	// 等待评论容器加载
-	if err := page.Sleep(2 * time.Second); err != nil {
+	if err := sleepForCommentStep(page, 1*time.Second, 2*time.Second); err != nil {
 		return err
 	}
 
@@ -117,7 +134,7 @@ func (f *CommentFeedAction) ReplyToComment(ctx context.Context, feedID, xsecToke
 	// 滚动到评论位置
 	logrus.Info("滚动到评论位置...")
 	commentEl.MustScrollIntoView()
-	if err := page.Sleep(time.Second); err != nil {
+	if err := sleepForCommentStep(page, 500*time.Millisecond, 1500*time.Millisecond); err != nil {
 		return err
 	}
 
@@ -133,7 +150,7 @@ func (f *CommentFeedAction) ReplyToComment(ctx context.Context, feedID, xsecToke
 		return fmt.Errorf("点击回复按钮失败: %w", err)
 	}
 
-	if err := page.Sleep(time.Second); err != nil {
+	if err := sleepForCommentStep(page, 500*time.Millisecond, 1500*time.Millisecond); err != nil {
 		return err
 	}
 
@@ -148,8 +165,12 @@ func (f *CommentFeedAction) ReplyToComment(ctx context.Context, feedID, xsecToke
 		return fmt.Errorf("输入回复内容失败: %w", err)
 	}
 
-	if err := page.Sleep(500 * time.Millisecond); err != nil {
+	if err := sleepForCommentStep(page, 500*time.Millisecond, 1500*time.Millisecond); err != nil {
 		return err
+	}
+	initialMatchCount, err := countCommentContent(page, content)
+	if err != nil {
+		return fmt.Errorf("提交前检查回复区失败: %w", err)
 	}
 
 	// 查找并点击提交按钮
@@ -162,8 +183,8 @@ func (f *CommentFeedAction) ReplyToComment(ctx context.Context, feedID, xsecToke
 		return fmt.Errorf("点击提交按钮失败: %w", err)
 	}
 
-	if err := page.Sleep(2 * time.Second); err != nil {
-		return err
+	if err := verifyCommentSubmission(page, content, initialMatchCount); err != nil {
+		return fmt.Errorf("回复提交未成功: %w", err)
 	}
 	logrus.Infof("回复评论成功")
 	return nil
@@ -174,13 +195,11 @@ func findCommentElement(page *hrod.Page, commentID, userID string) (*hrod.Elemen
 	logrus.Infof("开始查找评论 - commentID: %s, userID: %s", commentID, userID)
 
 	const maxAttempts = 100
-	const scrollInterval = 800 * time.Millisecond
-
 	// 先滚动到评论区
 	if err := scrollToCommentsArea(page); err != nil {
 		return nil, err
 	}
-	if err := page.Sleep(time.Second); err != nil {
+	if err := sleepForCommentStep(page, 500*time.Millisecond, 1500*time.Millisecond); err != nil {
 		return nil, err
 	}
 
@@ -235,7 +254,7 @@ func findCommentElement(page *hrod.Page, commentID, userID string) (*hrod.Elemen
 			} else {
 				logrus.Warnf("未找到评论元素: %v", err)
 			}
-			if err := page.Sleep(300 * time.Millisecond); err != nil {
+			if err := sleepForCommentStep(page, 300*time.Millisecond, 800*time.Millisecond); err != nil {
 				return nil, err
 			}
 		}
@@ -246,7 +265,7 @@ func findCommentElement(page *hrod.Page, commentID, userID string) (*hrod.Elemen
 		if err := page.Actor().Mouse.Scroll(0, float64(viewportHeight)*0.8); err != nil {
 			logrus.Warnf("滚动失败: %v", err)
 		}
-		if err := page.Sleep(500 * time.Millisecond); err != nil {
+		if err := sleepForCommentStep(page, 500*time.Millisecond, 1200*time.Millisecond); err != nil {
 			return nil, err
 		}
 
@@ -290,10 +309,80 @@ func findCommentElement(page *hrod.Page, commentID, userID string) (*hrod.Elemen
 		logrus.Infof("本次尝试未找到目标评论，继续下一轮...")
 
 		// === 7. 等待内容加载 ===
-		if err := page.Sleep(scrollInterval); err != nil {
+		if err := sleepForCommentStep(page, 600*time.Millisecond, 1200*time.Millisecond); err != nil {
 			return nil, err
 		}
 	}
 
 	return nil, fmt.Errorf("未找到评论 (commentID: %s, userID: %s), 尝试次数: %d", commentID, userID, maxAttempts)
+}
+
+// browseBeforeComment triggers the post's lazy-loaded content before interacting
+// with the comment box.
+func browseBeforeComment(page *hrod.Page) error {
+	if err := page.Actor().Mouse.Scroll(0, 400); err != nil {
+		return err
+	}
+	return sleepForCommentStep(page, 500*time.Millisecond, 1200*time.Millisecond)
+}
+
+type commentSubmissionState struct {
+	MatchCount int    `json:"matchCount"`
+	Error      string `json:"error"`
+}
+
+func countCommentContent(page *hrod.Page, content string) (int, error) {
+	state, err := getCommentSubmissionState(page, content)
+	if err != nil {
+		return 0, err
+	}
+	if state.Error != "" {
+		return 0, fmt.Errorf("页面提示: %s", state.Error)
+	}
+	return state.MatchCount, nil
+}
+
+func verifyCommentSubmission(page *hrod.Page, content string, initialMatchCount int) error {
+	const maxChecks = 12
+
+	for check := 0; check < maxChecks; check++ {
+		state, err := getCommentSubmissionState(page, content)
+		if err != nil {
+			return fmt.Errorf("检查提交结果失败: %w", err)
+		}
+		if state.Error != "" {
+			return fmt.Errorf("页面提示: %s", state.Error)
+		}
+		if state.MatchCount > initialMatchCount {
+			return nil
+		}
+		if err := sleepForCommentStep(page, 500*time.Millisecond, 1200*time.Millisecond); err != nil {
+			return err
+		}
+	}
+
+	return fmt.Errorf("等待评论出现在评论区超时")
+}
+
+func getCommentSubmissionState(page *hrod.Page, content string) (commentSubmissionState, error) {
+	var state commentSubmissionState
+	result, err := page.Eval(`(content) => {
+		const commentSelector = ".comments-container .parent-comment, .comments-container .comment-item, .comments-container .comment, .comments-container .sub-comment, .comments-container .reply-item";
+		const matchCount = Array.from(document.querySelectorAll(commentSelector))
+			.filter((el) => (el.innerText || el.textContent || "").includes(content)).length;
+		const errorKeywords = ["操作频繁", "评论过于频繁", "请验证", "滑块验证", "安全验证", "评论失败", "发送失败", "提交失败", "禁止评论"];
+		const pageText = document.body?.innerText || "";
+		const error = errorKeywords.find((keyword) => pageText.includes(keyword)) || "";
+		return JSON.stringify({ matchCount, error });
+	}`, content)
+	if err != nil {
+		return state, err
+	}
+	if result == nil {
+		return state, fmt.Errorf("页面未返回评论提交状态")
+	}
+	if err := json.Unmarshal([]byte(result.Value.Str()), &state); err != nil {
+		return state, fmt.Errorf("解析评论提交状态失败: %w", err)
+	}
+	return state, nil
 }
