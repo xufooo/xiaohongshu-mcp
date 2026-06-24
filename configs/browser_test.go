@@ -3,18 +3,10 @@ package configs
 import "testing"
 
 func TestUseCloakBrowser(t *testing.T) {
-	originalBinPath := GetBinPath()
 	originalMode := browserMode
 	t.Cleanup(func() {
-		SetBinPath(originalBinPath)
 		SetBrowserMode(originalMode)
 	})
-
-	SetBinPath("/usr/local/bin/cloak-chromium")
-	SetBrowserMode("auto")
-	if !UseCloakBrowser() {
-		t.Fatal("auto mode should detect CloakBrowser binary")
-	}
 
 	SetBrowserMode("chrome")
 	if UseCloakBrowser() {

@@ -2,7 +2,6 @@ package configs
 
 import (
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 )
@@ -62,8 +61,7 @@ func UseCloakBrowser() bool {
 		return false
 	}
 
-	name := strings.ToLower(filepath.Base(binPath))
-	return strings.Contains(name, "cloak")
+	return false
 }
 
 // SetBrowserIdleTimeout 设置浏览器空闲回收时间。
