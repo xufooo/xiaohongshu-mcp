@@ -48,6 +48,11 @@ func (b *Browser) Close() error {
 	return b.hb.CloseContext(ctx)
 }
 
+// Health 检查底层浏览器的 CDP 连接。
+func (b *Browser) Health(ctx context.Context) error {
+	return b.hb.Health(ctx)
+}
+
 // MustClose is the humanized version of MustClose.
 func (b *Browser) MustClose() *Browser {
 	_ = b.Close()

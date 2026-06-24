@@ -109,6 +109,9 @@ ENV HOME=/app/data/home
 ENV XDG_CACHE_HOME=/app/data/cache
 ENV XDG_CONFIG_HOME=/app/data/config
 ENV ROD_BROWSER_BIN=/usr/local/bin/cloak-chromium
+ENV XHS_BROWSER_MODE=cloak
+ENV XHS_BROWSER_PROFILE_DIR=/app/data/browser-profile
+ENV XHS_BROWSER_IDLE_TIMEOUT=5m
 
 EXPOSE 18060
 

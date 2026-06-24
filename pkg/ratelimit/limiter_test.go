@@ -5,12 +5,10 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 )
 
 func TestReserveIsAtomicUnderConcurrentCallers(t *testing.T) {
 	limiter := New(Config{MaxPerHour: 3})
-	limiter.tokenInterval = time.Millisecond
 
 	var allowed int32
 	var wg sync.WaitGroup
@@ -48,7 +46,6 @@ func TestReserveIsAtomicUnderConcurrentCallers(t *testing.T) {
 
 func TestReserveRejectsWhenLimitReached(t *testing.T) {
 	limiter := New(Config{MaxPerHour: 1})
-	limiter.tokenInterval = time.Millisecond
 
 	if _, _, canProceed, err := limiter.Reserve(context.Background()); err != nil || !canProceed {
 		t.Fatalf("first reservation should proceed, canProceed=%v err=%v", canProceed, err)
