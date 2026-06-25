@@ -61,9 +61,22 @@ func (b *Browser) MustClose() *Browser {
 	return b
 }
 
+// Page creates a humanized page.
+func (b *Browser) Page() (*Page, error) {
+	page, err := b.hb.Page()
+	if err != nil {
+		return nil, err
+	}
+	return b.wrapPage(page), nil
+}
+
 // NewPage creates a humanized page.
 func (b *Browser) NewPage() *Page {
-	return b.wrapPage(b.hb.NewPage())
+	page, err := b.Page()
+	if err != nil {
+		panic(err)
+	}
+	return page
 }
 
 // MustPage opens a humanized page.

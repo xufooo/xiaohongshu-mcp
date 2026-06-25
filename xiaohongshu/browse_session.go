@@ -29,6 +29,7 @@ type BrowseSessionInfo struct {
 
 type BrowseSession struct {
 	mu      sync.Mutex
+	opMu    sync.Mutex
 	id      string
 	page    *hrod.Page
 	state   *ActionStateStore
@@ -78,7 +79,7 @@ func (m *BrowseSessionManager) Create(page *hrod.Page, state *ActionStateStore, 
 		results:   make(map[string]Feed),
 	}
 	session.touchLocked()
-	session.refreshPageStateLocked()
+	session.refreshPageState()
 
 	m.mu.Lock()
 	m.sessions[session.id] = session
@@ -147,10 +148,10 @@ func (s *BrowseSession) Info() BrowseSessionInfo {
 }
 
 func (s *BrowseSession) Search(ctx context.Context, keyword string, filters ...FilterOption) ([]Feed, error) {
-	if err := s.beginOperation(); err != nil {
+	if err := s.beginLockedOperation(); err != nil {
 		return nil, err
 	}
-	defer s.endOperation()
+	defer s.finishOperation()
 
 	action := NewSearchActionWithState(s.page.Context(ctx), s.state)
 	feeds, err := action.Search(ctx, keyword, filters...)
@@ -159,7 +160,6 @@ func (s *BrowseSession) Search(ctx context.Context, keyword string, filters ...F
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.sourceURL = ""
 	s.currentFeedID = ""
 	s.currentXsecToken = ""
@@ -173,15 +173,15 @@ func (s *BrowseSession) Search(ctx context.Context, keyword string, filters ...F
 			s.results[feed.ID] = feed
 		}
 	}
-	s.refreshPageStateLocked()
+	s.mu.Unlock()
 	return feeds, nil
 }
 
 func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, xsecToken string) error {
-	if err := s.beginOperation(); err != nil {
+	if err := s.beginLockedOperation(); err != nil {
 		return err
 	}
-	defer s.endOperation()
+	defer s.finishOperation()
 
 	feed, ok := s.resolveResult(resultRef)
 	if !ok {
@@ -194,29 +194,31 @@ func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, xsecToken strin
 		return fmt.Errorf("搜索结果缺少 feed_id")
 	}
 
-	sourceURL := s.page.MustEval(`() => location.href`).String()
+	sourceURL, err := s.currentPageURL()
+	if err != nil {
+		return fmt.Errorf("读取当前页面 URL: %w", err)
+	}
 	opener := NewNoteOpenActionWithState(s.page.Context(ctx), s.state)
 	if err := opener.OpenFromCards(ctx, feed.ID, feed.XsecToken, OpenSourceSearch); err != nil {
 		return err
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.sourceURL = sourceURL
 	s.currentFeedID = feed.ID
 	s.currentXsecToken = feed.XsecToken
 	s.opened = true
 	s.read = false
 	s.seenNotes[feed.ID] = true
-	s.refreshPageStateLocked()
+	s.mu.Unlock()
 	return nil
 }
 
 func (s *BrowseSession) Read(ctx context.Context, minDuration time.Duration) error {
-	if err := s.beginOperation(); err != nil {
+	if err := s.beginLockedOperation(); err != nil {
 		return err
 	}
-	defer s.endOperation()
+	defer s.finishOperation()
 
 	feedID, err := s.currentOpenedFeedID()
 	if err != nil {
@@ -231,22 +233,21 @@ func (s *BrowseSession) Read(ctx context.Context, minDuration time.Duration) err
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.read = true
 	s.seenNotes[feedID] = true
-	s.refreshPageStateLocked()
+	s.mu.Unlock()
 	return nil
 }
 
 func (s *BrowseSession) Like(ctx context.Context, unlike bool) error {
+	if err := s.beginLockedOperation(); err != nil {
+		return err
+	}
+	defer s.finishOperation()
+
 	if err := s.ensureReadableInteraction(); err != nil {
 		return err
 	}
-	if err := s.beginOperation(); err != nil {
-		return err
-	}
-	defer s.endOperation()
-
 	feedID, xsecToken := s.currentFeed()
 	action := NewLikeActionWithState(s.page.Context(ctx), s.state)
 	if unlike {
@@ -256,29 +257,31 @@ func (s *BrowseSession) Like(ctx context.Context, unlike bool) error {
 }
 
 func (s *BrowseSession) Comment(ctx context.Context, content string) error {
-	if err := s.ensureReadableInteraction(); err != nil {
-		return err
-	}
 	if strings.TrimSpace(content) == "" {
 		return fmt.Errorf("评论内容不能为空")
 	}
-	if err := s.beginOperation(); err != nil {
+	if err := s.beginLockedOperation(); err != nil {
 		return err
 	}
-	defer s.endOperation()
+	defer s.finishOperation()
 
+	if err := s.ensureReadableInteraction(); err != nil {
+		return err
+	}
 	feedID, xsecToken := s.currentFeed()
 	action := NewCommentFeedActionWithState(s.page.Context(ctx), s.state)
 	return action.PostComment(ctx, feedID, xsecToken, content)
 }
 
 func (s *BrowseSession) Back(ctx context.Context) error {
-	if err := s.beginOperation(); err != nil {
+	if err := s.beginLockedOperation(); err != nil {
 		return err
 	}
-	defer s.endOperation()
+	defer s.finishOperation()
 
+	s.mu.Lock()
 	sourceURL := s.sourceURL
+	s.mu.Unlock()
 	if sourceURL == "" {
 		return fmt.Errorf("当前 session 没有来源 URL")
 	}
@@ -290,16 +293,21 @@ func (s *BrowseSession) Back(ctx context.Context) error {
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.currentFeedID = ""
 	s.currentXsecToken = ""
 	s.opened = false
 	s.read = false
-	s.refreshPageStateLocked()
+	s.mu.Unlock()
 	return nil
 }
 
 func (s *BrowseSession) Close() {
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
+	s.close()
+}
+
+func (s *BrowseSession) close() {
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
@@ -322,6 +330,20 @@ func (s *BrowseSession) Close() {
 	}
 }
 
+func (s *BrowseSession) beginLockedOperation() error {
+	s.opMu.Lock()
+	if err := s.beginOperation(); err != nil {
+		s.opMu.Unlock()
+		return err
+	}
+	return nil
+}
+
+func (s *BrowseSession) finishOperation() {
+	s.endOperation()
+	s.opMu.Unlock()
+}
+
 func (s *BrowseSession) beginOperation() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -336,10 +358,11 @@ func (s *BrowseSession) beginOperation() error {
 }
 
 func (s *BrowseSession) endOperation() {
+	s.refreshPageState()
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.closed {
-		s.refreshPageStateLocked()
 		s.touchLocked()
 	}
 }
@@ -392,19 +415,68 @@ func (s *BrowseSession) touchLocked() {
 	if s.timer != nil {
 		s.timer.Stop()
 	}
-	s.timer = time.AfterFunc(s.timeout, s.Close)
+	expiresAt := s.expiresAt
+	s.timer = time.AfterFunc(s.timeout, func() {
+		s.closeExpired(expiresAt)
+	})
 }
 
-func (s *BrowseSession) refreshPageStateLocked() {
-	if s.page == nil {
+func (s *BrowseSession) closeExpired(expiresAt time.Time) {
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
+
+	s.mu.Lock()
+	expired := !s.closed && s.expiresAt.Equal(expiresAt) && !time.Now().Before(s.expiresAt)
+	s.mu.Unlock()
+	if !expired {
 		return
 	}
-	if url, err := s.page.Eval(`() => location.href`); err == nil && url != nil {
-		s.currentURL = url.Value.Str()
+	s.close()
+}
+
+func (s *BrowseSession) refreshPageState() {
+	s.mu.Lock()
+	page := s.page
+	closed := s.closed
+	s.mu.Unlock()
+	if closed || page == nil {
+		return
 	}
-	if y, err := s.page.Eval(`() => Math.round(window.scrollY || document.scrollingElement?.scrollTop || 0)`); err == nil && y != nil {
-		s.scrollY = y.Value.Int()
+
+	var currentURL string
+	var scrollY int
+	var hasURL, hasScrollY bool
+	if url, err := page.Eval(`() => location.href`); err == nil && url != nil {
+		currentURL = url.Value.Str()
+		hasURL = true
 	}
+	if y, err := page.Eval(`() => Math.round(window.scrollY || document.scrollingElement?.scrollTop || 0)`); err == nil && y != nil {
+		scrollY = y.Value.Int()
+		hasScrollY = true
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || s.page != page {
+		return
+	}
+	if hasURL {
+		s.currentURL = currentURL
+	}
+	if hasScrollY {
+		s.scrollY = scrollY
+	}
+}
+
+func (s *BrowseSession) currentPageURL() (string, error) {
+	if s.page == nil {
+		return "", nil
+	}
+	result, err := s.page.Eval(`() => location.href`)
+	if err != nil || result == nil {
+		return "", err
+	}
+	return result.Value.Str(), nil
 }
 
 func (s *BrowseSession) infoLocked() BrowseSessionInfo {

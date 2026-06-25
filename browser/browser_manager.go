@@ -36,10 +36,13 @@ type Manager struct {
 	token   chan struct{}
 
 	mu       sync.Mutex
+	wg       sync.WaitGroup
 	browser  *hrod.Browser
 	starting *browserStartup
-	startErr error
-	closed   bool
+	startErr  error
+	closed    bool
+	resetting bool
+	resetDone chan struct{}
 
 	idleTimeout time.Duration
 	idleTimer   *time.Timer
@@ -50,6 +53,7 @@ type browserStartup struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	done   chan struct{}
+	timer  *time.Timer
 	once   sync.Once
 	err    error
 }
@@ -145,22 +149,42 @@ func (m *Manager) Reset(ctx context.Context) error {
 	defer m.releaseToken()
 
 	m.mu.Lock()
+	resetDone := make(chan struct{})
+	m.resetting = true
+	m.resetDone = resetDone
 	m.cancelIdleCloseLocked()
 	b := m.browser
 	m.browser = nil
 	if m.starting != nil {
 		m.starting.err = errors.New("browser startup reset")
 		m.starting.cancel()
+		if m.starting.timer != nil {
+			m.starting.timer.Stop()
+		}
 		m.starting.finish()
 		m.starting = nil
 	}
 	m.startErr = nil
 	m.mu.Unlock()
+	m.wg.Wait()
+
+	var closeErr error
+	if b != nil {
+		closeErr = b.Close()
+	}
+
+	m.mu.Lock()
+	if m.resetDone == resetDone {
+		m.resetting = false
+		m.resetDone = nil
+		close(resetDone)
+	}
+	m.mu.Unlock()
 
 	if b == nil {
 		return nil
 	}
-	return b.Close()
+	return closeErr
 }
 
 // Close 阻止新的获取并关闭常驻浏览器。
@@ -179,6 +203,16 @@ func (m *Manager) getBrowser(ctx context.Context) (*hrod.Browser, error) {
 			m.mu.Unlock()
 			return nil, errors.New("browser manager is closing")
 		}
+		if m.resetting {
+			done := m.resetDone
+			m.mu.Unlock()
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-done:
+				continue
+			}
+		}
 		if m.browser != nil {
 			b := m.browser
 			m.mu.Unlock()
@@ -193,8 +227,9 @@ func (m *Manager) getBrowser(ctx context.Context) (*hrod.Browser, error) {
 			started = newBrowserStartup(startupTimeout)
 			m.starting = started
 			m.startErr = nil
+			m.wg.Add(1)
 			go m.startBrowser(started)
-			time.AfterFunc(startupTimeout, func() {
+			started.timer = time.AfterFunc(startupTimeout, func() {
 				m.failStartup(started)
 			})
 		}
@@ -222,6 +257,8 @@ func (m *Manager) getBrowser(ctx context.Context) (*hrod.Browser, error) {
 }
 
 func (m *Manager) startBrowser(started *browserStartup) {
+	defer m.wg.Done()
+
 	b, err := newBrowser(started.ctx, m.factory)
 
 	m.mu.Lock()
@@ -241,6 +278,9 @@ func (m *Manager) startBrowser(started *browserStartup) {
 	m.browser = b
 	m.startErr = err
 	started.err = err
+	if started.timer != nil {
+		started.timer.Stop()
+	}
 	m.starting = nil
 	started.cancel()
 	started.finish()
@@ -262,7 +302,7 @@ func newPage(browser *hrod.Browser) (page *hrod.Page, err error) {
 			err = fmt.Errorf("create browser page failed: %v", recovered)
 		}
 	}()
-	return browser.NewPage(), nil
+	return browser.Page()
 }
 
 func (m *Manager) discardBrowser(target *hrod.Browser) {
