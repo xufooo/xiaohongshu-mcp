@@ -397,7 +397,7 @@ func (s *XiaohongshuService) ListFeeds(ctx context.Context) (*FeedsListResponse,
 }
 // SearchFeeds 搜索 Feeds
 func (s *XiaohongshuService) SearchFeeds(ctx context.Context, keyword string, filters ...xiaohongshu.FilterOption) (*FeedsListResponse, error) {
-	searchCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	searchCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
 
 	page, err := s.browserManager.Acquire(searchCtx)
