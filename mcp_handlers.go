@@ -10,6 +10,7 @@ import (
 
 	"github.com/sirupsen/logrus"
 	"github.com/xpzouying/xiaohongshu-mcp/cookies"
+	"github.com/xpzouying/xiaohongshu-mcp/pkg/ratelimit"
 	"github.com/xpzouying/xiaohongshu-mcp/xiaohongshu"
 )
 
@@ -37,8 +38,8 @@ func parseVisibility(args map[string]interface{}) string {
 }
 
 // rateLimitMCP MCP handler 速率限制检查。
-func (s *AppServer) rateLimitMCP(ctx context.Context, name string) *MCPToolResult {
-	r := s.checkRateLimitInternal(ctx)
+func (s *AppServer) rateLimitMCP(ctx context.Context, name string, action ratelimit.Action) *MCPToolResult {
+	r := s.checkRateLimitInternal(ctx, action)
 	if !r.CanProceed {
 		msg := r.Info.Warning
 		if msg == "" {
@@ -151,7 +152,7 @@ func (s *AppServer) handleDeleteCookies(ctx context.Context) *MCPToolResult {
 
 // handlePublishContent 处理发布内容
 func (s *AppServer) handlePublishContent(ctx context.Context, args map[string]interface{}) *MCPToolResult {
-	if blocked := s.rateLimitMCP(ctx, "发布内容"); blocked != nil {
+	if blocked := s.rateLimitMCP(ctx, "发布内容", ratelimit.ActionPublish); blocked != nil {
 		return blocked
 	}
 	logrus.Info("MCP: 发布内容")
@@ -228,7 +229,7 @@ func (s *AppServer) handlePublishContent(ctx context.Context, args map[string]in
 
 // handlePublishVideo 处理发布视频内容（仅本地单个视频文件）
 func (s *AppServer) handlePublishVideo(ctx context.Context, args map[string]interface{}) *MCPToolResult {
-	if blocked := s.rateLimitMCP(ctx, "发布视频"); blocked != nil {
+	if blocked := s.rateLimitMCP(ctx, "发布视频", ratelimit.ActionPublish); blocked != nil {
 		return blocked
 	}
 	logrus.Info("MCP: 发布视频内容（本地）")
@@ -303,7 +304,7 @@ func (s *AppServer) handlePublishVideo(ctx context.Context, args map[string]inte
 
 // handleListFeeds 处理获取Feeds列表
 func (s *AppServer) handleListFeeds(ctx context.Context) *MCPToolResult {
-	if blocked := s.rateLimitMCP(ctx, "获取Feeds列表"); blocked != nil {
+	if blocked := s.rateLimitMCP(ctx, "获取Feeds列表", ratelimit.ActionBrowse); blocked != nil {
 		return blocked
 	}
 	logrus.Info("MCP: 获取Feeds列表")
@@ -343,7 +344,7 @@ func (s *AppServer) handleListFeeds(ctx context.Context) *MCPToolResult {
 func (s *AppServer) handleSearchFeeds(ctx context.Context, args SearchFeedsArgs) *MCPToolResult {
 	logrus.Info("MCP: 搜索Feeds")
 
-	if blocked := s.rateLimitMCP(ctx, "搜索Feeds"); blocked != nil {
+	if blocked := s.rateLimitMCP(ctx, "搜索Feeds", ratelimit.ActionSearch); blocked != nil {
 		return blocked
 	}
 
@@ -401,7 +402,7 @@ func (s *AppServer) handleSearchFeeds(ctx context.Context, args SearchFeedsArgs)
 
 // handleGetFeedDetail 处理获取Feed详情
 func (s *AppServer) handleGetFeedDetail(ctx context.Context, args map[string]any) *MCPToolResult {
-	if blocked := s.rateLimitMCP(ctx, "获取Feed详情"); blocked != nil {
+	if blocked := s.rateLimitMCP(ctx, "获取Feed详情", ratelimit.ActionOpenNote); blocked != nil {
 		return blocked
 	}
 	logrus.Info("MCP: 获取Feed详情")
@@ -559,7 +560,7 @@ func (s *AppServer) handleGetFeedDetail(ctx context.Context, args map[string]any
 
 // handleUserProfile 获取用户主页
 func (s *AppServer) handleUserProfile(ctx context.Context, args map[string]any) *MCPToolResult {
-	if blocked := s.rateLimitMCP(ctx, "获取用户主页"); blocked != nil {
+	if blocked := s.rateLimitMCP(ctx, "获取用户主页", ratelimit.ActionBrowse); blocked != nil {
 		return blocked
 	}
 	logrus.Info("MCP: 获取用户主页")
@@ -622,7 +623,7 @@ func (s *AppServer) handleUserProfile(ctx context.Context, args map[string]any) 
 
 // handleLikeFeed 处理点赞/取消点赞
 func (s *AppServer) handleLikeFeed(ctx context.Context, args map[string]interface{}) *MCPToolResult {
-	if blocked := s.rateLimitMCP(ctx, "点赞"); blocked != nil {
+	if blocked := s.rateLimitMCP(ctx, "点赞", ratelimit.ActionLike); blocked != nil {
 		return blocked
 	}
 	feedID, ok := args["feed_id"].(string)
@@ -661,7 +662,7 @@ func (s *AppServer) handleLikeFeed(ctx context.Context, args map[string]interfac
 
 // handleFavoriteFeed 处理收藏/取消收藏
 func (s *AppServer) handleFavoriteFeed(ctx context.Context, args map[string]interface{}) *MCPToolResult {
-	if blocked := s.rateLimitMCP(ctx, "收藏"); blocked != nil {
+	if blocked := s.rateLimitMCP(ctx, "收藏", ratelimit.ActionFavorite); blocked != nil {
 		return blocked
 	}
 	feedID, ok := args["feed_id"].(string)
@@ -700,7 +701,7 @@ func (s *AppServer) handleFavoriteFeed(ctx context.Context, args map[string]inte
 
 // handlePostComment 处理发表评论到Feed
 func (s *AppServer) handlePostComment(ctx context.Context, args map[string]interface{}) *MCPToolResult {
-	if blocked := s.rateLimitMCP(ctx, "发表评论"); blocked != nil {
+	if blocked := s.rateLimitMCP(ctx, "发表评论", ratelimit.ActionComment); blocked != nil {
 		return blocked
 	}
 	logrus.Info("MCP: 发表评论到Feed")
@@ -765,7 +766,7 @@ func (s *AppServer) handlePostComment(ctx context.Context, args map[string]inter
 
 // handleReplyComment 处理回复评论
 func (s *AppServer) handleReplyComment(ctx context.Context, args map[string]interface{}) *MCPToolResult {
-	if blocked := s.rateLimitMCP(ctx, "回复评论"); blocked != nil {
+	if blocked := s.rateLimitMCP(ctx, "回复评论", ratelimit.ActionReply); blocked != nil {
 		return blocked
 	}
 	logrus.Info("MCP: 回复评论")
@@ -838,4 +839,123 @@ func (s *AppServer) handleReplyComment(ctx context.Context, args map[string]inte
 			Text: responseText,
 		}},
 	}
+}
+
+func (s *AppServer) handleCreateBrowseSession(ctx context.Context) *MCPToolResult {
+	logrus.Info("MCP: 创建浏览会话")
+	info, err := s.xiaohongshuService.CreateBrowseSession(ctx)
+	if err != nil {
+		return &MCPToolResult{
+			Content: []MCPContent{{Type: "text", Text: "创建浏览会话失败: " + err.Error()}},
+			IsError: true,
+		}
+	}
+	return jsonMCPResult(info, "创建浏览会话成功")
+}
+
+func (s *AppServer) handleCloseBrowseSession(ctx context.Context, args BrowseSessionIDArgs) *MCPToolResult {
+	if args.SessionID == "" {
+		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "关闭浏览会话失败: 缺少session_id参数"}}, IsError: true}
+	}
+	if err := s.xiaohongshuService.CloseBrowseSession(args.SessionID); err != nil {
+		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "关闭浏览会话失败: " + err.Error()}}, IsError: true}
+	}
+	return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "浏览会话已关闭: " + args.SessionID}}}
+}
+
+func (s *AppServer) handleSessionSearch(ctx context.Context, args SessionSearchArgs) *MCPToolResult {
+	if blocked := s.rateLimitMCP(ctx, "session搜索", ratelimit.ActionSearch); blocked != nil {
+		return blocked
+	}
+	if args.SessionID == "" || args.Keyword == "" {
+		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "session搜索失败: 缺少session_id或keyword参数"}}, IsError: true}
+	}
+	filter := xiaohongshu.FilterOption{
+		SortBy:      args.Filters.SortBy,
+		NoteType:    args.Filters.NoteType,
+		PublishTime: args.Filters.PublishTime,
+		SearchScope: args.Filters.SearchScope,
+		Location:    args.Filters.Location,
+	}
+	result, err := s.xiaohongshuService.SessionSearch(ctx, args.SessionID, args.Keyword, filter)
+	if err != nil {
+		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "session搜索失败: " + err.Error()}}, IsError: true}
+	}
+	return jsonMCPResult(result, "session搜索成功")
+}
+
+func (s *AppServer) handleSessionOpenNote(ctx context.Context, args SessionOpenNoteArgs) *MCPToolResult {
+	if blocked := s.rateLimitMCP(ctx, "session打开笔记", ratelimit.ActionOpenNote); blocked != nil {
+		return blocked
+	}
+	if args.SessionID == "" || args.ResultRef == "" {
+		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "session打开笔记失败: 缺少session_id或result_ref参数"}}, IsError: true}
+	}
+	info, err := s.xiaohongshuService.SessionOpenNote(ctx, args.SessionID, args.ResultRef, args.XsecToken)
+	if err != nil {
+		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "session打开笔记失败: " + err.Error()}}, IsError: true}
+	}
+	return jsonMCPResult(info, "session打开笔记成功")
+}
+
+func (s *AppServer) handleSessionRead(ctx context.Context, args SessionReadArgs) *MCPToolResult {
+	if blocked := s.rateLimitMCP(ctx, "session阅读", ratelimit.ActionOpenNote); blocked != nil {
+		return blocked
+	}
+	if args.SessionID == "" {
+		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "session阅读失败: 缺少session_id参数"}}, IsError: true}
+	}
+	minDuration := time.Duration(args.MinSeconds) * time.Second
+	info, err := s.xiaohongshuService.SessionRead(ctx, args.SessionID, minDuration)
+	if err != nil {
+		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "session阅读失败: " + err.Error()}}, IsError: true}
+	}
+	return jsonMCPResult(info, "session阅读成功")
+}
+
+func (s *AppServer) handleSessionLike(ctx context.Context, args SessionLikeArgs) *MCPToolResult {
+	if blocked := s.rateLimitMCP(ctx, "session点赞", ratelimit.ActionLike); blocked != nil {
+		return blocked
+	}
+	if args.SessionID == "" {
+		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "session点赞失败: 缺少session_id参数"}}, IsError: true}
+	}
+	result, err := s.xiaohongshuService.SessionLike(ctx, args.SessionID, args.Unlike)
+	if err != nil {
+		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "session点赞失败: " + err.Error()}}, IsError: true}
+	}
+	return jsonMCPResult(result, "session点赞成功")
+}
+
+func (s *AppServer) handleSessionComment(ctx context.Context, args SessionCommentArgs) *MCPToolResult {
+	if blocked := s.rateLimitMCP(ctx, "session评论", ratelimit.ActionComment); blocked != nil {
+		return blocked
+	}
+	if args.SessionID == "" || args.Content == "" {
+		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "session评论失败: 缺少session_id或content参数"}}, IsError: true}
+	}
+	result, err := s.xiaohongshuService.SessionComment(ctx, args.SessionID, args.Content)
+	if err != nil {
+		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "session评论失败: " + err.Error()}}, IsError: true}
+	}
+	return jsonMCPResult(result, "session评论成功")
+}
+
+func (s *AppServer) handleSessionBack(ctx context.Context, args BrowseSessionIDArgs) *MCPToolResult {
+	if args.SessionID == "" {
+		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "session返回失败: 缺少session_id参数"}}, IsError: true}
+	}
+	info, err := s.xiaohongshuService.SessionBack(ctx, args.SessionID)
+	if err != nil {
+		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "session返回失败: " + err.Error()}}, IsError: true}
+	}
+	return jsonMCPResult(info, "session返回成功")
+}
+
+func jsonMCPResult(value any, fallback string) *MCPToolResult {
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: fallback + "，但序列化失败: " + err.Error()}}, IsError: true}
+	}
+	return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: string(data)}}}
 }

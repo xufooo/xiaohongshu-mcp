@@ -7,6 +7,8 @@ import (
 	"net/url"
 	"time"
 
+	rodinput "github.com/go-rod/rod/lib/input"
+	"github.com/go-rod/rod/lib/proto"
 	"github.com/xpzouying/xiaohongshu-mcp/errors"
 	hrod "github.com/xpzouying/xiaohongshu-mcp/pkg/humanize/rod"
 )
@@ -156,18 +158,75 @@ func validateInternalFilterOption(filter internalFilterOption) error {
 }
 
 type SearchAction struct {
-	page *hrod.Page
+	page  *hrod.Page
+	state *ActionStateStore
 }
 
 func NewSearchAction(page *hrod.Page) *SearchAction {
 	return &SearchAction{page: page}
 }
 
+func NewSearchActionWithState(page *hrod.Page, state *ActionStateStore) *SearchAction {
+	return &SearchAction{page: page, state: state}
+}
+
 func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...FilterOption) ([]Feed, error) {
+	page := s.page.Context(ctx)
+	if err := s.searchByUI(page, keyword); err != nil {
+		return nil, err
+	}
+	return s.collectResults(page, filters...)
+}
+
+func (s *SearchAction) SearchByURLFallback(ctx context.Context, keyword string, filters ...FilterOption) ([]Feed, error) {
 	page := s.page.Context(ctx)
 	searchURL := makeSearchURL(keyword)
 	page.MustNavigate(searchURL).MustWaitLoad()
+	return s.collectResults(page, filters...)
+}
 
+func (s *SearchAction) searchByUI(page *hrod.Page, keyword string) error {
+	page.MustNavigate("https://www.xiaohongshu.com/explore").MustWaitLoad()
+
+	input, err := page.Timeout(15 * time.Second).Element(SelectorSearchInput)
+	if err != nil {
+		return fmt.Errorf("未找到搜索框: %w", err)
+	}
+	if err := input.Click(proto.InputMouseButtonLeft, 1); err != nil {
+		return fmt.Errorf("点击搜索框失败: %w", err)
+	}
+	page.MustEval(`(selector) => {
+		const el = document.querySelector(selector);
+		if (!el) return;
+		el.focus();
+		el.value = "";
+		el.dispatchEvent(new Event("input", { bubbles: true }));
+	}`, SelectorSearchInput)
+	if err := page.SleepRandom(300*time.Millisecond, 1200*time.Millisecond); err != nil {
+		return err
+	}
+	if err := input.Input(keyword); err != nil {
+		return fmt.Errorf("输入关键词失败: %w", err)
+	}
+	if err := page.SleepRandom(500*time.Millisecond, 2*time.Second); err != nil {
+		return err
+	}
+	if err := page.Actor().Keyboard.Press(rodinput.Enter); err != nil {
+		return fmt.Errorf("提交搜索失败: %w", err)
+	}
+
+	deadline := time.Now().Add(12 * time.Second).UnixMilli()
+	page.MustWait(`(deadline) => {
+		const feeds = window.__INITIAL_STATE__?.search?.feeds;
+		const data = feeds?.value !== undefined ? feeds.value : feeds?._value;
+		const hasStateFeeds = Array.isArray(data) && data.length > 0;
+		const hasVisibleCards = document.querySelectorAll("section.note-item, .note-item, .feeds-container section, .note-list section").length > 0;
+		return hasStateFeeds || hasVisibleCards || Date.now() >= deadline;
+	}`, deadline)
+	return nil
+}
+
+func (s *SearchAction) collectResults(page *hrod.Page, filters ...FilterOption) ([]Feed, error) {
 	// 如果有筛选条件，则应用筛选
 	if len(filters) > 0 {
 		// 将所有 FilterOption 转换为内部筛选选项
@@ -224,7 +283,8 @@ func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...Fi
 			}
 		}
 
-		// 记录关闭筛选面板前的 feeds 数据长度，避免直接返回旧的搜索结果。
+		// 记录关闭筛选面板前的 DOM 卡片和 state 长度，避免直接返回旧的搜索结果。
+		previousDOMCardCount := page.MustEval(`(selector) => document.querySelectorAll(selector).length`, SelectorFeedCard).Int()
 		previousFeedsJSONLength := page.MustEval(`() => {
 			const feeds = window.__INITIAL_STATE__?.search?.feeds;
 			const data = feeds?.value !== undefined ? feeds.value : feeds?._value;
@@ -240,14 +300,21 @@ func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...Fi
 		// page keeps background requests/DOM updates active, so WaitStable may
 		// never resolve even though results are ready.
 		// 超过 5 秒则返回当前可用结果。
-		page.MustWait(`(previousFeedsJSONLength, deadline) => {
+		page.MustWait(`(selector, previousDOMCardCount, previousFeedsJSONLength, deadline) => {
+			const currentDOMCardCount = document.querySelectorAll(selector).length;
 			const feeds = window.__INITIAL_STATE__?.search?.feeds;
 			const data = feeds?.value !== undefined ? feeds.value : feeds?._value;
-			return (Array.isArray(data) && JSON.stringify(data).length !== previousFeedsJSONLength) ||
+			return currentDOMCardCount !== previousDOMCardCount ||
+				(Array.isArray(data) && JSON.stringify(data).length !== previousFeedsJSONLength) ||
 				Date.now() >= deadline;
-		}`, previousFeedsJSONLength, time.Now().Add(5*time.Second).UnixMilli())
+		}`, SelectorFeedCard, previousDOMCardCount, previousFeedsJSONLength, time.Now().Add(5*time.Second).UnixMilli())
 	}
 
+	if feeds, err := ExtractSearchFeedsFromDOM(page); err == nil && len(feeds) > 0 {
+		return feeds, nil
+	}
+
+	// DOM 提取失败时降级到 __INITIAL_STATE__，兼容页面结构变动或虚拟列表未渲染的情况。
 	result := page.MustEval(`() => {
 		if (window.__INITIAL_STATE__ &&
 		    window.__INITIAL_STATE__.search &&

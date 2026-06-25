@@ -36,15 +36,30 @@ const (
 )
 
 type interactAction struct {
-	page *hrod.Page
+	page  *hrod.Page
+	state *ActionStateStore
 }
 
 func newInteractAction(page *hrod.Page) *interactAction {
 	return &interactAction{page: page}
 }
 
+func newInteractActionWithState(page *hrod.Page, state *ActionStateStore) *interactAction {
+	return &interactAction{page: page, state: state}
+}
+
 func (a *interactAction) preparePage(ctx context.Context, actionType interactActionType, feedID, xsecToken string) (*hrod.Page, error) {
 	page := a.page.Context(ctx).Timeout(60 * time.Second)
+	if a.state != nil {
+		if err := a.state.ValidateInteraction(feedID, interactionValidationAction(actionType)); err != nil {
+			return nil, fmt.Errorf("%s前置校验失败: %w", actionType, err)
+		}
+		if !isCurrentFeedDetail(page, feedID) {
+			return nil, fmt.Errorf("%s前置校验失败: 当前页面不是最近打开的笔记 %s", actionType, feedID)
+		}
+		return page, nil
+	}
+
 	url := makeFeedDetailURL(feedID, xsecToken)
 	logrus.Infof("Opening feed detail page for %s: %s", actionType, url)
 
@@ -55,6 +70,24 @@ func (a *interactAction) preparePage(ctx context.Context, actionType interactAct
 	}
 
 	return page, nil
+}
+
+func interactionValidationAction(actionType interactActionType) string {
+	switch actionType {
+	case actionLike, actionUnlike:
+		return "like"
+	case actionFavorite, actionUnfavorite:
+		return "favorite"
+	default:
+		return ""
+	}
+}
+
+func isCurrentFeedDetail(page *hrod.Page, feedID string) bool {
+	return page.MustEval(`(feedID) => {
+		const map = window.__INITIAL_STATE__?.note?.noteDetailMap;
+		return location.href.includes(feedID) || Boolean(map && Object.prototype.hasOwnProperty.call(map, feedID));
+	}`, feedID).Bool()
 }
 
 func (a *interactAction) performClick(page *hrod.Page, selector string) {
@@ -69,6 +102,10 @@ type LikeAction struct {
 
 func NewLikeAction(page *hrod.Page) *LikeAction {
 	return &LikeAction{interactAction: newInteractAction(page)}
+}
+
+func NewLikeActionWithState(page *hrod.Page, state *ActionStateStore) *LikeAction {
+	return &LikeAction{interactAction: newInteractActionWithState(page, state)}
 }
 
 // Like 点赞指定笔记，如果已点赞则直接返回
@@ -94,8 +131,7 @@ func (a *LikeAction) perform(ctx context.Context, feedID, xsecToken string, targ
 
 	liked, _, err := a.getInteractState(page, feedID)
 	if err != nil {
-		logrus.Warnf("failed to read interact state: %v (continue to try clicking)", err)
-		return a.toggleLike(page, feedID, targetLiked, actionType)
+		return fmt.Errorf("读取点赞状态失败，取消点击: %w", err)
 	}
 
 	if targetLiked && liked {
@@ -118,31 +154,17 @@ func (a *LikeAction) toggleLike(page *hrod.Page, feedID string, targetLiked bool
 
 	liked, _, err := a.getInteractState(page, feedID)
 	if err != nil {
-		logrus.Warnf("验证%s状态失败: %v", actionType, err)
-		return nil
+		return fmt.Errorf("state_unknown: 验证%s状态失败，取消立即二次点击: %w", actionType, err)
 	}
 	if liked == targetLiked {
 		logrus.Infof("feed %s %s成功", feedID, actionType)
+		if a.state != nil {
+			_ = a.state.RecordInteraction(feedID, interactionValidationAction(actionType))
+		}
 		return nil
 	}
 
-	logrus.Warnf("feed %s %s可能未成功，状态未变化，尝试再次点击", feedID, actionType)
-	a.performClick(page, SelectorLikeButton)
-	if err := page.Sleep(2 * time.Second); err != nil {
-		return err
-	}
-
-	liked, _, err = a.getInteractState(page, feedID)
-	if err != nil {
-		logrus.Warnf("第二次验证%s状态失败: %v", actionType, err)
-		return nil
-	}
-	if liked == targetLiked {
-		logrus.Infof("feed %s 第二次点击%s成功", feedID, actionType)
-		return nil
-	}
-
-	return nil
+	return fmt.Errorf("state_unknown: %s后状态未确认，取消立即二次点击", actionType)
 }
 
 // FavoriteAction 负责处理收藏相关交互
@@ -152,6 +174,10 @@ type FavoriteAction struct {
 
 func NewFavoriteAction(page *hrod.Page) *FavoriteAction {
 	return &FavoriteAction{interactAction: newInteractAction(page)}
+}
+
+func NewFavoriteActionWithState(page *hrod.Page, state *ActionStateStore) *FavoriteAction {
+	return &FavoriteAction{interactAction: newInteractActionWithState(page, state)}
 }
 
 // Favorite 收藏指定笔记，如果已收藏则直接返回
@@ -177,8 +203,7 @@ func (a *FavoriteAction) perform(ctx context.Context, feedID, xsecToken string, 
 
 	_, collected, err := a.getInteractState(page, feedID)
 	if err != nil {
-		logrus.Warnf("failed to read interact state: %v (continue to try clicking)", err)
-		return a.toggleFavorite(page, feedID, targetCollected, actionType)
+		return fmt.Errorf("读取收藏状态失败，取消点击: %w", err)
 	}
 
 	if targetCollected && collected {
@@ -201,35 +226,24 @@ func (a *FavoriteAction) toggleFavorite(page *hrod.Page, feedID string, targetCo
 
 	_, collected, err := a.getInteractState(page, feedID)
 	if err != nil {
-		logrus.Warnf("验证%s状态失败: %v", actionType, err)
-		return nil
+		return fmt.Errorf("state_unknown: 验证%s状态失败，取消立即二次点击: %w", actionType, err)
 	}
 	if collected == targetCollected {
 		logrus.Infof("feed %s %s成功", feedID, actionType)
+		if a.state != nil {
+			_ = a.state.RecordInteraction(feedID, interactionValidationAction(actionType))
+		}
 		return nil
 	}
 
-	logrus.Warnf("feed %s %s可能未成功，状态未变化，尝试再次点击", feedID, actionType)
-	a.performClick(page, SelectorCollectButton)
-	if err := page.Sleep(2 * time.Second); err != nil {
-		return err
-	}
-
-	_, collected, err = a.getInteractState(page, feedID)
-	if err != nil {
-		logrus.Warnf("第二次验证%s状态失败: %v", actionType, err)
-		return nil
-	}
-	if collected == targetCollected {
-		logrus.Infof("feed %s 第二次点击%s成功", feedID, actionType)
-		return nil
-	}
-
-	return nil
+	return fmt.Errorf("state_unknown: %s后状态未确认，取消立即二次点击", actionType)
 }
 
-// getInteractState 从 __INITIAL_STATE__ 读取笔记的点赞/收藏状态
+// getInteractState 优先从渲染后的按钮状态读取，失败时降级到 __INITIAL_STATE__。
 func (a *interactAction) getInteractState(page *hrod.Page, feedID string) (liked bool, collected bool, err error) {
+	if liked, collected, err := ExtractInteractStateFromDOM(page, feedID); err == nil {
+		return liked, collected, nil
+	}
 
 	result := page.MustEval(`() => {
 		if (window.__INITIAL_STATE__ &&

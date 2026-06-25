@@ -100,6 +100,37 @@ type FavoriteFeedArgs struct {
 	Unfavorite bool   `json:"unfavorite,omitempty" jsonschema:"是否取消收藏，true为取消收藏，false或未设置则为收藏"`
 }
 
+type BrowseSessionIDArgs struct {
+	SessionID string `json:"session_id" jsonschema:"浏览会话ID，由create_browse_session返回"`
+}
+
+type SessionSearchArgs struct {
+	SessionID string       `json:"session_id" jsonschema:"浏览会话ID，由create_browse_session返回"`
+	Keyword   string       `json:"keyword" jsonschema:"搜索关键词"`
+	Filters   FilterOption `json:"filters,omitempty" jsonschema:"筛选选项"`
+}
+
+type SessionOpenNoteArgs struct {
+	SessionID string `json:"session_id" jsonschema:"浏览会话ID，由create_browse_session返回"`
+	ResultRef string `json:"result_ref" jsonschema:"搜索结果引用。可传搜索结果的index或feed_id"`
+	XsecToken string `json:"xsec_token,omitempty" jsonschema:"访问令牌。通常可省略，session会使用搜索结果里的xsecToken"`
+}
+
+type SessionReadArgs struct {
+	SessionID  string `json:"session_id" jsonschema:"浏览会话ID，由create_browse_session返回"`
+	MinSeconds int    `json:"min_seconds,omitempty" jsonschema:"最短阅读秒数，默认20秒"`
+}
+
+type SessionLikeArgs struct {
+	SessionID string `json:"session_id" jsonschema:"浏览会话ID，由create_browse_session返回"`
+	Unlike    bool   `json:"unlike,omitempty" jsonschema:"是否取消点赞，true为取消点赞，false或未设置则为点赞"`
+}
+
+type SessionCommentArgs struct {
+	SessionID string `json:"session_id" jsonschema:"浏览会话ID，由create_browse_session返回"`
+	Content   string `json:"content" jsonschema:"评论内容"`
+}
+
 // InitMCPServer 初始化 MCP Server
 func InitMCPServer(appServer *AppServer) *mcp.Server {
 	// 创建 MCP Server
@@ -440,7 +471,135 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 		}),
 	)
 
-	logrus.Infof("Registered %d MCP tools", 13)
+	// 工具 14: 创建浏览会话
+	mcp.AddTool(server,
+		&mcp.Tool{
+			Name:        "create_browse_session",
+			Description: "创建一个保留同一浏览器页面的浏览会话，用于连续执行搜索、打开、阅读、互动和返回",
+			Annotations: &mcp.ToolAnnotations{
+				Title:        "Create Browse Session",
+				ReadOnlyHint: true,
+			},
+		},
+		withPanicRecovery("create_browse_session", func(ctx context.Context, req *mcp.CallToolRequest, _ any) (*mcp.CallToolResult, any, error) {
+			result := appServer.handleCreateBrowseSession(ctx)
+			return convertToMCPResult(result), nil, nil
+		}),
+	)
+
+	// 工具 15: session 搜索
+	mcp.AddTool(server,
+		&mcp.Tool{
+			Name:        "session_search",
+			Description: "在浏览会话内通过真实UI搜索内容，并返回可用于session_open_note的结果引用",
+			Annotations: &mcp.ToolAnnotations{
+				Title:        "Session Search",
+				ReadOnlyHint: true,
+			},
+		},
+		withPanicRecovery("session_search", func(ctx context.Context, req *mcp.CallToolRequest, args SessionSearchArgs) (*mcp.CallToolResult, any, error) {
+			result := appServer.handleSessionSearch(ctx, args)
+			return convertToMCPResult(result), nil, nil
+		}),
+	)
+
+	// 工具 16: session 打开笔记
+	mcp.AddTool(server,
+		&mcp.Tool{
+			Name:        "session_open_note",
+			Description: "在浏览会话内从搜索结果卡片点击打开笔记。result_ref可传搜索结果index或feed_id",
+			Annotations: &mcp.ToolAnnotations{
+				Title:        "Session Open Note",
+				ReadOnlyHint: true,
+			},
+		},
+		withPanicRecovery("session_open_note", func(ctx context.Context, req *mcp.CallToolRequest, args SessionOpenNoteArgs) (*mcp.CallToolResult, any, error) {
+			result := appServer.handleSessionOpenNote(ctx, args)
+			return convertToMCPResult(result), nil, nil
+		}),
+	)
+
+	// 工具 17: session 阅读
+	mcp.AddTool(server,
+		&mcp.Tool{
+			Name:        "session_read",
+			Description: "在浏览会话内阅读当前已打开笔记，记录阅读和滚动状态",
+			Annotations: &mcp.ToolAnnotations{
+				Title:        "Session Read",
+				ReadOnlyHint: true,
+			},
+		},
+		withPanicRecovery("session_read", func(ctx context.Context, req *mcp.CallToolRequest, args SessionReadArgs) (*mcp.CallToolResult, any, error) {
+			result := appServer.handleSessionRead(ctx, args)
+			return convertToMCPResult(result), nil, nil
+		}),
+	)
+
+	// 工具 18: session 点赞
+	mcp.AddTool(server,
+		&mcp.Tool{
+			Name:        "session_like",
+			Description: "在浏览会话内点赞或取消点赞当前已打开且已阅读的笔记",
+			Annotations: &mcp.ToolAnnotations{
+				Title:           "Session Like",
+				DestructiveHint: boolPtr(true),
+			},
+		},
+		withPanicRecovery("session_like", func(ctx context.Context, req *mcp.CallToolRequest, args SessionLikeArgs) (*mcp.CallToolResult, any, error) {
+			result := appServer.handleSessionLike(ctx, args)
+			return convertToMCPResult(result), nil, nil
+		}),
+	)
+
+	// 工具 19: session 评论
+	mcp.AddTool(server,
+		&mcp.Tool{
+			Name:        "session_comment",
+			Description: "在浏览会话内评论当前已打开且已阅读的笔记",
+			Annotations: &mcp.ToolAnnotations{
+				Title:           "Session Comment",
+				DestructiveHint: boolPtr(true),
+			},
+		},
+		withPanicRecovery("session_comment", func(ctx context.Context, req *mcp.CallToolRequest, args SessionCommentArgs) (*mcp.CallToolResult, any, error) {
+			result := appServer.handleSessionComment(ctx, args)
+			return convertToMCPResult(result), nil, nil
+		}),
+	)
+
+	// 工具 20: session 返回
+	mcp.AddTool(server,
+		&mcp.Tool{
+			Name:        "session_back",
+			Description: "在浏览会话内从笔记详情返回来源页",
+			Annotations: &mcp.ToolAnnotations{
+				Title:        "Session Back",
+				ReadOnlyHint: true,
+			},
+		},
+		withPanicRecovery("session_back", func(ctx context.Context, req *mcp.CallToolRequest, args BrowseSessionIDArgs) (*mcp.CallToolResult, any, error) {
+			result := appServer.handleSessionBack(ctx, args)
+			return convertToMCPResult(result), nil, nil
+		}),
+	)
+
+	// 工具 21: 关闭浏览会话
+	mcp.AddTool(server,
+		&mcp.Tool{
+			Name:        "close_browse_session",
+			Description: "关闭浏览会话并释放浏览器页面",
+			Annotations: &mcp.ToolAnnotations{
+				Title:           "Close Browse Session",
+				DestructiveHint: boolPtr(true),
+			},
+		},
+		withPanicRecovery("close_browse_session", func(ctx context.Context, req *mcp.CallToolRequest, args BrowseSessionIDArgs) (*mcp.CallToolResult, any, error) {
+			result := appServer.handleCloseBrowseSession(ctx, args)
+			return convertToMCPResult(result), nil, nil
+		}),
+	)
+
+	logrus.Infof("Registered %d MCP tools", 21)
 }
 
 // convertToMCPResult 将自定义的 MCPToolResult 转换为官方 SDK 的格式

@@ -75,11 +75,16 @@ func DefaultCommentLoadConfig() CommentLoadConfig {
 }
 
 type FeedDetailAction struct {
-	page *hrod.Page
+	page  *hrod.Page
+	state *ActionStateStore
 }
 
 func NewFeedDetailAction(page *hrod.Page) *FeedDetailAction {
 	return &FeedDetailAction{page: page}
+}
+
+func NewFeedDetailActionWithState(page *hrod.Page, state *ActionStateStore) *FeedDetailAction {
+	return &FeedDetailAction{page: page, state: state}
 }
 
 // ========== 主要业务逻辑 ==========
@@ -97,29 +102,27 @@ func (f *FeedDetailAction) GetFeedDetailWithConfig(ctx context.Context, feedID, 
 	logrus.Infof("配置: 点击更多=%v, 回复阈值=%d, 最大评论数=%d, 滚动速度=%s",
 		config.ClickMoreReplies, config.MaxRepliesThreshold, config.MaxCommentItems, config.ScrollSpeed)
 
-	// XHS continuously mutates the document after navigation. Waiting for DOM
-	// stability can therefore consume the full request deadline even though the
-	// note state is already available.
-	err := retry.Do(
-		func() error {
-			if err := page.Navigate(url); err != nil {
-				return fmt.Errorf("navigate feed detail: %w", err)
-			}
-			if err := page.WaitLoad(); err != nil {
-				return fmt.Errorf("wait for feed detail load: %w", err)
-			}
-			return nil
-		},
-		retry.Attempts(3),
-		retry.Delay(500*time.Millisecond),
-		retry.MaxJitter(1000*time.Millisecond),
-		retry.OnRetry(func(n uint, err error) {
-			logrus.Debugf("页面导航重试 #%d: %v", n, err)
-		}),
-	)
-	if err != nil {
-		logrus.Errorf("页面导航失败: %v", err)
-		return nil, err
+	opener := NewNoteOpenActionWithState(page, f.state)
+	if err := opener.OpenFromCards(ctx, feedID, xsecToken, ""); err != nil {
+		logrus.Warnf("从卡片打开笔记失败，使用详情 URL 兜底: %v", err)
+		// XHS continuously mutates the document after navigation. Waiting for DOM
+		// stability can therefore consume the full request deadline even though the
+		// note state is already available.
+		err := retry.Do(
+			func() error {
+				return opener.OpenByURLFallback(ctx, feedID, xsecToken)
+			},
+			retry.Attempts(3),
+			retry.Delay(500*time.Millisecond),
+			retry.MaxJitter(1000*time.Millisecond),
+			retry.OnRetry(func(n uint, err error) {
+				logrus.Debugf("页面导航重试 #%d: %v", n, err)
+			}),
+		)
+		if err != nil {
+			logrus.Errorf("页面导航失败: %v", err)
+			return nil, err
+		}
 	}
 	if err := sleepRandom(page, 1000, 1000); err != nil {
 		return nil, err
@@ -127,6 +130,14 @@ func (f *FeedDetailAction) GetFeedDetailWithConfig(ctx context.Context, feedID, 
 
 	if err := checkPageAccessible(page); err != nil {
 		return nil, err
+	}
+	readDuration := 20 * time.Second
+	if loadAllComments {
+		readDuration = 45 * time.Second
+	}
+	reader := NewReadStageAction(page, f.state)
+	if err := reader.Read(ctx, feedID, readDuration); err != nil {
+		return nil, fmt.Errorf("阅读阶段失败: %w", err)
 	}
 	if !loadAllComments {
 		return f.extractFeedDetail(page, feedID)
@@ -143,9 +154,11 @@ func (f *FeedDetailAction) GetFeedDetailWithConfig(ctx context.Context, feedID, 
 	// Bound the scroll loop independently so the main page context remains
 	// usable for extracting a partial result after comment loading times out.
 	commentPage := page.Timeout(commentLoadTimeout)
+	commentStart := time.Now()
 	if err := f.loadAllCommentsWithConfig(commentPage, config); err != nil {
 		logrus.Warnf("加载全部评论失败: %v", err)
 	}
+	reader.RecordCommentDwell(feedID, time.Since(commentStart), true)
 
 	detail, err := f.extractFeedDetail(page, feedID)
 	if err != nil {
@@ -1057,28 +1070,41 @@ func checkPageAccessible(page *hrod.Page) error {
 // ========== 数据提取 ==========
 
 func (f *FeedDetailAction) extractFeedDetail(page *hrod.Page, feedID string) (*FeedDetailResponse, error) {
-	page.MustWait(`(id) => {
+	page.MustWait(`(id, selector, deadline) => {
 		const s = window.__INITIAL_STATE__;
-		return s?.note?.noteDetailMap?.[id] != null;
-	}`, feedID)
+		const hasState = s?.note?.noteDetailMap?.[id] != null;
+		const hasDOM = document.querySelector(selector) !== null;
+		return hasDOM || hasState || Date.now() >= deadline;
+	}`, feedID, SelectorFeedDetailReady, time.Now().Add(10*time.Second).UnixMilli())
 
 	deadline := time.Now().Add(initialCommentStateTimeout)
+	var lastErr error
 
 	for {
-		response, err := readFeedDetailState(page, feedID)
+		response, err := ExtractFeedDetailFromDOM(page, feedID)
 		if err != nil {
-			return nil, err
+			lastErr = err
+			// DOM 结构变更或虚拟列表未渲染时，降级读取 __INITIAL_STATE__。
+			response, err = readFeedDetailState(page, feedID)
+			if err != nil {
+				lastErr = err
+			}
 		}
 
 		// A non-zero displayed count with an empty list is a transient state while
 		// the web client hydrates its comments ref. Do not return that incomplete
 		// snapshot as a successful result. A genuinely empty or unavailable list
 		// still returns after the short bounded wait.
-		if !shouldWaitForInitialComments(response) || time.Now().After(deadline) {
+		if response != nil && (!shouldWaitForInitialComments(response) || time.Now().After(deadline)) {
 			return response, nil
 		}
+		if time.Now().After(deadline) && lastErr != nil {
+			return nil, lastErr
+		}
 
-		logrus.Debugf("评论状态尚未就绪: note=%s, reported=%s", feedID, response.Note.InteractInfo.CommentCount)
+		if response != nil {
+			logrus.Debugf("评论 DOM 尚未就绪: note=%s, reported=%s", feedID, response.Note.InteractInfo.CommentCount)
+		}
 		if err := page.Sleep(commentPollInterval); err != nil {
 			return nil, err
 		}

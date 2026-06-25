@@ -14,6 +14,8 @@ package hrod
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/go-rod/rod"
@@ -399,12 +401,18 @@ func (el *Element) Page() *Page {
 
 // Click performs a human-like click.
 func (el *Element) Click(button proto.InputMouseButton, clickCount int) error {
+	if err := el.waitInteractable(5*time.Second, true); err != nil {
+		return err
+	}
 	return el.actor.Mouse.ClickWithOptions(el.Rod, button, clickCount)
 }
 
 // ClickNoScroll performs a human-like click without scrolling the element into
 // view first. Useful for sticky/fixed elements that are already visible.
 func (el *Element) ClickNoScroll() error {
+	if err := el.waitInteractable(5*time.Second, false); err != nil {
+		return err
+	}
 	return el.actor.Mouse.ClickNoScroll(el.Rod)
 }
 
@@ -468,6 +476,137 @@ func (el *Element) MustScrollIntoView() *Element {
 		panic(err)
 	}
 	return el
+}
+
+type interactableSnapshot struct {
+	Connected bool    `json:"connected"`
+	Visible   bool    `json:"visible"`
+	Clickable bool    `json:"clickable"`
+	Left      float64 `json:"left"`
+	Top       float64 `json:"top"`
+	Width     float64 `json:"width"`
+	Height    float64 `json:"height"`
+	Reason    string  `json:"reason"`
+}
+
+// WaitInteractable 等待元素进入可点击状态。页面频繁重排时会重新测量，避免点到旧位置。
+func (el *Element) WaitInteractable(timeout time.Duration) error {
+	return el.waitInteractable(timeout, true)
+}
+
+func (el *Element) waitInteractable(timeout time.Duration, scroll bool) error {
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	deadline := time.Now().Add(timeout)
+	var last interactableSnapshot
+	var lastErr error
+
+	for attempt := 0; time.Now().Before(deadline); attempt++ {
+		if scroll {
+			if err := el.ScrollIntoView(); err != nil {
+				lastErr = err
+				_ = el.actor.Sleep(120 * time.Millisecond)
+				continue
+			}
+		}
+
+		first, err := el.interactableSnapshot()
+		if err != nil {
+			lastErr = err
+			_ = el.actor.Sleep(120 * time.Millisecond)
+			continue
+		}
+		last = first
+		if !first.Connected || !first.Visible || !first.Clickable {
+			lastErr = fmt.Errorf("元素不可点击: %s", first.Reason)
+			_ = el.actor.Sleep(120 * time.Millisecond)
+			continue
+		}
+
+		// DOM 变化会导致位置漂移。短暂停顿后重新测量，确认中心点稳定。
+		if err := el.actor.Sleep(160 * time.Millisecond); err != nil {
+			return err
+		}
+		second, err := el.interactableSnapshot()
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		last = second
+		if second.Connected && second.Visible && second.Clickable && snapshotStable(first, second) {
+			return nil
+		}
+		lastErr = fmt.Errorf("元素尚未稳定: %s", second.Reason)
+
+		if attempt%2 == 1 {
+			_ = el.actor.Sleep(220 * time.Millisecond)
+		}
+	}
+
+	if lastErr != nil {
+		return lastErr
+	}
+	return fmt.Errorf("等待元素可点击超时: visible=%v clickable=%v stable=false reason=%s", last.Visible, last.Clickable, last.Reason)
+}
+
+func (el *Element) interactableSnapshot() (interactableSnapshot, error) {
+	result, err := el.Eval(`() => {
+		const rect = this.getBoundingClientRect();
+		const style = window.getComputedStyle(this);
+		const connected = this.isConnected;
+		const visible = connected &&
+			style.visibility !== "hidden" &&
+			style.display !== "none" &&
+			Number(style.opacity || "1") > 0 &&
+			rect.width > 1 && rect.height > 1 &&
+			rect.bottom > 0 && rect.right > 0 &&
+			rect.top < window.innerHeight && rect.left < window.innerWidth;
+		const x = Math.min(Math.max(rect.left + rect.width / 2, 1), window.innerWidth - 1);
+		const y = Math.min(Math.max(rect.top + rect.height / 2, 1), window.innerHeight - 1);
+		const target = visible ? document.elementFromPoint(x, y) : null;
+		const clickable = visible && target && (target === this || this.contains(target));
+		let reason = "";
+		if (!connected) reason = "detached";
+		else if (!visible) reason = "not_visible";
+		else if (!clickable) reason = "obscured";
+		return JSON.stringify({
+			connected,
+			visible,
+			clickable,
+			left: rect.left,
+			top: rect.top,
+			width: rect.width,
+			height: rect.height,
+			reason
+		});
+	}`)
+	if err != nil {
+		return interactableSnapshot{}, err
+	}
+	if result == nil {
+		return interactableSnapshot{}, fmt.Errorf("元素可点击性检查无结果")
+	}
+	var snapshot interactableSnapshot
+	if err := json.Unmarshal([]byte(result.Value.Str()), &snapshot); err != nil {
+		return interactableSnapshot{}, err
+	}
+	return snapshot, nil
+}
+
+func snapshotStable(a, b interactableSnapshot) bool {
+	const tolerance = 1.5
+	return absFloat(a.Left-b.Left) <= tolerance &&
+		absFloat(a.Top-b.Top) <= tolerance &&
+		absFloat(a.Width-b.Width) <= tolerance &&
+		absFloat(a.Height-b.Height) <= tolerance
+}
+
+func absFloat(v float64) float64 {
+	if v < 0 {
+		return -v
+	}
+	return v
 }
 
 // Element finds a child element and returns a humanized wrapper.
