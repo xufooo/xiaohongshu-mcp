@@ -7,13 +7,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/xpzouying/xiaohongshu-mcp/configs"
 	hrod "github.com/xpzouying/xiaohongshu-mcp/pkg/humanize/rod"
 )
 
 const (
 	pageCloseTimeout      = 2 * time.Second
 	browserHealthTimeout  = 2 * time.Second
-	defaultStartupTimeout = 45 * time.Second
+	defaultStartupTimeout = 120 * time.Second
 )
 
 // BrowserFactory 创建浏览器实例。
@@ -185,11 +186,15 @@ func (m *Manager) getBrowser(ctx context.Context) (*hrod.Browser, error) {
 		}
 		started := m.starting
 		if started == nil {
-			started = newBrowserStartup(defaultStartupTimeout)
+			startupTimeout := defaultStartupTimeout
+			if configuredTimeout := configs.GetBrowserStartupTimeout(); configuredTimeout > 0 {
+				startupTimeout = configuredTimeout
+			}
+			started = newBrowserStartup(startupTimeout)
 			m.starting = started
 			m.startErr = nil
 			go m.startBrowser(started)
-			time.AfterFunc(defaultStartupTimeout, func() {
+			time.AfterFunc(startupTimeout, func() {
 				m.failStartup(started)
 			})
 		}
