@@ -193,8 +193,8 @@ func (s *SearchAction) searchByUI(page *hrod.Page, keyword string) error {
 		return fmt.Errorf("导航探索页失败: %w", err)
 	}
 
-	// 等搜索框出现（15s超时），不使用WaitLoad因为小红书是SPA
-	input, err := page.Timeout(15 * time.Second).Element(SelectorSearchInput)
+	// 等搜索框出现（30s超时），不使用WaitLoad因为小红书是SPA
+	input, err := page.Timeout(30 * time.Second).Element(SelectorSearchInput)
 	if err != nil {
 		return fmt.Errorf("未找到搜索框: %w", err)
 	}
