@@ -93,13 +93,11 @@ func (s *ActionStateStore) Save(state ActionState) error {
 func (s *ActionStateStore) RecordOpen(feedID, source string) error {
 	return s.update(func(state *ActionState) {
 		now := time.Now()
-		if state.LastOpenedFeedID != feedID {
-			state.ReadDuration = 0
-			state.FeedScrollCount = 0
-			state.CommentDwellTime = 0
-			state.CommentScrollCount = 0
-			state.InteractionsOnFeed = 0
-		}
+		state.ReadDuration = 0
+		state.FeedScrollCount = 0
+		state.CommentDwellTime = 0
+		state.CommentScrollCount = 0
+		state.InteractionsOnFeed = 0
 		state.LastAction = "open_note"
 		state.LastActionAt = now
 		state.LastOpenedFeedID = feedID
@@ -126,6 +124,7 @@ func (s *ActionStateStore) RecordFeedScroll(feedID string, count int) error {
 	return s.update(func(state *ActionState) {
 		if state.LastOpenedFeedID == feedID {
 			state.FeedScrollCount += count
+			state.LastReadAt = time.Now()
 		}
 	})
 }

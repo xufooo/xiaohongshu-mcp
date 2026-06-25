@@ -665,6 +665,7 @@ func newBrowser() *hrod.Browser {
 		browser.WithBinPath(configs.GetBinPath()),
 		browser.WithProfileDir(configs.GetProfileDir()),
 		browser.WithCloakBrowser(configs.UseCloakBrowser()),
+		browser.WithCloakLauncherProfile(configs.CloakLauncherProfile()),
 		browser.WithExtraArgs(configs.GetBrowserExtraArgs()),
 	)
 }
