@@ -20,6 +20,8 @@ import (
 // XiaohongshuService 小红书业务服务
 type XiaohongshuService struct {
 	browserManager *browser.Manager
+	actionState    *xiaohongshu.ActionStateStore
+	browseSessions *xiaohongshu.BrowseSessionManager
 }
 
 // NewXiaohongshuService 创建小红书服务实例
@@ -29,6 +31,12 @@ func NewXiaohongshuService() *XiaohongshuService {
 			newBrowser,
 			browser.WithIdleTimeout(configs.GetBrowserIdleTimeout()),
 		),
+		actionState: xiaohongshu.DefaultActionStateStore(
+			configs.Username,
+			configs.GetProfileDir(),
+			cookies.GetCookiesFilePath(),
+		),
+		browseSessions: xiaohongshu.NewBrowseSessionManager(xiaohongshu.DefaultBrowseSessionTimeout),
 	}
 }
 
@@ -392,7 +400,7 @@ func (s *XiaohongshuService) SearchFeeds(ctx context.Context, keyword string, fi
 	}
 	defer s.browserManager.Release(page)
 
-	action := xiaohongshu.NewSearchAction(page.Context(ctx))
+	action := xiaohongshu.NewSearchActionWithState(page.Context(ctx), s.actionState)
 
 	feeds, err := action.Search(ctx, keyword, filters...)
 	if err != nil {
@@ -421,7 +429,7 @@ func (s *XiaohongshuService) GetFeedDetailWithConfig(ctx context.Context, feedID
 	defer s.browserManager.Release(page)
 
 	// 创建 Feed 详情 action
-	action := xiaohongshu.NewFeedDetailAction(page.Context(ctx))
+	action := xiaohongshu.NewFeedDetailActionWithState(page.Context(ctx), s.actionState)
 
 	// 获取 Feed 详情
 	result, err := action.GetFeedDetailWithConfig(ctx, feedID, xsecToken, loadAllComments, config)
@@ -469,7 +477,7 @@ func (s *XiaohongshuService) PostCommentToFeed(ctx context.Context, feedID, xsec
 	}
 	defer s.browserManager.Release(page)
 
-	action := xiaohongshu.NewCommentFeedAction(page.Context(ctx))
+	action := xiaohongshu.NewCommentFeedActionWithState(page.Context(ctx), s.actionState)
 
 	if err := action.PostComment(ctx, feedID, xsecToken, content); err != nil {
 		return nil, err
@@ -486,7 +494,7 @@ func (s *XiaohongshuService) LikeFeed(ctx context.Context, feedID, xsecToken str
 	}
 	defer s.browserManager.Release(page)
 
-	action := xiaohongshu.NewLikeAction(page.Context(ctx))
+	action := xiaohongshu.NewLikeActionWithState(page.Context(ctx), s.actionState)
 	if err := action.Like(ctx, feedID, xsecToken); err != nil {
 		return nil, err
 	}
@@ -501,7 +509,7 @@ func (s *XiaohongshuService) UnlikeFeed(ctx context.Context, feedID, xsecToken s
 	}
 	defer s.browserManager.Release(page)
 
-	action := xiaohongshu.NewLikeAction(page.Context(ctx))
+	action := xiaohongshu.NewLikeActionWithState(page.Context(ctx), s.actionState)
 	if err := action.Unlike(ctx, feedID, xsecToken); err != nil {
 		return nil, err
 	}
@@ -516,7 +524,7 @@ func (s *XiaohongshuService) FavoriteFeed(ctx context.Context, feedID, xsecToken
 	}
 	defer s.browserManager.Release(page)
 
-	action := xiaohongshu.NewFavoriteAction(page.Context(ctx))
+	action := xiaohongshu.NewFavoriteActionWithState(page.Context(ctx), s.actionState)
 	if err := action.Favorite(ctx, feedID, xsecToken); err != nil {
 		return nil, err
 	}
@@ -531,7 +539,7 @@ func (s *XiaohongshuService) UnfavoriteFeed(ctx context.Context, feedID, xsecTok
 	}
 	defer s.browserManager.Release(page)
 
-	action := xiaohongshu.NewFavoriteAction(page.Context(ctx))
+	action := xiaohongshu.NewFavoriteActionWithState(page.Context(ctx), s.actionState)
 	if err := action.Unfavorite(ctx, feedID, xsecToken); err != nil {
 		return nil, err
 	}
@@ -546,7 +554,7 @@ func (s *XiaohongshuService) ReplyCommentToFeed(ctx context.Context, feedID, xse
 	}
 	defer s.browserManager.Release(page)
 
-	action := xiaohongshu.NewCommentFeedAction(page.Context(ctx))
+	action := xiaohongshu.NewCommentFeedActionWithState(page.Context(ctx), s.actionState)
 
 	if err := action.ReplyToComment(ctx, feedID, xsecToken, commentID, userID, content); err != nil {
 		return nil, err
@@ -559,6 +567,96 @@ func (s *XiaohongshuService) ReplyCommentToFeed(ctx context.Context, feedID, xse
 		Success:         true,
 		Message:         "评论回复成功",
 	}, nil
+}
+
+func (s *XiaohongshuService) CreateBrowseSession(ctx context.Context) (*xiaohongshu.BrowseSessionInfo, error) {
+	page, err := s.browserManager.Acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	session := s.browseSessions.Create(page, s.actionState, s.browserManager.Release)
+	info := session.Info()
+	return &info, nil
+}
+
+func (s *XiaohongshuService) CloseBrowseSession(id string) error {
+	return s.browseSessions.Close(id)
+}
+
+func (s *XiaohongshuService) SessionSearch(ctx context.Context, id, keyword string, filters ...xiaohongshu.FilterOption) (*FeedsListResponse, error) {
+	session, err := s.browseSessions.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	feeds, err := session.Search(ctx, keyword, filters...)
+	if err != nil {
+		return nil, err
+	}
+	return &FeedsListResponse{Feeds: feeds, Count: len(feeds)}, nil
+}
+
+func (s *XiaohongshuService) SessionOpenNote(ctx context.Context, id, resultRef, xsecToken string) (*xiaohongshu.BrowseSessionInfo, error) {
+	session, err := s.browseSessions.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	if err := session.OpenNote(ctx, resultRef, xsecToken); err != nil {
+		return nil, err
+	}
+	info := session.Info()
+	return &info, nil
+}
+
+func (s *XiaohongshuService) SessionRead(ctx context.Context, id string, minDuration time.Duration) (*xiaohongshu.BrowseSessionInfo, error) {
+	session, err := s.browseSessions.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	if err := session.Read(ctx, minDuration); err != nil {
+		return nil, err
+	}
+	info := session.Info()
+	return &info, nil
+}
+
+func (s *XiaohongshuService) SessionLike(ctx context.Context, id string, unlike bool) (*ActionResult, error) {
+	session, err := s.browseSessions.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	info := session.Info()
+	if err := session.Like(ctx, unlike); err != nil {
+		return nil, err
+	}
+	action := "点赞成功或已点赞"
+	if unlike {
+		action = "取消点赞成功或未点赞"
+	}
+	return &ActionResult{FeedID: info.CurrentFeedID, Success: true, Message: action}, nil
+}
+
+func (s *XiaohongshuService) SessionComment(ctx context.Context, id, content string) (*PostCommentResponse, error) {
+	session, err := s.browseSessions.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	info := session.Info()
+	if err := session.Comment(ctx, content); err != nil {
+		return nil, err
+	}
+	return &PostCommentResponse{FeedID: info.CurrentFeedID, Success: true, Message: "评论发表成功"}, nil
+}
+
+func (s *XiaohongshuService) SessionBack(ctx context.Context, id string) (*xiaohongshu.BrowseSessionInfo, error) {
+	session, err := s.browseSessions.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	if err := session.Back(ctx); err != nil {
+		return nil, err
+	}
+	info := session.Info()
+	return &info, nil
 }
 
 func newBrowser() *hrod.Browser {
@@ -599,6 +697,9 @@ func (s *XiaohongshuService) withBrowserPage(ctx context.Context, fn func(*hrod.
 
 // Close 关闭常驻浏览器。
 func (s *XiaohongshuService) Close(ctx context.Context) error {
+	if s.browseSessions != nil {
+		s.browseSessions.CloseAll()
+	}
 	return s.browserManager.Close(ctx)
 }
 

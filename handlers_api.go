@@ -55,12 +55,12 @@ func respondSuccess(c *gin.Context, data any, message string) {
 
 // checkRateLimit 检查速率限制，如果超限则返回 429 并阻止执行。
 // 注意：必须在 handler 中尽早调用，允许执行时会原子预占一次额度。
-func (s *AppServer) checkRateLimit(c *gin.Context) (canProceed bool) {
+func (s *AppServer) checkRateLimit(c *gin.Context, action ratelimit.Action) (canProceed bool) {
 	if s.rateLimiter == nil {
 		return true
 	}
 
-	info, wait, canProceed, err := s.rateLimiter.Reserve(c.Request.Context())
+	info, wait, canProceed, err := s.rateLimiter.ReserveAction(c.Request.Context(), action)
 	if err != nil {
 		logrus.Errorf("rate limiter check error: %v", err)
 		c.Set("rate_limit", &info)
@@ -95,12 +95,12 @@ type checkRateLimitResult struct {
 }
 
 // checkRateLimitInternal 通用速率限制检查（供 MCP handler 使用）。
-func (s *AppServer) checkRateLimitInternal(ctx context.Context) checkRateLimitResult {
+func (s *AppServer) checkRateLimitInternal(ctx context.Context, action ratelimit.Action) checkRateLimitResult {
 	if s.rateLimiter == nil {
 		return checkRateLimitResult{CanProceed: true}
 	}
 
-	info, wait, canProceed, err := s.rateLimiter.Reserve(ctx)
+	info, wait, canProceed, err := s.rateLimiter.ReserveAction(ctx, action)
 	if err != nil {
 		logrus.Errorf("rate limiter check error: %v", err)
 		return checkRateLimitResult{CanProceed: false, Info: info}
@@ -179,7 +179,7 @@ func (s *AppServer) deleteCookiesHandler(c *gin.Context) {
 
 // publishHandler 发布内容
 func (s *AppServer) publishHandler(c *gin.Context) {
-	if !s.checkRateLimit(c) {
+	if !s.checkRateLimit(c, ratelimit.ActionPublish) {
 		return
 	}
 	var req PublishRequest
@@ -202,7 +202,7 @@ func (s *AppServer) publishHandler(c *gin.Context) {
 
 // publishVideoHandler 发布视频内容
 func (s *AppServer) publishVideoHandler(c *gin.Context) {
-	if !s.checkRateLimit(c) {
+	if !s.checkRateLimit(c, ratelimit.ActionPublish) {
 		return
 	}
 	var req PublishVideoRequest
@@ -225,7 +225,7 @@ func (s *AppServer) publishVideoHandler(c *gin.Context) {
 
 // listFeedsHandler 获取Feeds列表
 func (s *AppServer) listFeedsHandler(c *gin.Context) {
-	if !s.checkRateLimit(c) {
+	if !s.checkRateLimit(c, ratelimit.ActionBrowse) {
 		return
 	}
 	// 获取 Feeds 列表
@@ -242,7 +242,7 @@ func (s *AppServer) listFeedsHandler(c *gin.Context) {
 
 // searchFeedsHandler 搜索Feeds
 func (s *AppServer) searchFeedsHandler(c *gin.Context) {
-	if !s.checkRateLimit(c) {
+	if !s.checkRateLimit(c, ratelimit.ActionSearch) {
 		return
 	}
 	var keyword string
@@ -283,7 +283,7 @@ func (s *AppServer) searchFeedsHandler(c *gin.Context) {
 
 // getFeedDetailHandler 获取Feed详情
 func (s *AppServer) getFeedDetailHandler(c *gin.Context) {
-	if !s.checkRateLimit(c) {
+	if !s.checkRateLimit(c, ratelimit.ActionOpenNote) {
 		return
 	}
 	var req FeedDetailRequest
@@ -322,7 +322,7 @@ func (s *AppServer) getFeedDetailHandler(c *gin.Context) {
 
 // userProfileHandler 用户主页
 func (s *AppServer) userProfileHandler(c *gin.Context) {
-	if !s.checkRateLimit(c) {
+	if !s.checkRateLimit(c, ratelimit.ActionBrowse) {
 		return
 	}
 	var req UserProfileRequest
@@ -346,7 +346,7 @@ func (s *AppServer) userProfileHandler(c *gin.Context) {
 
 // postCommentHandler 发表评论到Feed
 func (s *AppServer) postCommentHandler(c *gin.Context) {
-	if !s.checkRateLimit(c) {
+	if !s.checkRateLimit(c, ratelimit.ActionComment) {
 		return
 	}
 	var req PostCommentRequest
@@ -370,7 +370,7 @@ func (s *AppServer) postCommentHandler(c *gin.Context) {
 
 // replyCommentHandler 回复指定评论
 func (s *AppServer) replyCommentHandler(c *gin.Context) {
-	if !s.checkRateLimit(c) {
+	if !s.checkRateLimit(c, ratelimit.ActionReply) {
 		return
 	}
 	var req ReplyCommentRequest

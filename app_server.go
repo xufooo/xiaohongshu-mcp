@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/sirupsen/logrus"
+	"github.com/xpzouying/xiaohongshu-mcp/configs"
 	"github.com/xpzouying/xiaohongshu-mcp/pkg/ratelimit"
 )
 
@@ -27,7 +28,7 @@ type AppServer struct {
 func NewAppServer(xiaohongshuService *XiaohongshuService, opts ...AppServerOption) *AppServer {
 	appServer := &AppServer{
 		xiaohongshuService: xiaohongshuService,
-		rateLimiter:        ratelimit.New(ratelimit.DefaultConfig()),
+		rateLimiter:        ratelimit.New(configs.DefaultRateLimitConfig()),
 	}
 
 	for _, opt := range opts {

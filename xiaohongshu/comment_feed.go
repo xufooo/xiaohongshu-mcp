@@ -13,7 +13,8 @@ import (
 
 // CommentFeedAction 表示 Feed 评论动作
 type CommentFeedAction struct {
-	page *hrod.Page
+	page  *hrod.Page
+	state *ActionStateStore
 }
 
 // sleepForCommentStep adds a small human-like delay while preserving cancellation.
@@ -27,17 +28,14 @@ func NewCommentFeedAction(page *hrod.Page) *CommentFeedAction {
 	return &CommentFeedAction{page: page}
 }
 
+func NewCommentFeedActionWithState(page *hrod.Page, state *ActionStateStore) *CommentFeedAction {
+	return &CommentFeedAction{page: page, state: state}
+}
+
 // PostComment 发表评论到 Feed
 func (f *CommentFeedAction) PostComment(ctx context.Context, feedID, xsecToken, content string) error {
-	page := f.page.Context(ctx).Timeout(60 * time.Second)
-
-	url := makeFeedDetailURL(feedID, xsecToken)
-	logrus.Infof("打开 feed 详情页: %s", url)
-
-	// 导航到详情页
-	page.MustNavigate(url)
-	page.MustWaitLoad()
-	if err := sleepForCommentStep(page, 1500*time.Millisecond, 3*time.Second); err != nil {
+	page, err := f.preparePage(ctx, feedID, xsecToken, "comment", 60*time.Second)
+	if err != nil {
 		return err
 	}
 
@@ -94,6 +92,9 @@ func (f *CommentFeedAction) PostComment(ctx context.Context, feedID, xsecToken, 
 		return fmt.Errorf("评论提交未成功: %w", err)
 	}
 
+	if f.state != nil {
+		_ = f.state.RecordInteraction(feedID, "comment")
+	}
 	logrus.Infof("Comment posted successfully to feed: %s", feedID)
 	return nil
 }
@@ -101,14 +102,8 @@ func (f *CommentFeedAction) PostComment(ctx context.Context, feedID, xsecToken, 
 // ReplyToComment 回复指定评论
 func (f *CommentFeedAction) ReplyToComment(ctx context.Context, feedID, xsecToken, commentID, userID, content string) error {
 	// 增加超时时间，因为需要滚动查找评论，同时保留调用方取消语义。
-	page := f.page.Context(ctx).Timeout(5 * time.Minute)
-	url := makeFeedDetailURL(feedID, xsecToken)
-	logrus.Infof("打开 feed 详情页进行回复: %s", url)
-
-	// 导航到详情页
-	page.MustNavigate(url)
-	page.MustWaitLoad()
-	if err := sleepForCommentStep(page, 1500*time.Millisecond, 3*time.Second); err != nil {
+	page, err := f.preparePage(ctx, feedID, xsecToken, "reply", 5*time.Minute)
+	if err != nil {
 		return err
 	}
 
@@ -186,8 +181,40 @@ func (f *CommentFeedAction) ReplyToComment(ctx context.Context, feedID, xsecToke
 	if err := verifyCommentSubmission(page, content, initialMatchCount); err != nil {
 		return fmt.Errorf("回复提交未成功: %w", err)
 	}
+	if f.state != nil {
+		_ = f.state.RecordInteraction(feedID, "reply")
+	}
 	logrus.Infof("回复评论成功")
 	return nil
+}
+
+func (f *CommentFeedAction) preparePage(ctx context.Context, feedID, xsecToken, action string, timeout time.Duration) (*hrod.Page, error) {
+	page := f.page.Context(ctx).Timeout(timeout)
+	if f.state != nil {
+		if err := f.state.ValidateInteraction(feedID, action); err != nil {
+			return nil, fmt.Errorf("%s前置校验失败: %w", commentActionName(action), err)
+		}
+		if !isCurrentFeedDetail(page, feedID) {
+			return nil, fmt.Errorf("%s前置校验失败: 当前页面不是最近打开的笔记 %s", commentActionName(action), feedID)
+		}
+		return page, nil
+	}
+
+	url := makeFeedDetailURL(feedID, xsecToken)
+	logrus.Infof("打开 feed 详情页: %s", url)
+	page.MustNavigate(url)
+	page.MustWaitLoad()
+	if err := sleepForCommentStep(page, 1500*time.Millisecond, 3*time.Second); err != nil {
+		return nil, err
+	}
+	return page, nil
+}
+
+func commentActionName(action string) string {
+	if action == "reply" {
+		return "回复"
+	}
+	return "评论"
 }
 
 // findCommentElement 查找指定评论元素（参考 feed_detail.go 的滚动逻辑）
