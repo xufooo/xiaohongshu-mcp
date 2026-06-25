@@ -1,6 +1,7 @@
 package browser
 
 import (
+	"context"
 	"net/url"
 	"os"
 
@@ -69,10 +70,13 @@ func maskProxyCredentials(proxyURL string) string {
 	return u.String()
 }
 
-func NewBrowser(headless bool, options ...Option) *hrod.Browser {
+func NewBrowser(ctx context.Context, headless bool, options ...Option) (*hrod.Browser, error) {
 	cfg := &browserConfig{}
 	for _, opt := range options {
 		opt(cfg)
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 
 	opts := []headless_browser.Option{
@@ -114,7 +118,17 @@ func NewBrowser(headless bool, options ...Option) *hrod.Browser {
 		logrus.Warnf("failed to load cookies: %v", err)
 	}
 
-	hb := headless_browser.New(opts...)
+	logrus.WithFields(logrus.Fields{
+		"headless":    headless,
+		"bin":         cfg.binPath,
+		"profile_dir": cfg.profileDir,
+	}).Info("starting browser")
+	hb, err := headless_browser.New(ctx, opts...)
+	if err != nil {
+		logrus.WithError(err).Error("browser startup failed")
+		return nil, err
+	}
+	logrus.Info("browser startup completed")
 
-	return hrod.NewBrowser(hb, humanize.DefaultConfig())
+	return hrod.NewBrowser(hb, humanize.DefaultConfig()), nil
 }

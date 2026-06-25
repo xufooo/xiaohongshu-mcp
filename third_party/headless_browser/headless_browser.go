@@ -4,6 +4,7 @@ package headless_browser
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"sync"
 
@@ -68,16 +69,33 @@ func WithExtraArgs(args []string) Option {
 	}
 }
 
+var lowMemoryLaunchArgs = []flags.Flag{
+	"disable-dev-shm-usage",
+	"disable-gpu",
+	"disable-extensions",
+	"disable-background-networking",
+	"disable-sync",
+	"disable-component-update",
+	"no-first-run",
+	"no-default-browser-check",
+}
+
 // New creates a browser with stealth enabled.
-func New(options ...Option) *Browser {
+func New(ctx context.Context, options ...Option) (*Browser, error) {
 	cfg := newDefaultConfig()
 	for _, option := range options {
 		option(cfg)
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 
 	l := launcher.New().
 		Headless(cfg.Headless).
 		Set("--no-sandbox")
+	for _, arg := range lowMemoryLaunchArgs {
+		l = l.Set(arg)
+	}
 	if cfg.CloakProfile {
 		applyCloakLauncherProfile(l)
 	}
@@ -109,13 +127,34 @@ func New(options ...Option) *Browser {
 		}
 	}
 
-	url := l.MustLaunch()
+	logrus.WithFields(logrus.Fields{
+		"bin":  cfg.ChromeBinPath,
+		"args": l.FormatArgs(),
+	}).Info("launching browser")
+	url, err := l.Context(ctx).Launch()
+	if err != nil {
+		l.Kill()
+		go l.Cleanup()
+		return nil, fmt.Errorf("launch browser: %w", err)
+	}
+	logrus.WithFields(logrus.Fields{
+		"pid": l.PID(),
+		"url": url,
+	}).Info("browser launched")
+
 	controller := rod.New().ControlURL(url).Trace(cfg.Trace)
 	if cfg.CloakProfile {
 		// CloakBrowser 已接管 UA 和视口指纹，避免 rod 默认设备再发覆盖指令。
 		controller = controller.NoDefaultDevice()
 	}
-	browser := controller.MustConnect()
+	controller = controller.Context(ctx)
+	if err := controller.Connect(); err != nil {
+		l.Kill()
+		go l.Cleanup()
+		return nil, fmt.Errorf("connect browser: %w", err)
+	}
+	browser := controller
+	logrus.WithField("pid", l.PID()).Info("browser connected")
 	if cfg.Cookies != "" {
 		var cookies []*proto.NetworkCookie
 		if err := json.Unmarshal([]byte(cfg.Cookies), &cookies); err != nil {
@@ -125,7 +164,7 @@ func New(options ...Option) *Browser {
 		}
 	}
 
-	return &Browser{browser: browser, launcher: l, stealth: cfg.Stealth}
+	return &Browser{browser: browser, launcher: l, stealth: cfg.Stealth}, nil
 }
 
 func applyCloakLauncherProfile(l *launcher.Launcher) {

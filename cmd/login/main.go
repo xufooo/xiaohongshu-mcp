@@ -29,7 +29,8 @@ func main() {
 	configs.SetBrowserExtraArgs(configs.BrowserExtraArgsFromEnv())
 
 	// 登录的时候，需要界面，所以不能无头模式
-	b := browser.NewBrowser(
+	b, err := browser.NewBrowser(
+		context.Background(),
 		false,
 		browser.WithBinPath(binPath),
 		browser.WithProfileDir(configs.GetProfileDir()),
@@ -37,6 +38,9 @@ func main() {
 		browser.WithCloakLauncherProfile(configs.CloakLauncherProfile()),
 		browser.WithExtraArgs(configs.GetBrowserExtraArgs()),
 	)
+	if err != nil {
+		logrus.Fatalf("failed to start browser: %v", err)
+	}
 	defer b.Close()
 
 	page := b.NewPage()
