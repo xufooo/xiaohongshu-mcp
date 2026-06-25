@@ -153,6 +153,7 @@ func New(ctx context.Context, options ...Option) (*Browser, error) {
 		go l.Cleanup()
 		return nil, fmt.Errorf("connect browser: %w", err)
 	}
+	controller = controller.Context(context.Background())
 	browser := controller
 	logrus.WithField("pid", l.PID()).Info("browser connected")
 	if cfg.Cookies != "" {
