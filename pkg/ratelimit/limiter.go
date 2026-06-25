@@ -153,7 +153,9 @@ func New(cfg Config) *Limiter {
 	}
 
 	cfg = normalizeConfig(cfg)
-	store, err := NewFileStore(cfg.StorePath, cfg.Account)
+	var store Store
+	var err error
+	store, err = NewFileStore(cfg.StorePath, cfg.Account)
 	if err != nil {
 		// 持久化不可用时降级内存存储，避免服务启动失败。
 		store = NewMemoryStore()
