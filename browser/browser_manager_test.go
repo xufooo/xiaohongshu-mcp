@@ -10,7 +10,7 @@ import (
 )
 
 func TestManagerStartupPanicReturnsError(t *testing.T) {
-	manager := NewManager(func() *hrod.Browser {
+	manager := NewManager(func(context.Context) (*hrod.Browser, error) {
 		panic("launch failed")
 	})
 
@@ -25,10 +25,14 @@ func TestManagerStartupPanicReturnsError(t *testing.T) {
 func TestManagerStartupRespectsContext(t *testing.T) {
 	started := make(chan struct{})
 	finish := make(chan struct{})
-	manager := NewManager(func() *hrod.Browser {
+	manager := NewManager(func(ctx context.Context) (*hrod.Browser, error) {
 		close(started)
-		<-finish
-		return nil
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-finish:
+			return nil, nil
+		}
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)

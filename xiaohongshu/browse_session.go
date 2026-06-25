@@ -35,6 +35,7 @@ type BrowseSession struct {
 	timeout time.Duration
 	timer   *time.Timer
 	onClose func(*hrod.Page)
+	onRemove func(*BrowseSession)
 
 	currentURL       string
 	sourceURL        string
@@ -72,6 +73,7 @@ func (m *BrowseSessionManager) Create(page *hrod.Page, state *ActionStateStore, 
 		state:     state,
 		timeout:   m.timeout,
 		onClose:   onClose,
+		onRemove:  m.remove,
 		seenNotes: make(map[string]bool),
 		results:   make(map[string]Feed),
 	}
@@ -108,6 +110,17 @@ func (m *BrowseSessionManager) Close(id string) error {
 	}
 	session.Close()
 	return nil
+}
+
+func (m *BrowseSessionManager) remove(session *BrowseSession) {
+	if session == nil {
+		return
+	}
+	m.mu.Lock()
+	if m.sessions[session.id] == session {
+		delete(m.sessions, session.id)
+	}
+	m.mu.Unlock()
 }
 
 func (m *BrowseSessionManager) CloseAll() {
@@ -298,8 +311,12 @@ func (s *BrowseSession) Close() {
 	}
 	page := s.page
 	onClose := s.onClose
+	onRemove := s.onRemove
 	s.mu.Unlock()
 
+	if onRemove != nil {
+		onRemove(s)
+	}
 	if onClose != nil {
 		onClose(page)
 	}

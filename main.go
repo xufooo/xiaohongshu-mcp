@@ -10,6 +10,9 @@ import (
 )
 
 func main() {
+	logrus.SetOutput(os.Stdout)
+	logrus.SetFormatter(&logrus.TextFormatter{FullTimestamp: true})
+
 	var (
 		headless bool
 		binPath  string // 浏览器二进制文件路径

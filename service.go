@@ -659,8 +659,9 @@ func (s *XiaohongshuService) SessionBack(ctx context.Context, id string) (*xiaoh
 	return &info, nil
 }
 
-func newBrowser() *hrod.Browser {
+func newBrowser(ctx context.Context) (*hrod.Browser, error) {
 	return browser.NewBrowser(
+		ctx,
 		configs.IsHeadless(),
 		browser.WithBinPath(configs.GetBinPath()),
 		browser.WithProfileDir(configs.GetProfileDir()),

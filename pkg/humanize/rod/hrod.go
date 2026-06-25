@@ -88,9 +88,6 @@ func (b *Browser) wrapPage(p *rod.Page) *Page {
 		cfg:      b.cfg,
 		ctx:      context.Background(),
 	}
-	// Eagerly initialize the cursor position so the first interaction does not
-	// start from rod's default (0,0), which is an obvious automation signature.
-	_ = page.actor.Mouse.InitPosition()
 	return page
 }
 

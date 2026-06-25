@@ -17,7 +17,7 @@ const (
 )
 
 // BrowserFactory 创建浏览器实例。
-type BrowserFactory func() *hrod.Browser
+type BrowserFactory func(context.Context) (*hrod.Browser, error)
 
 // ManagerOption 配置浏览器管理器。
 type ManagerOption func(*Manager)
@@ -36,13 +36,36 @@ type Manager struct {
 
 	mu       sync.Mutex
 	browser  *hrod.Browser
-	starting chan struct{}
+	starting *browserStartup
 	startErr error
 	closed   bool
 
 	idleTimeout time.Duration
 	idleTimer   *time.Timer
 	idleVersion uint64
+}
+
+type browserStartup struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+	done   chan struct{}
+	once   sync.Once
+	err    error
+}
+
+func newBrowserStartup(timeout time.Duration) *browserStartup {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	return &browserStartup{
+		ctx:    ctx,
+		cancel: cancel,
+		done:   make(chan struct{}),
+	}
+}
+
+func (s *browserStartup) finish() {
+	s.once.Do(func() {
+		close(s.done)
+	})
 }
 
 // NewManager 创建浏览器管理器。
@@ -124,6 +147,13 @@ func (m *Manager) Reset(ctx context.Context) error {
 	m.cancelIdleCloseLocked()
 	b := m.browser
 	m.browser = nil
+	if m.starting != nil {
+		m.starting.err = errors.New("browser startup reset")
+		m.starting.cancel()
+		m.starting.finish()
+		m.starting = nil
+	}
+	m.startErr = nil
 	m.mu.Unlock()
 
 	if b == nil {
@@ -153,16 +183,11 @@ func (m *Manager) getBrowser(ctx context.Context) (*hrod.Browser, error) {
 			m.mu.Unlock()
 			return b, nil
 		}
-		if m.startErr != nil {
-			err := m.startErr
-			m.mu.Unlock()
-			return nil, err
-		}
-
 		started := m.starting
 		if started == nil {
-			started = make(chan struct{})
+			started = newBrowserStartup(defaultStartupTimeout)
 			m.starting = started
+			m.startErr = nil
 			go m.startBrowser(started)
 			time.AfterFunc(defaultStartupTimeout, func() {
 				m.failStartup(started)
@@ -173,9 +198,12 @@ func (m *Manager) getBrowser(ctx context.Context) (*hrod.Browser, error) {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
-		case <-started:
+		case <-started.done:
 			m.mu.Lock()
-			b, err := m.browser, m.startErr
+			b, err := m.browser, started.err
+			if err == nil {
+				err = m.startErr
+			}
 			m.mu.Unlock()
 			if b != nil {
 				return b, nil
@@ -188,11 +216,11 @@ func (m *Manager) getBrowser(ctx context.Context) (*hrod.Browser, error) {
 	}
 }
 
-func (m *Manager) startBrowser(done chan struct{}) {
-	b, err := newBrowser(m.factory)
+func (m *Manager) startBrowser(started *browserStartup) {
+	b, err := newBrowser(started.ctx, m.factory)
 
 	m.mu.Lock()
-	if m.starting != done {
+	if m.starting != started {
 		m.mu.Unlock()
 		if b != nil {
 			_ = b.Close()
@@ -207,18 +235,20 @@ func (m *Manager) startBrowser(done chan struct{}) {
 	}
 	m.browser = b
 	m.startErr = err
+	started.err = err
 	m.starting = nil
-	close(done)
+	started.cancel()
+	started.finish()
 	m.mu.Unlock()
 }
 
-func newBrowser(factory BrowserFactory) (browser *hrod.Browser, err error) {
+func newBrowser(ctx context.Context, factory BrowserFactory) (browser *hrod.Browser, err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			err = fmt.Errorf("browser startup failed: %v", recovered)
 		}
 	}()
-	return factory(), nil
+	return factory(ctx)
 }
 
 func newPage(browser *hrod.Browser) (page *hrod.Page, err error) {
@@ -249,15 +279,17 @@ func checkBrowserHealth(browser *hrod.Browser) error {
 	return browser.Health(ctx)
 }
 
-func (m *Manager) failStartup(done chan struct{}) {
+func (m *Manager) failStartup(started *browserStartup) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.starting != done {
+	if m.starting != started {
 		return
 	}
-	m.startErr = errors.New("browser startup timed out")
+	started.err = errors.New("browser startup timed out")
+	m.startErr = started.err
+	started.cancel()
 	m.starting = nil
-	close(done)
+	started.finish()
 }
 
 func (m *Manager) scheduleIdleClose() {
