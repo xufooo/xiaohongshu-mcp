@@ -161,11 +161,25 @@ func New(ctx context.Context, options ...Option) (*Browser, error) {
 		if err := json.Unmarshal([]byte(cfg.Cookies), &cookies); err != nil {
 			logrus.Warnf("failed to unmarshal cookies: %v", err)
 		} else {
-			browser.MustSetCookies(cookies...)
+			if err := setBrowserCookies(browser, cookies); err != nil {
+				logrus.Warnf("failed to set cookies: %v", err)
+			}
 		}
 	}
 
 	return &Browser{browser: browser, launcher: l, stealth: cfg.Stealth}, nil
+}
+
+func setBrowserCookies(browser *rod.Browser, cookies []*proto.NetworkCookie) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("set cookies: %v", recovered)
+		}
+	}()
+	if len(cookies) == 0 {
+		return browser.SetCookies(nil)
+	}
+	return browser.SetCookies(proto.CookiesToParams(cookies))
 }
 
 func applyCloakLauncherProfile(l *launcher.Launcher) {
@@ -221,12 +235,26 @@ func (b *Browser) close(ctx context.Context) error {
 	}
 }
 
-// NewPage 创建页面。CloakBrowser 已在浏览器层处理指纹，不能再叠加 stealth 注入。
-func (b *Browser) NewPage() *rod.Page {
+// Page 创建页面。CloakBrowser 已在浏览器层处理指纹，不能再叠加 stealth 注入。
+func (b *Browser) Page() (page *rod.Page, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("create page: %v", recovered)
+		}
+	}()
 	if b.stealth {
-		return stealth.MustPage(b.browser)
+		return stealth.Page(b.browser)
 	}
-	return b.browser.MustPage()
+	return b.browser.Page(proto.TargetCreateTarget{})
+}
+
+// NewPage preserves the upstream convenience API.
+func (b *Browser) NewPage() *rod.Page {
+	page, err := b.Page()
+	if err != nil {
+		panic(err)
+	}
+	return page
 }
 
 func parseLaunchArg(raw string) (name, value string, hasValue, ok bool) {
