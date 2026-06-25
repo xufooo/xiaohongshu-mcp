@@ -244,41 +244,62 @@ func (l *Limiter) Reserve(ctx context.Context) (Info, time.Duration, bool, error
 
 // ReserveAction 原子地检查并预占一次指定操作额度。
 func (l *Limiter) ReserveAction(ctx context.Context, action Action) (Info, time.Duration, bool, error) {
+	for {
+		select {
+		case <-ctx.Done():
+			return Info{}, 0, false, ctx.Err()
+		default:
+		}
+
+		l.mu.Lock()
+
+		now := time.Now()
+		state, err := l.loadState(now)
+		if err != nil {
+			l.mu.Unlock()
+			return Info{}, 0, false, err
+		}
+
+		info, canProceed := l.evaluate(state, action, now)
+		if !canProceed {
+			l.mu.Unlock()
+			return info, 0, false, nil
+		}
+
+		wait := l.waitBeforeAction(state, action, now)
+		if wait > l.cfg.AutoWaitMax {
+			info.Warning = fmt.Sprintf("操作节奏过快，建议 %d 秒后重试", int(wait.Seconds()))
+			retryAfter := int(wait.Seconds())
+			info.RetryAfter = &retryAfter
+			l.mu.Unlock()
+			return info, 0, false, nil
+		}
+		if wait > 0 {
+			l.mu.Unlock()
+			if err := sleepContext(ctx, wait); err != nil {
+				return info, 0, false, err
+			}
+			continue
+		}
+
+		l.recordLocked(state, action, now)
+		info, _ = l.evaluate(state, action, now)
+		l.mu.Unlock()
+
+		return info, 0, true, nil
+	}
+}
+
+func sleepContext(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+
 	select {
 	case <-ctx.Done():
-		return Info{}, 0, false, ctx.Err()
-	default:
+		return ctx.Err()
+	case <-timer.C:
+		return nil
 	}
-
-	l.mu.Lock()
-
-	now := time.Now()
-	state, err := l.loadState(now)
-	if err != nil {
-		l.mu.Unlock()
-		return Info{}, 0, false, err
-	}
-
-	info, canProceed := l.evaluate(state, action, now)
-	if !canProceed {
-		l.mu.Unlock()
-		return info, 0, false, nil
-	}
-
-	wait := l.waitBeforeAction(state, action, now)
-	if wait > l.cfg.AutoWaitMax {
-		info.Warning = fmt.Sprintf("操作节奏过快，建议 %d 秒后重试", int(wait.Seconds()))
-		retryAfter := int(wait.Seconds())
-		info.RetryAfter = &retryAfter
-		l.mu.Unlock()
-		return info, 0, false, nil
-	}
-
-	l.recordLocked(state, action, now)
-	info, _ = l.evaluate(state, action, now)
-	l.mu.Unlock()
-
-	return info, wait, true, nil
 }
 
 // Record 记录一次默认浏览操作。
@@ -553,7 +574,7 @@ func countSince(events []int64, cutoff time.Time) int {
 	count := 0
 	cutoffUnix := cutoff.Unix()
 	for _, ts := range events {
-		if ts >= cutoffUnix {
+		if ts > cutoffUnix {
 			count++
 		}
 	}
@@ -564,7 +585,7 @@ func resetUnix(events []int64, now time.Time, window time.Duration) int64 {
 	cutoff := now.Add(-window).Unix()
 	var oldest int64
 	for _, ts := range events {
-		if ts >= cutoff && (oldest == 0 || ts < oldest) {
+		if ts > cutoff && (oldest == 0 || ts < oldest) {
 			oldest = ts
 		}
 	}

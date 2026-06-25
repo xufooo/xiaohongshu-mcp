@@ -64,6 +64,11 @@ func UseCloakBrowser() bool {
 	return false
 }
 
+// CloakLauncherProfile 判断是否启用 CloakBrowser 专用 launcher 配置。
+func CloakLauncherProfile() bool {
+	return UseCloakBrowser()
+}
+
 // SetBrowserIdleTimeout 设置浏览器空闲回收时间。
 func SetBrowserIdleTimeout(timeout time.Duration) {
 	browserIdleTimeout = timeout

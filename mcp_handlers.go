@@ -843,6 +843,9 @@ func (s *AppServer) handleReplyComment(ctx context.Context, args map[string]inte
 
 func (s *AppServer) handleCreateBrowseSession(ctx context.Context) *MCPToolResult {
 	logrus.Info("MCP: 创建浏览会话")
+	if blocked := s.rateLimitMCP(ctx, "创建浏览会话", ratelimit.ActionBrowse); blocked != nil {
+		return blocked
+	}
 	info, err := s.xiaohongshuService.CreateBrowseSession(ctx)
 	if err != nil {
 		return &MCPToolResult{
@@ -864,11 +867,11 @@ func (s *AppServer) handleCloseBrowseSession(ctx context.Context, args BrowseSes
 }
 
 func (s *AppServer) handleSessionSearch(ctx context.Context, args SessionSearchArgs) *MCPToolResult {
-	if blocked := s.rateLimitMCP(ctx, "session搜索", ratelimit.ActionSearch); blocked != nil {
-		return blocked
-	}
 	if args.SessionID == "" || args.Keyword == "" {
 		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "session搜索失败: 缺少session_id或keyword参数"}}, IsError: true}
+	}
+	if blocked := s.rateLimitMCP(ctx, "session搜索", ratelimit.ActionSearch); blocked != nil {
+		return blocked
 	}
 	filter := xiaohongshu.FilterOption{
 		SortBy:      args.Filters.SortBy,
@@ -885,11 +888,11 @@ func (s *AppServer) handleSessionSearch(ctx context.Context, args SessionSearchA
 }
 
 func (s *AppServer) handleSessionOpenNote(ctx context.Context, args SessionOpenNoteArgs) *MCPToolResult {
-	if blocked := s.rateLimitMCP(ctx, "session打开笔记", ratelimit.ActionOpenNote); blocked != nil {
-		return blocked
-	}
 	if args.SessionID == "" || args.ResultRef == "" {
 		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "session打开笔记失败: 缺少session_id或result_ref参数"}}, IsError: true}
+	}
+	if blocked := s.rateLimitMCP(ctx, "session打开笔记", ratelimit.ActionOpenNote); blocked != nil {
+		return blocked
 	}
 	info, err := s.xiaohongshuService.SessionOpenNote(ctx, args.SessionID, args.ResultRef, args.XsecToken)
 	if err != nil {
@@ -899,11 +902,11 @@ func (s *AppServer) handleSessionOpenNote(ctx context.Context, args SessionOpenN
 }
 
 func (s *AppServer) handleSessionRead(ctx context.Context, args SessionReadArgs) *MCPToolResult {
-	if blocked := s.rateLimitMCP(ctx, "session阅读", ratelimit.ActionOpenNote); blocked != nil {
-		return blocked
-	}
 	if args.SessionID == "" {
 		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "session阅读失败: 缺少session_id参数"}}, IsError: true}
+	}
+	if blocked := s.rateLimitMCP(ctx, "session阅读", ratelimit.ActionOpenNote); blocked != nil {
+		return blocked
 	}
 	minDuration := time.Duration(args.MinSeconds) * time.Second
 	info, err := s.xiaohongshuService.SessionRead(ctx, args.SessionID, minDuration)
@@ -914,11 +917,11 @@ func (s *AppServer) handleSessionRead(ctx context.Context, args SessionReadArgs)
 }
 
 func (s *AppServer) handleSessionLike(ctx context.Context, args SessionLikeArgs) *MCPToolResult {
-	if blocked := s.rateLimitMCP(ctx, "session点赞", ratelimit.ActionLike); blocked != nil {
-		return blocked
-	}
 	if args.SessionID == "" {
 		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "session点赞失败: 缺少session_id参数"}}, IsError: true}
+	}
+	if blocked := s.rateLimitMCP(ctx, "session点赞", ratelimit.ActionLike); blocked != nil {
+		return blocked
 	}
 	result, err := s.xiaohongshuService.SessionLike(ctx, args.SessionID, args.Unlike)
 	if err != nil {
@@ -928,11 +931,11 @@ func (s *AppServer) handleSessionLike(ctx context.Context, args SessionLikeArgs)
 }
 
 func (s *AppServer) handleSessionComment(ctx context.Context, args SessionCommentArgs) *MCPToolResult {
-	if blocked := s.rateLimitMCP(ctx, "session评论", ratelimit.ActionComment); blocked != nil {
-		return blocked
-	}
 	if args.SessionID == "" || args.Content == "" {
 		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "session评论失败: 缺少session_id或content参数"}}, IsError: true}
+	}
+	if blocked := s.rateLimitMCP(ctx, "session评论", ratelimit.ActionComment); blocked != nil {
+		return blocked
 	}
 	result, err := s.xiaohongshuService.SessionComment(ctx, args.SessionID, args.Content)
 	if err != nil {

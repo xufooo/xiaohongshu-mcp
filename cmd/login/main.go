@@ -34,6 +34,7 @@ func main() {
 		browser.WithBinPath(binPath),
 		browser.WithProfileDir(configs.GetProfileDir()),
 		browser.WithCloakBrowser(configs.UseCloakBrowser()),
+		browser.WithCloakLauncherProfile(configs.CloakLauncherProfile()),
 		browser.WithExtraArgs(configs.GetBrowserExtraArgs()),
 	)
 	defer b.Close()

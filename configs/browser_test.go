@@ -19,6 +19,23 @@ func TestUseCloakBrowser(t *testing.T) {
 	}
 }
 
+func TestCloakLauncherProfile(t *testing.T) {
+	originalMode := browserMode
+	t.Cleanup(func() {
+		SetBrowserMode(originalMode)
+	})
+
+	SetBrowserMode("chrome")
+	if CloakLauncherProfile() {
+		t.Fatal("chrome mode should disable CloakBrowser launcher profile")
+	}
+
+	SetBrowserMode("cloak")
+	if !CloakLauncherProfile() {
+		t.Fatal("cloak mode should enable CloakBrowser launcher profile")
+	}
+}
+
 func TestBrowserExtraArgsFromEnv(t *testing.T) {
 	t.Setenv("XHS_BROWSER_LANG", "zh-CN")
 	t.Setenv("XHS_BROWSER_TIMEZONE", "Asia/Shanghai")

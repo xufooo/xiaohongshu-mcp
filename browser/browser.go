@@ -12,10 +12,11 @@ import (
 )
 
 type browserConfig struct {
-	binPath      string
-	profileDir   string
-	cloakBrowser bool
-	extraArgs    []string
+	binPath              string
+	profileDir           string
+	cloakBrowser         bool
+	cloakLauncherProfile bool
+	extraArgs            []string
 }
 
 type Option func(*browserConfig)
@@ -37,6 +38,13 @@ func WithProfileDir(profileDir string) Option {
 func WithCloakBrowser(enabled bool) Option {
 	return func(c *browserConfig) {
 		c.cloakBrowser = enabled
+	}
+}
+
+// WithCloakLauncherProfile 设置是否使用 CloakBrowser 专用 launcher 配置。
+func WithCloakLauncherProfile(enabled bool) Option {
+	return func(c *browserConfig) {
+		c.cloakLauncherProfile = enabled
 	}
 }
 
@@ -79,6 +87,10 @@ func NewBrowser(headless bool, options ...Option) *hrod.Browser {
 	if cfg.cloakBrowser {
 		opts = append(opts, headless_browser.WithStealth(false))
 		logrus.Info("using CloakBrowser without go-rod stealth injection")
+	}
+	if cfg.cloakBrowser || cfg.cloakLauncherProfile {
+		opts = append(opts, headless_browser.CloakLauncherProfile())
+		logrus.Info("using CloakBrowser launcher profile")
 	}
 	if len(cfg.extraArgs) > 0 {
 		opts = append(opts, headless_browser.WithExtraArgs(cfg.extraArgs))

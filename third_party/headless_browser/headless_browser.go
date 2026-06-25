@@ -35,6 +35,7 @@ type Config struct {
 	Trace         bool
 	Stealth       bool
 	ExtraArgs     []string
+	CloakProfile  bool
 }
 
 // Option configures a Browser.
@@ -55,6 +56,12 @@ func WithUserDataDir(path string) Option    { return func(c *Config) { c.UserDat
 func WithProxy(proxy string) Option         { return func(c *Config) { c.Proxy = proxy } }
 func WithTrace() Option                     { return func(c *Config) { c.Trace = true } }
 func WithStealth(enabled bool) Option       { return func(c *Config) { c.Stealth = enabled } }
+func WithCloakLauncherProfile(enabled bool) Option {
+	return func(c *Config) { c.CloakProfile = enabled }
+}
+
+func CloakLauncherProfile() Option { return WithCloakLauncherProfile(true) }
+
 func WithExtraArgs(args []string) Option {
 	return func(c *Config) {
 		c.ExtraArgs = append([]string(nil), args...)
@@ -71,6 +78,9 @@ func New(options ...Option) *Browser {
 	l := launcher.New().
 		Headless(cfg.Headless).
 		Set("--no-sandbox")
+	if cfg.CloakProfile {
+		applyCloakLauncherProfile(l)
+	}
 	if cfg.UserAgent != "" {
 		l = l.Set("user-agent", cfg.UserAgent)
 	}
@@ -100,7 +110,12 @@ func New(options ...Option) *Browser {
 	}
 
 	url := l.MustLaunch()
-	browser := rod.New().ControlURL(url).Trace(cfg.Trace).MustConnect()
+	controller := rod.New().ControlURL(url).Trace(cfg.Trace)
+	if cfg.CloakProfile {
+		// CloakBrowser 已接管 UA 和视口指纹，避免 rod 默认设备再发覆盖指令。
+		controller = controller.NoDefaultDevice()
+	}
+	browser := controller.MustConnect()
 	if cfg.Cookies != "" {
 		var cookies []*proto.NetworkCookie
 		if err := json.Unmarshal([]byte(cfg.Cookies), &cookies); err != nil {
@@ -111,6 +126,13 @@ func New(options ...Option) *Browser {
 	}
 
 	return &Browser{browser: browser, launcher: l, stealth: cfg.Stealth}
+}
+
+func applyCloakLauncherProfile(l *launcher.Launcher) {
+	// CloakBrowser 自己处理自动化特征，去掉 rod 默认容易暴露的启动参数。
+	// 不动 disable-features：rod 默认 site-per-process,TranslateUI，
+	// 整体替换会静默覆盖未来 rod 新增的默认值，维护风险高。
+	l.Delete("enable-automation")
 }
 
 // Close preserves the upstream API. Callers that need to handle a failed CDP
