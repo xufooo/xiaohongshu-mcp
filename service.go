@@ -125,7 +125,10 @@ func (s *XiaohongshuService) DeleteCookies(ctx context.Context) error {
 
 // CheckLoginStatus 检查登录状态
 func (s *XiaohongshuService) CheckLoginStatus(ctx context.Context) (*LoginStatusResponse, error) {
-	page, err := s.browserManager.Acquire(ctx)
+	loginCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
+	defer cancel()
+
+	page, err := s.browserManager.Acquire(loginCtx)
 	if err != nil {
 		return nil, err
 	}
@@ -133,7 +136,7 @@ func (s *XiaohongshuService) CheckLoginStatus(ctx context.Context) (*LoginStatus
 
 	loginAction := xiaohongshu.NewLogin(page.Context(ctx))
 
-	isLoggedIn, err := loginAction.CheckLoginStatus(ctx)
+	isLoggedIn, err := loginAction.CheckLoginStatus(loginCtx)
 	if err != nil {
 		return nil, err
 	}
@@ -392,9 +395,12 @@ func (s *XiaohongshuService) ListFeeds(ctx context.Context) (*FeedsListResponse,
 
 	return response, nil
 }
-
+// SearchFeeds 搜索 Feeds
 func (s *XiaohongshuService) SearchFeeds(ctx context.Context, keyword string, filters ...xiaohongshu.FilterOption) (*FeedsListResponse, error) {
-	page, err := s.browserManager.Acquire(ctx)
+	searchCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+
+	page, err := s.browserManager.Acquire(searchCtx)
 	if err != nil {
 		return nil, err
 	}
@@ -402,7 +408,7 @@ func (s *XiaohongshuService) SearchFeeds(ctx context.Context, keyword string, fi
 
 	action := xiaohongshu.NewSearchActionWithState(page.Context(ctx), s.actionState)
 
-	feeds, err := action.Search(ctx, keyword, filters...)
+	feeds, err := action.Search(searchCtx, keyword, filters...)
 	if err != nil {
 		return nil, err
 	}
@@ -422,7 +428,10 @@ func (s *XiaohongshuService) GetFeedDetail(ctx context.Context, feedID, xsecToke
 
 // GetFeedDetailWithConfig 使用配置获取Feed详情
 func (s *XiaohongshuService) GetFeedDetailWithConfig(ctx context.Context, feedID, xsecToken string, loadAllComments bool, config xiaohongshu.CommentLoadConfig) (*FeedDetailResponse, error) {
-	page, err := s.browserManager.Acquire(ctx)
+	detailCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
+	defer cancel()
+
+	page, err := s.browserManager.Acquire(detailCtx)
 	if err != nil {
 		return nil, err
 	}
@@ -432,7 +441,7 @@ func (s *XiaohongshuService) GetFeedDetailWithConfig(ctx context.Context, feedID
 	action := xiaohongshu.NewFeedDetailActionWithState(page.Context(ctx), s.actionState)
 
 	// 获取 Feed 详情
-	result, err := action.GetFeedDetailWithConfig(ctx, feedID, xsecToken, loadAllComments, config)
+	result, err := action.GetFeedDetailWithConfig(detailCtx, feedID, xsecToken, loadAllComments, config)
 	if err != nil {
 		return nil, err
 	}
