@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 
@@ -18,11 +19,12 @@ import (
 
 // Browser represents a browser instance with its launcher.
 type Browser struct {
-	browser   *rod.Browser
-	launcher  *launcher.Launcher
-	stealth   bool
-	closeOnce sync.Once
-	closeErr  error
+	browser       *rod.Browser
+	browserCancel context.CancelFunc
+	launcher      *launcher.Launcher
+	stealth       bool
+	closeOnce     sync.Once
+	closeErr      error
 }
 
 // Config holds browser options.
@@ -142,18 +144,20 @@ func New(ctx context.Context, options ...Option) (*Browser, error) {
 		"url": url,
 	}).Info("browser launched")
 
+	browserCtx, browserCancel := context.WithCancel(context.Background())
+
 	controller := rod.New().ControlURL(url).Trace(cfg.Trace)
 	if cfg.CloakProfile {
 		// CloakBrowser 已接管 UA 和视口指纹，避免 rod 默认设备再发覆盖指令。
 		controller = controller.NoDefaultDevice()
 	}
-	controller = controller.Context(ctx)
+	controller = controller.Context(browserCtx)
 	if err := controller.Connect(); err != nil {
+		browserCancel()
 		l.Kill()
 		go l.Cleanup()
 		return nil, fmt.Errorf("connect browser: %w", err)
 	}
-	controller = controller.Context(context.Background())
 	browser := controller
 	logrus.WithField("pid", l.PID()).Info("browser connected")
 	if cfg.Cookies != "" {
@@ -167,7 +171,7 @@ func New(ctx context.Context, options ...Option) (*Browser, error) {
 		}
 	}
 
-	return &Browser{browser: browser, launcher: l, stealth: cfg.Stealth}, nil
+	return &Browser{browser: browser, browserCancel: browserCancel, launcher: l, stealth: cfg.Stealth}, nil
 }
 
 func setBrowserCookies(browser *rod.Browser, cookies []*proto.NetworkCookie) (err error) {
@@ -213,6 +217,10 @@ func (b *Browser) Health(ctx context.Context) error {
 }
 
 func (b *Browser) close(ctx context.Context) error {
+	if b.browserCancel != nil {
+		defer b.browserCancel()
+	}
+
 	err := b.browser.Context(ctx).Close()
 	if err != nil {
 		b.launcher.Kill()
@@ -240,12 +248,17 @@ func (b *Browser) Page() (page *rod.Page, err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			err = fmt.Errorf("create page: %v", recovered)
+			fmt.Fprintf(os.Stderr, "[DEBUG] headless_browser.Page panicked: %v (stealth=%v, browser=%v)\n", recovered, b.stealth, b.browser)
 		}
 	}()
 	if b.stealth {
 		return stealth.Page(b.browser)
 	}
-	return b.browser.Page(proto.TargetCreateTarget{})
+	page, err = b.browser.Page(proto.TargetCreateTarget{})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[DEBUG] rod.Browser.Page returned error: %v\n", err)
+	}
+	return
 }
 
 // NewPage preserves the upstream convenience API.

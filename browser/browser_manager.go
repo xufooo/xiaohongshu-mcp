@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
@@ -35,10 +36,10 @@ type Manager struct {
 	factory BrowserFactory
 	token   chan struct{}
 
-	mu       sync.Mutex
-	wg       sync.WaitGroup
-	browser  *hrod.Browser
-	starting *browserStartup
+	mu        sync.Mutex
+	wg        sync.WaitGroup
+	browser   *hrod.Browser
+	starting  *browserStartup
 	startErr  error
 	closed    bool
 	resetting bool
@@ -300,6 +301,7 @@ func newPage(browser *hrod.Browser) (page *hrod.Page, err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			err = fmt.Errorf("create browser page failed: %v", recovered)
+			fmt.Fprintf(os.Stderr, "[DEBUG] newPage panicked: %v\n", recovered)
 		}
 	}()
 	return browser.Page()
