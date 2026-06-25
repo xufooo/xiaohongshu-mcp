@@ -27,7 +27,7 @@ func (a *LoginAction) CheckLoginStatus(ctx context.Context) (bool, error) {
 		return false, err
 	}
 
-	exists, _, err := pp.Has(` + "`" + `.main-container .user .link-wrapper .channel` + "`" + `)
+	exists, _, err := pp.Has(`.main-container .user .link-wrapper .channel`)
 	if err != nil {
 		return false, errors.Wrap(err, "check login status failed")
 	}
