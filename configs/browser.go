@@ -79,6 +79,19 @@ func GetBrowserIdleTimeout() time.Duration {
 	return browserIdleTimeout
 }
 
+// GetBrowserStartupTimeout 返回用户配置的浏览器启动超时时间。
+func GetBrowserStartupTimeout() time.Duration {
+	rawTimeout := strings.TrimSpace(os.Getenv("XHS_BROWSER_STARTUP_TIMEOUT"))
+	if rawTimeout == "" {
+		return 0
+	}
+	timeout, err := time.ParseDuration(rawTimeout)
+	if err != nil {
+		return 0
+	}
+	return timeout
+}
+
 // SetBrowserExtraArgs 设置附加浏览器启动参数。
 func SetBrowserExtraArgs(args []string) {
 	browserExtraArgs = append([]string(nil), args...)
