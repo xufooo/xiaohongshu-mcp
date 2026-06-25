@@ -181,12 +181,22 @@ func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...Fi
 func (s *SearchAction) SearchByURLFallback(ctx context.Context, keyword string, filters ...FilterOption) ([]Feed, error) {
 	page := s.page.Context(ctx)
 	searchURL := makeSearchURL(keyword)
-	page.MustNavigate(searchURL).MustWaitLoad()
+	if err := page.Navigate(searchURL); err != nil {
+		return nil, fmt.Errorf("导航搜索页失败: %w", err)
+	}
+	if err := page.WaitLoad(); err != nil {
+		return nil, fmt.Errorf("等待搜索页加载失败: %w", err)
+	}
 	return s.collectResults(page, filters...)
 }
 
 func (s *SearchAction) searchByUI(page *hrod.Page, keyword string) error {
-	page.MustNavigate("https://www.xiaohongshu.com/explore").MustWaitLoad()
+	if err := page.Navigate("https://www.xiaohongshu.com/explore"); err != nil {
+		return fmt.Errorf("导航探索页失败: %w", err)
+	}
+	if err := page.WaitLoad(); err != nil {
+		return fmt.Errorf("等待探索页加载失败: %w", err)
+	}
 
 	input, err := page.Timeout(15 * time.Second).Element(SelectorSearchInput)
 	if err != nil {
