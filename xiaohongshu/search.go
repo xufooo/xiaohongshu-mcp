@@ -184,9 +184,7 @@ func (s *SearchAction) SearchByURLFallback(ctx context.Context, keyword string, 
 	if err := page.Navigate(searchURL); err != nil {
 		return nil, fmt.Errorf("导航搜索页失败: %w", err)
 	}
-	if err := page.WaitLoad(); err != nil {
-		return nil, fmt.Errorf("等待搜索页加载失败: %w", err)
-	}
+
 	return s.collectResults(page, filters...)
 }
 
@@ -194,10 +192,8 @@ func (s *SearchAction) searchByUI(page *hrod.Page, keyword string) error {
 	if err := page.Navigate("https://www.xiaohongshu.com/explore"); err != nil {
 		return fmt.Errorf("导航探索页失败: %w", err)
 	}
-	if err := page.WaitLoad(); err != nil {
-		return fmt.Errorf("等待探索页加载失败: %w", err)
-	}
 
+	// 等搜索框出现（15s超时），不使用WaitLoad因为小红书是SPA
 	input, err := page.Timeout(15 * time.Second).Element(SelectorSearchInput)
 	if err != nil {
 		return fmt.Errorf("未找到搜索框: %w", err)

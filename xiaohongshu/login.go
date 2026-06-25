@@ -21,21 +21,19 @@ func (a *LoginAction) CheckLoginStatus(ctx context.Context) (bool, error) {
 	if err := pp.Navigate("https://www.xiaohongshu.com/explore"); err != nil {
 		return false, errors.Wrap(err, "navigate to explore")
 	}
-	if err := pp.WaitLoad(); err != nil {
-		return false, errors.Wrap(err, "wait for explore page load")
-	}
 
-	if err := pp.Sleep(time.Second); err != nil {
+	// 等待页面加载（3s缓冲），然后检查元素
+	if err := pp.Sleep(3 * time.Second); err != nil {
 		return false, err
 	}
 
-	exists, _, err := pp.Has(`.main-container .user .link-wrapper .channel`)
+	exists, _, err := pp.Has(` + "`" + `.main-container .user .link-wrapper .channel` + "`" + `)
 	if err != nil {
 		return false, errors.Wrap(err, "check login status failed")
 	}
 
 	if !exists {
-		return false, errors.Wrap(err, "login status element not found")
+		return false, errors.Errorf("login status element not found")
 	}
 
 	return true, nil
@@ -47,12 +45,9 @@ func (a *LoginAction) Login(ctx context.Context) error {
 	if err := pp.Navigate("https://www.xiaohongshu.com/explore"); err != nil {
 		return errors.Wrap(err, "navigate to explore")
 	}
-	if err := pp.WaitLoad(); err != nil {
-		return errors.Wrap(err, "wait for explore page load")
-	}
 
 	// 等待一小段时间让页面完全加载
-	if err := pp.Sleep(2 * time.Second); err != nil {
+	if err := pp.Sleep(3 * time.Second); err != nil {
 		return err
 	}
 
@@ -75,12 +70,9 @@ func (a *LoginAction) FetchQrcodeImage(ctx context.Context) (string, bool, error
 	if err := pp.Navigate("https://www.xiaohongshu.com/explore"); err != nil {
 		return "", false, errors.Wrap(err, "navigate to explore")
 	}
-	if err := pp.WaitLoad(); err != nil {
-		return "", false, errors.Wrap(err, "wait for explore page load")
-	}
 
 	// 等待一小段时间让页面完全加载
-	if err := pp.Sleep(2 * time.Second); err != nil {
+	if err := pp.Sleep(3 * time.Second); err != nil {
 		return "", false, err
 	}
 
