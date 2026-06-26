@@ -18,6 +18,8 @@ var (
 	browserIdleTimeout = 5 * time.Minute
 
 	browserExtraArgs []string
+
+	browserUserAgent = ""
 )
 
 func InitHeadless(h bool) {
@@ -100,6 +102,26 @@ func SetBrowserExtraArgs(args []string) {
 // GetBrowserExtraArgs 返回附加浏览器启动参数。
 func GetBrowserExtraArgs() []string {
 	return append([]string(nil), browserExtraArgs...)
+}
+
+func SetBrowserUserAgent(userAgent string) {
+	browserUserAgent = userAgent
+}
+
+func GetBrowserUserAgent() string {
+	if browserUserAgent != "" {
+		return browserUserAgent
+	}
+	return strings.TrimSpace(os.Getenv("XHS_BROWSER_USER_AGENT"))
+}
+
+func UseFixedIdentity() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("XHS_FIXED_IDENTITY"))) {
+	case "0", "false", "off", "no":
+		return false
+	default:
+		return true
+	}
 }
 
 // BrowserExtraArgsFromEnv 读取用户配置的附加启动参数。

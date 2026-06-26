@@ -41,24 +41,10 @@ func NewPublishImageAction(page *hrod.Page) (*PublishAction, error) {
 
 	pp := page.Timeout(300 * time.Second)
 
-	// 使用更稳健的导航和等待策略
 	if err := pp.Navigate(urlOfPublic); err != nil {
 		return nil, errors.Wrap(err, "导航到发布页面失败")
 	}
-
-	// 等待页面加载，使用 WaitLoad 代替 WaitIdle（更宽松）
-	if err := pp.WaitLoad(); err != nil {
-		logrus.Warnf("等待页面加载出现问题: %v，继续尝试", err)
-	}
-	if err := pp.Sleep(2 * time.Second); err != nil {
-		return nil, err
-	}
-
-	// 等待页面稳定
-	if err := pp.WaitDOMStable(time.Second, 0.1); err != nil {
-		logrus.Warnf("等待 DOM 稳定出现问题: %v，继续尝试", err)
-	}
-	if err := pp.Sleep(time.Second); err != nil {
+	if err := waitForPublishPageReady(pp); err != nil {
 		return nil, err
 	}
 
@@ -74,6 +60,13 @@ func NewPublishImageAction(page *hrod.Page) (*PublishAction, error) {
 	return &PublishAction{
 		page: pp,
 	}, nil
+}
+
+func waitForPublishPageReady(page *hrod.Page) error {
+	if err := WaitForXHSReady(page, XHSReadyOptions{Kind: XHSReadyPublish, Timeout: 60 * time.Second}); err != nil {
+		return errors.Wrap(err, "等待发布页面就绪失败")
+	}
+	return nil
 }
 
 func (p *PublishAction) Publish(ctx context.Context, content PublishImageContent) error {

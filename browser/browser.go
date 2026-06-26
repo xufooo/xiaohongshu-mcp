@@ -18,6 +18,7 @@ type browserConfig struct {
 	cloakBrowser         bool
 	cloakLauncherProfile bool
 	extraArgs            []string
+	userAgent            string
 }
 
 type Option func(*browserConfig)
@@ -56,6 +57,12 @@ func WithExtraArgs(args []string) Option {
 	}
 }
 
+func WithUserAgent(userAgent string) Option {
+	return func(c *browserConfig) {
+		c.userAgent = userAgent
+	}
+}
+
 // maskProxyCredentials masks username and password in proxy URL for safe logging.
 func maskProxyCredentials(proxyURL string) string {
 	u, err := url.Parse(proxyURL)
@@ -84,6 +91,9 @@ func NewBrowser(ctx context.Context, headless bool, options ...Option) (*hrod.Br
 	}
 	if cfg.binPath != "" {
 		opts = append(opts, headless_browser.WithChromeBinPath(cfg.binPath))
+	}
+	if cfg.userAgent != "" {
+		opts = append(opts, headless_browser.WithUserAgent(cfg.userAgent))
 	}
 	if cfg.profileDir != "" {
 		opts = append(opts, headless_browser.WithUserDataDir(cfg.profileDir))

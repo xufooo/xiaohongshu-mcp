@@ -26,6 +26,7 @@ func main() {
 	configs.SetBinPath(binPath)
 	configs.SetProfileDir(os.Getenv("XHS_BROWSER_PROFILE_DIR"))
 	configs.SetBrowserMode(os.Getenv("XHS_BROWSER_MODE"))
+	configs.SetBrowserUserAgent(os.Getenv("XHS_BROWSER_USER_AGENT"))
 	configs.SetBrowserExtraArgs(configs.BrowserExtraArgsFromEnv())
 
 	// 登录的时候，需要界面，所以不能无头模式
@@ -33,6 +34,7 @@ func main() {
 		context.Background(),
 		false,
 		browser.WithBinPath(binPath),
+		browser.WithUserAgent(configs.GetBrowserUserAgent()),
 		browser.WithProfileDir(configs.GetProfileDir()),
 		browser.WithCloakBrowser(configs.UseCloakBrowser()),
 		browser.WithCloakLauncherProfile(configs.CloakLauncherProfile()),

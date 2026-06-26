@@ -56,7 +56,10 @@ func (a *NoteOpenAction) OpenFromCards(ctx context.Context, feedID, xsecToken, s
 
 func (a *NoteOpenAction) OpenByURLFallback(ctx context.Context, feedID, xsecToken string) error {
 	page := a.page.Context(ctx).Timeout(60 * time.Second)
-	page.MustNavigate(makeFeedDetailURL(feedID, xsecToken)).MustWaitLoad()
+	page.MustNavigate(makeFeedDetailURL(feedID, xsecToken))
+	if err := WaitForXHSReady(page, XHSReadyOptions{Kind: XHSReadyDetail, FeedID: feedID}); err != nil {
+		return err
+	}
 	if err := waitFeedDetailVisible(page, feedID); err != nil {
 		return err
 	}

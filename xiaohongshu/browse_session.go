@@ -27,6 +27,31 @@ type BrowseSessionInfo struct {
 	ExpiresAt     time.Time      `json:"expires_at"`
 }
 
+type BrowseSessionPageState struct {
+	Session          BrowseSessionInfo       `json:"session"`
+	Kind             XHSReadyKind            `json:"kind"`
+	Ready            bool                    `json:"ready"`
+	Risk             RiskSignal              `json:"risk"`
+	Counts           BrowseSessionPageCounts `json:"counts"`
+	StateFragment    string                  `json:"state_fragment,omitempty"`
+	ResultsCount     int                     `json:"results_count"`
+	SeenCount        int                     `json:"seen_count"`
+	AvailableActions []string                `json:"available_actions,omitempty"`
+}
+
+type BrowseSessionPageCounts struct {
+	AppCount           int `json:"app_count"`
+	FeedCardCount      int `json:"feed_card_count"`
+	SearchInputCount   int `json:"search_input_count"`
+	SearchResultCount  int `json:"search_result_count"`
+	HomeFeedCount      int `json:"home_feed_count"`
+	SearchFeedCount    int `json:"search_feed_count"`
+	DetailCount        int `json:"detail_count"`
+	CommentBoxCount    int `json:"comment_box_count"`
+	LikeButtonCount    int `json:"like_button_count"`
+	PublishSignalCount int `json:"publish_signal_count"`
+}
+
 type BrowseSession struct {
 	mu      sync.Mutex
 	opMu    sync.Mutex
@@ -145,6 +170,65 @@ func (s *BrowseSession) Info() BrowseSessionInfo {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.infoLocked()
+}
+
+func (s *BrowseSession) PageState(ctx context.Context) (*BrowseSessionPageState, error) {
+	if err := s.beginLockedOperation(); err != nil {
+		return nil, err
+	}
+	defer s.finishPageStateOperation()
+
+	s.mu.Lock()
+	page := s.page
+	feedID := s.currentFeedID
+	s.mu.Unlock()
+	if page == nil {
+		return nil, fmt.Errorf("browse session 页面不存在: %s", s.id)
+	}
+
+	page = page.Context(ctx)
+	probe, err := probeXHSReady(page, feedID)
+	if err != nil {
+		return nil, err
+	}
+	risk := riskSignalFromReadyProbe(probe)
+
+	kind := inferXHSReadyKindFromSessionURL(probe.URL)
+	ready := isXHSReady(probe, kind, feedID, true)
+
+	s.mu.Lock()
+	if probe.URL != "" {
+		s.currentURL = probe.URL
+	}
+	s.scrollY = probe.ScrollY
+	info := s.infoLocked()
+	resultsCount := s.uniqueResultCountLocked()
+	seenCount := len(s.seenNotes)
+	availableActions := s.availableActionsLocked(resultsCount)
+	s.mu.Unlock()
+
+	return &BrowseSessionPageState{
+		Session: info,
+		Kind:    kind,
+		Ready:   ready,
+		Risk:    risk,
+		Counts: BrowseSessionPageCounts{
+			AppCount:           probe.AppCount,
+			FeedCardCount:      probe.FeedCardCount,
+			SearchInputCount:   probe.SearchInputCount,
+			SearchResultCount:  probe.SearchResultCount,
+			HomeFeedCount:      probe.HomeFeedCount,
+			SearchFeedCount:    probe.SearchFeedCount,
+			DetailCount:        probe.DetailCount,
+			CommentBoxCount:    probe.CommentBoxCount,
+			LikeButtonCount:    probe.LikeButtonCount,
+			PublishSignalCount: probe.PublishSignalCount,
+		},
+		StateFragment:    probe.StateFragment,
+		ResultsCount:     resultsCount,
+		SeenCount:        seenCount,
+		AvailableActions: availableActions,
+	}, nil
 }
 
 func (s *BrowseSession) Search(ctx context.Context, keyword string, filters ...FilterOption) ([]Feed, error) {
@@ -288,7 +372,7 @@ func (s *BrowseSession) Back(ctx context.Context) error {
 	if err := s.page.Context(ctx).Navigate(sourceURL); err != nil {
 		return err
 	}
-	if err := s.page.Context(ctx).WaitLoad(); err != nil {
+	if err := WaitForXHSReady(s.page.Context(ctx), XHSReadyOptions{Kind: inferXHSReadyKindFromURL(sourceURL)}); err != nil {
 		return err
 	}
 
@@ -305,6 +389,20 @@ func (s *BrowseSession) Close() {
 	s.opMu.Lock()
 	defer s.opMu.Unlock()
 	s.close()
+}
+
+func (s *BrowseSession) ClassifyRisk() (RiskSignal, error) {
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
+
+	s.mu.Lock()
+	closed := s.closed
+	page := s.page
+	s.mu.Unlock()
+	if closed || page == nil {
+		return RiskSignal{Kind: RiskNone, DetectedAt: time.Now()}, nil
+	}
+	return ClassifyRisk(page)
 }
 
 func (s *BrowseSession) close() {
@@ -341,6 +439,15 @@ func (s *BrowseSession) beginLockedOperation() error {
 
 func (s *BrowseSession) finishOperation() {
 	s.endOperation()
+	s.opMu.Unlock()
+}
+
+func (s *BrowseSession) finishPageStateOperation() {
+	s.mu.Lock()
+	if !s.closed {
+		s.touchLocked()
+	}
+	s.mu.Unlock()
 	s.opMu.Unlock()
 }
 
@@ -495,6 +602,43 @@ func (s *BrowseSession) infoLocked() BrowseSessionInfo {
 		SeenNotes:     seen,
 		ExpiresAt:     s.expiresAt,
 	}
+}
+
+func (s *BrowseSession) uniqueResultCountLocked() int {
+	ids := make(map[string]bool, len(s.results))
+	for _, feed := range s.results {
+		if feed.ID != "" {
+			ids[feed.ID] = true
+		}
+	}
+	if len(ids) > 0 {
+		return len(ids)
+	}
+	return len(s.results)
+}
+
+func (s *BrowseSession) availableActionsLocked(resultsCount int) []string {
+	actions := []string{"session_state", "session_search", "close_browse_session"}
+	if resultsCount > 0 && !s.opened {
+		actions = append(actions, "session_open_note")
+	}
+	if s.opened && !s.read {
+		actions = append(actions, "session_read")
+	}
+	if s.opened && s.read {
+		actions = append(actions, "session_like", "session_comment")
+	}
+	if s.opened && s.sourceURL != "" {
+		actions = append(actions, "session_back")
+	}
+	return actions
+}
+
+func inferXHSReadyKindFromSessionURL(rawURL string) XHSReadyKind {
+	if isDetailURL(rawURL) {
+		return XHSReadyDetail
+	}
+	return inferXHSReadyKindFromURL(rawURL)
 }
 
 func newBrowseSessionID() string {

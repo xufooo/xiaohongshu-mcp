@@ -21,7 +21,8 @@ func TestGetFeedsList(t *testing.T) {
 	defer page.Close()
 
 	// NewFeedsListAction 内部已经处理导航
-	action := NewFeedsListAction(page)
+	action, err := NewFeedsListAction(page)
+	require.NoError(t, err)
 
 	feeds, err := action.GetFeedsList(context.Background())
 	require.NoError(t, err)

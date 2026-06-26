@@ -6,21 +6,23 @@ import (
 	"fmt"
 	"time"
 
-	hrod "github.com/xpzouying/xiaohongshu-mcp/pkg/humanize/rod"
 	"github.com/xpzouying/xiaohongshu-mcp/errors"
+	hrod "github.com/xpzouying/xiaohongshu-mcp/pkg/humanize/rod"
 )
 
 type FeedsListAction struct {
 	page *hrod.Page
 }
 
-func NewFeedsListAction(page *hrod.Page) *FeedsListAction {
+func NewFeedsListAction(page *hrod.Page) (*FeedsListAction, error) {
 	pp := page.Timeout(60 * time.Second)
 
 	pp.MustNavigate("https://www.xiaohongshu.com")
-	pp.MustWaitLoad()
+	if err := WaitForXHSReady(pp, XHSReadyOptions{Kind: XHSReadyHome, Timeout: 60 * time.Second}); err != nil {
+		return nil, err
+	}
 
-	return &FeedsListAction{page: pp}
+	return &FeedsListAction{page: pp}, nil
 }
 
 // GetFeedsList 获取页面的 Feed 列表数据

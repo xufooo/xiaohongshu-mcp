@@ -28,6 +28,7 @@ func main() {
 	}
 	profileDir := os.Getenv("XHS_BROWSER_PROFILE_DIR")
 	browserMode := os.Getenv("XHS_BROWSER_MODE")
+	browserUserAgent := os.Getenv("XHS_BROWSER_USER_AGENT")
 	idleTimeout := 5 * time.Minute
 	if rawTimeout := os.Getenv("XHS_BROWSER_IDLE_TIMEOUT"); rawTimeout != "" {
 		parsed, err := time.ParseDuration(rawTimeout)
@@ -48,6 +49,7 @@ func main() {
 	configs.SetProfileDir(profileDir)
 	configs.SetBrowserMode(browserMode)
 	configs.SetBrowserIdleTimeout(idleTimeout)
+	configs.SetBrowserUserAgent(browserUserAgent)
 	configs.SetBrowserExtraArgs(configs.BrowserExtraArgsFromEnv())
 	if profileDir != "" {
 		logrus.Infof("using persistent browser profile: %s", profileDir)

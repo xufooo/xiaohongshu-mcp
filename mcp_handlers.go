@@ -866,6 +866,17 @@ func (s *AppServer) handleCloseBrowseSession(ctx context.Context, args BrowseSes
 	return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "浏览会话已关闭: " + args.SessionID}}}
 }
 
+func (s *AppServer) handleSessionState(ctx context.Context, args BrowseSessionIDArgs) *MCPToolResult {
+	if args.SessionID == "" {
+		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "session状态获取失败: 缺少session_id参数"}}, IsError: true}
+	}
+	state, err := s.xiaohongshuService.SessionState(ctx, args.SessionID)
+	if err != nil {
+		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "session状态获取失败: " + err.Error()}}, IsError: true}
+	}
+	return jsonMCPResult(state, "session状态获取成功")
+}
+
 func (s *AppServer) handleSessionSearch(ctx context.Context, args SessionSearchArgs) *MCPToolResult {
 	if args.SessionID == "" || args.Keyword == "" {
 		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "session搜索失败: 缺少session_id或keyword参数"}}, IsError: true}
