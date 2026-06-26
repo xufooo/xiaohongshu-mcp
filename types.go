@@ -66,15 +66,17 @@ type SearchFeedsRequest struct {
 
 // FeedDetailResponse Feed详情响应
 type FeedDetailResponse struct {
-	FeedID string `json:"feed_id"`
-	Data   any    `json:"data"`
+	FeedID  string                            `json:"feed_id"`
+	Data    any                               `json:"data"`
+	Network []xiaohongshu.NetworkCaptureEntry `json:"network,omitempty"`
 }
 
 // PostCommentRequest 发表评论请求
 type PostCommentRequest struct {
 	FeedID    string `json:"feed_id" binding:"required"`
 	XsecToken string `json:"xsec_token" binding:"required"`
-	Content   string `json:"content" binding:"required"`
+	Content      string `json:"content" binding:"required"`
+	ConfirmToken string `json:"confirm_token,omitempty"`
 }
 
 // PostCommentResponse 发表评论响应
@@ -90,7 +92,8 @@ type ReplyCommentRequest struct {
 	XsecToken string `json:"xsec_token" binding:"required"`
 	CommentID string `json:"comment_id" binding:"required_without=UserID"`
 	UserID    string `json:"user_id" binding:"required_without=CommentID"`
-	Content   string `json:"content" binding:"required"`
+	Content      string `json:"content" binding:"required"`
+	ConfirmToken string `json:"confirm_token,omitempty"`
 }
 
 // ReplyCommentResponse 回复评论响应
