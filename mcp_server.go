@@ -487,7 +487,23 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 		}),
 	)
 
-	// 工具 15: session 搜索
+	// 工具 15: session 状态
+	mcp.AddTool(server,
+		&mcp.Tool{
+			Name:        "session_state",
+			Description: "获取浏览会话的紧凑页面状态，包括当前URL、页面类型、就绪状态、风险信号和可执行的下一步动作",
+			Annotations: &mcp.ToolAnnotations{
+				Title:        "Session State",
+				ReadOnlyHint: true,
+			},
+		},
+		withPanicRecovery("session_state", func(ctx context.Context, req *mcp.CallToolRequest, args BrowseSessionIDArgs) (*mcp.CallToolResult, any, error) {
+			result := appServer.handleSessionState(ctx, args)
+			return convertToMCPResult(result), nil, nil
+		}),
+	)
+
+	// 工具 16: session 搜索
 	mcp.AddTool(server,
 		&mcp.Tool{
 			Name:        "session_search",
@@ -503,7 +519,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 		}),
 	)
 
-	// 工具 16: session 打开笔记
+	// 工具 17: session 打开笔记
 	mcp.AddTool(server,
 		&mcp.Tool{
 			Name:        "session_open_note",
@@ -519,7 +535,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 		}),
 	)
 
-	// 工具 17: session 阅读
+	// 工具 18: session 阅读
 	mcp.AddTool(server,
 		&mcp.Tool{
 			Name:        "session_read",
@@ -535,7 +551,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 		}),
 	)
 
-	// 工具 18: session 点赞
+	// 工具 19: session 点赞
 	mcp.AddTool(server,
 		&mcp.Tool{
 			Name:        "session_like",
@@ -551,7 +567,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 		}),
 	)
 
-	// 工具 19: session 评论
+	// 工具 20: session 评论
 	mcp.AddTool(server,
 		&mcp.Tool{
 			Name:        "session_comment",
@@ -567,7 +583,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 		}),
 	)
 
-	// 工具 20: session 返回
+	// 工具 21: session 返回
 	mcp.AddTool(server,
 		&mcp.Tool{
 			Name:        "session_back",
@@ -583,7 +599,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 		}),
 	)
 
-	// 工具 21: 关闭浏览会话
+	// 工具 22: 关闭浏览会话
 	mcp.AddTool(server,
 		&mcp.Tool{
 			Name:        "close_browse_session",
@@ -599,7 +615,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 		}),
 	)
 
-	logrus.Infof("Registered %d MCP tools", 21)
+	logrus.Infof("Registered %d MCP tools", 22)
 }
 
 // convertToMCPResult 将自定义的 MCPToolResult 转换为官方 SDK 的格式

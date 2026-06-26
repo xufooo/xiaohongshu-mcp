@@ -64,7 +64,9 @@ func (a *interactAction) preparePage(ctx context.Context, actionType interactAct
 	logrus.Infof("Opening feed detail page for %s: %s", actionType, url)
 
 	page.MustNavigate(url)
-	page.MustWaitLoad()
+	if err := WaitForXHSReady(page, XHSReadyOptions{Kind: XHSReadyDetail, FeedID: feedID}); err != nil {
+		return nil, err
+	}
 	if err := page.Sleep(time.Second); err != nil {
 		return nil, err
 	}

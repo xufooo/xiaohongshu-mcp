@@ -16,9 +16,11 @@ func NewNavigate(page *hrod.Page) *NavigateAction {
 
 func (n *NavigateAction) ToExplorePage(ctx context.Context) error {
 	page := n.page.Context(ctx)
-	page.MustNavigate("https://www.xiaohongshu.com/explore").
-		MustWaitLoad().
-		MustElement(`div#app`)
+	page.MustNavigate("https://www.xiaohongshu.com/explore")
+	if err := WaitForXHSReady(page, XHSReadyOptions{Kind: XHSReadyHome}); err != nil {
+		return err
+	}
+	page.MustElement(`div#app`)
 	return nil
 }
 
@@ -35,7 +37,9 @@ func (n *NavigateAction) ToProfilePage(ctx context.Context) error {
 	profileLink.MustClick()
 
 	// Wait for navigation to complete
-	page.MustWaitLoad()
+	if err := WaitForXHSReady(page, XHSReadyOptions{Kind: XHSReadyProfile}); err != nil {
+		return err
+	}
 
 	return nil
 }

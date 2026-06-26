@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -13,6 +14,7 @@ import (
 	"github.com/xpzouying/xiaohongshu-mcp/cookies"
 	"github.com/xpzouying/xiaohongshu-mcp/pkg/downloader"
 	hrod "github.com/xpzouying/xiaohongshu-mcp/pkg/humanize/rod"
+	"github.com/xpzouying/xiaohongshu-mcp/pkg/ratelimit"
 	"github.com/xpzouying/xiaohongshu-mcp/pkg/xhsutil"
 	"github.com/xpzouying/xiaohongshu-mcp/xiaohongshu"
 )
@@ -22,6 +24,7 @@ type XiaohongshuService struct {
 	browserManager *browser.Manager
 	actionState    *xiaohongshu.ActionStateStore
 	browseSessions *xiaohongshu.BrowseSessionManager
+	rateLimiter    *ratelimit.Limiter
 }
 
 // NewXiaohongshuService 创建小红书服务实例
@@ -38,6 +41,10 @@ func NewXiaohongshuService() *XiaohongshuService {
 		),
 		browseSessions: xiaohongshu.NewBrowseSessionManager(xiaohongshu.DefaultBrowseSessionTimeout),
 	}
+}
+
+func (s *XiaohongshuService) SetRateLimiter(limiter *ratelimit.Limiter) {
+	s.rateLimiter = limiter
 }
 
 // PublishRequest 发布请求
@@ -120,7 +127,15 @@ func (s *XiaohongshuService) DeleteCookies(ctx context.Context) error {
 
 	cookiePath := cookies.GetCookiesFilePath()
 	cookieLoader := cookies.NewLoadCookie(cookiePath)
-	return cookieLoader.DeleteCookies()
+	if err := cookieLoader.DeleteCookies(); err != nil {
+		return err
+	}
+	if s.actionState != nil {
+		if err := s.actionState.ClearIdentity(); err != nil {
+			logrus.Warnf("clear browser identity metadata failed: %v", err)
+		}
+	}
+	return nil
 }
 
 // CheckLoginStatus 检查登录状态
@@ -128,7 +143,7 @@ func (s *XiaohongshuService) CheckLoginStatus(ctx context.Context) (*LoginStatus
 	loginCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
 
-	page, err := s.browserManager.Acquire(loginCtx)
+	page, err := s.acquirePage(loginCtx)
 	if err != nil {
 		return nil, err
 	}
@@ -151,7 +166,7 @@ func (s *XiaohongshuService) CheckLoginStatus(ctx context.Context) (*LoginStatus
 
 // GetLoginQrcode 获取登录的扫码二维码
 func (s *XiaohongshuService) GetLoginQrcode(ctx context.Context) (*LoginQrcodeResponse, error) {
-	page, err := s.browserManager.Acquire(ctx)
+	page, err := s.acquirePage(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -273,7 +288,7 @@ func (s *XiaohongshuService) processImages(images []string) ([]string, error) {
 
 // publishContent 执行内容发布
 func (s *XiaohongshuService) publishContent(ctx context.Context, content xiaohongshu.PublishImageContent) error {
-	page, err := s.browserManager.Acquire(ctx)
+	page, err := s.acquirePage(ctx)
 	if err != nil {
 		return err
 	}
@@ -281,11 +296,16 @@ func (s *XiaohongshuService) publishContent(ctx context.Context, content xiaohon
 
 	action, err := xiaohongshu.NewPublishImageAction(page.Context(ctx))
 	if err != nil {
+		s.recordRiskFromPage(page, err)
 		return err
 	}
 
 	// 执行发布
-	return action.Publish(ctx, content)
+	if err := action.Publish(ctx, content); err != nil {
+		s.recordRiskFromPage(page, err)
+		return err
+	}
+	return nil
 }
 
 // PublishVideo 发布视频（本地文件）
@@ -356,7 +376,7 @@ func (s *XiaohongshuService) PublishVideo(ctx context.Context, req *PublishVideo
 
 // publishVideo 执行视频发布
 func (s *XiaohongshuService) publishVideo(ctx context.Context, content xiaohongshu.PublishVideoContent) error {
-	page, err := s.browserManager.Acquire(ctx)
+	page, err := s.acquirePage(ctx)
 	if err != nil {
 		return err
 	}
@@ -364,26 +384,36 @@ func (s *XiaohongshuService) publishVideo(ctx context.Context, content xiaohongs
 
 	action, err := xiaohongshu.NewPublishVideoAction(page.Context(ctx))
 	if err != nil {
+		s.recordRiskFromPage(page, err)
 		return err
 	}
 
-	return action.PublishVideo(ctx, content)
+	if err := action.PublishVideo(ctx, content); err != nil {
+		s.recordRiskFromPage(page, err)
+		return err
+	}
+	return nil
 }
 
 // ListFeeds 获取Feeds列表
 func (s *XiaohongshuService) ListFeeds(ctx context.Context) (*FeedsListResponse, error) {
-	page, err := s.browserManager.Acquire(ctx)
+	page, err := s.acquirePage(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer s.browserManager.Release(page)
 
 	// 创建 Feeds 列表 action
-	action := xiaohongshu.NewFeedsListAction(page.Context(ctx))
+	action, err := xiaohongshu.NewFeedsListAction(page.Context(ctx))
+	if err != nil {
+		s.recordRiskFromPage(page, err)
+		return nil, err
+	}
 
 	// 获取 Feeds 列表
 	feeds, err := action.GetFeedsList(ctx)
 	if err != nil {
+		s.recordRiskFromPage(page, err)
 		logrus.Errorf("获取 Feeds 列表失败: %v", err)
 		return nil, err
 	}
@@ -400,16 +430,17 @@ func (s *XiaohongshuService) SearchFeeds(ctx context.Context, keyword string, fi
 	searchCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
 
-	page, err := s.browserManager.Acquire(searchCtx)
+	page, err := s.acquirePage(searchCtx)
 	if err != nil {
 		return nil, err
 	}
 	defer s.browserManager.Release(page)
 
-	action := xiaohongshu.NewSearchActionWithState(page.Context(ctx), s.actionState)
+	action := xiaohongshu.NewSearchActionWithState(page.Context(searchCtx), s.actionState)
 
 	feeds, err := action.Search(searchCtx, keyword, filters...)
 	if err != nil {
+		s.recordRiskFromPage(page, err)
 		return nil, err
 	}
 
@@ -431,7 +462,7 @@ func (s *XiaohongshuService) GetFeedDetailWithConfig(ctx context.Context, feedID
 	detailCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
 
-	page, err := s.browserManager.Acquire(detailCtx)
+	page, err := s.acquirePage(detailCtx)
 	if err != nil {
 		return nil, err
 	}
@@ -443,6 +474,7 @@ func (s *XiaohongshuService) GetFeedDetailWithConfig(ctx context.Context, feedID
 	// 获取 Feed 详情
 	result, err := action.GetFeedDetailWithConfig(detailCtx, feedID, xsecToken, loadAllComments, config)
 	if err != nil {
+		s.recordRiskFromPage(page, err)
 		return nil, err
 	}
 
@@ -456,7 +488,7 @@ func (s *XiaohongshuService) GetFeedDetailWithConfig(ctx context.Context, feedID
 
 // UserProfile 获取用户信息
 func (s *XiaohongshuService) UserProfile(ctx context.Context, userID, xsecToken string) (*UserProfileResponse, error) {
-	page, err := s.browserManager.Acquire(ctx)
+	page, err := s.acquirePage(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -466,6 +498,7 @@ func (s *XiaohongshuService) UserProfile(ctx context.Context, userID, xsecToken 
 
 	result, err := action.UserProfile(ctx, userID, xsecToken)
 	if err != nil {
+		s.recordRiskFromPage(page, err)
 		return nil, err
 	}
 	response := &UserProfileResponse{
@@ -480,7 +513,7 @@ func (s *XiaohongshuService) UserProfile(ctx context.Context, userID, xsecToken 
 
 // PostCommentToFeed 发表评论到Feed
 func (s *XiaohongshuService) PostCommentToFeed(ctx context.Context, feedID, xsecToken, content string) (*PostCommentResponse, error) {
-	page, err := s.browserManager.Acquire(ctx)
+	page, err := s.acquirePage(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -489,6 +522,7 @@ func (s *XiaohongshuService) PostCommentToFeed(ctx context.Context, feedID, xsec
 	action := xiaohongshu.NewCommentFeedActionWithState(page.Context(ctx), s.actionState)
 
 	if err := action.PostComment(ctx, feedID, xsecToken, content); err != nil {
+		s.recordRiskFromPage(page, err)
 		return nil, err
 	}
 
@@ -497,7 +531,7 @@ func (s *XiaohongshuService) PostCommentToFeed(ctx context.Context, feedID, xsec
 
 // LikeFeed 点赞笔记
 func (s *XiaohongshuService) LikeFeed(ctx context.Context, feedID, xsecToken string) (*ActionResult, error) {
-	page, err := s.browserManager.Acquire(ctx)
+	page, err := s.acquirePage(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -505,6 +539,7 @@ func (s *XiaohongshuService) LikeFeed(ctx context.Context, feedID, xsecToken str
 
 	action := xiaohongshu.NewLikeActionWithState(page.Context(ctx), s.actionState)
 	if err := action.Like(ctx, feedID, xsecToken); err != nil {
+		s.recordRiskFromPage(page, err)
 		return nil, err
 	}
 	return &ActionResult{FeedID: feedID, Success: true, Message: "点赞成功或已点赞"}, nil
@@ -512,7 +547,7 @@ func (s *XiaohongshuService) LikeFeed(ctx context.Context, feedID, xsecToken str
 
 // UnlikeFeed 取消点赞笔记
 func (s *XiaohongshuService) UnlikeFeed(ctx context.Context, feedID, xsecToken string) (*ActionResult, error) {
-	page, err := s.browserManager.Acquire(ctx)
+	page, err := s.acquirePage(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -520,6 +555,7 @@ func (s *XiaohongshuService) UnlikeFeed(ctx context.Context, feedID, xsecToken s
 
 	action := xiaohongshu.NewLikeActionWithState(page.Context(ctx), s.actionState)
 	if err := action.Unlike(ctx, feedID, xsecToken); err != nil {
+		s.recordRiskFromPage(page, err)
 		return nil, err
 	}
 	return &ActionResult{FeedID: feedID, Success: true, Message: "取消点赞成功或未点赞"}, nil
@@ -527,7 +563,7 @@ func (s *XiaohongshuService) UnlikeFeed(ctx context.Context, feedID, xsecToken s
 
 // FavoriteFeed 收藏笔记
 func (s *XiaohongshuService) FavoriteFeed(ctx context.Context, feedID, xsecToken string) (*ActionResult, error) {
-	page, err := s.browserManager.Acquire(ctx)
+	page, err := s.acquirePage(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -535,6 +571,7 @@ func (s *XiaohongshuService) FavoriteFeed(ctx context.Context, feedID, xsecToken
 
 	action := xiaohongshu.NewFavoriteActionWithState(page.Context(ctx), s.actionState)
 	if err := action.Favorite(ctx, feedID, xsecToken); err != nil {
+		s.recordRiskFromPage(page, err)
 		return nil, err
 	}
 	return &ActionResult{FeedID: feedID, Success: true, Message: "收藏成功或已收藏"}, nil
@@ -542,7 +579,7 @@ func (s *XiaohongshuService) FavoriteFeed(ctx context.Context, feedID, xsecToken
 
 // UnfavoriteFeed 取消收藏笔记
 func (s *XiaohongshuService) UnfavoriteFeed(ctx context.Context, feedID, xsecToken string) (*ActionResult, error) {
-	page, err := s.browserManager.Acquire(ctx)
+	page, err := s.acquirePage(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -550,6 +587,7 @@ func (s *XiaohongshuService) UnfavoriteFeed(ctx context.Context, feedID, xsecTok
 
 	action := xiaohongshu.NewFavoriteActionWithState(page.Context(ctx), s.actionState)
 	if err := action.Unfavorite(ctx, feedID, xsecToken); err != nil {
+		s.recordRiskFromPage(page, err)
 		return nil, err
 	}
 	return &ActionResult{FeedID: feedID, Success: true, Message: "取消收藏成功或未收藏"}, nil
@@ -557,7 +595,7 @@ func (s *XiaohongshuService) UnfavoriteFeed(ctx context.Context, feedID, xsecTok
 
 // ReplyCommentToFeed 回复指定评论
 func (s *XiaohongshuService) ReplyCommentToFeed(ctx context.Context, feedID, xsecToken, commentID, userID, content string) (*ReplyCommentResponse, error) {
-	page, err := s.browserManager.Acquire(ctx)
+	page, err := s.acquirePage(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -566,6 +604,7 @@ func (s *XiaohongshuService) ReplyCommentToFeed(ctx context.Context, feedID, xse
 	action := xiaohongshu.NewCommentFeedActionWithState(page.Context(ctx), s.actionState)
 
 	if err := action.ReplyToComment(ctx, feedID, xsecToken, commentID, userID, content); err != nil {
+		s.recordRiskFromPage(page, err)
 		return nil, err
 	}
 
@@ -579,7 +618,7 @@ func (s *XiaohongshuService) ReplyCommentToFeed(ctx context.Context, feedID, xse
 }
 
 func (s *XiaohongshuService) CreateBrowseSession(ctx context.Context) (*xiaohongshu.BrowseSessionInfo, error) {
-	page, err := s.browserManager.Acquire(ctx)
+	page, err := s.acquirePage(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -592,6 +631,14 @@ func (s *XiaohongshuService) CloseBrowseSession(id string) error {
 	return s.browseSessions.Close(id)
 }
 
+func (s *XiaohongshuService) SessionState(ctx context.Context, id string) (*xiaohongshu.BrowseSessionPageState, error) {
+	session, err := s.browseSessions.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	return session.PageState(ctx)
+}
+
 func (s *XiaohongshuService) SessionSearch(ctx context.Context, id, keyword string, filters ...xiaohongshu.FilterOption) (*FeedsListResponse, error) {
 	session, err := s.browseSessions.Get(id)
 	if err != nil {
@@ -599,6 +646,7 @@ func (s *XiaohongshuService) SessionSearch(ctx context.Context, id, keyword stri
 	}
 	feeds, err := session.Search(ctx, keyword, filters...)
 	if err != nil {
+		s.recordRiskFromSession(session, err)
 		return nil, err
 	}
 	return &FeedsListResponse{Feeds: feeds, Count: len(feeds)}, nil
@@ -610,6 +658,7 @@ func (s *XiaohongshuService) SessionOpenNote(ctx context.Context, id, resultRef,
 		return nil, err
 	}
 	if err := session.OpenNote(ctx, resultRef, xsecToken); err != nil {
+		s.recordRiskFromSession(session, err)
 		return nil, err
 	}
 	info := session.Info()
@@ -622,6 +671,7 @@ func (s *XiaohongshuService) SessionRead(ctx context.Context, id string, minDura
 		return nil, err
 	}
 	if err := session.Read(ctx, minDuration); err != nil {
+		s.recordRiskFromSession(session, err)
 		return nil, err
 	}
 	info := session.Info()
@@ -635,6 +685,7 @@ func (s *XiaohongshuService) SessionLike(ctx context.Context, id string, unlike 
 	}
 	info := session.Info()
 	if err := session.Like(ctx, unlike); err != nil {
+		s.recordRiskFromSession(session, err)
 		return nil, err
 	}
 	action := "点赞成功或已点赞"
@@ -651,6 +702,7 @@ func (s *XiaohongshuService) SessionComment(ctx context.Context, id, content str
 	}
 	info := session.Info()
 	if err := session.Comment(ctx, content); err != nil {
+		s.recordRiskFromSession(session, err)
 		return nil, err
 	}
 	return &PostCommentResponse{FeedID: info.CurrentFeedID, Success: true, Message: "评论发表成功"}, nil
@@ -662,6 +714,7 @@ func (s *XiaohongshuService) SessionBack(ctx context.Context, id string) (*xiaoh
 		return nil, err
 	}
 	if err := session.Back(ctx); err != nil {
+		s.recordRiskFromSession(session, err)
 		return nil, err
 	}
 	info := session.Info()
@@ -673,6 +726,7 @@ func newBrowser(ctx context.Context) (*hrod.Browser, error) {
 		ctx,
 		configs.IsHeadless(),
 		browser.WithBinPath(configs.GetBinPath()),
+		browser.WithUserAgent(configs.GetBrowserUserAgent()),
 		browser.WithProfileDir(configs.GetProfileDir()),
 		browser.WithCloakBrowser(configs.UseCloakBrowser()),
 		browser.WithCloakLauncherProfile(configs.CloakLauncherProfile()),
@@ -695,9 +749,130 @@ func saveCookies(page *hrod.Page) error {
 	return cookieLoader.SaveCookies(data)
 }
 
+func (s *XiaohongshuService) recordRiskFromPage(page *hrod.Page, sourceErr error) {
+	if page == nil || sourceErr == nil {
+		return
+	}
+	signal, err := xiaohongshu.ClassifyRisk(page)
+	if err != nil {
+		logrus.Debugf("classify XHS risk after error failed: %v", err)
+		return
+	}
+	if !xiaohongshu.IsRisk(signal) {
+		return
+	}
+	s.recordRiskSignal(signal, sourceErr)
+}
+
+func (s *XiaohongshuService) recordRiskFromSession(session *xiaohongshu.BrowseSession, sourceErr error) {
+	if session == nil || sourceErr == nil {
+		return
+	}
+	signal, err := session.ClassifyRisk()
+	if err != nil {
+		logrus.Debugf("classify XHS session risk after error failed: %v", err)
+		return
+	}
+	if !xiaohongshu.IsRisk(signal) {
+		return
+	}
+	s.recordRiskSignal(signal, sourceErr)
+}
+
+func (s *XiaohongshuService) recordRiskSignal(signal xiaohongshu.RiskSignal, sourceErr error) {
+	reason := formatRiskReason(signal)
+	if s.actionState != nil {
+		if err := s.actionState.RecordRisk(reason, signal.Cooldown); err != nil {
+			logrus.Warnf("record action risk failed: %v", err)
+		}
+	}
+	if s.rateLimiter != nil {
+		s.rateLimiter.RecordRisk(reason, signal.Cooldown)
+	}
+	logrus.Warnf("detected XHS risk kind=%s recoverable=%v cooldown=%s reason=%s op_error=%v",
+		signal.Kind, signal.Recoverable, signal.Cooldown, reason, sourceErr)
+}
+
+func formatRiskReason(signal xiaohongshu.RiskSignal) string {
+	reason := string(signal.Kind)
+	if signal.Reason != "" {
+		reason = signal.Reason
+	}
+	if signal.MatchedText != "" {
+		reason = fmt.Sprintf("%s: %s", reason, signal.MatchedText)
+	}
+	return reason
+}
+
+func (s *XiaohongshuService) acquirePage(ctx context.Context) (*hrod.Page, error) {
+	page, err := s.browserManager.Acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.checkFixedIdentity(page); err != nil {
+		s.browserManager.Release(page)
+		return nil, err
+	}
+	return page, nil
+}
+
+func (s *XiaohongshuService) checkFixedIdentity(page *hrod.Page) error {
+	if !configs.UseFixedIdentity() || s.actionState == nil {
+		return nil
+	}
+	current, err := xiaohongshu.CaptureIdentityMetadata(page)
+	if err != nil {
+		return fmt.Errorf("browser identity fingerprint check failed: %w", err)
+	}
+	baseline, drift, err := s.actionState.CheckIdentity(current)
+	if err != nil {
+		return fmt.Errorf("browser identity state check failed: %w", err)
+	}
+	if len(drift) == 0 {
+		return nil
+	}
+
+	reason := formatIdentityDriftReason(baseline, current, drift)
+	if err := s.actionState.RecordRisk(reason, 6*time.Hour); err != nil {
+		logrus.Warnf("record identity drift risk failed: %v", err)
+	}
+	if s.rateLimiter != nil {
+		s.rateLimiter.RecordRisk(reason, 6*time.Hour)
+	}
+	return fmt.Errorf("%s", reason)
+}
+
+func formatIdentityDriftReason(baseline, current xiaohongshu.IdentityMetadata, drift []xiaohongshu.IdentityDrift) string {
+	parts := make([]string, 0, len(drift))
+	for i, item := range drift {
+		if i >= 4 {
+			parts = append(parts, fmt.Sprintf("+%d more", len(drift)-i))
+			break
+		}
+		parts = append(parts, fmt.Sprintf("%s %q -> %q", item.Field, capIdentityValue(item.Before), capIdentityValue(item.After)))
+	}
+	return fmt.Sprintf("browser identity drift detected baseline=%s current=%s: %s",
+		shortFingerprint(baseline.Fingerprint), shortFingerprint(current.Fingerprint), strings.Join(parts, "; "))
+}
+
+func shortFingerprint(value string) string {
+	if len(value) <= 12 {
+		return value
+	}
+	return value[:12]
+}
+
+func capIdentityValue(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) <= 80 {
+		return value
+	}
+	return value[:77] + "..."
+}
+
 // withBrowserPage 执行需要浏览器页面的操作的通用函数
 func (s *XiaohongshuService) withBrowserPage(ctx context.Context, fn func(*hrod.Page) error) error {
-	page, err := s.browserManager.Acquire(ctx)
+	page, err := s.acquirePage(ctx)
 	if err != nil {
 		return err
 	}
@@ -722,6 +897,9 @@ func (s *XiaohongshuService) GetMyProfile(ctx context.Context) (*UserProfileResp
 	err = s.withBrowserPage(ctx, func(page *hrod.Page) error {
 		action := xiaohongshu.NewUserProfileAction(page.Context(ctx))
 		result, err = action.GetMyProfileViaSidebar(ctx)
+		if err != nil {
+			s.recordRiskFromPage(page, err)
+		}
 		return err
 	})
 

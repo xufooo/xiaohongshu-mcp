@@ -34,6 +34,9 @@ func NewAppServer(xiaohongshuService *XiaohongshuService, opts ...AppServerOptio
 	for _, opt := range opts {
 		opt(appServer)
 	}
+	if appServer.xiaohongshuService != nil {
+		appServer.xiaohongshuService.SetRateLimiter(appServer.rateLimiter)
+	}
 
 	// 初始化 MCP Server（需要在创建 appServer 之后，因为工具注册需要访问 appServer）
 	appServer.mcpServer = InitMCPServer(appServer)

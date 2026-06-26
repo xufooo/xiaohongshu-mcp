@@ -36,6 +36,8 @@ type ActionState struct {
 	ConsecutiveFailures int       `json:"consecutive_failures,omitempty"`
 	RiskCooldownUntil   time.Time `json:"risk_cooldown_until,omitempty"`
 	LastRiskText        string    `json:"last_risk_text,omitempty"`
+
+	Identity *IdentityMetadata `json:"identity,omitempty"`
 }
 
 type ActionStateStore struct {
@@ -164,13 +166,26 @@ func (s *ActionStateStore) RecordFailure(reason string) error {
 }
 
 func (s *ActionStateStore) RecordRisk(reason string, cooldown time.Duration) error {
-	if cooldown <= 0 {
-		cooldown = 6 * time.Hour
-	}
 	return s.update(func(state *ActionState) {
 		state.ConsecutiveFailures++
 		state.LastRiskText = reason
-		state.RiskCooldownUntil = time.Now().Add(cooldown)
+		if cooldown > 0 {
+			state.RiskCooldownUntil = time.Now().Add(cooldown)
+		}
+	})
+}
+
+func (s *ActionStateStore) ClearRisk() error {
+	return s.update(func(state *ActionState) {
+		state.ConsecutiveFailures = 0
+		state.RiskCooldownUntil = time.Time{}
+		state.LastRiskText = ""
+	})
+}
+
+func (s *ActionStateStore) ClearIdentity() error {
+	return s.update(func(state *ActionState) {
+		state.Identity = nil
 	})
 }
 

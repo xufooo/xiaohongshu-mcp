@@ -203,7 +203,13 @@ func (f *CommentFeedAction) preparePage(ctx context.Context, feedID, xsecToken, 
 	url := makeFeedDetailURL(feedID, xsecToken)
 	logrus.Infof("打开 feed 详情页: %s", url)
 	page.MustNavigate(url)
-	page.MustWaitLoad()
+	kind := XHSReadyDetail
+	if action == "comment" {
+		kind = XHSReadyCommentBox
+	}
+	if err := WaitForXHSReady(page, XHSReadyOptions{Kind: kind, FeedID: feedID}); err != nil {
+		return nil, err
+	}
 	if err := sleepForCommentStep(page, 1500*time.Millisecond, 3*time.Second); err != nil {
 		return nil, err
 	}

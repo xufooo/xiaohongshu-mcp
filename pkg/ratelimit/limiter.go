@@ -82,6 +82,13 @@ type Info struct {
 	Scope         string `json:"scope,omitempty"`
 }
 
+type RiskStatus struct {
+	Active              bool      `json:"active"`
+	CooldownUntil       time.Time `json:"cooldown_until,omitempty"`
+	LastRiskText        string    `json:"last_risk_text,omitempty"`
+	ConsecutiveFailures int       `json:"consecutive_failures"`
+}
+
 // Limiter 速率限制器（goroutine-safe）。
 type Limiter struct {
 	mu     sync.Mutex
@@ -374,9 +381,6 @@ func (l *Limiter) RecordRisk(reason string, cooldown time.Duration) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	if cooldown <= 0 {
-		cooldown = time.Duration(6+rand.Intn(19)) * time.Hour
-	}
 	now := time.Now()
 	state, err := l.loadState(now)
 	if err != nil {
@@ -384,7 +388,40 @@ func (l *Limiter) RecordRisk(reason string, cooldown time.Duration) {
 	}
 	state.ConsecutiveFailures++
 	state.LastRiskText = reason
-	state.RiskCooldownUntil = now.Add(cooldown)
+	if cooldown > 0 {
+		state.RiskCooldownUntil = now.Add(cooldown)
+	}
+	_ = l.store.Save(state)
+}
+
+func (l *Limiter) RiskStatus() RiskStatus {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	now := time.Now()
+	state, err := l.loadState(now)
+	if err != nil {
+		return RiskStatus{}
+	}
+	return RiskStatus{
+		Active:              state.RiskCooldownUntil.After(now),
+		CooldownUntil:       state.RiskCooldownUntil,
+		LastRiskText:        state.LastRiskText,
+		ConsecutiveFailures: state.ConsecutiveFailures,
+	}
+}
+
+func (l *Limiter) ClearRisk() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	state, err := l.loadState(time.Now())
+	if err != nil {
+		return
+	}
+	state.RiskCooldownUntil = time.Time{}
+	state.LastRiskText = ""
+	state.ConsecutiveFailures = 0
 	_ = l.store.Save(state)
 }
 
