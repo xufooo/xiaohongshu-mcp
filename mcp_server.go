@@ -24,7 +24,8 @@ type PublishContentArgs struct {
 	ScheduleAt string   `json:"schedule_at,omitempty" jsonschema:"定时发布时间（可选），ISO8601格式如 2024-01-20T10:30:00+08:00，支持1小时至14天内。不填则立即发布"`
 	IsOriginal bool     `json:"is_original,omitempty" jsonschema:"是否声明原创（可选），true为声明原创，false或不填则不声明"`
 	Visibility string   `json:"visibility,omitempty" jsonschema:"可见范围（可选），支持: 公开可见(默认)、仅自己可见、仅互关好友可见。不填则默认公开可见"`
-	Products   []string `json:"products,omitempty" jsonschema:"商品关键词列表（可选），用于绑定带货商品。填写商品名称或商品ID，系统会自动搜索并选择第一个匹配结果。需账号已开通商品功能。示例: [面膜, 防晒霜SPF50]"`
+	Products     []string `json:"products,omitempty" jsonschema:"商品关键词列表（可选），用于绑定带货商品。填写商品名称或商品ID，系统会自动搜索并选择第一个匹配结果。需账号已开通商品功能。示例: [面膜, 防晒霜SPF50]"`
+	ConfirmToken string `json:"confirm_token,omitempty" jsonschema:"写操作确认令牌。启用XHS_WRITE_CONFIRM时，首次调用会返回该令牌，使用相同参数二次调用时传入"`
 }
 
 // PublishVideoArgs 发布视频的参数（仅支持本地单个视频文件）
@@ -35,7 +36,8 @@ type PublishVideoArgs struct {
 	Tags       []string `json:"tags,omitempty" jsonschema:"话题标签列表（可选参数），如 [美食, 旅行, 生活]"`
 	ScheduleAt string   `json:"schedule_at,omitempty" jsonschema:"定时发布时间（可选），ISO8601格式如 2024-01-20T10:30:00+08:00，支持1小时至14天内。不填则立即发布"`
 	Visibility string   `json:"visibility,omitempty" jsonschema:"可见范围（可选），支持: 公开可见(默认)、仅自己可见、仅互关好友可见。不填则默认公开可见"`
-	Products   []string `json:"products,omitempty" jsonschema:"商品关键词列表（可选），用于绑定带货商品。填写商品名称或商品ID，系统会自动搜索并选择第一个匹配结果。需账号已开通商品功能。示例: [面膜, 防晒霜SPF50]"`
+	Products     []string `json:"products,omitempty" jsonschema:"商品关键词列表（可选），用于绑定带货商品。填写商品名称或商品ID，系统会自动搜索并选择第一个匹配结果。需账号已开通商品功能。示例: [面膜, 防晒霜SPF50]"`
+	ConfirmToken string `json:"confirm_token,omitempty" jsonschema:"写操作确认令牌。启用XHS_WRITE_CONFIRM时，首次调用会返回该令牌，使用相同参数二次调用时传入"`
 }
 
 // SearchFeedsArgs 搜索内容的参数
@@ -74,7 +76,8 @@ type UserProfileArgs struct {
 type PostCommentArgs struct {
 	FeedID    string `json:"feed_id" jsonschema:"小红书笔记ID，从Feed列表获取"`
 	XsecToken string `json:"xsec_token" jsonschema:"访问令牌，从Feed列表的xsecToken字段获取"`
-	Content   string `json:"content" jsonschema:"评论内容"`
+	Content      string `json:"content" jsonschema:"评论内容"`
+	ConfirmToken string `json:"confirm_token,omitempty" jsonschema:"写操作确认令牌。启用XHS_WRITE_CONFIRM时，首次调用会返回该令牌，使用相同参数二次调用时传入"`
 }
 
 // ReplyCommentArgs 回复评论的参数
@@ -83,21 +86,24 @@ type ReplyCommentArgs struct {
 	XsecToken string `json:"xsec_token" jsonschema:"访问令牌，从Feed列表的xsecToken字段获取"`
 	CommentID string `json:"comment_id,omitempty" jsonschema:"目标评论ID，从评论列表获取"`
 	UserID    string `json:"user_id,omitempty" jsonschema:"目标评论用户ID，从评论列表获取"`
-	Content   string `json:"content" jsonschema:"回复内容"`
+	Content      string `json:"content" jsonschema:"回复内容"`
+	ConfirmToken string `json:"confirm_token,omitempty" jsonschema:"写操作确认令牌。启用XHS_WRITE_CONFIRM时，首次调用会返回该令牌，使用相同参数二次调用时传入"`
 }
 
 // LikeFeedArgs 点赞参数
 type LikeFeedArgs struct {
 	FeedID    string `json:"feed_id" jsonschema:"小红书笔记ID，从Feed列表获取"`
 	XsecToken string `json:"xsec_token" jsonschema:"访问令牌，从Feed列表的xsecToken字段获取"`
-	Unlike    bool   `json:"unlike,omitempty" jsonschema:"是否取消点赞，true为取消点赞，false或未设置则为点赞"`
+	Unlike       bool   `json:"unlike,omitempty" jsonschema:"是否取消点赞，true为取消点赞，false或未设置则为点赞"`
+	ConfirmToken string `json:"confirm_token,omitempty" jsonschema:"写操作确认令牌。启用XHS_WRITE_CONFIRM时，首次调用会返回该令牌，使用相同参数二次调用时传入"`
 }
 
 // FavoriteFeedArgs 收藏参数
 type FavoriteFeedArgs struct {
 	FeedID     string `json:"feed_id" jsonschema:"小红书笔记ID，从Feed列表获取"`
 	XsecToken  string `json:"xsec_token" jsonschema:"访问令牌，从Feed列表的xsecToken字段获取"`
-	Unfavorite bool   `json:"unfavorite,omitempty" jsonschema:"是否取消收藏，true为取消收藏，false或未设置则为收藏"`
+	Unfavorite   bool   `json:"unfavorite,omitempty" jsonschema:"是否取消收藏，true为取消收藏，false或未设置则为收藏"`
+	ConfirmToken string `json:"confirm_token,omitempty" jsonschema:"写操作确认令牌。启用XHS_WRITE_CONFIRM时，首次调用会返回该令牌，使用相同参数二次调用时传入"`
 }
 
 type BrowseSessionIDArgs struct {
@@ -123,12 +129,14 @@ type SessionReadArgs struct {
 
 type SessionLikeArgs struct {
 	SessionID string `json:"session_id" jsonschema:"浏览会话ID，由create_browse_session返回"`
-	Unlike    bool   `json:"unlike,omitempty" jsonschema:"是否取消点赞，true为取消点赞，false或未设置则为点赞"`
+	Unlike       bool   `json:"unlike,omitempty" jsonschema:"是否取消点赞，true为取消点赞，false或未设置则为点赞"`
+	ConfirmToken string `json:"confirm_token,omitempty" jsonschema:"写操作确认令牌。启用XHS_WRITE_CONFIRM时，首次调用会返回该令牌，使用相同参数二次调用时传入"`
 }
 
 type SessionCommentArgs struct {
 	SessionID string `json:"session_id" jsonschema:"浏览会话ID，由create_browse_session返回"`
-	Content   string `json:"content" jsonschema:"评论内容"`
+	Content      string `json:"content" jsonschema:"评论内容"`
+	ConfirmToken string `json:"confirm_token,omitempty" jsonschema:"写操作确认令牌。启用XHS_WRITE_CONFIRM时，首次调用会返回该令牌，使用相同参数二次调用时传入"`
 }
 
 // InitMCPServer 初始化 MCP Server
@@ -245,14 +253,15 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 		withPanicRecovery("publish_content", func(ctx context.Context, req *mcp.CallToolRequest, args PublishContentArgs) (*mcp.CallToolResult, any, error) {
 			// 转换参数格式到现有的 handler
 			argsMap := map[string]interface{}{
-				"title":       args.Title,
-				"content":     args.Content,
-				"images":      convertStringsToInterfaces(args.Images),
-				"tags":        convertStringsToInterfaces(args.Tags),
-				"schedule_at": args.ScheduleAt,
-				"is_original": args.IsOriginal,
-				"visibility":  args.Visibility,
-				"products":    convertStringsToInterfaces(args.Products),
+				"title":         args.Title,
+				"content":       args.Content,
+				"images":        convertStringsToInterfaces(args.Images),
+				"tags":          convertStringsToInterfaces(args.Tags),
+				"schedule_at":   args.ScheduleAt,
+				"is_original":   args.IsOriginal,
+				"visibility":    args.Visibility,
+				"products":      convertStringsToInterfaces(args.Products),
+				"confirm_token": args.ConfirmToken,
 			}
 			result := appServer.handlePublishContent(ctx, argsMap)
 			return convertToMCPResult(result), nil, nil
@@ -365,9 +374,10 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 		},
 		withPanicRecovery("post_comment_to_feed", func(ctx context.Context, req *mcp.CallToolRequest, args PostCommentArgs) (*mcp.CallToolResult, any, error) {
 			argsMap := map[string]interface{}{
-				"feed_id":    args.FeedID,
-				"xsec_token": args.XsecToken,
-				"content":    args.Content,
+				"feed_id":       args.FeedID,
+				"xsec_token":    args.XsecToken,
+				"content":       args.Content,
+				"confirm_token": args.ConfirmToken,
 			}
 			result := appServer.handlePostComment(ctx, argsMap)
 			return convertToMCPResult(result), nil, nil
@@ -393,11 +403,12 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 			}
 
 			argsMap := map[string]interface{}{
-				"feed_id":    args.FeedID,
-				"xsec_token": args.XsecToken,
-				"comment_id": args.CommentID,
-				"user_id":    args.UserID,
-				"content":    args.Content,
+				"feed_id":       args.FeedID,
+				"xsec_token":    args.XsecToken,
+				"comment_id":    args.CommentID,
+				"user_id":       args.UserID,
+				"content":       args.Content,
+				"confirm_token": args.ConfirmToken,
 			}
 			result := appServer.handleReplyComment(ctx, argsMap)
 			return convertToMCPResult(result), nil, nil
@@ -416,13 +427,14 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 		},
 		withPanicRecovery("publish_with_video", func(ctx context.Context, req *mcp.CallToolRequest, args PublishVideoArgs) (*mcp.CallToolResult, any, error) {
 			argsMap := map[string]interface{}{
-				"title":       args.Title,
-				"content":     args.Content,
-				"video":       args.Video,
-				"tags":        convertStringsToInterfaces(args.Tags),
-				"schedule_at": args.ScheduleAt,
-				"visibility":  args.Visibility,
-				"products":    convertStringsToInterfaces(args.Products),
+				"title":         args.Title,
+				"content":       args.Content,
+				"video":         args.Video,
+				"tags":          convertStringsToInterfaces(args.Tags),
+				"schedule_at":   args.ScheduleAt,
+				"visibility":    args.Visibility,
+				"products":      convertStringsToInterfaces(args.Products),
+				"confirm_token": args.ConfirmToken,
 			}
 			result := appServer.handlePublishVideo(ctx, argsMap)
 			return convertToMCPResult(result), nil, nil
@@ -441,9 +453,10 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 		},
 		withPanicRecovery("like_feed", func(ctx context.Context, req *mcp.CallToolRequest, args LikeFeedArgs) (*mcp.CallToolResult, any, error) {
 			argsMap := map[string]interface{}{
-				"feed_id":    args.FeedID,
-				"xsec_token": args.XsecToken,
-				"unlike":     args.Unlike,
+				"feed_id":       args.FeedID,
+				"xsec_token":    args.XsecToken,
+				"unlike":        args.Unlike,
+				"confirm_token": args.ConfirmToken,
 			}
 			result := appServer.handleLikeFeed(ctx, argsMap)
 			return convertToMCPResult(result), nil, nil
@@ -462,9 +475,10 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 		},
 		withPanicRecovery("favorite_feed", func(ctx context.Context, req *mcp.CallToolRequest, args FavoriteFeedArgs) (*mcp.CallToolResult, any, error) {
 			argsMap := map[string]interface{}{
-				"feed_id":    args.FeedID,
-				"xsec_token": args.XsecToken,
-				"unfavorite": args.Unfavorite,
+				"feed_id":       args.FeedID,
+				"xsec_token":    args.XsecToken,
+				"unfavorite":    args.Unfavorite,
+				"confirm_token": args.ConfirmToken,
 			}
 			result := appServer.handleFavoriteFeed(ctx, argsMap)
 			return convertToMCPResult(result), nil, nil

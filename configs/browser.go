@@ -124,6 +124,24 @@ func UseFixedIdentity() bool {
 	}
 }
 
+func UseWriteConfirmation() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("XHS_WRITE_CONFIRM"))) {
+	case "1", "true", "on", "yes":
+		return true
+	default:
+		return false
+	}
+}
+
+func UseNetworkCapture() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("XHS_NETWORK_CAPTURE"))) {
+	case "1", "true", "on", "yes":
+		return true
+	default:
+		return false
+	}
+}
+
 // BrowserExtraArgsFromEnv 读取用户配置的附加启动参数。
 // 参数必须使用 --名称 或 --名称=值 形式，以空白字符分隔。
 func BrowserExtraArgsFromEnv() []string {

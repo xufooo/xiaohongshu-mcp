@@ -47,6 +47,20 @@ func (s *XiaohongshuService) SetRateLimiter(limiter *ratelimit.Limiter) {
 	s.rateLimiter = limiter
 }
 
+func (s *XiaohongshuService) startReadNetworkCapture(page *hrod.Page) *xiaohongshu.NetworkCapture {
+	if !configs.UseNetworkCapture() {
+		return nil
+	}
+	return xiaohongshu.StartNetworkCapture(page, xiaohongshu.NetworkCaptureOptions{})
+}
+
+func stopReadNetworkCapture(capture *xiaohongshu.NetworkCapture) []xiaohongshu.NetworkCaptureEntry {
+	if capture == nil {
+		return nil
+	}
+	return capture.Stop()
+}
+
 // PublishRequest 发布请求
 type PublishRequest struct {
 	Title      string   `json:"title" binding:"required"`
@@ -56,7 +70,8 @@ type PublishRequest struct {
 	ScheduleAt string   `json:"schedule_at,omitempty"` // 定时发布时间，ISO8601格式，为空则立即发布
 	IsOriginal bool     `json:"is_original,omitempty"` // 是否声明原创
 	Visibility string   `json:"visibility,omitempty"`  // 可见范围: "公开可见"(默认), "仅自己可见", "仅互关好友可见"
-	Products   []string `json:"products,omitempty"`    // 商品关键词列表，用于绑定带货商品
+	Products     []string `json:"products,omitempty"` // 商品关键词列表，用于绑定带货商品
+	ConfirmToken string `json:"confirm_token,omitempty"`
 }
 
 // LoginStatusResponse 登录状态响应
@@ -89,7 +104,8 @@ type PublishVideoRequest struct {
 	Tags       []string `json:"tags,omitempty"`
 	ScheduleAt string   `json:"schedule_at,omitempty"` // 定时发布时间，ISO8601格式，为空则立即发布
 	Visibility string   `json:"visibility,omitempty"`  // 可见范围: "公开可见"(默认), "仅自己可见", "仅互关好友可见"
-	Products   []string `json:"products,omitempty"`    // 商品关键词列表，用于绑定带货商品
+	Products     []string `json:"products,omitempty"` // 商品关键词列表，用于绑定带货商品
+	ConfirmToken string `json:"confirm_token,omitempty"`
 }
 
 // PublishVideoResponse 发布视频响应
@@ -103,8 +119,9 @@ type PublishVideoResponse struct {
 
 // FeedsListResponse Feeds列表响应
 type FeedsListResponse struct {
-	Feeds []xiaohongshu.Feed `json:"feeds"`
-	Count int                `json:"count"`
+	Feeds   []xiaohongshu.Feed                `json:"feeds"`
+	Count   int                               `json:"count"`
+	Network []xiaohongshu.NetworkCaptureEntry `json:"network,omitempty"`
 }
 
 // UserProfileResponse 用户主页响应
@@ -437,16 +454,19 @@ func (s *XiaohongshuService) SearchFeeds(ctx context.Context, keyword string, fi
 	defer s.browserManager.Release(page)
 
 	action := xiaohongshu.NewSearchActionWithState(page.Context(searchCtx), s.actionState)
+	capture := s.startReadNetworkCapture(page)
 
 	feeds, err := action.Search(searchCtx, keyword, filters...)
+	network := stopReadNetworkCapture(capture)
 	if err != nil {
 		s.recordRiskFromPage(page, err)
 		return nil, err
 	}
 
 	response := &FeedsListResponse{
-		Feeds: feeds,
-		Count: len(feeds),
+		Feeds:   feeds,
+		Count:   len(feeds),
+		Network: network,
 	}
 
 	return response, nil
@@ -470,17 +490,20 @@ func (s *XiaohongshuService) GetFeedDetailWithConfig(ctx context.Context, feedID
 
 	// 创建 Feed 详情 action
 	action := xiaohongshu.NewFeedDetailActionWithState(page.Context(ctx), s.actionState)
+	capture := s.startReadNetworkCapture(page)
 
 	// 获取 Feed 详情
 	result, err := action.GetFeedDetailWithConfig(detailCtx, feedID, xsecToken, loadAllComments, config)
+	network := stopReadNetworkCapture(capture)
 	if err != nil {
 		s.recordRiskFromPage(page, err)
 		return nil, err
 	}
 
 	response := &FeedDetailResponse{
-		FeedID: feedID,
-		Data:   result,
+		FeedID:  feedID,
+		Data:    result,
+		Network: network,
 	}
 
 	return response, nil

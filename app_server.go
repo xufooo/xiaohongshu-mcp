@@ -22,6 +22,7 @@ type AppServer struct {
 	router             *gin.Engine
 	httpServer         *http.Server
 	rateLimiter        *ratelimit.Limiter
+	writeConfirm       *WriteConfirmationGate
 }
 
 // NewAppServer 创建新的应用服务器实例
@@ -29,6 +30,7 @@ func NewAppServer(xiaohongshuService *XiaohongshuService, opts ...AppServerOptio
 	appServer := &AppServer{
 		xiaohongshuService: xiaohongshuService,
 		rateLimiter:        ratelimit.New(configs.DefaultRateLimitConfig()),
+		writeConfirm:       NewWriteConfirmationGate(configs.UseWriteConfirmation()),
 	}
 
 	for _, opt := range opts {

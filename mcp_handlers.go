@@ -57,6 +57,31 @@ func (s *AppServer) rateLimitMCP(ctx context.Context, name string, action rateli
 	return nil
 }
 
+func (s *AppServer) requireWriteConfirmation(action, key, summary, token string) *MCPToolResult {
+	if s.writeConfirm == nil || !s.writeConfirm.Enabled() {
+		return nil
+	}
+	challenge, err := s.writeConfirm.Confirm(action, key, summary, token)
+	if err != nil {
+		return &MCPToolResult{
+			Content: []MCPContent{{Type: "text", Text: "写操作确认失败: " + err.Error()}},
+			IsError: true,
+		}
+	}
+	if challenge == nil {
+		return nil
+	}
+	return jsonMCPResult(challenge, "写操作需要确认")
+}
+
+func compactWriteSummary(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) <= 120 {
+		return value
+	}
+	return value[:117] + "..."
+}
+
 // handleCheckLoginStatus 处理检查登录状态
 func (s *AppServer) handleCheckLoginStatus(ctx context.Context) *MCPToolResult {
 	logrus.Info("MCP: 检查登录状态")
@@ -152,9 +177,6 @@ func (s *AppServer) handleDeleteCookies(ctx context.Context) *MCPToolResult {
 
 // handlePublishContent 处理发布内容
 func (s *AppServer) handlePublishContent(ctx context.Context, args map[string]interface{}) *MCPToolResult {
-	if blocked := s.rateLimitMCP(ctx, "发布内容", ratelimit.ActionPublish); blocked != nil {
-		return blocked
-	}
 	logrus.Info("MCP: 发布内容")
 
 	// 解析参数
@@ -206,6 +228,16 @@ func (s *AppServer) handlePublishContent(ctx context.Context, args map[string]in
 		Products:   products,
 	}
 
+	confirmToken, _ := args["confirm_token"].(string)
+	key := writeConfirmationKey("publish_content", title, content, imagePaths, tags, scheduleAt, isOriginal, visibility, products)
+	summary := fmt.Sprintf("发布图文: title=%q images=%d visibility=%s content=%q", title, len(imagePaths), visibility, compactWriteSummary(content))
+	if confirm := s.requireWriteConfirmation("publish_content", key, summary, confirmToken); confirm != nil {
+		return confirm
+	}
+	if blocked := s.rateLimitMCP(ctx, "发布内容", ratelimit.ActionPublish); blocked != nil {
+		return blocked
+	}
+
 	// 执行发布
 	result, err := s.xiaohongshuService.PublishContent(ctx, req)
 	if err != nil {
@@ -229,9 +261,6 @@ func (s *AppServer) handlePublishContent(ctx context.Context, args map[string]in
 
 // handlePublishVideo 处理发布视频内容（仅本地单个视频文件）
 func (s *AppServer) handlePublishVideo(ctx context.Context, args map[string]interface{}) *MCPToolResult {
-	if blocked := s.rateLimitMCP(ctx, "发布视频", ratelimit.ActionPublish); blocked != nil {
-		return blocked
-	}
 	logrus.Info("MCP: 发布视频内容（本地）")
 
 	title, _ := args["title"].(string)
@@ -279,6 +308,16 @@ func (s *AppServer) handlePublishVideo(ctx context.Context, args map[string]inte
 		ScheduleAt: scheduleAt,
 		Visibility: visibility,
 		Products:   products,
+	}
+
+	confirmToken, _ := args["confirm_token"].(string)
+	key := writeConfirmationKey("publish_video", title, content, videoPath, tags, scheduleAt, visibility, products)
+	summary := fmt.Sprintf("发布视频: title=%q video=%q visibility=%s content=%q", title, videoPath, visibility, compactWriteSummary(content))
+	if confirm := s.requireWriteConfirmation("publish_video", key, summary, confirmToken); confirm != nil {
+		return confirm
+	}
+	if blocked := s.rateLimitMCP(ctx, "发布视频", ratelimit.ActionPublish); blocked != nil {
+		return blocked
 	}
 
 	// 执行发布
@@ -623,9 +662,6 @@ func (s *AppServer) handleUserProfile(ctx context.Context, args map[string]any) 
 
 // handleLikeFeed 处理点赞/取消点赞
 func (s *AppServer) handleLikeFeed(ctx context.Context, args map[string]interface{}) *MCPToolResult {
-	if blocked := s.rateLimitMCP(ctx, "点赞", ratelimit.ActionLike); blocked != nil {
-		return blocked
-	}
 	feedID, ok := args["feed_id"].(string)
 	if !ok || feedID == "" {
 		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "操作失败: 缺少feed_id参数"}}, IsError: true}
@@ -635,6 +671,20 @@ func (s *AppServer) handleLikeFeed(ctx context.Context, args map[string]interfac
 		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "操作失败: 缺少xsec_token参数"}}, IsError: true}
 	}
 	unlike, _ := args["unlike"].(bool)
+	action := "点赞"
+	if unlike {
+		action = "取消点赞"
+	}
+
+	confirmToken, _ := args["confirm_token"].(string)
+	key := writeConfirmationKey("like_feed", feedID, xsecToken, unlike)
+	summary := fmt.Sprintf("%s: feed_id=%s", action, feedID)
+	if confirm := s.requireWriteConfirmation("like_feed", key, summary, confirmToken); confirm != nil {
+		return confirm
+	}
+	if blocked := s.rateLimitMCP(ctx, action, ratelimit.ActionLike); blocked != nil {
+		return blocked
+	}
 
 	var res *ActionResult
 	var err error
@@ -646,25 +696,14 @@ func (s *AppServer) handleLikeFeed(ctx context.Context, args map[string]interfac
 	}
 
 	if err != nil {
-		action := "点赞"
-		if unlike {
-			action = "取消点赞"
-		}
 		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: action + "失败: " + err.Error()}}, IsError: true}
 	}
 
-	action := "点赞"
-	if unlike {
-		action = "取消点赞"
-	}
 	return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: fmt.Sprintf("%s成功 - Feed ID: %s", action, res.FeedID)}}}
 }
 
 // handleFavoriteFeed 处理收藏/取消收藏
 func (s *AppServer) handleFavoriteFeed(ctx context.Context, args map[string]interface{}) *MCPToolResult {
-	if blocked := s.rateLimitMCP(ctx, "收藏", ratelimit.ActionFavorite); blocked != nil {
-		return blocked
-	}
 	feedID, ok := args["feed_id"].(string)
 	if !ok || feedID == "" {
 		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "操作失败: 缺少feed_id参数"}}, IsError: true}
@@ -674,6 +713,20 @@ func (s *AppServer) handleFavoriteFeed(ctx context.Context, args map[string]inte
 		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "操作失败: 缺少xsec_token参数"}}, IsError: true}
 	}
 	unfavorite, _ := args["unfavorite"].(bool)
+	action := "收藏"
+	if unfavorite {
+		action = "取消收藏"
+	}
+
+	confirmToken, _ := args["confirm_token"].(string)
+	key := writeConfirmationKey("favorite_feed", feedID, xsecToken, unfavorite)
+	summary := fmt.Sprintf("%s: feed_id=%s", action, feedID)
+	if confirm := s.requireWriteConfirmation("favorite_feed", key, summary, confirmToken); confirm != nil {
+		return confirm
+	}
+	if blocked := s.rateLimitMCP(ctx, action, ratelimit.ActionFavorite); blocked != nil {
+		return blocked
+	}
 
 	var res *ActionResult
 	var err error
@@ -685,25 +738,14 @@ func (s *AppServer) handleFavoriteFeed(ctx context.Context, args map[string]inte
 	}
 
 	if err != nil {
-		action := "收藏"
-		if unfavorite {
-			action = "取消收藏"
-		}
 		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: action + "失败: " + err.Error()}}, IsError: true}
 	}
 
-	action := "收藏"
-	if unfavorite {
-		action = "取消收藏"
-	}
 	return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: fmt.Sprintf("%s成功 - Feed ID: %s", action, res.FeedID)}}}
 }
 
 // handlePostComment 处理发表评论到Feed
 func (s *AppServer) handlePostComment(ctx context.Context, args map[string]interface{}) *MCPToolResult {
-	if blocked := s.rateLimitMCP(ctx, "发表评论", ratelimit.ActionComment); blocked != nil {
-		return blocked
-	}
 	logrus.Info("MCP: 发表评论到Feed")
 
 	// 解析参数
@@ -742,6 +784,16 @@ func (s *AppServer) handlePostComment(ctx context.Context, args map[string]inter
 
 	logrus.Infof("MCP: 发表评论 - Feed ID: %s, 内容长度: %d", feedID, len(content))
 
+	confirmToken, _ := args["confirm_token"].(string)
+	key := writeConfirmationKey("post_comment", feedID, xsecToken, content)
+	summary := fmt.Sprintf("发表评论: feed_id=%s content=%q", feedID, compactWriteSummary(content))
+	if confirm := s.requireWriteConfirmation("post_comment", key, summary, confirmToken); confirm != nil {
+		return confirm
+	}
+	if blocked := s.rateLimitMCP(ctx, "发表评论", ratelimit.ActionComment); blocked != nil {
+		return blocked
+	}
+
 	// 发表评论
 	result, err := s.xiaohongshuService.PostCommentToFeed(ctx, feedID, xsecToken, content)
 	if err != nil {
@@ -766,9 +818,6 @@ func (s *AppServer) handlePostComment(ctx context.Context, args map[string]inter
 
 // handleReplyComment 处理回复评论
 func (s *AppServer) handleReplyComment(ctx context.Context, args map[string]interface{}) *MCPToolResult {
-	if blocked := s.rateLimitMCP(ctx, "回复评论", ratelimit.ActionReply); blocked != nil {
-		return blocked
-	}
 	logrus.Info("MCP: 回复评论")
 
 	// 解析参数
@@ -818,6 +867,16 @@ func (s *AppServer) handleReplyComment(ctx context.Context, args map[string]inte
 	}
 
 	logrus.Infof("MCP: 回复评论 - Feed ID: %s, Comment ID: %s, User ID: %s, 内容长度: %d", feedID, commentID, userID, len(content))
+
+	confirmToken, _ := args["confirm_token"].(string)
+	key := writeConfirmationKey("reply_comment", feedID, xsecToken, commentID, userID, content)
+	summary := fmt.Sprintf("回复评论: feed_id=%s comment_id=%s user_id=%s content=%q", feedID, commentID, userID, compactWriteSummary(content))
+	if confirm := s.requireWriteConfirmation("reply_comment", key, summary, confirmToken); confirm != nil {
+		return confirm
+	}
+	if blocked := s.rateLimitMCP(ctx, "回复评论", ratelimit.ActionReply); blocked != nil {
+		return blocked
+	}
 
 	// 回复评论
 	result, err := s.xiaohongshuService.ReplyCommentToFeed(ctx, feedID, xsecToken, commentID, userID, content)
@@ -931,7 +990,16 @@ func (s *AppServer) handleSessionLike(ctx context.Context, args SessionLikeArgs)
 	if args.SessionID == "" {
 		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "session点赞失败: 缺少session_id参数"}}, IsError: true}
 	}
-	if blocked := s.rateLimitMCP(ctx, "session点赞", ratelimit.ActionLike); blocked != nil {
+	action := "session点赞"
+	if args.Unlike {
+		action = "session取消点赞"
+	}
+	key := writeConfirmationKey("session_like", args.SessionID, args.Unlike)
+	summary := fmt.Sprintf("%s: session_id=%s", action, args.SessionID)
+	if confirm := s.requireWriteConfirmation("session_like", key, summary, args.ConfirmToken); confirm != nil {
+		return confirm
+	}
+	if blocked := s.rateLimitMCP(ctx, action, ratelimit.ActionLike); blocked != nil {
 		return blocked
 	}
 	result, err := s.xiaohongshuService.SessionLike(ctx, args.SessionID, args.Unlike)
@@ -944,6 +1012,11 @@ func (s *AppServer) handleSessionLike(ctx context.Context, args SessionLikeArgs)
 func (s *AppServer) handleSessionComment(ctx context.Context, args SessionCommentArgs) *MCPToolResult {
 	if args.SessionID == "" || args.Content == "" {
 		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "session评论失败: 缺少session_id或content参数"}}, IsError: true}
+	}
+	key := writeConfirmationKey("session_comment", args.SessionID, args.Content)
+	summary := fmt.Sprintf("session评论: session_id=%s content=%q", args.SessionID, compactWriteSummary(args.Content))
+	if confirm := s.requireWriteConfirmation("session_comment", key, summary, args.ConfirmToken); confirm != nil {
+		return confirm
 	}
 	if blocked := s.rateLimitMCP(ctx, "session评论", ratelimit.ActionComment); blocked != nil {
 		return blocked

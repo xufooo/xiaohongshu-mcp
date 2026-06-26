@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -51,6 +52,22 @@ func respondSuccess(c *gin.Context, data any, message string) {
 		c.GetString("account"), http.StatusOK)
 
 	c.JSON(http.StatusOK, response)
+}
+
+func (s *AppServer) requireHTTPWriteConfirmation(c *gin.Context, action, key, summary, token string) bool {
+	if s.writeConfirm == nil || !s.writeConfirm.Enabled() {
+		return false
+	}
+	challenge, err := s.writeConfirm.Confirm(action, key, summary, token)
+	if err != nil {
+		respondError(c, http.StatusBadRequest, "WRITE_CONFIRMATION_FAILED", "写操作确认失败", err.Error())
+		return true
+	}
+	if challenge == nil {
+		return false
+	}
+	respondSuccess(c, challenge, "写操作需要确认")
+	return true
 }
 
 // checkRateLimit 检查速率限制，如果超限则返回 429 并阻止执行。
@@ -179,13 +196,18 @@ func (s *AppServer) deleteCookiesHandler(c *gin.Context) {
 
 // publishHandler 发布内容
 func (s *AppServer) publishHandler(c *gin.Context) {
-	if !s.checkRateLimit(c, ratelimit.ActionPublish) {
-		return
-	}
 	var req PublishRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		respondError(c, http.StatusBadRequest, "INVALID_REQUEST",
 			"请求参数错误", err.Error())
+		return
+	}
+	key := writeConfirmationKey("api_publish_content", req.Title, req.Content, req.Images, req.Tags, req.ScheduleAt, req.IsOriginal, req.Visibility, req.Products)
+	summary := fmt.Sprintf("发布图文: title=%q images=%d visibility=%s content=%q", req.Title, len(req.Images), req.Visibility, compactWriteSummary(req.Content))
+	if s.requireHTTPWriteConfirmation(c, "api_publish_content", key, summary, req.ConfirmToken) {
+		return
+	}
+	if !s.checkRateLimit(c, ratelimit.ActionPublish) {
 		return
 	}
 
@@ -202,13 +224,18 @@ func (s *AppServer) publishHandler(c *gin.Context) {
 
 // publishVideoHandler 发布视频内容
 func (s *AppServer) publishVideoHandler(c *gin.Context) {
-	if !s.checkRateLimit(c, ratelimit.ActionPublish) {
-		return
-	}
 	var req PublishVideoRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		respondError(c, http.StatusBadRequest, "INVALID_REQUEST",
 			"请求参数错误", err.Error())
+		return
+	}
+	key := writeConfirmationKey("api_publish_video", req.Title, req.Content, req.Video, req.Tags, req.ScheduleAt, req.Visibility, req.Products)
+	summary := fmt.Sprintf("发布视频: title=%q video=%q visibility=%s content=%q", req.Title, req.Video, req.Visibility, compactWriteSummary(req.Content))
+	if s.requireHTTPWriteConfirmation(c, "api_publish_video", key, summary, req.ConfirmToken) {
+		return
+	}
+	if !s.checkRateLimit(c, ratelimit.ActionPublish) {
 		return
 	}
 
@@ -346,13 +373,18 @@ func (s *AppServer) userProfileHandler(c *gin.Context) {
 
 // postCommentHandler 发表评论到Feed
 func (s *AppServer) postCommentHandler(c *gin.Context) {
-	if !s.checkRateLimit(c, ratelimit.ActionComment) {
-		return
-	}
 	var req PostCommentRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		respondError(c, http.StatusBadRequest, "INVALID_REQUEST",
 			"请求参数错误", err.Error())
+		return
+	}
+	key := writeConfirmationKey("api_post_comment", req.FeedID, req.XsecToken, req.Content)
+	summary := fmt.Sprintf("发表评论: feed_id=%s content=%q", req.FeedID, compactWriteSummary(req.Content))
+	if s.requireHTTPWriteConfirmation(c, "api_post_comment", key, summary, req.ConfirmToken) {
+		return
+	}
+	if !s.checkRateLimit(c, ratelimit.ActionComment) {
 		return
 	}
 
@@ -370,13 +402,18 @@ func (s *AppServer) postCommentHandler(c *gin.Context) {
 
 // replyCommentHandler 回复指定评论
 func (s *AppServer) replyCommentHandler(c *gin.Context) {
-	if !s.checkRateLimit(c, ratelimit.ActionReply) {
-		return
-	}
 	var req ReplyCommentRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		respondError(c, http.StatusBadRequest, "INVALID_REQUEST",
 			"请求参数错误", err.Error())
+		return
+	}
+	key := writeConfirmationKey("api_reply_comment", req.FeedID, req.XsecToken, req.CommentID, req.UserID, req.Content)
+	summary := fmt.Sprintf("回复评论: feed_id=%s comment_id=%s user_id=%s content=%q", req.FeedID, req.CommentID, req.UserID, compactWriteSummary(req.Content))
+	if s.requireHTTPWriteConfirmation(c, "api_reply_comment", key, summary, req.ConfirmToken) {
+		return
+	}
+	if !s.checkRateLimit(c, ratelimit.ActionReply) {
 		return
 	}
 
