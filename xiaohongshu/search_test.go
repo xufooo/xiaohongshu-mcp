@@ -13,7 +13,10 @@ func TestSearch(t *testing.T) {
 
 	t.Skip("SKIP: 测试发布")
 
-	b := browser.NewBrowser(false)
+	b, err := browser.NewBrowser(context.Background(), false)
+	if err != nil {
+		t.Skipf("browser unavailable: %v", err)
+	}
 	defer b.Close()
 
 	page := b.NewPage()
@@ -39,7 +42,10 @@ func TestSearchWithFilters(t *testing.T) {
 
 	//t.Skip("SKIP: 测试筛选功能")
 
-	b := browser.NewBrowser(false)
+	b, err := browser.NewBrowser(context.Background(), false)
+	if err != nil {
+		t.Skipf("browser unavailable: %v", err)
+	}
 	defer b.Close()
 
 	page := b.NewPage()
