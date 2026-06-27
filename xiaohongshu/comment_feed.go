@@ -212,7 +212,11 @@ func (f *CommentFeedAction) preparePage(ctx context.Context, feedID, xsecToken, 
 		if err := f.state.ValidateInteraction(feedID, action); err != nil {
 			return nil, fmt.Errorf("%s前置校验失败: %w", commentActionName(action), err)
 		}
-		if !isCurrentFeedDetail(page, feedID) {
+		ok, err := isCurrentFeedDetail(page, feedID)
+		if err != nil {
+			return nil, fmt.Errorf("%s前置校验失败: 检查当前笔记失败: %w", commentActionName(action), err)
+		}
+		if !ok {
 			return nil, fmt.Errorf("%s前置校验失败: 当前页面不是最近打开的笔记 %s", commentActionName(action), feedID)
 		}
 		return page, nil
@@ -220,7 +224,9 @@ func (f *CommentFeedAction) preparePage(ctx context.Context, feedID, xsecToken, 
 
 	url := makeFeedDetailURL(feedID, xsecToken)
 	logrus.Infof("打开 feed 详情页: %s", url)
-	page.MustNavigate(url)
+	if err := page.Navigate(url); err != nil {
+		return nil, fmt.Errorf("打开 feed 详情页失败: %w", err)
+	}
 	kind := XHSReadyDetail
 	if action == "comment" {
 		kind = XHSReadyCommentBox
@@ -292,7 +298,7 @@ func findCommentElement(page *hrod.Page, commentID, userID string) (*hrod.Elemen
 		// === 4. 先滚动到最后一个评论（触发懒加载）===
 		if currentCount > 0 {
 			logrus.Infof("滚动到最后一个评论（共 %d 条）", currentCount)
-			
+
 			// 使用 Go 获取所有评论元素
 			elements, err := page.Timeout(2 * time.Second).Elements(".parent-comment, .comment-item, .comment")
 			if err == nil && len(elements) > 0 {
@@ -312,7 +318,14 @@ func findCommentElement(page *hrod.Page, commentID, userID string) (*hrod.Elemen
 
 		// === 5. 继续向下滚动 ===
 		logrus.Infof("继续向下滚动...")
-		viewportHeight := page.MustEval(`() => window.innerHeight`).Int()
+		viewportHeightResult, err := page.Eval(`() => window.innerHeight`)
+		if err != nil {
+			return nil, fmt.Errorf("读取视口高度失败: %w", err)
+		}
+		if viewportHeightResult == nil {
+			return nil, fmt.Errorf("读取视口高度失败: 无返回")
+		}
+		viewportHeight := viewportHeightResult.Value.Int()
 		if err := page.Actor().Mouse.Scroll(0, float64(viewportHeight)*0.8); err != nil {
 			logrus.Warnf("滚动失败: %v", err)
 		}
@@ -325,7 +338,7 @@ func findCommentElement(page *hrod.Page, commentID, userID string) (*hrod.Elemen
 		if commentID != "" {
 			selector := fmt.Sprintf("#comment-%s", commentID)
 			logrus.Infof("尝试通过 commentID 查找: %s", selector)
-			
+
 			// 使用 Timeout 避免长时间等待
 			el, err := page.Timeout(2 * time.Second).Element(selector)
 			if err == nil && el != nil {

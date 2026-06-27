@@ -213,7 +213,7 @@ func (s *SearchAction) searchByUI(page *hrod.Page, keyword string) error {
 	if err := input.Click(proto.InputMouseButtonLeft, 1); err != nil {
 		return fmt.Errorf("点击搜索框失败: %w", err)
 	}
-	page.MustEval(`(selector) => {
+	if _, err := page.Eval(`(selector) => {
 		const el = document.querySelector(selector);
 		if (!el) return;
 		el.focus();
@@ -223,7 +223,9 @@ func (s *SearchAction) searchByUI(page *hrod.Page, keyword string) error {
 			el.textContent = "";
 		}
 		el.dispatchEvent(new Event("input", { bubbles: true }));
-	}`, SelectorMarkedSearchInput)
+	}`, SelectorMarkedSearchInput); err != nil {
+		return fmt.Errorf("清空搜索框失败: %w", err)
+	}
 	if err := page.SleepRandom(300*time.Millisecond, 1200*time.Millisecond); err != nil {
 		return err
 	}

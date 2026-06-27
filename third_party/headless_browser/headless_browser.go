@@ -72,9 +72,12 @@ func WithExtraArgs(args []string) Option {
 }
 
 var lowMemoryLaunchArgs = []flags.Flag{
+	"disable-dev-shm-usage",
+	"disable-gpu",
 	"disable-extensions",
 	"disable-background-networking",
 	"disable-sync",
+	"disable-component-update",
 	"no-first-run",
 	"no-default-browser-check",
 }

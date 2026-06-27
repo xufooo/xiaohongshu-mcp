@@ -6,10 +6,11 @@ import (
 	"fmt"
 	"time"
 
-	hrod "github.com/xpzouying/xiaohongshu-mcp/pkg/humanize/rod"
+	"github.com/go-rod/rod/lib/proto"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	myerrors "github.com/xpzouying/xiaohongshu-mcp/errors"
+	hrod "github.com/xpzouying/xiaohongshu-mcp/pkg/humanize/rod"
 )
 
 // ActionResult 通用动作响应（点赞/收藏等）
@@ -58,7 +59,11 @@ func (a *interactAction) preparePage(ctx context.Context, actionType interactAct
 		if err := a.state.ValidateInteraction(feedID, interactionValidationAction(actionType)); err != nil {
 			return nil, fmt.Errorf("%s前置校验失败: %w", actionType, err)
 		}
-		if !isCurrentFeedDetail(page, feedID) {
+		ok, err := isCurrentFeedDetail(page, feedID)
+		if err != nil {
+			return nil, fmt.Errorf("%s前置校验失败: 检查当前笔记失败: %w", actionType, err)
+		}
+		if !ok {
 			return nil, fmt.Errorf("%s前置校验失败: 当前页面不是最近打开的笔记 %s", actionType, feedID)
 		}
 		return page, nil
@@ -67,7 +72,9 @@ func (a *interactAction) preparePage(ctx context.Context, actionType interactAct
 	url := makeFeedDetailURL(feedID, xsecToken)
 	logrus.Infof("Opening feed detail page for %s: %s", actionType, url)
 
-	page.MustNavigate(url)
+	if err := page.Navigate(url); err != nil {
+		return nil, fmt.Errorf("%s打开 feed 详情页失败: %w", actionType, err)
+	}
 	if err := WaitForXHSReady(page, XHSReadyOptions{Kind: XHSReadyDetail, FeedID: feedID}); err != nil {
 		return nil, err
 	}
@@ -89,16 +96,26 @@ func interactionValidationAction(actionType interactActionType) string {
 	}
 }
 
-func isCurrentFeedDetail(page *hrod.Page, feedID string) bool {
-	return page.MustEval(`(feedID) => {
+func isCurrentFeedDetail(page *hrod.Page, feedID string) (bool, error) {
+	result, err := page.Eval(`(feedID) => {
 		const map = window.__INITIAL_STATE__?.note?.noteDetailMap;
 		return location.href.includes(feedID) || Boolean(map && Object.prototype.hasOwnProperty.call(map, feedID));
-	}`, feedID).Bool()
+	}`, feedID)
+	if err != nil {
+		return false, err
+	}
+	if result == nil {
+		return false, fmt.Errorf("current feed detail check returned no result")
+	}
+	return result.Value.Bool(), nil
 }
 
-func (a *interactAction) performClick(page *hrod.Page, selector string) {
-	element := page.MustElement(selector)
-	element.MustClick()
+func (a *interactAction) performClick(page *hrod.Page, selector string) error {
+	element, err := page.Element(selector)
+	if err != nil {
+		return err
+	}
+	return element.Click(proto.InputMouseButtonLeft, 1)
 }
 
 // LikeAction 负责处理点赞相关交互
@@ -153,7 +170,9 @@ func (a *LikeAction) perform(ctx context.Context, feedID, xsecToken string, targ
 }
 
 func (a *LikeAction) toggleLike(page *hrod.Page, feedID string, targetLiked bool, actionType interactActionType) error {
-	a.performClick(page, SelectorLikeButton)
+	if err := a.performClick(page, SelectorLikeButton); err != nil {
+		return fmt.Errorf("%s点击按钮失败: %w", actionType, err)
+	}
 	if err := page.Sleep(3 * time.Second); err != nil {
 		return err
 	}
@@ -225,7 +244,9 @@ func (a *FavoriteAction) perform(ctx context.Context, feedID, xsecToken string, 
 }
 
 func (a *FavoriteAction) toggleFavorite(page *hrod.Page, feedID string, targetCollected bool, actionType interactActionType) error {
-	a.performClick(page, SelectorCollectButton)
+	if err := a.performClick(page, SelectorCollectButton); err != nil {
+		return fmt.Errorf("%s点击按钮失败: %w", actionType, err)
+	}
 	if err := page.Sleep(3 * time.Second); err != nil {
 		return err
 	}
@@ -251,14 +272,21 @@ func (a *interactAction) getInteractState(page *hrod.Page, feedID string) (liked
 		return liked, collected, nil
 	}
 
-	result := page.MustEval(`() => {
+	resultObj, err := page.Eval(`() => {
 		if (window.__INITIAL_STATE__ &&
 		    window.__INITIAL_STATE__.note &&
 		    window.__INITIAL_STATE__.note.noteDetailMap) {
 			return JSON.stringify(window.__INITIAL_STATE__.note.noteDetailMap);
 		}
 		return "";
-	}`).String()
+	}`)
+	if err != nil {
+		return false, false, fmt.Errorf("读取 noteDetailMap 失败: %w", err)
+	}
+	result := ""
+	if resultObj != nil {
+		result = resultObj.Value.Str()
+	}
 	if result == "" {
 		return false, false, myerrors.ErrNoFeedDetail
 	}
