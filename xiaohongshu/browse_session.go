@@ -292,8 +292,8 @@ func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, xsecToken strin
 	if xsecToken != "" {
 		feed.XsecToken = xsecToken
 	}
-	if feed.ID == "" {
-		return fmt.Errorf("搜索结果缺少 feed_id")
+	if err := validateFeedAccessArgs(feed.ID, feed.XsecToken); err != nil {
+		return fmt.Errorf("搜索结果参数无效: %w", err)
 	}
 
 	sourceURL, err := s.currentPageURL()
