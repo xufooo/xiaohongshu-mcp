@@ -419,7 +419,7 @@ func probeSearchInput(page *hrod.Page) (searchInputProbe, error) {
 		}
 		const inputs = Array.from(document.querySelectorAll('input, textarea, [contenteditable="true"]'))
 			.slice(0, 8)
-			.map((el) => `${label(el).replace(/\s+/g, " ").trim()} visible=${visible(el)}`);
+			.map((el) => label(el).replace(/\s+/g, " ").trim() + " visible=" + visible(el));
 		return JSON.stringify({
 			url: location.href,
 			title: document.title,
