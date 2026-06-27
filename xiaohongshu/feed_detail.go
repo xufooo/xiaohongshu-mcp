@@ -887,7 +887,7 @@ func getScrollTop(page *hrod.Page) int {
 				return fmt.Errorf("读取滚动位置未返回结果")
 			}
 
-			result = evalResult.Int()
+			result = evalResult.Value.Int()
 			return nil
 		},
 		retry.Attempts(3),
