@@ -71,17 +71,6 @@ func WithExtraArgs(args []string) Option {
 	}
 }
 
-var lowMemoryLaunchArgs = []flags.Flag{
-	"disable-dev-shm-usage",
-	"disable-gpu",
-	"disable-extensions",
-	"disable-background-networking",
-	"disable-sync",
-	"disable-component-update",
-	"no-first-run",
-	"no-default-browser-check",
-}
-
 // New creates a browser with stealth enabled.
 func New(ctx context.Context, options ...Option) (*Browser, error) {
 	cfg := newDefaultConfig()
@@ -95,9 +84,6 @@ func New(ctx context.Context, options ...Option) (*Browser, error) {
 	l := launcher.New().
 		Headless(cfg.Headless).
 		Set("--no-sandbox")
-	for _, arg := range lowMemoryLaunchArgs {
-		l = l.Set(arg)
-	}
 	if cfg.CloakProfile {
 		applyCloakLauncherProfile(l)
 	}
