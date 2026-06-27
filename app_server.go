@@ -91,7 +91,7 @@ func (s *AppServer) Start(port string) error {
 		logrus.Infof("HTTP 服务器已优雅关闭")
 	}
 
-	browserCtx, cancelBrowser := context.WithTimeout(context.Background(), 10*time.Second)
+	browserCtx, cancelBrowser := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancelBrowser()
 	if err := s.xiaohongshuService.Close(browserCtx); err != nil {
 		logrus.WithError(err).Warn("浏览器未能在关闭期限内释放")

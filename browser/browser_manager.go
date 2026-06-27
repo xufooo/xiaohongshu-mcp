@@ -13,10 +13,11 @@ import (
 )
 
 const (
-	pageCloseTimeout      = 2 * time.Second
-	browserHealthTimeout  = 2 * time.Second
-	defaultStartupTimeout = 120 * time.Second
-	defaultAcquireTimeout = 5 * time.Second
+	pageCloseTimeout        = 2 * time.Second
+	browserHealthTimeout    = 2 * time.Second
+	defaultStartupTimeout   = 120 * time.Second
+	operationAcquireTimeout = 5 * time.Second
+	lifecycleAcquireTimeout = 60 * time.Second
 )
 
 // BusyError reports that the single browser is currently owned by another operation.
@@ -184,7 +185,7 @@ func (m *Manager) Release(page *hrod.Page) {
 
 // Reset 关闭常驻浏览器。下次 Acquire 会创建新实例。
 func (m *Manager) Reset(ctx context.Context) error {
-	if err := m.lockForOwner(ctx, "reset"); err != nil {
+	if err := m.lifecycleLockForOwner(ctx, "reset"); err != nil {
 		return err
 	}
 	defer m.releaseToken()
@@ -393,7 +394,7 @@ func (m *Manager) scheduleIdleClose() {
 }
 
 func (m *Manager) closeIfIdle(version uint64) {
-	if err := m.lockForOwner(context.Background(), "idle_close"); err != nil {
+	if err := m.lifecycleLockForOwner(context.Background(), "idle_close"); err != nil {
 		return
 	}
 	defer m.releaseToken()
@@ -427,6 +428,14 @@ func (m *Manager) lock(ctx context.Context) error {
 }
 
 func (m *Manager) lockForOwner(ctx context.Context, owner string) error {
+	return m.lockForOwnerWithTimeout(ctx, owner, operationAcquireTimeout)
+}
+
+func (m *Manager) lifecycleLockForOwner(ctx context.Context, owner string) error {
+	return m.lockForOwnerWithTimeout(ctx, owner, lifecycleAcquireTimeout)
+}
+
+func (m *Manager) lockForOwnerWithTimeout(ctx context.Context, owner string, acquireTimeout time.Duration) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -436,8 +445,10 @@ func (m *Manager) lockForOwner(ctx context.Context, owner string) error {
 
 	waitCtx := ctx
 	cancel := func() {}
-	if deadline, ok := ctx.Deadline(); !ok || time.Until(deadline) > defaultAcquireTimeout {
-		waitCtx, cancel = context.WithTimeout(ctx, defaultAcquireTimeout)
+	if acquireTimeout > 0 {
+		if deadline, ok := ctx.Deadline(); !ok || time.Until(deadline) > acquireTimeout {
+			waitCtx, cancel = context.WithTimeout(ctx, acquireTimeout)
+		}
 	}
 	defer cancel()
 
@@ -446,7 +457,7 @@ func (m *Manager) lockForOwner(ctx context.Context, owner string) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		return m.currentBusyError(defaultAcquireTimeout)
+		return m.currentBusyError(acquireTimeout)
 	case <-m.token:
 		m.mu.Lock()
 		m.owner = owner

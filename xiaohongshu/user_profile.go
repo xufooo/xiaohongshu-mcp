@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/go-rod/rod"
 	hrod "github.com/xpzouying/xiaohongshu-mcp/pkg/humanize/rod"
 )
 
@@ -23,7 +24,9 @@ func (u *UserProfileAction) UserProfile(ctx context.Context, userID, xsecToken s
 	page := u.page.Context(ctx)
 
 	searchURL := makeUserProfileURL(userID, xsecToken)
-	page.MustNavigate(searchURL)
+	if err := page.Navigate(searchURL); err != nil {
+		return nil, fmt.Errorf("navigate to user profile failed: %w", err)
+	}
 	if err := WaitForXHSReady(page, XHSReadyOptions{Kind: XHSReadyProfile}); err != nil {
 		return nil, err
 	}
@@ -33,9 +36,11 @@ func (u *UserProfileAction) UserProfile(ctx context.Context, userID, xsecToken s
 
 // extractUserProfileData 从页面中提取用户资料数据的通用方法
 func (u *UserProfileAction) extractUserProfileData(page *hrod.Page) (*UserProfileResponse, error) {
-	page.MustWait(`() => window.__INITIAL_STATE__ !== undefined`)
+	if err := page.Wait(rod.Eval(`() => window.__INITIAL_STATE__ !== undefined`)); err != nil {
+		return nil, fmt.Errorf("wait for profile state failed: %w", err)
+	}
 
-	userDataResult := page.MustEval(`() => {
+	userDataObj, err := page.Eval(`() => {
 		if (window.__INITIAL_STATE__ &&
 		    window.__INITIAL_STATE__.user &&
 		    window.__INITIAL_STATE__.user.userPageData) {
@@ -46,14 +51,21 @@ func (u *UserProfileAction) extractUserProfileData(page *hrod.Page) (*UserProfil
 			}
 		}
 		return "";
-	}`).String()
+	}`)
+	if err != nil {
+		return nil, fmt.Errorf("extract userPageData failed: %w", err)
+	}
+	userDataResult := ""
+	if userDataObj != nil {
+		userDataResult = userDataObj.Value.Str()
+	}
 
 	if userDataResult == "" {
 		return nil, fmt.Errorf("user.userPageData.value not found in __INITIAL_STATE__")
 	}
 
 	// 2. 获取用户帖子：window.__INITIAL_STATE__.user.notes.value
-	notesResult := page.MustEval(`() => {
+	notesObj, err := page.Eval(`() => {
 		if (window.__INITIAL_STATE__ &&
 		    window.__INITIAL_STATE__.user &&
 		    window.__INITIAL_STATE__.user.notes) {
@@ -65,7 +77,14 @@ func (u *UserProfileAction) extractUserProfileData(page *hrod.Page) (*UserProfil
 			}
 		}
 		return "";
-	}`).String()
+	}`)
+	if err != nil {
+		return nil, fmt.Errorf("extract user notes failed: %w", err)
+	}
+	notesResult := ""
+	if notesObj != nil {
+		notesResult = notesObj.Value.Str()
+	}
 
 	if notesResult == "" {
 		return nil, fmt.Errorf("user.notes.value not found in __INITIAL_STATE__")
