@@ -96,12 +96,13 @@ func (s *ActionStateStore) CheckIdentity(current IdentityMetadata) (IdentityMeta
 
 	baseline := *state.Identity
 	drift := CompareIdentityMetadata(baseline, current)
-	if len(drift) == 0 {
-		baseline.CheckedAt = current.CheckedAt
-		state.Identity = &baseline
-		if err := s.saveLocked(state); err != nil {
-			return baseline, nil, err
-		}
+	current.CreatedAt = baseline.CreatedAt
+	if current.CreatedAt.IsZero() {
+		current.CreatedAt = current.CheckedAt
+	}
+	state.Identity = &current
+	if err := s.saveLocked(state); err != nil {
+		return baseline, nil, err
 	}
 	return baseline, drift, nil
 }
