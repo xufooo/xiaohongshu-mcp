@@ -21,6 +21,12 @@ type SearchResult struct {
 	} `json:"search"`
 }
 
+const (
+	searchInputWaitTimeout         = 45 * time.Second
+	searchResultsWaitTimeout       = 30 * time.Second
+	searchFilterRefreshWaitTimeout = 20 * time.Second
+)
+
 // FilterOption 筛选选项结构体
 type FilterOption struct {
 	SortBy      string `json:"sort_by,omitempty" jsonschema:"排序依据: 综合|最新|最多点赞|最多评论|最多收藏,默认为'综合'"`
@@ -199,7 +205,7 @@ func (s *SearchAction) searchByUI(page *hrod.Page, keyword string) error {
 	}
 
 	// 等搜索框出现，不使用WaitLoad因为小红书是SPA。
-	input, err := waitForSearchInput(page, 45*time.Second)
+	input, err := waitForSearchInput(page, searchInputWaitTimeout)
 	if err != nil {
 		logrus.Warnf("未找到搜索框，使用搜索URL兜底: %v", err)
 		if navErr := page.Navigate(makeSearchURL(keyword)); navErr != nil {
@@ -246,7 +252,7 @@ func (s *SearchAction) searchByUI(page *hrod.Page, keyword string) error {
 }
 
 func waitForSearchResults(page *hrod.Page, keyword string) error {
-	deadline := time.Now().Add(12 * time.Second).UnixMilli()
+	deadline := time.Now().Add(searchResultsWaitTimeout).UnixMilli()
 	err := page.Wait(rod.Eval(`(deadline, keyword, feedCardSelector) => {
 		const unwrap = (value) => {
 			if (value && typeof value === "object") {
@@ -556,7 +562,7 @@ func (s *SearchAction) collectResults(page *hrod.Page, filters ...FilterOption) 
 		// Wait for the application state instead of page stability. The search
 		// page keeps background requests/DOM updates active, so WaitStable may
 		// never resolve even though results are ready.
-		// 超过 5 秒则返回当前可用结果。
+		// 超过等待上限则返回当前可用结果。
 		if err := page.Wait(rod.Eval(`(selector, previousDOMCardCount, previousFeedsJSONLength, deadline) => {
 			const currentDOMCardCount = document.querySelectorAll(selector).length;
 			const feeds = window.__INITIAL_STATE__?.search?.feeds;
@@ -564,7 +570,7 @@ func (s *SearchAction) collectResults(page *hrod.Page, filters ...FilterOption) 
 			return currentDOMCardCount !== previousDOMCardCount ||
 				(Array.isArray(data) && JSON.stringify(data).length !== previousFeedsJSONLength) ||
 				Date.now() >= deadline;
-		}`, SelectorFeedCard, previousDOMCardCount, previousFeedsJSONLength, time.Now().Add(5*time.Second).UnixMilli())); err != nil {
+		}`, SelectorFeedCard, previousDOMCardCount, previousFeedsJSONLength, time.Now().Add(searchFilterRefreshWaitTimeout).UnixMilli())); err != nil {
 			return nil, fmt.Errorf("等待筛选结果刷新失败: %w", err)
 		}
 	}

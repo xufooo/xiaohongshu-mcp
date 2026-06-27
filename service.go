@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -188,16 +189,22 @@ func (s *XiaohongshuService) GetLoginQrcode(ctx context.Context) (*LoginQrcodeRe
 		return nil, err
 	}
 
-	deferFunc := func() {
-		s.browserManager.Release(page)
+	releaseInCaller := true
+	var releaseOnce sync.Once
+	release := func() {
+		releaseOnce.Do(func() {
+			s.browserManager.Release(page)
+		})
 	}
+	defer func() {
+		if releaseInCaller {
+			release()
+		}
+	}()
 
 	loginAction := xiaohongshu.NewLogin(page)
 
 	img, loggedIn, err := loginAction.FetchQrcodeImage(ctx)
-	if err != nil || loggedIn {
-		defer deferFunc()
-	}
 	if err != nil {
 		return nil, err
 	}
@@ -205,10 +212,18 @@ func (s *XiaohongshuService) GetLoginQrcode(ctx context.Context) (*LoginQrcodeRe
 	timeout := 4 * time.Minute
 
 	if !loggedIn {
+		releaseInCaller = false
+		s.browserManager.UpdateOwner("login_qrcode_wait")
 		go func() {
+			defer release()
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					logrus.Errorf("login qrcode wait panicked: %v", recovered)
+				}
+			}()
+
 			ctxTimeout, cancel := context.WithTimeout(context.Background(), timeout)
 			defer cancel()
-			defer deferFunc()
 
 			if loginAction.WaitForLogin(ctxTimeout) {
 				if er := saveCookies(page); er != nil {

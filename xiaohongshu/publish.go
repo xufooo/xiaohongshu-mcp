@@ -48,7 +48,7 @@ func NewPublishImageAction(page *hrod.Page) (*PublishAction, error) {
 		return nil, err
 	}
 
-	if err := mustClickPublishTab(pp, "上传图文"); err != nil {
+	if err := clickPublishTab(pp, "上传图文"); err != nil {
 		logrus.Errorf("点击上传图文 TAB 失败: %v", err)
 		return nil, err
 	}
@@ -103,7 +103,9 @@ func removePopCover(page *hrod.Page) {
 		return
 	}
 	if has {
-		elem.MustRemove()
+		if err := elem.Remove(); err != nil {
+			logrus.Warnf("移除弹窗封面失败: %v", err)
+		}
 	}
 
 	// 兜底：点击一下空位置吧
@@ -118,7 +120,7 @@ func clickEmptyPosition(page *hrod.Page) {
 	}
 }
 
-func mustClickPublishTab(page *hrod.Page, tabname string) error {
+func clickPublishTab(page *hrod.Page, tabname string) error {
 	uploadContent, err := page.Element(`div.upload-content`)
 	if err != nil {
 		return errors.Wrap(err, "获取上传区域失败")
@@ -579,29 +581,18 @@ func makeMaxLengthError(elemText string) error {
 	return errors.Errorf("当前输入长度为%s，最大长度为%s", currLen, maxLen)
 }
 
-// 查找内容输入框 - 使用Race方法处理两种样式
+// 查找内容输入框，兼容当前编辑器和 placeholder 兜底结构。
 func getContentElement(page *hrod.Page) (*hrod.Element, bool) {
-	var foundElement *rod.Element
-	var found bool
+	if editor, err := page.Timeout(5 * time.Second).Element("div.ql-editor"); err == nil && editor != nil {
+		return editor, true
+	}
 
-	page.Rod.Race().
-		Element("div.ql-editor").MustHandle(func(e *rod.Element) {
-		foundElement = e
-		found = true
-	}).
-		ElementFunc(func(page *rod.Page) (*rod.Element, error) {
-			return findTextboxByPlaceholder(page)
-		}).MustHandle(func(e *rod.Element) {
-		foundElement = e
-		found = true
-	}).
-		MustDo()
-
-	if found {
+	foundElement, err := findTextboxByPlaceholder(page.Timeout(5 * time.Second).Rod)
+	if err == nil && foundElement != nil {
 		return hrod.NewElement(foundElement, page.Actor()), true
 	}
 
-	slog.Warn("no content element found by any method")
+	slog.Warn("no content element found by any method", "error", err)
 	return nil, false
 }
 
@@ -697,7 +688,10 @@ func inputTag(contentElem *hrod.Element, tag string) error {
 }
 
 func findTextboxByPlaceholder(page *rod.Page) (*rod.Element, error) {
-	elements := page.MustElements("p")
+	elements, err := page.Elements("p")
+	if err != nil {
+		return nil, errors.Wrap(err, "find p elements")
+	}
 	if elements == nil {
 		return nil, errors.New("no p elements found")
 	}
