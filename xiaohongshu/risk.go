@@ -47,7 +47,7 @@ func ClassifyRisk(page *hrod.Page) (RiskSignal, error) {
 		const bodyText = normalize(document.body?.innerText || "").slice(0, 2000);
 		const title = normalize(document.title || "");
 		const url = location.href.slice(0, 500);
-		const haystack = `${title} ${bodyText}`;
+		const haystack = title + " " + bodyText;
 		const findText = (keywords) => {
 			const keyword = keywords.find((item) => haystack.includes(item));
 			if (!keyword) return "";
