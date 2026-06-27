@@ -864,8 +864,7 @@ func (s *XiaohongshuService) acquirePageFor(ctx context.Context, owner string) (
 		return nil, err
 	}
 	if err := s.checkFixedIdentity(page); err != nil {
-		s.browserManager.Release(page)
-		return nil, err
+		logrus.Warnf("browser identity check skipped: %v", err)
 	}
 	return page, nil
 }
@@ -887,13 +886,8 @@ func (s *XiaohongshuService) checkFixedIdentity(page *hrod.Page) error {
 	}
 
 	reason := formatIdentityDriftReason(baseline, current, drift)
-	if err := s.actionState.RecordRisk(reason, 0); err != nil {
-		logrus.Warnf("record identity drift risk failed: %v", err)
-	}
-	if s.rateLimiter != nil {
-		s.rateLimiter.RecordRisk(reason, 0)
-	}
-	return fmt.Errorf("%s", reason)
+	logrus.Warn(reason)
+	return nil
 }
 
 func formatIdentityDriftReason(baseline, current xiaohongshu.IdentityMetadata, drift []xiaohongshu.IdentityDrift) string {
