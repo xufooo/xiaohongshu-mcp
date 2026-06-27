@@ -475,15 +475,22 @@ func (s *SearchAction) collectResults(page *hrod.Page, filters ...FilterOption) 
 		}
 
 		// 悬停在筛选按钮上
-		filterButton := page.MustElement(`div.filter`)
-		filterButton.MustHover()
+		filterButton, err := page.Element(`div.filter`)
+		if err != nil {
+			return nil, fmt.Errorf("查找筛选按钮失败: %w", err)
+		}
+		if err := filterButton.Hover(); err != nil {
+			return nil, fmt.Errorf("悬停筛选按钮失败: %w", err)
+		}
 
 		// 等待筛选面板出现
-		page.MustWait(`() => document.querySelector('div.filter-panel') !== null`)
+		if err := page.Wait(rod.Eval(`() => document.querySelector('div.filter-panel') !== null`)); err != nil {
+			return nil, fmt.Errorf("等待筛选面板失败: %w", err)
+		}
 
 		// 使用 JavaScript 注入方式筛选（比 Go-rod 跨进程 DOM 遍历更稳定）
 		for _, filter := range allInternalFilters {
-			result := page.MustEval(`(filtersIndex, text) => {
+			result, err := page.Eval(`(filtersIndex, text) => {
 				const panel = document.querySelector('div.filter-panel');
 				if (!panel) {
 					return '筛选面板不存在';
@@ -505,37 +512,59 @@ func (s *SearchAction) collectResults(page *hrod.Page, filters ...FilterOption) 
 				}
 				option.click();
 				return '';
-			}`, filter.FiltersIndex, filter.Text).String()
-			if result != "" {
-				return nil, fmt.Errorf("应用筛选失败: %s: %s", result, filter.Text)
+			}`, filter.FiltersIndex, filter.Text)
+			if err != nil {
+				return nil, fmt.Errorf("应用筛选失败: %w", err)
+			}
+			if result != nil && result.Value.Str() != "" {
+				return nil, fmt.Errorf("应用筛选失败: %s: %s", result.Value.Str(), filter.Text)
 			}
 		}
 
 		// 记录关闭筛选面板前的 DOM 卡片和 state 长度，避免直接返回旧的搜索结果。
-		previousDOMCardCount := page.MustEval(`(selector) => document.querySelectorAll(selector).length`, SelectorFeedCard).Int()
-		previousFeedsJSONLength := page.MustEval(`() => {
+		previousDOMCardCountResult, err := page.Eval(`(selector) => document.querySelectorAll(selector).length`, SelectorFeedCard)
+		if err != nil {
+			return nil, fmt.Errorf("读取筛选前 DOM 卡片数量失败: %w", err)
+		}
+		if previousDOMCardCountResult == nil {
+			return nil, fmt.Errorf("读取筛选前 DOM 卡片数量失败: 无返回")
+		}
+		previousDOMCardCount := previousDOMCardCountResult.Value.Int()
+
+		previousFeedsJSONLengthResult, err := page.Eval(`() => {
 			const feeds = window.__INITIAL_STATE__?.search?.feeds;
-			const data = feeds?.value !== undefined ? feeds.value : feeds?._value;
+			const data = feeds?.value !== undefined ? feeds.value : (feeds?._value !== undefined ? feeds._value : feeds?._rawValue);
 			return Array.isArray(data) ? JSON.stringify(data).length : 0;
-		}`).Int()
+		}`)
+		if err != nil {
+			return nil, fmt.Errorf("读取筛选前 state 长度失败: %w", err)
+		}
+		if previousFeedsJSONLengthResult == nil {
+			return nil, fmt.Errorf("读取筛选前 state 长度失败: 无返回")
+		}
+		previousFeedsJSONLength := previousFeedsJSONLengthResult.Value.Int()
 
 		// 关闭筛选面板触发新的搜索请求
-		page.MustEval(`() => {
+		if _, err := page.Eval(`() => {
 			document.querySelector('div.filter')?.dispatchEvent(new MouseEvent('mouseleave', {bubbles: true}));
-		}`)
+		}`); err != nil {
+			return nil, fmt.Errorf("关闭筛选面板失败: %w", err)
+		}
 
 		// Wait for the application state instead of page stability. The search
 		// page keeps background requests/DOM updates active, so WaitStable may
 		// never resolve even though results are ready.
 		// 超过 5 秒则返回当前可用结果。
-		page.MustWait(`(selector, previousDOMCardCount, previousFeedsJSONLength, deadline) => {
+		if err := page.Wait(rod.Eval(`(selector, previousDOMCardCount, previousFeedsJSONLength, deadline) => {
 			const currentDOMCardCount = document.querySelectorAll(selector).length;
 			const feeds = window.__INITIAL_STATE__?.search?.feeds;
-			const data = feeds?.value !== undefined ? feeds.value : feeds?._value;
+			const data = feeds?.value !== undefined ? feeds.value : (feeds?._value !== undefined ? feeds._value : feeds?._rawValue);
 			return currentDOMCardCount !== previousDOMCardCount ||
 				(Array.isArray(data) && JSON.stringify(data).length !== previousFeedsJSONLength) ||
 				Date.now() >= deadline;
-		}`, SelectorFeedCard, previousDOMCardCount, previousFeedsJSONLength, time.Now().Add(5*time.Second).UnixMilli())
+		}`, SelectorFeedCard, previousDOMCardCount, previousFeedsJSONLength, time.Now().Add(5*time.Second).UnixMilli())); err != nil {
+			return nil, fmt.Errorf("等待筛选结果刷新失败: %w", err)
+		}
 	}
 
 	if feeds, err := ExtractSearchFeedsFromDOM(page); err == nil && len(feeds) > 0 {
