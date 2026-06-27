@@ -539,33 +539,72 @@ func (s *SearchAction) collectResults(page *hrod.Page, filters ...FilterOption) 
 	}
 
 	if feeds, err := ExtractSearchFeedsFromDOM(page); err == nil && len(feeds) > 0 {
+		if hasEmptyXsecToken(feeds) {
+			if stateFeeds, stateErr := readSearchFeedsFromState(page); stateErr == nil {
+				mergeSearchFeedXsecTokens(feeds, stateFeeds)
+			}
+		}
 		return feeds, nil
 	}
 
 	// DOM 提取失败时降级到 __INITIAL_STATE__，兼容页面结构变动或虚拟列表未渲染的情况。
-	result := page.MustEval(`() => {
+	return readSearchFeedsFromState(page)
+}
+
+func readSearchFeedsFromState(page *hrod.Page) ([]Feed, error) {
+	result, err := page.Eval(`() => {
 		if (window.__INITIAL_STATE__ &&
 		    window.__INITIAL_STATE__.search &&
 		    window.__INITIAL_STATE__.search.feeds) {
 			const feeds = window.__INITIAL_STATE__.search.feeds;
-			const feedsData = feeds.value !== undefined ? feeds.value : feeds._value;
+			const feedsData = feeds?.value !== undefined ? feeds.value : (feeds?._value !== undefined ? feeds._value : feeds?._rawValue);
 			if (feedsData) {
 				return JSON.stringify(feedsData);
 			}
 		}
 		return "";
-	}`).String()
+	}`)
+	if err != nil {
+		return nil, err
+	}
 
-	if result == "" {
+	if result == nil || result.Value.Str() == "" {
 		return nil, errors.ErrNoFeeds
 	}
 
 	var feeds []Feed
-	if err := json.Unmarshal([]byte(result), &feeds); err != nil {
+	if err := json.Unmarshal([]byte(result.Value.Str()), &feeds); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal feeds: %w", err)
 	}
 
 	return feeds, nil
+}
+
+func hasEmptyXsecToken(feeds []Feed) bool {
+	for _, feed := range feeds {
+		if feed.XsecToken == "" {
+			return true
+		}
+	}
+	return false
+}
+
+func mergeSearchFeedXsecTokens(feeds, stateFeeds []Feed) {
+	tokenByID := make(map[string]string, len(stateFeeds))
+	for _, feed := range stateFeeds {
+		if feed.ID != "" && feed.XsecToken != "" {
+			tokenByID[feed.ID] = feed.XsecToken
+		}
+	}
+
+	for i := range feeds {
+		if feeds[i].XsecToken != "" {
+			continue
+		}
+		if token := tokenByID[feeds[i].ID]; token != "" {
+			feeds[i].XsecToken = token
+		}
+	}
 }
 
 func makeSearchURL(keyword string) string {
