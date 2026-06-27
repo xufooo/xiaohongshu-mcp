@@ -887,11 +887,11 @@ func (s *XiaohongshuService) checkFixedIdentity(page *hrod.Page) error {
 	}
 
 	reason := formatIdentityDriftReason(baseline, current, drift)
-	if err := s.actionState.RecordRisk(reason, 6*time.Hour); err != nil {
+	if err := s.actionState.RecordRisk(reason, 0); err != nil {
 		logrus.Warnf("record identity drift risk failed: %v", err)
 	}
 	if s.rateLimiter != nil {
-		s.rateLimiter.RecordRisk(reason, 6*time.Hour)
+		s.rateLimiter.RecordRisk(reason, 0)
 	}
 	return fmt.Errorf("%s", reason)
 }
