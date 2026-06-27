@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/proto"
 	hrod "github.com/xpzouying/xiaohongshu-mcp/pkg/humanize/rod"
 )
@@ -26,7 +27,11 @@ func NewNoteOpenActionWithState(page *hrod.Page, state *ActionStateStore) *NoteO
 func (a *NoteOpenAction) OpenFromCards(ctx context.Context, feedID, xsecToken, source string) error {
 	page := a.page.Context(ctx).Timeout(60 * time.Second)
 	if source == "" {
-		source = inferOpenSource(page)
+		inferred, err := inferOpenSource(page)
+		if err != nil {
+			return fmt.Errorf("推断打开来源失败: %w", err)
+		}
+		source = inferred
 	}
 
 	if err := markFeedCard(page, feedID); err != nil {
@@ -56,7 +61,9 @@ func (a *NoteOpenAction) OpenFromCards(ctx context.Context, feedID, xsecToken, s
 
 func (a *NoteOpenAction) OpenByURLFallback(ctx context.Context, feedID, xsecToken string) error {
 	page := a.page.Context(ctx).Timeout(60 * time.Second)
-	page.MustNavigate(makeFeedDetailURL(feedID, xsecToken))
+	if err := page.Navigate(makeFeedDetailURL(feedID, xsecToken)); err != nil {
+		return fmt.Errorf("导航笔记详情页失败: %w", err)
+	}
 	if err := WaitForXHSReady(page, XHSReadyOptions{Kind: XHSReadyDetail, FeedID: feedID}); err != nil {
 		return err
 	}
@@ -94,24 +101,33 @@ func markFeedCard(page *hrod.Page, feedID string) error {
 
 func waitFeedDetailVisible(page *hrod.Page, feedID string) error {
 	deadline := time.Now().Add(15 * time.Second).UnixMilli()
-	page.MustWait(`(feedID, selector, deadline) => {
+	if err := page.Wait(rod.Eval(`(feedID, selector, deadline) => {
 		const hrefMatched = location.href.includes(feedID);
 		const ready = document.querySelector(selector) !== null;
 		const map = window.__INITIAL_STATE__?.note?.noteDetailMap;
 		const hasState = map && Object.prototype.hasOwnProperty.call(map, feedID);
 		return hrefMatched || ready || hasState || Date.now() >= deadline;
-	}`, feedID, SelectorFeedDetailReady, deadline)
+	}`, feedID, SelectorFeedDetailReady, deadline)); err != nil {
+		return fmt.Errorf("等待笔记详情可见失败: %w", err)
+	}
 	return nil
 }
 
-func inferOpenSource(page *hrod.Page) string {
-	u := page.MustEval(`() => location.href`).String()
+func inferOpenSource(page *hrod.Page) (string, error) {
+	result, err := page.Eval(`() => location.href`)
+	if err != nil {
+		return "", err
+	}
+	if result == nil {
+		return "", fmt.Errorf("location.href 未返回结果")
+	}
+	u := result.Value.Str()
 	switch {
 	case strings.Contains(u, "search"):
-		return OpenSourceSearch
+		return OpenSourceSearch, nil
 	case strings.Contains(u, "explore"):
-		return OpenSourceHome
+		return OpenSourceHome, nil
 	default:
-		return OpenSourceRecommend
+		return OpenSourceRecommend, nil
 	}
 }

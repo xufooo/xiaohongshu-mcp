@@ -17,7 +17,7 @@ const (
 	browserHealthTimeout    = 2 * time.Second
 	defaultStartupTimeout   = 120 * time.Second
 	operationAcquireTimeout = 5 * time.Second
-	lifecycleAcquireTimeout = 60 * time.Second
+	lifecycleAcquireTimeout = 30 * time.Second
 )
 
 // BusyError reports that the single browser is currently owned by another operation.

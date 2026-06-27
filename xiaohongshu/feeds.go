@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/go-rod/rod"
 	"github.com/xpzouying/xiaohongshu-mcp/errors"
 	hrod "github.com/xpzouying/xiaohongshu-mcp/pkg/humanize/rod"
 )
@@ -17,7 +18,9 @@ type FeedsListAction struct {
 func NewFeedsListAction(page *hrod.Page) (*FeedsListAction, error) {
 	pp := page.Timeout(60 * time.Second)
 
-	pp.MustNavigate("https://www.xiaohongshu.com")
+	if err := pp.Navigate("https://www.xiaohongshu.com"); err != nil {
+		return nil, fmt.Errorf("navigate to home failed: %w", err)
+	}
 	if err := WaitForXHSReady(pp, XHSReadyOptions{Kind: XHSReadyHome, Timeout: 60 * time.Second}); err != nil {
 		return nil, err
 	}
@@ -28,13 +31,15 @@ func NewFeedsListAction(page *hrod.Page) (*FeedsListAction, error) {
 // GetFeedsList 获取页面的 Feed 列表数据
 func (f *FeedsListAction) GetFeedsList(ctx context.Context) ([]Feed, error) {
 	page := f.page.Context(ctx).Timeout(60 * time.Second)
-	page.MustWait(`() => {
+	if err := page.Wait(rod.Eval(`() => {
 		const feed = window.__INITIAL_STATE__?.feed;
 		const feeds = feed?.feeds;
 		return Array.isArray(feeds?.value) || Array.isArray(feeds?._value);
-	}`)
+	}`)); err != nil {
+		return nil, fmt.Errorf("wait for feeds failed: %w", err)
+	}
 
-	result := page.MustEval(`() => {
+	resultObj, err := page.Eval(`() => {
 		if (window.__INITIAL_STATE__ &&
 		    window.__INITIAL_STATE__.feed &&
 		    window.__INITIAL_STATE__.feed.feeds) {
@@ -45,7 +50,14 @@ func (f *FeedsListAction) GetFeedsList(ctx context.Context) ([]Feed, error) {
 			}
 		}
 		return "";
-	}`).String()
+	}`)
+	if err != nil {
+		return nil, fmt.Errorf("extract feeds failed: %w", err)
+	}
+	result := ""
+	if resultObj != nil {
+		result = resultObj.Value.Str()
+	}
 
 	if result == "" {
 		return nil, errors.ErrNoFeeds
