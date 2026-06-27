@@ -31,6 +31,13 @@ type RiskSignal struct {
 	Recoverable bool          `json:"recoverable"`
 }
 
+const (
+	RiskCooldownLoginExpired    = 15 * time.Minute
+	RiskCooldownAccessAnomaly   = 90 * time.Minute
+	RiskCooldownSliderChallenge = 2 * time.Hour
+	RiskCooldownCaptcha         = 12 * time.Hour
+)
+
 type riskProbe struct {
 	URL         string   `json:"url"`
 	Title       string   `json:"title"`
@@ -205,11 +212,17 @@ func riskSignalFromReadyProbe(probe xhsReadyProbe) RiskSignal {
 
 func applyRiskPolicy(signal *RiskSignal) {
 	switch signal.Kind {
-	case RiskLoginExpired, RiskCaptcha, RiskSliderChallenge:
-		signal.Cooldown = 6 * time.Hour
+	case RiskLoginExpired:
+		signal.Cooldown = RiskCooldownLoginExpired
+		signal.Recoverable = true
+	case RiskCaptcha:
+		signal.Cooldown = RiskCooldownCaptcha
+		signal.Recoverable = true
+	case RiskSliderChallenge:
+		signal.Cooldown = RiskCooldownSliderChallenge
 		signal.Recoverable = true
 	case RiskAccessAnomaly:
-		signal.Cooldown = 30 * time.Minute
+		signal.Cooldown = RiskCooldownAccessAnomaly
 		signal.Recoverable = true
 	case RiskNoteNotFound, RiskPermissionDenied:
 		signal.Cooldown = 0
