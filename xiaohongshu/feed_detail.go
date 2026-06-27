@@ -659,7 +659,9 @@ func clickElementWithHumanBehavior(page *hrod.Page, el *hrod.Element, text strin
 	err := retry.Do(
 		func() error {
 			// 滚动到元素
-			el.MustScrollIntoView()
+			if err := el.ScrollIntoView(); err != nil {
+				return err
+			}
 
 			if err := sleepRandom(page, reactionTimeRange.min, reactionTimeRange.max); err != nil {
 				return err
@@ -811,7 +813,9 @@ func scrollToCommentsArea(page *hrod.Page) error {
 
 	// 先定位到评论区
 	if el, err := page.Timeout(2 * time.Second).Element(".comments-container"); err == nil {
-		el.MustScrollIntoView()
+		if err := el.ScrollIntoView(); err != nil {
+			logrus.Warnf("滚动到评论区失败: %v", err)
+		}
 	}
 	// Give the browser a short opportunity to activate the comment lazy loader.
 	// This is synchronization, not a humanization delay.
@@ -832,7 +836,9 @@ func scrollToLastComment(page *hrod.Page) {
 	}
 	// 滚动到最后一个评论
 	lastComment := elements[len(elements)-1]
-	lastComment.MustScrollIntoView()
+	if err := lastComment.ScrollIntoView(); err != nil {
+		logrus.Warnf("滚动到最后一条评论失败: %v", err)
+	}
 }
 
 // ========== DOM 查询 ==========

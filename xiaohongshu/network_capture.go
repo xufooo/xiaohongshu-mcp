@@ -121,7 +121,7 @@ func (c *NetworkCapture) onResponseReceived(e *proto.NetworkResponseReceived) {
 		return
 	}
 	entry := NetworkCaptureEntry{
-		URL:         trimNetworkCaptureURL(e.Response.URL),
+		URL:         trimNetworkCaptureURL(redactSensitiveURL(e.Response.URL)),
 		Status:      e.Response.Status,
 		ContentType: e.Response.MIMEType,
 		requestID:   string(e.RequestID),
@@ -211,7 +211,7 @@ func isSummarizableContentType(contentType string) bool {
 }
 
 func summarizeNetworkBody(body string) string {
-	summary := strings.Join(strings.Fields(body), " ")
+	summary := redactSensitiveText(strings.Join(strings.Fields(body), " "))
 	runes := []rune(summary)
 	if len(runes) > maxNetworkCaptureSummaryRunes {
 		summary = string(runes[:maxNetworkCaptureSummaryRunes]) + "..."

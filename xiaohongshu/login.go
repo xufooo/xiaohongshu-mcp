@@ -2,10 +2,18 @@ package xiaohongshu
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/pkg/errors"
 	hrod "github.com/xpzouying/xiaohongshu-mcp/pkg/humanize/rod"
+)
+
+const (
+	loginReadySelector       = ".main-container .user .link-wrapper .channel"
+	loginQRCodeSelector     = ".login-container .qrcode-img"
+	defaultLoginWaitTimeout  = 4 * time.Minute
+	defaultQRCodeWaitTimeout = 30 * time.Second
 )
 
 type LoginAction struct {
@@ -27,16 +35,12 @@ func (a *LoginAction) CheckLoginStatus(ctx context.Context) (bool, error) {
 		return false, err
 	}
 
-	exists, _, err := pp.Has(`.main-container .user .link-wrapper .channel`)
+	exists, _, err := pp.Has(loginReadySelector)
 	if err != nil {
 		return false, errors.Wrap(err, "check login status failed")
 	}
 
-	if !exists {
-		return false, errors.Errorf("login status element not found")
-	}
-
-	return true, nil
+	return exists, nil
 }
 
 func (a *LoginAction) Login(ctx context.Context) error {
@@ -52,16 +56,27 @@ func (a *LoginAction) Login(ctx context.Context) error {
 	}
 
 	// 检查是否已经登录
-	if exists, _, _ := pp.Has(".main-container .user .link-wrapper .channel"); exists {
+	if exists, _, _ := pp.Has(loginReadySelector); exists {
 		// 已经登录，直接返回
 		return nil
 	}
 
 	// 等待扫码成功提示或者登录完成
 	// 这里我们等待登录成功的元素出现，这样更简单可靠
-	pp.MustElement(".main-container .user .link-wrapper .channel")
+	loginCtx := ctx
+	cancel := func() {}
+	if _, ok := loginCtx.Deadline(); !ok {
+		loginCtx, cancel = context.WithTimeout(ctx, defaultLoginWaitTimeout)
+	}
+	defer cancel()
 
-	return nil
+	if a.WaitForLogin(loginCtx) {
+		return nil
+	}
+	if err := loginCtx.Err(); err != nil {
+		return err
+	}
+	return errors.New("等待登录完成超时")
 }
 
 func (a *LoginAction) FetchQrcodeImage(ctx context.Context) (string, bool, error) {
@@ -77,12 +92,16 @@ func (a *LoginAction) FetchQrcodeImage(ctx context.Context) (string, bool, error
 	}
 
 	// 检查是否已经登录
-	if exists, _, _ := pp.Has(".main-container .user .link-wrapper .channel"); exists {
+	if exists, _, _ := pp.Has(loginReadySelector); exists {
 		return "", true, nil
 	}
 
 	// 获取二维码图片
-	src, err := pp.MustElement(".login-container .qrcode-img").Attribute("src")
+	qrcode, err := waitForElement(pp, loginQRCodeSelector, defaultQRCodeWaitTimeout)
+	if err != nil {
+		return "", false, errors.Wrap(err, "get qrcode element failed")
+	}
+	src, err := qrcode.Attribute("src")
 	if err != nil {
 		return "", false, errors.Wrap(err, "get qrcode src failed")
 	}
@@ -103,10 +122,34 @@ func (a *LoginAction) WaitForLogin(ctx context.Context) bool {
 		case <-ctx.Done():
 			return false
 		case <-ticker.C:
-			el, err := pp.Element(".main-container .user .link-wrapper .channel")
+			el, err := pp.Element(loginReadySelector)
 			if err == nil && el != nil {
 				return true
 			}
 		}
 	}
+}
+
+func waitForElement(page *hrod.Page, selector string, timeout time.Duration) (*hrod.Element, error) {
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+
+	for time.Now().Before(deadline) {
+		if err := page.Err(); err != nil {
+			return nil, err
+		}
+		el, err := page.Element(selector)
+		if err == nil && el != nil {
+			return el, nil
+		}
+		lastErr = err
+		if err := page.Sleep(300 * time.Millisecond); err != nil {
+			return nil, err
+		}
+	}
+
+	if lastErr != nil {
+		return nil, fmt.Errorf("等待元素 %s 超时(%s): %w", selector, timeout, lastErr)
+	}
+	return nil, fmt.Errorf("等待元素 %s 超时(%s)", selector, timeout)
 }

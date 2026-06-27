@@ -32,7 +32,7 @@ func NewPublishVideoAction(page *hrod.Page) (*PublishAction, error) {
 		return nil, err
 	}
 
-	if err := mustClickPublishTab(pp, "上传视频"); err != nil {
+	if err := clickPublishTab(pp, "上传视频"); err != nil {
 		return nil, errors.Wrap(err, "切换到上传视频失败")
 	}
 
@@ -80,7 +80,9 @@ func uploadVideo(page *hrod.Page, videoPath string) error {
 		}
 	}
 
-	fileInput.MustSetFiles(videoPath)
+	if err := fileInput.SetFiles([]string{videoPath}); err != nil {
+		return errors.Wrap(err, "设置视频上传文件失败")
+	}
 
 	// 对于视频，等待发布按钮变为可点击即表示处理完成
 	btn, err := waitForPublishButtonClickable(pp, 10*time.Minute)
