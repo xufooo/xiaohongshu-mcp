@@ -94,6 +94,10 @@ func (f *FeedDetailAction) GetFeedDetail(ctx context.Context, feedID, xsecToken 
 }
 
 func (f *FeedDetailAction) GetFeedDetailWithConfig(ctx context.Context, feedID, xsecToken string, loadAllComments bool, config CommentLoadConfig) (*FeedDetailResponse, error) {
+	if err := validateFeedAccessArgs(feedID, xsecToken); err != nil {
+		return nil, err
+	}
+
 	config = normalizeCommentLoadConfig(config)
 	page := f.page.Context(ctx).Timeout(feedDetailPageTimeout)
 	url := makeFeedDetailURL(feedID, xsecToken)
@@ -1227,4 +1231,14 @@ func shouldUseInitialCommentSnapshot(initial, current *FeedDetailResponse) bool 
 
 func makeFeedDetailURL(feedID, xsecToken string) string {
 	return fmt.Sprintf("https://www.xiaohongshu.com/explore/%s?xsec_token=%s&xsec_source=pc_feed", feedID, xsecToken)
+}
+
+func validateFeedAccessArgs(feedID, xsecToken string) error {
+	if strings.TrimSpace(feedID) == "" {
+		return fmt.Errorf("缺少feed_id参数")
+	}
+	if strings.TrimSpace(xsecToken) == "" {
+		return fmt.Errorf("缺少xsec_token参数")
+	}
+	return nil
 }

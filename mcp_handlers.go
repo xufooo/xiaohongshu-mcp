@@ -483,17 +483,9 @@ func (s *AppServer) handleSearchFeeds(ctx context.Context, args SearchFeedsArgs)
 
 // handleGetFeedDetail 处理获取Feed详情
 func (s *AppServer) handleGetFeedDetail(ctx context.Context, args map[string]any) *MCPToolResult {
-	if blocked := s.requireBrowserAvailableForMCP("获取Feed详情"); blocked != nil {
-		return blocked
-	}
-	if blocked := s.rateLimitMCP(ctx, "获取Feed详情", ratelimit.ActionOpenNote); blocked != nil {
-		return blocked
-	}
-	logrus.Info("MCP: 获取Feed详情")
-
 	// 解析参数
 	feedID, ok := args["feed_id"].(string)
-	if !ok || feedID == "" {
+	if !ok || strings.TrimSpace(feedID) == "" {
 		return &MCPToolResult{
 			Content: []MCPContent{{
 				Type: "text",
@@ -502,9 +494,10 @@ func (s *AppServer) handleGetFeedDetail(ctx context.Context, args map[string]any
 			IsError: true,
 		}
 	}
+	feedID = strings.TrimSpace(feedID)
 
 	xsecToken, ok := args["xsec_token"].(string)
-	if !ok || xsecToken == "" {
+	if !ok || strings.TrimSpace(xsecToken) == "" {
 		return &MCPToolResult{
 			Content: []MCPContent{{
 				Type: "text",
@@ -513,6 +506,15 @@ func (s *AppServer) handleGetFeedDetail(ctx context.Context, args map[string]any
 			IsError: true,
 		}
 	}
+	xsecToken = strings.TrimSpace(xsecToken)
+
+	if blocked := s.requireBrowserAvailableForMCP("获取Feed详情"); blocked != nil {
+		return blocked
+	}
+	if blocked := s.rateLimitMCP(ctx, "获取Feed详情", ratelimit.ActionOpenNote); blocked != nil {
+		return blocked
+	}
+	logrus.Info("MCP: 获取Feed详情")
 
 	loadAll := false
 	if raw, ok := args["load_all_comments"]; ok {
@@ -711,13 +713,15 @@ func (s *AppServer) handleUserProfile(ctx context.Context, args map[string]any) 
 // handleLikeFeed 处理点赞/取消点赞
 func (s *AppServer) handleLikeFeed(ctx context.Context, args map[string]interface{}) *MCPToolResult {
 	feedID, ok := args["feed_id"].(string)
-	if !ok || feedID == "" {
+	if !ok || strings.TrimSpace(feedID) == "" {
 		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "操作失败: 缺少feed_id参数"}}, IsError: true}
 	}
+	feedID = strings.TrimSpace(feedID)
 	xsecToken, ok := args["xsec_token"].(string)
-	if !ok || xsecToken == "" {
+	if !ok || strings.TrimSpace(xsecToken) == "" {
 		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "操作失败: 缺少xsec_token参数"}}, IsError: true}
 	}
+	xsecToken = strings.TrimSpace(xsecToken)
 	unlike, _ := args["unlike"].(bool)
 	action := "点赞"
 	if unlike {
@@ -756,13 +760,15 @@ func (s *AppServer) handleLikeFeed(ctx context.Context, args map[string]interfac
 // handleFavoriteFeed 处理收藏/取消收藏
 func (s *AppServer) handleFavoriteFeed(ctx context.Context, args map[string]interface{}) *MCPToolResult {
 	feedID, ok := args["feed_id"].(string)
-	if !ok || feedID == "" {
+	if !ok || strings.TrimSpace(feedID) == "" {
 		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "操作失败: 缺少feed_id参数"}}, IsError: true}
 	}
+	feedID = strings.TrimSpace(feedID)
 	xsecToken, ok := args["xsec_token"].(string)
-	if !ok || xsecToken == "" {
+	if !ok || strings.TrimSpace(xsecToken) == "" {
 		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "操作失败: 缺少xsec_token参数"}}, IsError: true}
 	}
+	xsecToken = strings.TrimSpace(xsecToken)
 	unfavorite, _ := args["unfavorite"].(bool)
 	action := "收藏"
 	if unfavorite {
@@ -804,7 +810,7 @@ func (s *AppServer) handlePostComment(ctx context.Context, args map[string]inter
 
 	// 解析参数
 	feedID, ok := args["feed_id"].(string)
-	if !ok || feedID == "" {
+	if !ok || strings.TrimSpace(feedID) == "" {
 		return &MCPToolResult{
 			Content: []MCPContent{{
 				Type: "text",
@@ -813,9 +819,10 @@ func (s *AppServer) handlePostComment(ctx context.Context, args map[string]inter
 			IsError: true,
 		}
 	}
+	feedID = strings.TrimSpace(feedID)
 
 	xsecToken, ok := args["xsec_token"].(string)
-	if !ok || xsecToken == "" {
+	if !ok || strings.TrimSpace(xsecToken) == "" {
 		return &MCPToolResult{
 			Content: []MCPContent{{
 				Type: "text",
@@ -824,9 +831,10 @@ func (s *AppServer) handlePostComment(ctx context.Context, args map[string]inter
 			IsError: true,
 		}
 	}
+	xsecToken = strings.TrimSpace(xsecToken)
 
 	content, ok := args["content"].(string)
-	if !ok || content == "" {
+	if !ok || strings.TrimSpace(content) == "" {
 		return &MCPToolResult{
 			Content: []MCPContent{{
 				Type: "text",
@@ -879,7 +887,7 @@ func (s *AppServer) handleReplyComment(ctx context.Context, args map[string]inte
 
 	// 解析参数
 	feedID, ok := args["feed_id"].(string)
-	if !ok || feedID == "" {
+	if !ok || strings.TrimSpace(feedID) == "" {
 		return &MCPToolResult{
 			Content: []MCPContent{{
 				Type: "text",
@@ -888,9 +896,10 @@ func (s *AppServer) handleReplyComment(ctx context.Context, args map[string]inte
 			IsError: true,
 		}
 	}
+	feedID = strings.TrimSpace(feedID)
 
 	xsecToken, ok := args["xsec_token"].(string)
-	if !ok || xsecToken == "" {
+	if !ok || strings.TrimSpace(xsecToken) == "" {
 		return &MCPToolResult{
 			Content: []MCPContent{{
 				Type: "text",
@@ -899,6 +908,7 @@ func (s *AppServer) handleReplyComment(ctx context.Context, args map[string]inte
 			IsError: true,
 		}
 	}
+	xsecToken = strings.TrimSpace(xsecToken)
 
 	commentID, _ := args["comment_id"].(string)
 	userID, _ := args["user_id"].(string)
@@ -913,7 +923,7 @@ func (s *AppServer) handleReplyComment(ctx context.Context, args map[string]inte
 	}
 
 	content, ok := args["content"].(string)
-	if !ok || content == "" {
+	if !ok || strings.TrimSpace(content) == "" {
 		return &MCPToolResult{
 			Content: []MCPContent{{
 				Type: "text",
@@ -1021,8 +1031,14 @@ func (s *AppServer) handleSessionSearch(ctx context.Context, args SessionSearchA
 }
 
 func (s *AppServer) handleSessionOpenNote(ctx context.Context, args SessionOpenNoteArgs) *MCPToolResult {
+	args.SessionID = strings.TrimSpace(args.SessionID)
+	args.ResultRef = strings.TrimSpace(args.ResultRef)
+	args.XsecToken = strings.TrimSpace(args.XsecToken)
 	if args.SessionID == "" || args.ResultRef == "" {
 		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "session打开笔记失败: 缺少session_id或result_ref参数"}}, IsError: true}
+	}
+	if args.XsecToken == "" {
+		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "session打开笔记失败: 缺少xsec_token参数"}}, IsError: true}
 	}
 	if blocked := s.rateLimitMCP(ctx, "session打开笔记", ratelimit.ActionOpenNote); blocked != nil {
 		return blocked

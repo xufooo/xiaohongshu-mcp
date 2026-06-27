@@ -49,6 +49,10 @@ func newInteractActionWithState(page *hrod.Page, state *ActionStateStore) *inter
 }
 
 func (a *interactAction) preparePage(ctx context.Context, actionType interactActionType, feedID, xsecToken string) (*hrod.Page, error) {
+	if err := validateFeedAccessArgs(feedID, xsecToken); err != nil {
+		return nil, fmt.Errorf("%s失败: %w", actionType, err)
+	}
+
 	page := a.page.Context(ctx).Timeout(60 * time.Second)
 	if a.state != nil {
 		if err := a.state.ValidateInteraction(feedID, interactionValidationAction(actionType)); err != nil {

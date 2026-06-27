@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	hrod "github.com/xpzouying/xiaohongshu-mcp/pkg/humanize/rod"
@@ -34,6 +35,13 @@ func NewCommentFeedActionWithState(page *hrod.Page, state *ActionStateStore) *Co
 
 // PostComment 发表评论到 Feed
 func (f *CommentFeedAction) PostComment(ctx context.Context, feedID, xsecToken, content string) error {
+	if err := validateFeedAccessArgs(feedID, xsecToken); err != nil {
+		return err
+	}
+	if strings.TrimSpace(content) == "" {
+		return fmt.Errorf("评论内容不能为空")
+	}
+
 	page, err := f.preparePage(ctx, feedID, xsecToken, "comment", 60*time.Second)
 	if err != nil {
 		return err
@@ -101,6 +109,16 @@ func (f *CommentFeedAction) PostComment(ctx context.Context, feedID, xsecToken, 
 
 // ReplyToComment 回复指定评论
 func (f *CommentFeedAction) ReplyToComment(ctx context.Context, feedID, xsecToken, commentID, userID, content string) error {
+	if err := validateFeedAccessArgs(feedID, xsecToken); err != nil {
+		return err
+	}
+	if strings.TrimSpace(content) == "" {
+		return fmt.Errorf("回复内容不能为空")
+	}
+	if strings.TrimSpace(commentID) == "" && strings.TrimSpace(userID) == "" {
+		return fmt.Errorf("缺少comment_id或user_id参数")
+	}
+
 	// 增加超时时间，因为需要滚动查找评论，同时保留调用方取消语义。
 	page, err := f.preparePage(ctx, feedID, xsecToken, "reply", 5*time.Minute)
 	if err != nil {
