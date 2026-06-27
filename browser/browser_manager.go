@@ -16,7 +16,26 @@ const (
 	pageCloseTimeout      = 2 * time.Second
 	browserHealthTimeout  = 2 * time.Second
 	defaultStartupTimeout = 120 * time.Second
+	defaultAcquireTimeout = 5 * time.Second
 )
+
+// BusyError reports that the single browser is currently owned by another operation.
+type BusyError struct {
+	Owner     string
+	StartedAt time.Time
+	Waited    time.Duration
+}
+
+func (e *BusyError) Error() string {
+	owner := e.Owner
+	if owner == "" {
+		owner = "unknown"
+	}
+	if len(owner) >= len("session:") && owner[:len("session:")] == "session:" {
+		return fmt.Sprintf("browser busy - session active: session_id=%s since %s", owner[len("session:"):], e.StartedAt.Format(time.RFC3339))
+	}
+	return fmt.Sprintf("browser busy: owner=%s since %s", owner, e.StartedAt.Format(time.RFC3339))
+}
 
 // BrowserFactory 创建浏览器实例。
 type BrowserFactory func(context.Context) (*hrod.Browser, error)
@@ -44,6 +63,8 @@ type Manager struct {
 	closed    bool
 	resetting bool
 	resetDone chan struct{}
+	owner     string
+	ownerAt   time.Time
 
 	idleTimeout time.Duration
 	idleTimer   *time.Timer
@@ -90,12 +111,20 @@ func NewManager(factory BrowserFactory, options ...ManagerOption) *Manager {
 
 // Acquire 获取独占页面。浏览器启动不占用操作令牌。
 func (m *Manager) Acquire(ctx context.Context) (*hrod.Page, error) {
+	return m.AcquireFor(ctx, "browser_operation")
+}
+
+// AcquireFor 获取独占页面并记录当前拥有者。
+func (m *Manager) AcquireFor(ctx context.Context, owner string) (*hrod.Page, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	for {
 		b, err := m.getBrowser(ctx)
 		if err != nil {
 			return nil, err
 		}
-		if err := m.lock(ctx); err != nil {
+		if err := m.lockForOwner(ctx, owner); err != nil {
 			return nil, err
 		}
 
@@ -128,6 +157,17 @@ func (m *Manager) Acquire(ctx context.Context) (*hrod.Page, error) {
 	}
 }
 
+// UpdateOwner updates the visible owner for the operation currently holding the browser.
+func (m *Manager) UpdateOwner(owner string) {
+	if owner == "" {
+		owner = "browser_operation"
+	}
+	m.mu.Lock()
+	m.owner = owner
+	m.ownerAt = time.Now()
+	m.mu.Unlock()
+}
+
 // Release 关闭本次页面并归还独占权，浏览器保持常驻。
 func (m *Manager) Release(page *hrod.Page) {
 	if page != nil {
@@ -144,7 +184,7 @@ func (m *Manager) Release(page *hrod.Page) {
 
 // Reset 关闭常驻浏览器。下次 Acquire 会创建新实例。
 func (m *Manager) Reset(ctx context.Context) error {
-	if err := m.lock(ctx); err != nil {
+	if err := m.lockForOwner(ctx, "reset"); err != nil {
 		return err
 	}
 	defer m.releaseToken()
@@ -226,13 +266,13 @@ func (m *Manager) getBrowser(ctx context.Context) (*hrod.Browser, error) {
 				startupTimeout = configuredTimeout
 			}
 			started = newBrowserStartup(startupTimeout)
+			started.timer = time.AfterFunc(startupTimeout, func() {
+				m.failStartup(started)
+			})
 			m.starting = started
 			m.startErr = nil
 			m.wg.Add(1)
 			go m.startBrowser(started)
-			started.timer = time.AfterFunc(startupTimeout, func() {
-				m.failStartup(started)
-			})
 		}
 		m.mu.Unlock()
 
@@ -353,7 +393,7 @@ func (m *Manager) scheduleIdleClose() {
 }
 
 func (m *Manager) closeIfIdle(version uint64) {
-	if err := m.lock(context.Background()); err != nil {
+	if err := m.lockForOwner(context.Background(), "idle_close"); err != nil {
 		return
 	}
 	defer m.releaseToken()
@@ -383,14 +423,53 @@ func (m *Manager) cancelIdleCloseLocked() {
 }
 
 func (m *Manager) lock(ctx context.Context) error {
+	return m.lockForOwner(ctx, "browser_operation")
+}
+
+func (m *Manager) lockForOwner(ctx context.Context, owner string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if owner == "" {
+		owner = "browser_operation"
+	}
+
+	waitCtx := ctx
+	cancel := func() {}
+	if deadline, ok := ctx.Deadline(); !ok || time.Until(deadline) > defaultAcquireTimeout {
+		waitCtx, cancel = context.WithTimeout(ctx, defaultAcquireTimeout)
+	}
+	defer cancel()
+
 	select {
-	case <-ctx.Done():
-		return ctx.Err()
+	case <-waitCtx.Done():
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return m.currentBusyError(defaultAcquireTimeout)
 	case <-m.token:
+		m.mu.Lock()
+		m.owner = owner
+		m.ownerAt = time.Now()
+		m.mu.Unlock()
 		return nil
 	}
 }
 
+func (m *Manager) currentBusyError(waited time.Duration) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return &BusyError{
+		Owner:     m.owner,
+		StartedAt: m.ownerAt,
+		Waited:    waited,
+	}
+}
+
 func (m *Manager) releaseToken() {
+	m.mu.Lock()
+	m.owner = ""
+	m.ownerAt = time.Time{}
+	m.mu.Unlock()
 	m.token <- struct{}{}
 }

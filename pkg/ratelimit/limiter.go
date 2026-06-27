@@ -69,6 +69,8 @@ type GlobalBudgetConfig struct {
 	Publish     BudgetConfig
 }
 
+const maxHandlerAutoWait = 30 * time.Second
+
 // Info 速率限制状态。
 type Info struct {
 	Used          int    `json:"used"`
@@ -276,7 +278,11 @@ func (l *Limiter) ReserveAction(ctx context.Context, action Action) (Info, time.
 		}
 
 		wait := l.waitBeforeAction(state, action, now)
-		if wait > l.cfg.AutoWaitMax {
+		autoWaitMax := l.cfg.AutoWaitMax
+		if autoWaitMax <= 0 || autoWaitMax > maxHandlerAutoWait {
+			autoWaitMax = maxHandlerAutoWait
+		}
+		if wait > autoWaitMax {
 			info.Warning = fmt.Sprintf("操作节奏过快，建议 %d 秒后重试", int(wait.Seconds()))
 			retryAfter := int(wait.Seconds())
 			info.RetryAfter = &retryAfter

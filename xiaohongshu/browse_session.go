@@ -126,6 +126,24 @@ func (m *BrowseSessionManager) Get(id string) (*BrowseSession, error) {
 	return session, nil
 }
 
+func (m *BrowseSessionManager) ActiveInfo() (BrowseSessionInfo, bool) {
+	m.mu.Lock()
+	sessions := make([]*BrowseSession, 0, len(m.sessions))
+	for _, session := range m.sessions {
+		sessions = append(sessions, session)
+	}
+	m.mu.Unlock()
+
+	for _, session := range sessions {
+		if session.isExpired() {
+			_ = m.Close(session.ID())
+			continue
+		}
+		return session.Info(), true
+	}
+	return BrowseSessionInfo{}, false
+}
+
 func (m *BrowseSessionManager) Close(id string) error {
 	m.mu.Lock()
 	session := m.sessions[id]
@@ -392,6 +410,10 @@ func (s *BrowseSession) Close() {
 }
 
 func (s *BrowseSession) ClassifyRisk() (RiskSignal, error) {
+	return s.ClassifyRiskContext(context.Background())
+}
+
+func (s *BrowseSession) ClassifyRiskContext(ctx context.Context) (RiskSignal, error) {
 	s.opMu.Lock()
 	defer s.opMu.Unlock()
 
@@ -402,7 +424,7 @@ func (s *BrowseSession) ClassifyRisk() (RiskSignal, error) {
 	if closed || page == nil {
 		return RiskSignal{Kind: RiskNone, DetectedAt: time.Now()}, nil
 	}
-	return ClassifyRisk(page)
+	return ClassifyRisk(page.Context(ctx))
 }
 
 func (s *BrowseSession) close() {

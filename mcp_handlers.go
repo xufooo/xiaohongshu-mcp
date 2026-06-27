@@ -18,11 +18,15 @@ import (
 
 const mcpFeedDetailOperationTimeout = 11 * time.Minute
 
-// newMCPFeedDetailContext returns a bounded context that is intentionally
-// independent from the HTTP request. Loading all comments can take longer than
-// an MCP client's request deadline.
-func newMCPFeedDetailContext() (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.Background(), mcpFeedDetailOperationTimeout)
+// newMCPFeedDetailContext 为加载全部评论设置上限，同时保留调用方更短的超时。
+func newMCPFeedDetailContext(parent context.Context) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	if deadline, ok := parent.Deadline(); ok && time.Until(deadline) < mcpFeedDetailOperationTimeout {
+		return context.WithCancel(parent)
+	}
+	return context.WithTimeout(parent, mcpFeedDetailOperationTimeout)
 }
 
 // parseVisibility 从 MCP 参数中解析可见范围
@@ -57,6 +61,23 @@ func (s *AppServer) rateLimitMCP(ctx context.Context, name string, action rateli
 	return nil
 }
 
+func (s *AppServer) requireBrowserAvailableForMCP(name string) *MCPToolResult {
+	if s.xiaohongshuService == nil {
+		return nil
+	}
+	info, ok := s.xiaohongshuService.ActiveBrowseSessionInfo()
+	if !ok {
+		return nil
+	}
+	msg := fmt.Sprintf("browser busy - session active: session_id=%s expires_at=%s. Use session_* tools or close_browse_session first.",
+		info.ID, info.ExpiresAt.Format(time.RFC3339))
+	logrus.Warnf("MCP: %s blocked because browse session is active: %s", name, info.ID)
+	return &MCPToolResult{
+		Content: []MCPContent{{Type: "text", Text: msg}},
+		IsError: true,
+	}
+}
+
 func (s *AppServer) requireWriteConfirmation(action, key, summary, token string) *MCPToolResult {
 	if s.writeConfirm == nil || !s.writeConfirm.Enabled() {
 		return nil
@@ -85,6 +106,9 @@ func compactWriteSummary(value string) string {
 // handleCheckLoginStatus 处理检查登录状态
 func (s *AppServer) handleCheckLoginStatus(ctx context.Context) *MCPToolResult {
 	logrus.Info("MCP: 检查登录状态")
+	if blocked := s.requireBrowserAvailableForMCP("检查登录状态"); blocked != nil {
+		return blocked
+	}
 
 	status, err := s.xiaohongshuService.CheckLoginStatus(ctx)
 	if err != nil {
@@ -117,6 +141,9 @@ func (s *AppServer) handleCheckLoginStatus(ctx context.Context) *MCPToolResult {
 // 返回二维码图片的 Base64 编码和超时时间，供前端展示扫码登录。
 func (s *AppServer) handleGetLoginQrcode(ctx context.Context) *MCPToolResult {
 	logrus.Info("MCP: 获取登录扫码图片")
+	if blocked := s.requireBrowserAvailableForMCP("获取登录扫码图片"); blocked != nil {
+		return blocked
+	}
 
 	result, err := s.xiaohongshuService.GetLoginQrcode(ctx)
 	if err != nil {
@@ -156,6 +183,9 @@ func (s *AppServer) handleGetLoginQrcode(ctx context.Context) *MCPToolResult {
 // handleDeleteCookies 处理删除 cookies 请求，用于登录重置
 func (s *AppServer) handleDeleteCookies(ctx context.Context) *MCPToolResult {
 	logrus.Info("MCP: 删除 cookies，重置登录状态")
+	if blocked := s.requireBrowserAvailableForMCP("删除 cookies"); blocked != nil {
+		return blocked
+	}
 
 	err := s.xiaohongshuService.DeleteCookies(ctx)
 	if err != nil {
@@ -231,6 +261,9 @@ func (s *AppServer) handlePublishContent(ctx context.Context, args map[string]in
 	confirmToken, _ := args["confirm_token"].(string)
 	key := writeConfirmationKey("publish_content", title, content, imagePaths, tags, scheduleAt, isOriginal, visibility, products)
 	summary := fmt.Sprintf("发布图文: title=%q images=%d visibility=%s content=%q", title, len(imagePaths), visibility, compactWriteSummary(content))
+	if blocked := s.requireBrowserAvailableForMCP("发布内容"); blocked != nil {
+		return blocked
+	}
 	if confirm := s.requireWriteConfirmation("publish_content", key, summary, confirmToken); confirm != nil {
 		return confirm
 	}
@@ -313,6 +346,9 @@ func (s *AppServer) handlePublishVideo(ctx context.Context, args map[string]inte
 	confirmToken, _ := args["confirm_token"].(string)
 	key := writeConfirmationKey("publish_video", title, content, videoPath, tags, scheduleAt, visibility, products)
 	summary := fmt.Sprintf("发布视频: title=%q video=%q visibility=%s content=%q", title, videoPath, visibility, compactWriteSummary(content))
+	if blocked := s.requireBrowserAvailableForMCP("发布视频"); blocked != nil {
+		return blocked
+	}
 	if confirm := s.requireWriteConfirmation("publish_video", key, summary, confirmToken); confirm != nil {
 		return confirm
 	}
@@ -343,6 +379,9 @@ func (s *AppServer) handlePublishVideo(ctx context.Context, args map[string]inte
 
 // handleListFeeds 处理获取Feeds列表
 func (s *AppServer) handleListFeeds(ctx context.Context) *MCPToolResult {
+	if blocked := s.requireBrowserAvailableForMCP("获取Feeds列表"); blocked != nil {
+		return blocked
+	}
 	if blocked := s.rateLimitMCP(ctx, "获取Feeds列表", ratelimit.ActionBrowse); blocked != nil {
 		return blocked
 	}
@@ -383,6 +422,9 @@ func (s *AppServer) handleListFeeds(ctx context.Context) *MCPToolResult {
 func (s *AppServer) handleSearchFeeds(ctx context.Context, args SearchFeedsArgs) *MCPToolResult {
 	logrus.Info("MCP: 搜索Feeds")
 
+	if blocked := s.requireBrowserAvailableForMCP("搜索Feeds"); blocked != nil {
+		return blocked
+	}
 	if blocked := s.rateLimitMCP(ctx, "搜索Feeds", ratelimit.ActionSearch); blocked != nil {
 		return blocked
 	}
@@ -441,6 +483,9 @@ func (s *AppServer) handleSearchFeeds(ctx context.Context, args SearchFeedsArgs)
 
 // handleGetFeedDetail 处理获取Feed详情
 func (s *AppServer) handleGetFeedDetail(ctx context.Context, args map[string]any) *MCPToolResult {
+	if blocked := s.requireBrowserAvailableForMCP("获取Feed详情"); blocked != nil {
+		return blocked
+	}
 	if blocked := s.rateLimitMCP(ctx, "获取Feed详情", ratelimit.ActionOpenNote); blocked != nil {
 		return blocked
 	}
@@ -554,15 +599,15 @@ func (s *AppServer) handleGetFeedDetail(ctx context.Context, args map[string]any
 	operationCtx := ctx
 	if loadAll {
 		if deadline, ok := ctx.Deadline(); ok {
-			logrus.Infof("MCP get_feed_detail 请求 deadline: %s；使用独立的 %s 操作超时",
+			logrus.Infof("MCP get_feed_detail 请求 deadline: %s；使用最长 %s 操作超时",
 				deadline.Format(time.RFC3339), mcpFeedDetailOperationTimeout)
 		} else {
-			logrus.Infof("MCP get_feed_detail 请求没有 deadline；使用独立的 %s 操作超时",
+			logrus.Infof("MCP get_feed_detail 请求没有 deadline；使用最长 %s 操作超时",
 				mcpFeedDetailOperationTimeout)
 		}
 
 		var cancel context.CancelFunc
-		operationCtx, cancel = newMCPFeedDetailContext()
+		operationCtx, cancel = newMCPFeedDetailContext(ctx)
 		defer cancel()
 	}
 
@@ -599,6 +644,9 @@ func (s *AppServer) handleGetFeedDetail(ctx context.Context, args map[string]any
 
 // handleUserProfile 获取用户主页
 func (s *AppServer) handleUserProfile(ctx context.Context, args map[string]any) *MCPToolResult {
+	if blocked := s.requireBrowserAvailableForMCP("获取用户主页"); blocked != nil {
+		return blocked
+	}
 	if blocked := s.rateLimitMCP(ctx, "获取用户主页", ratelimit.ActionBrowse); blocked != nil {
 		return blocked
 	}
@@ -679,6 +727,9 @@ func (s *AppServer) handleLikeFeed(ctx context.Context, args map[string]interfac
 	confirmToken, _ := args["confirm_token"].(string)
 	key := writeConfirmationKey("like_feed", feedID, xsecToken, unlike)
 	summary := fmt.Sprintf("%s: feed_id=%s", action, feedID)
+	if blocked := s.requireBrowserAvailableForMCP(action); blocked != nil {
+		return blocked
+	}
 	if confirm := s.requireWriteConfirmation("like_feed", key, summary, confirmToken); confirm != nil {
 		return confirm
 	}
@@ -721,6 +772,9 @@ func (s *AppServer) handleFavoriteFeed(ctx context.Context, args map[string]inte
 	confirmToken, _ := args["confirm_token"].(string)
 	key := writeConfirmationKey("favorite_feed", feedID, xsecToken, unfavorite)
 	summary := fmt.Sprintf("%s: feed_id=%s", action, feedID)
+	if blocked := s.requireBrowserAvailableForMCP(action); blocked != nil {
+		return blocked
+	}
 	if confirm := s.requireWriteConfirmation("favorite_feed", key, summary, confirmToken); confirm != nil {
 		return confirm
 	}
@@ -787,6 +841,9 @@ func (s *AppServer) handlePostComment(ctx context.Context, args map[string]inter
 	confirmToken, _ := args["confirm_token"].(string)
 	key := writeConfirmationKey("post_comment", feedID, xsecToken, content)
 	summary := fmt.Sprintf("发表评论: feed_id=%s content=%q", feedID, compactWriteSummary(content))
+	if blocked := s.requireBrowserAvailableForMCP("发表评论"); blocked != nil {
+		return blocked
+	}
 	if confirm := s.requireWriteConfirmation("post_comment", key, summary, confirmToken); confirm != nil {
 		return confirm
 	}
@@ -871,6 +928,9 @@ func (s *AppServer) handleReplyComment(ctx context.Context, args map[string]inte
 	confirmToken, _ := args["confirm_token"].(string)
 	key := writeConfirmationKey("reply_comment", feedID, xsecToken, commentID, userID, content)
 	summary := fmt.Sprintf("回复评论: feed_id=%s comment_id=%s user_id=%s content=%q", feedID, commentID, userID, compactWriteSummary(content))
+	if blocked := s.requireBrowserAvailableForMCP("回复评论"); blocked != nil {
+		return blocked
+	}
 	if confirm := s.requireWriteConfirmation("reply_comment", key, summary, confirmToken); confirm != nil {
 		return confirm
 	}
@@ -902,6 +962,9 @@ func (s *AppServer) handleReplyComment(ctx context.Context, args map[string]inte
 
 func (s *AppServer) handleCreateBrowseSession(ctx context.Context) *MCPToolResult {
 	logrus.Info("MCP: 创建浏览会话")
+	if blocked := s.requireBrowserAvailableForMCP("创建浏览会话"); blocked != nil {
+		return blocked
+	}
 	if blocked := s.rateLimitMCP(ctx, "创建浏览会话", ratelimit.ActionBrowse); blocked != nil {
 		return blocked
 	}
