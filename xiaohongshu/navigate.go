@@ -2,7 +2,9 @@ package xiaohongshu
 
 import (
 	"context"
+	"fmt"
 
+	"github.com/go-rod/rod/lib/proto"
 	hrod "github.com/xpzouying/xiaohongshu-mcp/pkg/humanize/rod"
 )
 
@@ -16,11 +18,15 @@ func NewNavigate(page *hrod.Page) *NavigateAction {
 
 func (n *NavigateAction) ToExplorePage(ctx context.Context) error {
 	page := n.page.Context(ctx)
-	page.MustNavigate("https://www.xiaohongshu.com/explore")
+	if err := page.Navigate("https://www.xiaohongshu.com/explore"); err != nil {
+		return fmt.Errorf("导航到发现页失败: %w", err)
+	}
 	if err := WaitForXHSReady(page, XHSReadyOptions{Kind: XHSReadyHome}); err != nil {
 		return err
 	}
-	page.MustElement(`div#app`)
+	if _, err := page.Element(`div#app`); err != nil {
+		return fmt.Errorf("等待发现页应用容器失败: %w", err)
+	}
 	return nil
 }
 
@@ -33,8 +39,13 @@ func (n *NavigateAction) ToProfilePage(ctx context.Context) error {
 	}
 
 	// Find and click the "我" channel link in sidebar
-	profileLink := page.MustElement(`div.main-container li.user.side-bar-component a.link-wrapper span.channel`)
-	profileLink.MustClick()
+	profileLink, err := page.Element(`div.main-container li.user.side-bar-component a.link-wrapper span.channel`)
+	if err != nil {
+		return fmt.Errorf("获取个人页入口失败: %w", err)
+	}
+	if err := profileLink.Click(proto.InputMouseButtonLeft, 1); err != nil {
+		return fmt.Errorf("点击个人页入口失败: %w", err)
+	}
 
 	// Wait for navigation to complete
 	if err := WaitForXHSReady(page, XHSReadyOptions{Kind: XHSReadyProfile}); err != nil {

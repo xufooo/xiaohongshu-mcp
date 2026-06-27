@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/avast/retry-go/v4"
+	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/proto"
 	"github.com/sirupsen/logrus"
 	"github.com/xpzouying/xiaohongshu-mcp/errors"
@@ -712,7 +713,14 @@ func clickElementWithHumanBehavior(page *hrod.Page, el *hrod.Element, text strin
 
 func humanScroll(page *hrod.Page, speed string, largeMode bool, pushCount int) (bool, int, int, error) {
 	beforeTop := getScrollTop(page)
-	viewportHeight := page.MustEval(`() => window.innerHeight`).Int()
+	viewportHeightResult, err := page.Eval(`() => window.innerHeight`)
+	if err != nil {
+		return false, 0, 0, fmt.Errorf("读取视口高度失败: %w", err)
+	}
+	if viewportHeightResult == nil {
+		return false, 0, 0, fmt.Errorf("读取视口高度失败: 无返回")
+	}
+	viewportHeight := viewportHeightResult.Value.Int()
 
 	baseRatio := getScrollRatio(speed)
 	if largeMode {
@@ -751,7 +759,14 @@ func humanScroll(page *hrod.Page, speed string, largeMode bool, pushCount int) (
 	}
 
 	if !scrolled && pushCount > 0 {
-		scrollHeight := page.MustEval(`() => document.body.scrollHeight`).Int()
+		scrollHeightResult, err := page.Eval(`() => document.body.scrollHeight`)
+		if err != nil {
+			return false, 0, 0, fmt.Errorf("读取页面高度失败: %w", err)
+		}
+		if scrollHeightResult == nil {
+			return false, 0, 0, fmt.Errorf("读取页面高度失败: 无返回")
+		}
+		scrollHeight := scrollHeightResult.Value.Int()
 		currentScrollTop := getScrollTop(page)
 		if err := page.Actor().Mouse.Scroll(0, float64(scrollHeight-currentScrollTop)); err != nil {
 			logrus.Warnf("滚动到底部失败: %v", err)
@@ -856,9 +871,15 @@ func getScrollTop(page *hrod.Page) int {
 	// 使用retry-go来处理可能的DOM查询失败
 	err := retry.Do(
 		func() error {
-			evalResult := page.MustEval(`() => {
+			evalResult, err := page.Eval(`() => {
 				return window.pageYOffset || document.documentElement.scrollTop || document.body.scrollTop || 0;
 			}`)
+			if err != nil {
+				return err
+			}
+			if evalResult == nil {
+				return fmt.Errorf("读取滚动位置未返回结果")
+			}
 
 			result = evalResult.Int()
 			return nil
@@ -1074,12 +1095,14 @@ func checkPageAccessible(page *hrod.Page) error {
 // ========== 数据提取 ==========
 
 func (f *FeedDetailAction) extractFeedDetail(page *hrod.Page, feedID string) (*FeedDetailResponse, error) {
-	page.MustWait(`(id, selector, deadline) => {
+	if err := page.Wait(rod.Eval(`(id, selector, deadline) => {
 		const s = window.__INITIAL_STATE__;
 		const hasState = s?.note?.noteDetailMap?.[id] != null;
 		const hasDOM = document.querySelector(selector) !== null;
 		return hasDOM || hasState || Date.now() >= deadline;
-	}`, feedID, SelectorFeedDetailReady, time.Now().Add(10*time.Second).UnixMilli())
+	}`, feedID, SelectorFeedDetailReady, time.Now().Add(10*time.Second).UnixMilli())); err != nil {
+		return nil, fmt.Errorf("等待笔记详情加载失败: %w", err)
+	}
 
 	deadline := time.Now().Add(initialCommentStateTimeout)
 	var lastErr error

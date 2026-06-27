@@ -119,7 +119,13 @@ func clickEmptyPosition(page *hrod.Page) {
 }
 
 func mustClickPublishTab(page *hrod.Page, tabname string) error {
-	page.MustElement(`div.upload-content`).MustWaitVisible()
+	uploadContent, err := page.Element(`div.upload-content`)
+	if err != nil {
+		return errors.Wrap(err, "获取上传区域失败")
+	}
+	if err := uploadContent.WaitVisible(); err != nil {
+		return errors.Wrap(err, "等待上传区域可见失败")
+	}
 
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
