@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/proto"
 	hrod "github.com/xpzouying/xiaohongshu-mcp/pkg/humanize/rod"
 )
@@ -100,17 +99,33 @@ func markFeedCard(page *hrod.Page, feedID string) error {
 }
 
 func waitFeedDetailVisible(page *hrod.Page, feedID string) error {
-	deadline := time.Now().Add(15 * time.Second).UnixMilli()
-	if err := page.Wait(rod.Eval(`(feedID, selector, deadline) => {
-		const hrefMatched = location.href.includes(feedID);
-		const ready = document.querySelector(selector) !== null;
-		const map = window.__INITIAL_STATE__?.note?.noteDetailMap;
-		const hasState = map && Object.prototype.hasOwnProperty.call(map, feedID);
-		return hrefMatched || ready || hasState || Date.now() >= deadline;
-	}`, feedID, SelectorFeedDetailReady, deadline)); err != nil {
-		return fmt.Errorf("等待笔记详情可见失败: %w", err)
+	deadline := time.Now().Add(15 * time.Second)
+	var last currentFeedDetailProbe
+	var lastErr error
+
+	for time.Now().Before(deadline) {
+		if err := page.Err(); err != nil {
+			return err
+		}
+		probe, err := probeCurrentFeedDetail(page, feedID)
+		if err != nil {
+			lastErr = err
+		} else {
+			last = probe
+			lastErr = nil
+			if currentFeedDetailMatched(probe) {
+				return nil
+			}
+		}
+		if err := page.SleepRandom(300*time.Millisecond, 500*time.Millisecond); err != nil {
+			return err
+		}
 	}
-	return nil
+	if lastErr != nil {
+		return fmt.Errorf("等待笔记详情可见失败: %w", lastErr)
+	}
+	return fmt.Errorf("等待笔记详情可见超时: url=%s url_matched=%v visible=%d visible_matched=%d state_matched=%v",
+		last.URL, last.URLMatched, last.VisibleDetailCount, last.VisibleMatchedDetailCount, last.StateMatched)
 }
 
 func inferOpenSource(page *hrod.Page) (string, error) {

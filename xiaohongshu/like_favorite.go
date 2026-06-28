@@ -97,17 +97,11 @@ func interactionValidationAction(actionType interactActionType) string {
 }
 
 func isCurrentFeedDetail(page *hrod.Page, feedID string) (bool, error) {
-	result, err := page.Eval(`(feedID) => {
-		const map = window.__INITIAL_STATE__?.note?.noteDetailMap;
-		return location.href.includes(feedID) || Boolean(map && Object.prototype.hasOwnProperty.call(map, feedID));
-	}`, feedID)
+	probe, err := probeCurrentFeedDetail(page, feedID)
 	if err != nil {
 		return false, err
 	}
-	if result == nil {
-		return false, fmt.Errorf("current feed detail check returned no result")
-	}
-	return result.Value.Bool(), nil
+	return currentFeedDetailMatched(probe), nil
 }
 
 func (a *interactAction) performClick(page *hrod.Page, selector string) error {

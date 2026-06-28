@@ -44,6 +44,7 @@ type xhsReadyProbe struct {
 	ProfileState       bool   `json:"profile_state"`
 	DetailState        bool   `json:"detail_state"`
 	DetailFeedMatched  bool   `json:"detail_feed_matched"`
+	DetailURLMatched   bool   `json:"detail_url_matched"`
 	PublishSignalCount int    `json:"publish_signal_count"`
 	StateFragment      string `json:"state_fragment,omitempty"`
 	RiskText           string `json:"risk_text,omitempty"`
@@ -140,6 +141,26 @@ func probeXHSReady(page *hrod.Page, feedID string) (xhsReadyProbe, error) {
 		const detail = feedID && detailMap && Object.prototype.hasOwnProperty.call(detailMap, feedID)
 			? unwrap(detailMap[feedID])
 			: null;
+		const visible = (el) => {
+			if (!el || !el.isConnected) return false;
+			if (typeof el.checkVisibility === "function") {
+				return el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
+			}
+			const rect = el.getBoundingClientRect();
+			const style = window.getComputedStyle(el);
+			return style.display !== "none" &&
+				style.visibility !== "hidden" &&
+				Number(style.opacity || "1") > 0 &&
+				rect.width > 1 &&
+				rect.height > 1;
+		};
+		const detailURLMatched = Boolean(feedID && location.href.includes(feedID));
+		const visibleDetails = Array.from(document.querySelectorAll(detailSelector)).filter(visible);
+		const visibleDetailMatched = Boolean(feedID && visibleDetails.some((el) => {
+			const data = JSON.stringify(el.dataset || {});
+			const links = Array.from(el.querySelectorAll("a[href]")).map((a) => a.href).join(" ");
+			return data.includes(feedID) || links.includes(feedID);
+		}));
 		const profileData = unwrap(state.user?.userPageData);
 		const detailCount = count(detailSelector);
 		const text = (document.body?.innerText || "").replace(/\s+/g, " ").slice(0, 1500);
@@ -178,7 +199,8 @@ func probeXHSReady(page *hrod.Page, feedID string) (xhsReadyProbe, error) {
 			search_feed_count: searchFeedCount,
 			profile_state: Boolean(profileData),
 			detail_state: feedID ? Boolean(detail) : sizeOf(detailMap) > 0,
-			detail_feed_matched: Boolean(detail) || (feedID ? location.href.includes(feedID) : false),
+			detail_feed_matched: feedID ? ((detailURLMatched && visibleDetails.length > 0) || visibleDetailMatched) : detailCount > 0,
+			detail_url_matched: detailURLMatched,
 			publish_signal_count: count("input[type='file'], .upload-input, .publish-container, .creator-container"),
 			state_fragment: stateFragment.slice(0, 220),
 			risk_text: riskText.slice(0, 180),
@@ -238,6 +260,9 @@ func isXHSReady(probe xhsReadyProbe, kind XHSReadyKind, feedID string, allowURLF
 func detailReady(probe xhsReadyProbe, feedID string) bool {
 	if feedID != "" && !probe.DetailFeedMatched {
 		return false
+	}
+	if feedID != "" {
+		return probe.DetailCount > 0 || probe.LikeButtonCount > 0
 	}
 	return probe.DetailState || probe.DetailCount > 0 || probe.LikeButtonCount > 0
 }
