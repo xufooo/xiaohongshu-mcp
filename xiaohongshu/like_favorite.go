@@ -101,7 +101,7 @@ func isCurrentFeedDetail(page *hrod.Page, feedID string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return currentFeedDetailMatched(probe), nil
+	return currentFeedDetailMatched(probe, feedID), nil
 }
 
 func (a *interactAction) performClick(page *hrod.Page, selector string) error {
