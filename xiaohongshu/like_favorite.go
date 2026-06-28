@@ -78,7 +78,7 @@ func (a *interactAction) preparePage(ctx context.Context, actionType interactAct
 	if err := WaitForXHSReady(page, XHSReadyOptions{Kind: XHSReadyDetail, FeedID: feedID}); err != nil {
 		return nil, err
 	}
-	if err := page.Sleep(time.Second); err != nil {
+	if err := page.SleepRandom(500*time.Millisecond, 1500*time.Millisecond); err != nil {
 		return nil, err
 	}
 
@@ -167,7 +167,7 @@ func (a *LikeAction) toggleLike(page *hrod.Page, feedID string, targetLiked bool
 	if err := a.performClick(page, SelectorLikeButton); err != nil {
 		return fmt.Errorf("%s点击按钮失败: %w", actionType, err)
 	}
-	if err := page.Sleep(3 * time.Second); err != nil {
+	if err := page.SleepRandom(2*time.Second, 5*time.Second); err != nil {
 		return err
 	}
 
@@ -241,7 +241,7 @@ func (a *FavoriteAction) toggleFavorite(page *hrod.Page, feedID string, targetCo
 	if err := a.performClick(page, SelectorCollectButton); err != nil {
 		return fmt.Errorf("%s点击按钮失败: %w", actionType, err)
 	}
-	if err := page.Sleep(3 * time.Second); err != nil {
+	if err := page.SleepRandom(2*time.Second, 5*time.Second); err != nil {
 		return err
 	}
 
