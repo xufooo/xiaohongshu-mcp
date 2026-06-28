@@ -563,7 +563,6 @@ func (s *SearchAction) collectResults(page *hrod.Page, filters ...FilterOption) 
 			return nil, fmt.Errorf("等待筛选结果刷新失败: %w", err)
 		}
 	}
-	}
 
 	if feeds, err := ExtractSearchFeedsFromDOM(page); err == nil && len(feeds) > 0 {
 		if hasEmptyXsecToken(feeds) {
