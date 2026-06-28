@@ -25,6 +25,7 @@ const (
 	searchInputWaitTimeout         = 45 * time.Second
 	searchResultsWaitTimeout       = 30 * time.Second
 	searchFilterRefreshWaitTimeout = 20 * time.Second
+	searchFilterPanelWaitTimeout   = 3 * time.Second
 )
 
 // FilterOption 筛选选项结构体
@@ -482,18 +483,17 @@ func (s *SearchAction) collectResults(page *hrod.Page, filters ...FilterOption) 
 			}
 		}
 
-		// 悬停在筛选按钮上
-		filterButton, err := page.Element(`div.filter`)
+		// 尝试打开筛选面板并应用筛选条件
+		applied, err := tryApplySearchFilters(page, allInternalFilters)
 		if err != nil {
-			return nil, fmt.Errorf("查找筛选按钮失败: %w", err)
-		}
-		if err := filterButton.Hover(); err != nil {
-			return nil, fmt.Errorf("悬停筛选按钮失败: %w", err)
+			logrus.Warnf("应用筛选条件失败，使用未筛选结果: %v", err)
+		} else if !applied {
+			logrus.Warn("筛选面板不可用，跳过筛选并返回未筛选结果")
 		}
 
-		// 等待筛选面板出现
-		if err := page.Wait(rod.Eval(`() => document.querySelector('div.filter-panel') !== null`)); err != nil {
-			return nil, fmt.Errorf("等待筛选面板失败: %w", err)
+		// 等待筛选结果刷新
+		if err := page.SleepRandom(1*time.Second, 3*time.Second); err != nil {
+			return nil, err
 		}
 
 		// 使用 JavaScript 注入方式筛选（比 Go-rod 跨进程 DOM 遍历更稳定）
@@ -586,6 +586,105 @@ func (s *SearchAction) collectResults(page *hrod.Page, filters ...FilterOption) 
 
 	// DOM 提取失败时降级到 __INITIAL_STATE__，兼容页面结构变动或虚拟列表未渲染的情况。
 	return readSearchFeedsFromState(page)
+}
+
+// tryApplySearchFilters 尝试打开筛选面板并应用筛选条件。
+// 先尝试 DOM 事件打开（兼容 no content quads），成功则应用筛选并返回 true。
+// 如面板打不开则返回 false, nil（调用方自行降级）。
+func tryApplySearchFilters(page *hrod.Page, filters []internalFilterOption) (bool, error) {
+	if len(filters) == 0 {
+		return false, nil
+	}
+
+	if err := page.Err(); err != nil {
+		return false, err
+	}
+
+	// 1. 先尝试用 DOM 事件打开筛选面板（不依赖 Hover，兼容 headless Chrome）
+	if err := page.SleepRandom(300*time.Millisecond, 600*time.Millisecond); err != nil {
+		return false, err
+	}
+
+	opened, err := func() (bool, error) {
+		result, err := page.Eval(`() => {
+			const button = document.querySelector('div.filter');
+			if (!button) return 'no_button';
+			const rect = button.getBoundingClientRect();
+			const eventInit = {
+				bubbles: true, cancelable: true, view: window,
+				clientX: rect.left + rect.width / 2,
+				clientY: rect.top + rect.height / 2,
+			};
+			if (typeof PointerEvent === 'function') {
+				button.dispatchEvent(new PointerEvent('pointerover', eventInit));
+			}
+			button.dispatchEvent(new MouseEvent('mouseover', eventInit));
+			button.dispatchEvent(new MouseEvent('mouseenter', {...eventInit, bubbles: false}));
+			return 'ok';
+		}`)
+		if err != nil {
+			return false, err
+		}
+		if result == nil {
+			return false, nil
+		}
+		return result.Value.Str() == "ok", nil
+	}()
+	if err != nil {
+		return false, err
+	}
+	if !opened {
+		logrus.Warn("筛选按钮不存在，跳过筛选")
+		return false, nil
+	}
+
+	// 2. 等待筛选面板出现
+	deadline := time.Now().Add(searchFilterPanelWaitTimeout)
+	panelFound := false
+	for time.Now().Before(deadline) {
+		result, err := page.Eval(`() => document.querySelector('div.filter-panel') !== null`)
+		if err != nil {
+			return false, err
+		}
+		if result != nil && result.Value.Bool() {
+			panelFound = true
+			break
+		}
+		if err := page.Sleep(100 * time.Millisecond); err != nil {
+			return false, err
+		}
+	}
+	if !panelFound {
+		logrus.Warn("筛选面板 3s 内未出现，跳过筛选")
+		return false, nil
+	}
+
+	// 3. 应用筛选条件（沿用原 JS 注入方式）
+	for _, filter := range filters {
+		result, err := page.Eval(`(filtersIndex, text) => {
+			const panel = document.querySelector('div.filter-panel');
+			if (!panel) { return '筛选面板不存在'; }
+			const groups = Array.from(panel.querySelectorAll('div.filters'));
+			const group = groups[filtersIndex - 1];
+			if (!group) { return '筛选组不存在'; }
+			const tags = Array.from(group.querySelectorAll('div.tags'));
+			const option = tags.find((tag) => {
+				if (tag.getAttribute('aria-hidden') === 'true') { return false; }
+				return tag.innerText.trim() === text;
+			});
+			if (!option) { return '未找到筛选选项: ' + text; }
+			option.click();
+			return 'ok';
+		}`, filter.Index, filter.Text)
+		if err != nil {
+			return false, err
+		}
+		if result == nil || result.Value.Str() != "ok" {
+			return false, fmt.Errorf("应用筛选失败: %v", result)
+		}
+	}
+
+	return true, nil
 }
 
 func readSearchFeedsFromState(page *hrod.Page) ([]Feed, error) {
