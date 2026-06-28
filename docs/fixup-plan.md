@@ -227,6 +227,13 @@ close_browse_session(id)
 - session 超时自动关闭（默认10分钟）
 - 重启后 session 失效，但限流不丢
 
+### ⚠️ 合并到 fixup 时的工作（2026-06-28 决策）
+- **不要保留两套 MCP 工具（13 旧 + 9 session）**
+- 把 session 式行为链（打开→阅读→校验→互动）**下沉到旧 13 个工具的底层**
+- 用户面 API 不变：`search_feeds` / `feed_detail` / `like` / `favorite` / `post_comment` / `reply_comment` / `publish` / `publish_video` / `user_profile` / `list_feeds` / `check_login_status` / `delete_cookies` / `get_login_qrcode`
+- 内部实现改为：旧工具内部走 session 式的 UI 搜索→卡片点击打开→阅读→校验→互动→验证
+- session 专用工具（`create_browse_session` / `session_search` / `session_open_note` / `session_read` / `session_like` / `session_comment` / `session_back` / `session_state` / `close_browse_session`）在合并前保留用于调试，合并时决定是否保留为高级接口
+
 ---
 
 ## 优先级建议

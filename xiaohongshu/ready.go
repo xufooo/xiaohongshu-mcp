@@ -104,23 +104,17 @@ func WaitForXHSReady(page *hrod.Page, opts XHSReadyOptions) error {
 }
 
 func probeXHSReady(page *hrod.Page, feedID string) (xhsReadyProbe, error) {
-	obj, err := page.Eval(`(feedID, searchInputSelector, searchResultSelector, feedCardSelector, detailSelector, commentBoxSelector, likeButtonSelector) => {
-		const count = (selector) => {
-			try { return document.querySelectorAll(selector).length; } catch (_) { return 0; }
-		};
-		const visibleCount = (selector) => {
-			try {
-				return Array.from(document.querySelectorAll(selector)).filter((el) => {
-					if (!el || !el.isConnected) return false;
-					if (typeof el.checkVisibility === "function") {
-						return el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
-					}
-					return el.offsetParent !== null;
-				}).length;
-			} catch (_) {
-				return 0;
-			}
-		};
+	probeJS := `(feedID, searchInputSelector, searchResultSelector, feedCardSelector, detailSelector, commentBoxSelector, likeButtonSelector) => {` + xhsProbeVisibleJS + xhsProbeFeedMatchJS + `
+			const count = (selector) => {
+				try { return document.querySelectorAll(selector).length; } catch (_) { return 0; }
+			};
+			const visibleCount = (selector) => {
+				try {
+					return Array.from(document.querySelectorAll(selector)).filter(visible).length;
+				} catch (_) {
+					return 0;
+				}
+			};
 		const unwrap = (value) => {
 			if (value && typeof value === "object") {
 				if ("value" in value) return value.value;
@@ -141,26 +135,9 @@ func probeXHSReady(page *hrod.Page, feedID string) (xhsReadyProbe, error) {
 		const detail = feedID && detailMap && Object.prototype.hasOwnProperty.call(detailMap, feedID)
 			? unwrap(detailMap[feedID])
 			: null;
-		const visible = (el) => {
-			if (!el || !el.isConnected) return false;
-			if (typeof el.checkVisibility === "function") {
-				return el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
-			}
-			const rect = el.getBoundingClientRect();
-			const style = window.getComputedStyle(el);
-			return style.display !== "none" &&
-				style.visibility !== "hidden" &&
-				Number(style.opacity || "1") > 0 &&
-				rect.width > 1 &&
-				rect.height > 1;
-		};
-		const detailURLMatched = Boolean(feedID && location.href.includes(feedID));
+		const detailURLMatched = detailURLMatchesFeedID(location.href);
 		const visibleDetails = Array.from(document.querySelectorAll(detailSelector)).filter(visible);
-		const visibleDetailMatched = Boolean(feedID && visibleDetails.some((el) => {
-			const data = JSON.stringify(el.dataset || {});
-			const links = Array.from(el.querySelectorAll("a[href]")).map((a) => a.href).join(" ");
-			return data.includes(feedID) || links.includes(feedID);
-		}));
+		const visibleDetailMatched = Boolean(feedID && visibleDetails.some(elementMatchesFeedID));
 		const profileData = unwrap(state.user?.userPageData);
 		const detailCount = count(detailSelector);
 		const text = (document.body?.innerText || "").replace(/\s+/g, " ").slice(0, 1500);
@@ -205,7 +182,8 @@ func probeXHSReady(page *hrod.Page, feedID string) (xhsReadyProbe, error) {
 			state_fragment: stateFragment.slice(0, 220),
 			risk_text: riskText.slice(0, 180),
 		});
-	}`, feedID, SelectorSearchInput, SelectorSearchResult, SelectorFeedCard, SelectorFeedDetailReady, SelectorCommentBox, SelectorLikeButton)
+	}`
+	obj, err := page.Eval(probeJS, feedID, SelectorSearchInput, SelectorSearchResult, SelectorFeedCard, SelectorFeedDetailReady, SelectorCommentBox, SelectorLikeButton)
 	if err != nil {
 		return xhsReadyProbe{}, err
 	}
@@ -258,13 +236,10 @@ func isXHSReady(probe xhsReadyProbe, kind XHSReadyKind, feedID string, allowURLF
 }
 
 func detailReady(probe xhsReadyProbe, feedID string) bool {
-	if feedID != "" && !probe.DetailFeedMatched {
-		return false
+	if feedID == "" {
+		return probe.DetailState || probe.DetailCount > 0 || probe.LikeButtonCount > 0
 	}
-	if feedID != "" {
-		return probe.DetailCount > 0 || probe.LikeButtonCount > 0
-	}
-	return probe.DetailState || probe.DetailCount > 0 || probe.LikeButtonCount > 0
+	return probe.DetailFeedMatched
 }
 
 func isHomeURL(rawURL string) bool {

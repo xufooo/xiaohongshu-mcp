@@ -109,11 +109,14 @@ func waitFeedDetailVisible(page *hrod.Page, feedID string) error {
 		}
 		probe, err := probeCurrentFeedDetail(page, feedID)
 		if err != nil {
+			if !isTransientCurrentDetailProbeError(err) {
+				return fmt.Errorf("等待笔记详情可见失败: %w", err)
+			}
 			lastErr = err
 		} else {
 			last = probe
 			lastErr = nil
-			if currentFeedDetailMatched(probe) {
+			if currentFeedDetailMatched(probe, feedID) {
 				return nil
 			}
 		}
