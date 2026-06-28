@@ -24,6 +24,7 @@ type SearchResult struct {
 const (
 	searchInputWaitTimeout         = 45 * time.Second
 	searchResultsWaitTimeout       = 30 * time.Second
+	searchFilterPanelWaitTimeout   = 3 * time.Second
 	searchFilterRefreshWaitTimeout = 20 * time.Second
 )
 
@@ -475,103 +476,21 @@ func (s *SearchAction) collectResults(page *hrod.Page, filters ...FilterOption) 
 			allInternalFilters = append(allInternalFilters, internalFilters...)
 		}
 
-		// 验证所有内部筛选选项
-		for _, filter := range allInternalFilters {
-			if err := validateInternalFilterOption(filter); err != nil {
-				return nil, fmt.Errorf("筛选选项验证失败: %w", err)
+		if len(allInternalFilters) > 0 {
+			// 验证所有内部筛选选项
+			for _, filter := range allInternalFilters {
+				if err := validateInternalFilterOption(filter); err != nil {
+					return nil, fmt.Errorf("筛选选项验证失败: %w", err)
+				}
 			}
-		}
 
-		// 悬停在筛选按钮上
-		filterButton, err := page.Element(`div.filter`)
-		if err != nil {
-			return nil, fmt.Errorf("查找筛选按钮失败: %w", err)
-		}
-		if err := filterButton.Hover(); err != nil {
-			return nil, fmt.Errorf("悬停筛选按钮失败: %w", err)
-		}
-
-		// 等待筛选面板出现
-		if err := page.Wait(rod.Eval(`() => document.querySelector('div.filter-panel') !== null`)); err != nil {
-			return nil, fmt.Errorf("等待筛选面板失败: %w", err)
-		}
-
-		// 使用 JavaScript 注入方式筛选（比 Go-rod 跨进程 DOM 遍历更稳定）
-		for _, filter := range allInternalFilters {
-			result, err := page.Eval(`(filtersIndex, text) => {
-				const panel = document.querySelector('div.filter-panel');
-				if (!panel) {
-					return '筛选面板不存在';
-				}
-				const groups = Array.from(panel.querySelectorAll('div.filters'));
-				const group = groups[filtersIndex - 1];
-				if (!group) {
-					return '筛选组不存在';
-				}
-				const tags = Array.from(group.querySelectorAll('div.tags'));
-				const option = tags.find((tag) => {
-					if (tag.getAttribute('aria-hidden') === 'true') {
-						return false;
-					}
-					return tag.innerText.trim() === text;
-				});
-				if (!option) {
-					return '筛选标签不存在';
-				}
-				option.click();
-				return '';
-			}`, filter.FiltersIndex, filter.Text)
+			applied, err := tryApplySearchFilters(page, allInternalFilters)
 			if err != nil {
-				return nil, fmt.Errorf("应用筛选失败: %w", err)
+				return nil, err
 			}
-			if result != nil && result.Value.Str() != "" {
-				return nil, fmt.Errorf("应用筛选失败: %s: %s", result.Value.Str(), filter.Text)
+			if !applied {
+				logrus.Warn("筛选 UI 不可用，跳过筛选并返回未筛选搜索结果")
 			}
-		}
-
-		// 记录关闭筛选面板前的 DOM 卡片和 state 长度，避免直接返回旧的搜索结果。
-		previousDOMCardCountResult, err := page.Eval(`(selector) => document.querySelectorAll(selector).length`, SelectorFeedCard)
-		if err != nil {
-			return nil, fmt.Errorf("读取筛选前 DOM 卡片数量失败: %w", err)
-		}
-		if previousDOMCardCountResult == nil {
-			return nil, fmt.Errorf("读取筛选前 DOM 卡片数量失败: 无返回")
-		}
-		previousDOMCardCount := previousDOMCardCountResult.Value.Int()
-
-		previousFeedsJSONLengthResult, err := page.Eval(`() => {
-			const feeds = window.__INITIAL_STATE__?.search?.feeds;
-			const data = feeds?.value !== undefined ? feeds.value : (feeds?._value !== undefined ? feeds._value : feeds?._rawValue);
-			return Array.isArray(data) ? JSON.stringify(data).length : 0;
-		}`)
-		if err != nil {
-			return nil, fmt.Errorf("读取筛选前 state 长度失败: %w", err)
-		}
-		if previousFeedsJSONLengthResult == nil {
-			return nil, fmt.Errorf("读取筛选前 state 长度失败: 无返回")
-		}
-		previousFeedsJSONLength := previousFeedsJSONLengthResult.Value.Int()
-
-		// 关闭筛选面板触发新的搜索请求
-		if _, err := page.Eval(`() => {
-			document.querySelector('div.filter')?.dispatchEvent(new MouseEvent('mouseleave', {bubbles: true}));
-		}`); err != nil {
-			return nil, fmt.Errorf("关闭筛选面板失败: %w", err)
-		}
-
-		// Wait for the application state instead of page stability. The search
-		// page keeps background requests/DOM updates active, so WaitStable may
-		// never resolve even though results are ready.
-		// 超过等待上限则返回当前可用结果。
-		if err := page.Wait(rod.Eval(`(selector, previousDOMCardCount, previousFeedsJSONLength, deadline) => {
-			const currentDOMCardCount = document.querySelectorAll(selector).length;
-			const feeds = window.__INITIAL_STATE__?.search?.feeds;
-			const data = feeds?.value !== undefined ? feeds.value : (feeds?._value !== undefined ? feeds._value : feeds?._rawValue);
-			return currentDOMCardCount !== previousDOMCardCount ||
-				(Array.isArray(data) && JSON.stringify(data).length !== previousFeedsJSONLength) ||
-				Date.now() >= deadline;
-		}`, SelectorFeedCard, previousDOMCardCount, previousFeedsJSONLength, time.Now().Add(searchFilterRefreshWaitTimeout).UnixMilli())); err != nil {
-			return nil, fmt.Errorf("等待筛选结果刷新失败: %w", err)
 		}
 	}
 
@@ -586,6 +505,224 @@ func (s *SearchAction) collectResults(page *hrod.Page, filters ...FilterOption) 
 
 	// DOM 提取失败时降级到 __INITIAL_STATE__，兼容页面结构变动或虚拟列表未渲染的情况。
 	return readSearchFeedsFromState(page)
+}
+
+func tryApplySearchFilters(page *hrod.Page, filters []internalFilterOption) (bool, error) {
+	if len(filters) == 0 {
+		return false, nil
+	}
+
+	if err := page.Err(); err != nil {
+		return false, err
+	}
+
+	opened, err := openSearchFilterPanel(page)
+	if err != nil {
+		if ctxErr := page.Err(); ctxErr != nil {
+			return false, ctxErr
+		}
+		logrus.Warnf("打开筛选面板失败，跳过筛选: %v", err)
+		return false, nil
+	}
+	if !opened {
+		return false, nil
+	}
+
+	// 使用 JavaScript 注入方式筛选（比 Go-rod 跨进程 DOM 遍历更稳定）。
+	for _, filter := range filters {
+		result, err := page.Eval(`(filtersIndex, text) => {
+			const panel = document.querySelector('div.filter-panel');
+			if (!panel) {
+				return '筛选面板不存在';
+			}
+			const groups = Array.from(panel.querySelectorAll('div.filters'));
+			const group = groups[filtersIndex - 1];
+			if (!group) {
+				return '筛选组不存在';
+			}
+			const tags = Array.from(group.querySelectorAll('div.tags'));
+			const option = tags.find((tag) => {
+				if (tag.getAttribute('aria-hidden') === 'true') {
+					return false;
+				}
+				return tag.innerText.trim() === text;
+			});
+			if (!option) {
+				return '筛选标签不存在';
+			}
+			option.click();
+			return '';
+		}`, filter.FiltersIndex, filter.Text)
+		if err != nil {
+			if ctxErr := page.Err(); ctxErr != nil {
+				return false, ctxErr
+			}
+			logrus.Warnf("应用筛选失败，跳过筛选: %v", err)
+			return false, nil
+		}
+		if result != nil && result.Value.Str() != "" {
+			logrus.Warnf("应用筛选失败，跳过筛选: %s: %s", result.Value.Str(), filter.Text)
+			return false, nil
+		}
+	}
+
+	// 记录关闭筛选面板前的 DOM 卡片和 state 长度，避免直接返回旧的搜索结果。
+	previousDOMCardCountResult, err := page.Eval(`(selector) => document.querySelectorAll(selector).length`, SelectorFeedCard)
+	if err != nil {
+		if ctxErr := page.Err(); ctxErr != nil {
+			return false, ctxErr
+		}
+		logrus.Warnf("读取筛选前 DOM 卡片数量失败，跳过筛选: %v", err)
+		return false, nil
+	}
+	if previousDOMCardCountResult == nil {
+		logrus.Warn("读取筛选前 DOM 卡片数量失败，跳过筛选: 无返回")
+		return false, nil
+	}
+	previousDOMCardCount := previousDOMCardCountResult.Value.Int()
+
+	previousFeedsJSONLengthResult, err := page.Eval(`() => {
+		const feeds = window.__INITIAL_STATE__?.search?.feeds;
+		const data = feeds?.value !== undefined ? feeds.value : (feeds?._value !== undefined ? feeds._value : feeds?._rawValue);
+		return Array.isArray(data) ? JSON.stringify(data).length : 0;
+	}`)
+	if err != nil {
+		if ctxErr := page.Err(); ctxErr != nil {
+			return false, ctxErr
+		}
+		logrus.Warnf("读取筛选前 state 长度失败，跳过筛选: %v", err)
+		return false, nil
+	}
+	if previousFeedsJSONLengthResult == nil {
+		logrus.Warn("读取筛选前 state 长度失败，跳过筛选: 无返回")
+		return false, nil
+	}
+	previousFeedsJSONLength := previousFeedsJSONLengthResult.Value.Int()
+
+	// 关闭筛选面板触发新的搜索请求。
+	if _, err := page.Eval(`() => {
+		document.querySelector('div.filter')?.dispatchEvent(new MouseEvent('mouseleave', {bubbles: true}));
+	}`); err != nil {
+		if ctxErr := page.Err(); ctxErr != nil {
+			return false, ctxErr
+		}
+		logrus.Warnf("关闭筛选面板失败，返回当前搜索结果: %v", err)
+		return true, nil
+	}
+
+	// Wait for the application state instead of page stability. The search
+	// page keeps background requests/DOM updates active, so WaitStable may
+	// never resolve even though results are ready.
+	// 超过等待上限则返回当前可用结果。
+	if err := page.Wait(rod.Eval(`(selector, previousDOMCardCount, previousFeedsJSONLength, deadline) => {
+		const currentDOMCardCount = document.querySelectorAll(selector).length;
+		const feeds = window.__INITIAL_STATE__?.search?.feeds;
+		const data = feeds?.value !== undefined ? feeds.value : (feeds?._value !== undefined ? feeds._value : feeds?._rawValue);
+		return currentDOMCardCount !== previousDOMCardCount ||
+			(Array.isArray(data) && JSON.stringify(data).length !== previousFeedsJSONLength) ||
+			Date.now() >= deadline;
+	}`, SelectorFeedCard, previousDOMCardCount, previousFeedsJSONLength, time.Now().Add(searchFilterRefreshWaitTimeout).UnixMilli())); err != nil {
+		if ctxErr := page.Err(); ctxErr != nil {
+			return false, ctxErr
+		}
+		logrus.Warnf("等待筛选结果刷新失败，返回当前搜索结果: %v", err)
+	}
+
+	return true, nil
+}
+
+func openSearchFilterPanel(page *hrod.Page) (bool, error) {
+	status, err := page.Eval(`() => {
+		const visible = (el) => {
+			if (!el || !el.isConnected) return false;
+			const style = window.getComputedStyle(el);
+			const rect = el.getBoundingClientRect();
+			return style.display !== 'none' &&
+				style.visibility !== 'hidden' &&
+				Number(style.opacity || '1') > 0 &&
+				rect.width > 1 &&
+				rect.height > 1 &&
+				rect.bottom > 0 &&
+				rect.right > 0 &&
+				rect.top < window.innerHeight &&
+				rect.left < window.innerWidth;
+		};
+		const button = document.querySelector('div.filter');
+		return JSON.stringify({
+			hasPanel: !!document.querySelector('div.filter-panel'),
+			hasButton: !!button,
+			buttonVisible: visible(button),
+		});
+	}`)
+	if err != nil {
+		return false, err
+	}
+	if status == nil || status.Value.Str() == "" {
+		return false, fmt.Errorf("筛选按钮探测无返回")
+	}
+
+	var probe struct {
+		HasPanel      bool `json:"hasPanel"`
+		HasButton     bool `json:"hasButton"`
+		ButtonVisible bool `json:"buttonVisible"`
+	}
+	if err := json.Unmarshal([]byte(status.Value.Str()), &probe); err != nil {
+		return false, err
+	}
+	if probe.HasPanel {
+		return true, nil
+	}
+	if !probe.HasButton {
+		logrus.Warn("筛选按钮不存在，跳过筛选")
+		return false, nil
+	}
+
+	if probe.ButtonVisible {
+		filterButton, err := page.Element(`div.filter`)
+		if err != nil {
+			return false, err
+		}
+		if err := filterButton.Hover(); err != nil {
+			logrus.Warnf("悬停筛选按钮失败，尝试 DOM 事件打开筛选面板: %v", err)
+		}
+	}
+
+	if _, err := page.Eval(`() => {
+		const button = document.querySelector('div.filter');
+		if (!button) return;
+		const rect = button.getBoundingClientRect();
+		const eventInit = {
+			bubbles: true,
+			cancelable: true,
+			view: window,
+			clientX: rect.left + rect.width / 2,
+			clientY: rect.top + rect.height / 2,
+		};
+		if (typeof PointerEvent === 'function') {
+			button.dispatchEvent(new PointerEvent('pointerover', eventInit));
+		}
+		button.dispatchEvent(new MouseEvent('mouseover', eventInit));
+		button.dispatchEvent(new MouseEvent('mouseenter', {...eventInit, bubbles: false}));
+	}`); err != nil {
+		return false, err
+	}
+
+	deadline := time.Now().Add(searchFilterPanelWaitTimeout)
+	for {
+		result, err := page.Eval(`() => document.querySelector('div.filter-panel') !== null`)
+		if err != nil {
+			return false, err
+		}
+		if result != nil && result.Value.Bool() {
+			return true, nil
+		}
+		if time.Now().After(deadline) {
+			return false, fmt.Errorf("等待筛选面板超时(%s)", searchFilterPanelWaitTimeout)
+		}
+		if err := page.Sleep(100 * time.Millisecond); err != nil {
+			return false, err
+		}
+	}
 }
 
 func readSearchFeedsFromState(page *hrod.Page) ([]Feed, error) {
