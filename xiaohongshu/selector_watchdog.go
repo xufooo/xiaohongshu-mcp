@@ -112,18 +112,20 @@ func (w *SelectorWatchdog) ProbeForKind(page *hrod.Page, kind XHSReadyKind) (war
 		return nil
 	}
 
-	// 过滤出需要重新探测的选择器（unknown 或非 healthy）
+	// 过滤出需要重新探测的选择器（unknown、非healthy、或距上次probe超过24h）
 	w.mu.RLock()
 	needProbe := make([]string, 0, len(names))
 	for _, name := range names {
-		if entry, ok := w.entries[name]; ok && entry.Status != SelectorHealthHealthy {
-			needProbe = append(needProbe, name)
+		if entry, ok := w.entries[name]; ok {
+			if entry.Status != SelectorHealthHealthy || time.Since(entry.LastChecked) >= 24*time.Hour {
+				needProbe = append(needProbe, name)
+			}
 		}
 	}
 	w.mu.RUnlock()
 
 	if len(needProbe) == 0 {
-		return nil // 全部已确认 healthy，跳过
+		return nil // 全部已确认 healthy 且未过期，跳过
 	}
 
 	// 从 needProbe 构建 spec 列表
