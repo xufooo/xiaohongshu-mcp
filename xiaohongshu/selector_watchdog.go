@@ -9,6 +9,11 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+// DefaultSelectorWatchdog 全局默认看门狗实例。
+// 由 AppServer 初始化时设置，所有 WaitForXHSReady 调用自动使用。
+// 为 nil 时不进行探测。
+var DefaultSelectorWatchdog *SelectorWatchdog
+
 // SelectorHealthKind 选择器健康状态
 type SelectorHealthKind string
 

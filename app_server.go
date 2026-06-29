@@ -38,6 +38,9 @@ func NewAppServer(xiaohongshuService *XiaohongshuService, opts ...AppServerOptio
 	// 注册核心选择器到看门狗
 	appServer.selectorWatchdog.RegisterAll()
 
+	// 设为全局默认，所有 WaitForXHSReady 调用自动使用
+	DefaultSelectorWatchdog = appServer.selectorWatchdog
+
 	for _, opt := range opts {
 		opt(appServer)
 	}

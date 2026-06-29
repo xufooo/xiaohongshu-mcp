@@ -81,19 +81,14 @@ func WaitForXHSReady(page *hrod.Page, opts XHSReadyOptions) error {
 				return fmt.Errorf("页面出现风险信号: %s; %s", probe.RiskText, formatXHSReadyProbe(probe))
 			}
 			if isXHSReady(probe, opts.Kind, opts.FeedID, false) {
-				if opts.SelectorWatchdog != nil {
-					if warns := opts.SelectorWatchdog.ProbeForKind(page, opts.Kind); len(warns) > 0 {
-						for _, w := range warns {
-							logrus.Warn(w)
-						}
-					}
-				}
+				probeWatchdogSelectors(page, opts)
 				return nil
 			}
 		}
 
 		if !time.Now().Before(deadline) {
 			if lastErr == nil && isXHSReady(last, opts.Kind, opts.FeedID, true) {
+				probeWatchdogSelectors(page, opts)
 				return nil
 			}
 			break
@@ -109,6 +104,19 @@ func WaitForXHSReady(page *hrod.Page, opts XHSReadyOptions) error {
 	}
 	return fmt.Errorf("等待小红书页面就绪超时(kind=%s timeout=%s): %s",
 		opts.Kind, opts.Timeout, formatXHSReadyProbe(last))
+}
+
+// probeWatchdogSelectors 在页面就绪后探测相关选择器健康状态。
+// 优先使用 opts 中的看门狗，回退到全局 DefaultSelectorWatchdog。
+func probeWatchdogSelectors(page *hrod.Page, opts XHSReadyOptions) {
+	wd := opts.SelectorWatchdog
+	if wd == nil {
+		wd = DefaultSelectorWatchdog
+	}
+	if wd == nil {
+		return
+	}
+	wd.ProbeForKind(page, opts.Kind)
 }
 
 func probeXHSReady(page *hrod.Page, feedID string) (xhsReadyProbe, error) {
