@@ -449,6 +449,32 @@ func healthHandler(c *gin.Context) {
 	}, "服务正常")
 }
 
+// selectorsHealthHandler 选择器健康状态
+func (s *AppServer) selectorsHealthHandler(c *gin.Context) {
+	status := s.selectorWatchdog.Status()
+	summary := s.selectorWatchdog.Summary()
+	
+	// 检查是否有退化（degraded）的选择器
+	hasDegraded := false
+	for _, entry := range status {
+		if entry.Status == SelectorHealthDegraded {
+			hasDegraded = true
+			break
+		}
+	}
+	
+	respStatus := "healthy"
+	if hasDegraded {
+		respStatus = "degraded"
+	}
+	
+	respondSuccess(c, map[string]any{
+		"status":   respStatus,
+		"summary":  summary,
+		"detailed": status,
+	}, summary)
+}
+
 // myProfileHandler 我的信息
 func (s *AppServer) myProfileHandler(c *gin.Context) {
 	// 获取当前登录用户信息
