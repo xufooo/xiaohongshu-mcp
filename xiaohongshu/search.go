@@ -268,7 +268,8 @@ func waitForSearchResults(page *hrod.Page, keyword string) error {
 				for (const name of ["keyword", "search_key", "query", "q"]) {
 					const raw = params.get(name);
 					if (raw) {
-						try { return normalize(decodeURIComponent(raw)); } catch (_) { return normalize(raw); }
+						const decoded = raw.includes("%") ? (() => { try { return decodeURIComponent(raw); } catch (_) { return raw; } })() : raw;
+						return normalize(decoded);
 					}
 				}
 			} catch (_) {}
@@ -337,7 +338,8 @@ func probeSearchResultsKeyword(page *hrod.Page, keyword string) (searchResultsKe
 				for (const name of ["keyword", "search_key", "query", "q"]) {
 					const raw = params.get(name);
 					if (raw) {
-						try { return normalize(decodeURIComponent(raw)); } catch (_) { return normalize(raw); }
+						const decoded = raw.includes("%") ? (() => { try { return decodeURIComponent(raw); } catch (_) { return raw; } })() : raw;
+						return normalize(decoded);
 					}
 				}
 			} catch (_) {}
