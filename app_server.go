@@ -13,6 +13,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/xpzouying/xiaohongshu-mcp/configs"
 	"github.com/xpzouying/xiaohongshu-mcp/pkg/ratelimit"
+	"github.com/xpzouying/xiaohongshu-mcp/xiaohongshu"
 )
 
 // AppServer 应用服务器结构体，封装所有服务和处理器
@@ -23,7 +24,7 @@ type AppServer struct {
 	httpServer         *http.Server
 	rateLimiter        *ratelimit.Limiter
 	writeConfirm       *WriteConfirmationGate
-	selectorWatchdog   *SelectorWatchdog // 选择器健康看门狗，跟踪上游DOM变更
+	selectorWatchdog   *xiaohongshu.SelectorWatchdog // 选择器健康看门狗，跟踪上游DOM变更
 }
 
 // NewAppServer 创建新的应用服务器实例
@@ -32,14 +33,14 @@ func NewAppServer(xiaohongshuService *XiaohongshuService, opts ...AppServerOptio
 		xiaohongshuService: xiaohongshuService,
 		rateLimiter:        ratelimit.New(configs.DefaultRateLimitConfig()),
 		writeConfirm:       NewWriteConfirmationGate(configs.UseWriteConfirmation()),
-		selectorWatchdog:   NewSelectorWatchdog(),
+		selectorWatchdog:   xiaohongshu.NewSelectorWatchdog(),
 	}
 
 	// 注册核心选择器到看门狗
 	appServer.selectorWatchdog.RegisterAll()
 
 	// 设为全局默认，所有 WaitForXHSReady 调用自动使用
-	DefaultSelectorWatchdog = appServer.selectorWatchdog
+	xiaohongshu.DefaultSelectorWatchdog = appServer.selectorWatchdog
 
 	for _, opt := range opts {
 		opt(appServer)

@@ -457,7 +457,7 @@ func (s *AppServer) selectorsHealthHandler(c *gin.Context) {
 	// 检查是否有退化（degraded）的选择器
 	hasDegraded := false
 	for _, entry := range status {
-		if entry.Status == SelectorHealthDegraded {
+		if entry.Status == xiaohongshu.SelectorHealthDegraded {
 			hasDegraded = true
 			break
 		}
