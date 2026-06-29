@@ -199,6 +199,7 @@ func (s *BrowseSession) PageState(ctx context.Context) (*BrowseSessionPageState,
 	s.mu.Lock()
 	page := s.page
 	feedID := s.currentFeedID
+	opened := s.opened
 	s.mu.Unlock()
 	if page == nil {
 		return nil, fmt.Errorf("browse session 页面不存在: %s", s.id)
@@ -211,8 +212,11 @@ func (s *BrowseSession) PageState(ctx context.Context) (*BrowseSessionPageState,
 	}
 	risk := riskSignalFromReadyProbe(probe)
 
-	kind := inferXHSReadyKindFromSessionURL(probe.URL)
+	kind := inferXHSReadyKindFromSessionState(probe.URL, opened, feedID)
 	ready := isXHSReady(probe, kind, feedID, true)
+	if ready {
+		probeWatchdogSelectors(page, XHSReadyOptions{Kind: kind, FeedID: feedID})
+	}
 
 	s.mu.Lock()
 	if probe.URL != "" {
@@ -276,6 +280,7 @@ func (s *BrowseSession) Search(ctx context.Context, keyword string, filters ...F
 		}
 	}
 	s.mu.Unlock()
+	s.probeWatchdogSelectorsForKind(ctx, XHSReadySearch, "")
 	return feeds, nil
 }
 
@@ -313,6 +318,7 @@ func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, xsecToken strin
 	s.read = false
 	s.seenNotes[feed.ID] = true
 	s.mu.Unlock()
+	s.probeWatchdogSelectorsForKind(ctx, XHSReadyDetail, feed.ID)
 	return nil
 }
 
@@ -338,6 +344,7 @@ func (s *BrowseSession) Read(ctx context.Context, minDuration time.Duration) err
 	s.read = true
 	s.seenNotes[feedID] = true
 	s.mu.Unlock()
+	s.probeWatchdogSelectorsForKind(ctx, XHSReadyDetail, feedID)
 	return nil
 }
 
@@ -353,9 +360,16 @@ func (s *BrowseSession) Like(ctx context.Context, unlike bool) error {
 	feedID, xsecToken := s.currentFeed()
 	action := NewLikeActionWithState(s.page.Context(ctx), s.state)
 	if unlike {
-		return action.Unlike(ctx, feedID, xsecToken)
+		if err := action.Unlike(ctx, feedID, xsecToken); err != nil {
+			return err
+		}
+	} else {
+		if err := action.Like(ctx, feedID, xsecToken); err != nil {
+			return err
+		}
 	}
-	return action.Like(ctx, feedID, xsecToken)
+	s.probeWatchdogSelectorsForKind(ctx, XHSReadyDetail, feedID)
+	return nil
 }
 
 func (s *BrowseSession) Comment(ctx context.Context, content string) error {
@@ -372,7 +386,11 @@ func (s *BrowseSession) Comment(ctx context.Context, content string) error {
 	}
 	feedID, xsecToken := s.currentFeed()
 	action := NewCommentFeedActionWithState(s.page.Context(ctx), s.state)
-	return action.PostComment(ctx, feedID, xsecToken, content)
+	if err := action.PostComment(ctx, feedID, xsecToken, content); err != nil {
+		return err
+	}
+	s.probeWatchdogSelectorsForKind(ctx, XHSReadyDetail, feedID)
+	return nil
 }
 
 func (s *BrowseSession) Back(ctx context.Context) error {
@@ -597,6 +615,18 @@ func (s *BrowseSession) refreshPageState() {
 	}
 }
 
+func (s *BrowseSession) probeWatchdogSelectorsForKind(ctx context.Context, kind XHSReadyKind, feedID string) {
+	s.mu.Lock()
+	page := s.page
+	closed := s.closed
+	s.mu.Unlock()
+	if closed || page == nil {
+		return
+	}
+
+	probeWatchdogSelectors(page.Context(ctx), XHSReadyOptions{Kind: kind, FeedID: feedID})
+}
+
 func (s *BrowseSession) currentPageURL() (string, error) {
 	if s.page == nil {
 		return "", nil
@@ -661,6 +691,13 @@ func inferXHSReadyKindFromSessionURL(rawURL string) XHSReadyKind {
 		return XHSReadyDetail
 	}
 	return inferXHSReadyKindFromURL(rawURL)
+}
+
+func inferXHSReadyKindFromSessionState(rawURL string, opened bool, feedID string) XHSReadyKind {
+	if opened && feedID != "" {
+		return XHSReadyDetail
+	}
+	return inferXHSReadyKindFromSessionURL(rawURL)
 }
 
 func newBrowseSessionID() string {
