@@ -253,7 +253,7 @@ func (s *SearchAction) searchByUI(page *hrod.Page, keyword string) error {
 
 func waitForSearchResults(page *hrod.Page, keyword string) error {
 	deadline := time.Now().Add(searchResultsWaitTimeout).UnixMilli()
-	err := page.Wait(rod.Eval(`(deadline, keyword, feedCardSelector) => {
+	err := page.Wait(rod.Eval(`(deadline, keyword, feedCardSelector, searchInputSelector, markedSearchInputSelector) => {
 		const unwrap = (value) => {
 			if (value && typeof value === "object") {
 				if ("value" in value) return value.value;
@@ -262,6 +262,17 @@ func waitForSearchResults(page *hrod.Page, keyword string) error {
 			return value;
 		};
 		const normalize = (value) => String(value ?? "").trim();
+		const visible = (el) => {
+			if (!el || !el.isConnected) return false;
+			const style = window.getComputedStyle(el);
+			const rect = el.getBoundingClientRect();
+			return style.display !== "none" &&
+				style.visibility !== "hidden" &&
+				Number(style.opacity || "1") > 0 &&
+				rect.width > 1 &&
+				rect.height > 1;
+		};
+		const inputValue = (el) => normalize("value" in el ? el.value : (el.innerText || el.textContent));
 		const urlKeyword = () => {
 			try {
 				const params = new URL(location.href).searchParams;
@@ -282,13 +293,18 @@ func waitForSearchResults(page *hrod.Page, keyword string) error {
 		const feeds = search?.feeds;
 		const data = unwrap(feeds);
 		const hasStateFeeds = Array.isArray(data) && data.length > 0;
-		const hasVisibleCards = document.querySelectorAll(feedCardSelector).length > 0;
+		const hasVisibleCards = Array.from(document.querySelectorAll(feedCardSelector)).some(visible);
 		const urlKeywordText = urlKeyword();
 		const urlKeywordMatched = urlKeywordText !== "" && urlKeywordText === normalize(keyword);
+		const markedInput = document.querySelector(markedSearchInputSelector);
+		const searchInput = markedInput || Array.from(document.querySelectorAll(searchInputSelector)).find(visible);
+		const inputKeyword = searchInput ? inputValue(searchInput) : "";
+		const inputMatched = inputKeyword !== "" && inputKeyword === normalize(keyword) && /\/search/i.test(location.pathname);
 		return (hasStateKeyword && keywordMatched && hasStateFeeds) ||
 			(urlKeywordMatched && hasVisibleCards) ||
+			(inputMatched && hasVisibleCards) ||
 			Date.now() >= deadline;
-	}`, deadline, keyword, SelectorFeedCard))
+	}`, deadline, keyword, SelectorFeedCard, SelectorSearchInput, SelectorMarkedSearchInput))
 	if err != nil {
 		return err
 	}
@@ -301,14 +317,14 @@ func waitForSearchResults(page *hrod.Page, keyword string) error {
 		return nil
 	}
 	if probe.HasStateKeyword && !probe.KeywordMatched {
-		return fmt.Errorf("搜索结果关键词不匹配: expected=%q state_keyword=%q url_keyword=%q visible_cards=%v",
-			keyword, probe.StateKeyword, probe.URLKeyword, probe.HasVisibleCards)
+		return fmt.Errorf("搜索结果关键词不匹配: expected=%q state_keyword=%q url_keyword=%q input_keyword=%q visible_cards=%v",
+			keyword, probe.StateKeyword, probe.URLKeyword, probe.InputKeyword, probe.HasVisibleCards)
 	}
 	if probe.HasStateKeyword && !probe.HasStateFeeds {
 		return fmt.Errorf("搜索状态结果未加载: keyword=%q state_keyword=%q", keyword, probe.StateKeyword)
 	}
-	return fmt.Errorf("搜索结果未加载: keyword=%q state_keyword=%q url_keyword=%q visible_cards=%v",
-		keyword, probe.StateKeyword, probe.URLKeyword, probe.HasVisibleCards)
+	return fmt.Errorf("搜索结果未加载: keyword=%q state_keyword=%q url_keyword=%q input_keyword=%q visible_cards=%v",
+		keyword, probe.StateKeyword, probe.URLKeyword, probe.InputKeyword, probe.HasVisibleCards)
 }
 
 type searchResultsKeywordProbe struct {
@@ -318,12 +334,15 @@ type searchResultsKeywordProbe struct {
 	URLKeyword       string `json:"url_keyword"`
 	HasURLKeyword    bool   `json:"has_url_keyword"`
 	URLKeywordMatched bool   `json:"url_keyword_matched"`
+	InputKeyword     string `json:"input_keyword"`
+	InputMatched     bool   `json:"input_matched"`
+	OnSearchPage     bool   `json:"on_search_page"`
 	HasStateFeeds    bool   `json:"has_state_feeds"`
 	HasVisibleCards  bool   `json:"has_visible_cards"`
 }
 
 func probeSearchResultsKeyword(page *hrod.Page, keyword string) (searchResultsKeywordProbe, error) {
-	obj, err := page.Eval(`(keyword, feedCardSelector) => {
+	obj, err := page.Eval(`(keyword, feedCardSelector, searchInputSelector, markedSearchInputSelector) => {
 		const unwrap = (value) => {
 			if (value && typeof value === "object") {
 				if ("value" in value) return value.value;
@@ -332,6 +351,17 @@ func probeSearchResultsKeyword(page *hrod.Page, keyword string) (searchResultsKe
 			return value;
 		};
 		const normalize = (value) => String(value ?? "").trim();
+		const visible = (el) => {
+			if (!el || !el.isConnected) return false;
+			const style = window.getComputedStyle(el);
+			const rect = el.getBoundingClientRect();
+			return style.display !== "none" &&
+				style.visibility !== "hidden" &&
+				Number(style.opacity || "1") > 0 &&
+				rect.width > 1 &&
+				rect.height > 1;
+		};
+		const inputValue = (el) => normalize("value" in el ? el.value : (el.innerText || el.textContent));
 		const urlKeyword = () => {
 			try {
 				const params = new URL(location.href).searchParams;
@@ -349,6 +379,9 @@ func probeSearchResultsKeyword(page *hrod.Page, keyword string) (searchResultsKe
 		const stateKeyword = unwrap(search?.searchKeyword);
 		const stateKeywordText = normalize(stateKeyword);
 		const urlKeywordText = urlKeyword();
+		const markedInput = document.querySelector(markedSearchInputSelector);
+		const searchInput = markedInput || Array.from(document.querySelectorAll(searchInputSelector)).find(visible);
+		const inputKeyword = searchInput ? inputValue(searchInput) : "";
 		const feeds = unwrap(search?.feeds);
 		const hasStateFeeds = Array.isArray(feeds) && feeds.length > 0;
 		return JSON.stringify({
@@ -358,10 +391,13 @@ func probeSearchResultsKeyword(page *hrod.Page, keyword string) (searchResultsKe
 			url_keyword: urlKeywordText.slice(0, 120),
 			has_url_keyword: urlKeywordText !== "",
 			url_keyword_matched: urlKeywordText !== "" && urlKeywordText === normalize(keyword),
+			input_keyword: inputKeyword.slice(0, 120),
+			input_matched: inputKeyword !== "" && inputKeyword === normalize(keyword),
+			on_search_page: /\/search/i.test(location.pathname),
 			has_state_feeds: hasStateFeeds,
-			has_visible_cards: document.querySelectorAll(feedCardSelector).length > 0,
+			has_visible_cards: Array.from(document.querySelectorAll(feedCardSelector)).some(visible),
 		});
-	}`, keyword, SelectorFeedCard)
+	}`, keyword, SelectorFeedCard, SelectorSearchInput, SelectorMarkedSearchInput)
 	if err != nil {
 		return searchResultsKeywordProbe{}, err
 	}
@@ -379,7 +415,8 @@ func probeSearchResultsKeyword(page *hrod.Page, keyword string) (searchResultsKe
 func searchResultsReady(probe searchResultsKeywordProbe) bool {
 	stateReady := probe.HasStateKeyword && probe.KeywordMatched && probe.HasStateFeeds
 	domReady := probe.URLKeywordMatched && probe.HasVisibleCards
-	return stateReady || domReady
+	inputReady := probe.OnSearchPage && probe.InputMatched && probe.HasVisibleCards
+	return stateReady || domReady || inputReady
 }
 
 type searchInputProbe struct {

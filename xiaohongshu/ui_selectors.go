@@ -8,7 +8,7 @@ import (
 )
 
 const (
-	SelectorSearchInput       = `input.search-input, input[type="search"], input[placeholder*="搜索"], input[placeholder*="Search"], input[placeholder*="search"], input[aria-label*="搜索"], input[aria-label*="Search"], input[aria-label*="search"], textarea[placeholder*="搜索"], [role="searchbox"], [contenteditable="true"][data-placeholder*="搜索"], [contenteditable="true"][aria-label*="搜索"]`
+	SelectorSearchInput       = `input.search-input, input[type="search"], input[role="searchbox"], input[placeholder*="搜索"], input[placeholder*="Search"], input[placeholder*="search"], input[aria-label*="搜索"], input[aria-label*="Search"], input[aria-label*="search"], textarea[role="searchbox"], textarea[placeholder*="搜索"], [contenteditable="true"][role="searchbox"], [contenteditable="true"][data-placeholder*="搜索"], [contenteditable="true"][aria-label*="搜索"]`
 	SelectorMarkedSearchInput = `[data-xhs-mcp-search-input="1"]`
 	SelectorSearchButton      = `.search-icon, .search-btn, button[type="submit"]`
 	SelectorSearchResult      = `.feeds-container, .note-list, .search-layout, div[data-v-]`

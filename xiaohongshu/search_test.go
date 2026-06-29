@@ -168,6 +168,23 @@ func TestSearchResultsReady(t *testing.T) {
 			},
 			ready: false,
 		},
+		{
+			name: "matched input on search page with cards is ready",
+			probe: searchResultsKeywordProbe{
+				InputMatched:    true,
+				OnSearchPage:    true,
+				HasVisibleCards: true,
+			},
+			ready: true,
+		},
+		{
+			name: "matched input off search page is not ready",
+			probe: searchResultsKeywordProbe{
+				InputMatched:    true,
+				HasVisibleCards: true,
+			},
+			ready: false,
+		},
 	}
 
 	for _, tt := range tests {
