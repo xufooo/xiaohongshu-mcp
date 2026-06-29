@@ -93,6 +93,8 @@ func selectorsForKind(kind XHSReadyKind) []string {
 		return []string{"search_input", "search_result"}
 	case XHSReadyDetail:
 		return []string{"feed_detail_ready", "like_button", "comment_box"}
+	case XHSReadyCommentBox:
+		return []string{"comment_box"}
 	case XHSReadyHome:
 		// 首页没有注册的 spec，暂不探测
 		return nil
