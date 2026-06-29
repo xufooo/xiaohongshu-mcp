@@ -262,21 +262,29 @@ func waitForSearchResults(page *hrod.Page, keyword string) error {
 			return value;
 		};
 		const normalize = (value) => String(value ?? "").trim();
+		const urlKeyword = () => {
+			try {
+				const params = new URL(location.href).searchParams;
+				for (const name of ["keyword", "search_key", "query", "q"]) {
+					const value = normalize(params.get(name));
+					if (value) return value;
+				}
+			} catch (_) {}
+			return "";
+		};
 		const search = window.__INITIAL_STATE__?.search;
 		const stateKeyword = unwrap(search?.searchKeyword);
 		const hasStateKeyword = normalize(stateKeyword) !== "";
 		const keywordMatched = !hasStateKeyword || normalize(stateKeyword) === normalize(keyword);
-		if (!keywordMatched && Date.now() < deadline) {
-			return false;
-		}
 		const feeds = search?.feeds;
 		const data = unwrap(feeds);
 		const hasStateFeeds = Array.isArray(data) && data.length > 0;
 		const hasVisibleCards = document.querySelectorAll(feedCardSelector).length > 0;
-		if (hasStateKeyword) {
-			return (keywordMatched && hasStateFeeds) || Date.now() >= deadline;
-		}
-		return hasStateFeeds || (Date.now() >= deadline && hasVisibleCards) || Date.now() >= deadline;
+		const urlKeywordText = urlKeyword();
+		const urlKeywordMatched = urlKeywordText !== "" && urlKeywordText === normalize(keyword);
+		return (hasStateKeyword && keywordMatched && hasStateFeeds) ||
+			(urlKeywordMatched && hasVisibleCards) ||
+			Date.now() >= deadline;
 	}`, deadline, keyword, SelectorFeedCard))
 	if err != nil {
 		return err
@@ -286,24 +294,29 @@ func waitForSearchResults(page *hrod.Page, keyword string) error {
 	if err != nil {
 		return err
 	}
+	if searchResultsReady(probe) {
+		return nil
+	}
 	if probe.HasStateKeyword && !probe.KeywordMatched {
-		return fmt.Errorf("搜索结果关键词不匹配: expected=%q actual=%q", keyword, probe.StateKeyword)
+		return fmt.Errorf("搜索结果关键词不匹配: expected=%q state_keyword=%q url_keyword=%q visible_cards=%v",
+			keyword, probe.StateKeyword, probe.URLKeyword, probe.HasVisibleCards)
 	}
 	if probe.HasStateKeyword && !probe.HasStateFeeds {
 		return fmt.Errorf("搜索状态结果未加载: keyword=%q state_keyword=%q", keyword, probe.StateKeyword)
 	}
-	if !probe.HasStateFeeds && !probe.HasVisibleCards {
-		return fmt.Errorf("搜索结果未加载: keyword=%q state_keyword=%q", keyword, probe.StateKeyword)
-	}
-	return nil
+	return fmt.Errorf("搜索结果未加载: keyword=%q state_keyword=%q url_keyword=%q visible_cards=%v",
+		keyword, probe.StateKeyword, probe.URLKeyword, probe.HasVisibleCards)
 }
 
 type searchResultsKeywordProbe struct {
-	StateKeyword    string `json:"state_keyword"`
-	HasStateKeyword bool   `json:"has_state_keyword"`
-	KeywordMatched  bool   `json:"keyword_matched"`
-	HasStateFeeds   bool   `json:"has_state_feeds"`
-	HasVisibleCards bool   `json:"has_visible_cards"`
+	StateKeyword     string `json:"state_keyword"`
+	HasStateKeyword  bool   `json:"has_state_keyword"`
+	KeywordMatched   bool   `json:"keyword_matched"`
+	URLKeyword       string `json:"url_keyword"`
+	HasURLKeyword    bool   `json:"has_url_keyword"`
+	URLKeywordMatched bool   `json:"url_keyword_matched"`
+	HasStateFeeds    bool   `json:"has_state_feeds"`
+	HasVisibleCards  bool   `json:"has_visible_cards"`
 }
 
 func probeSearchResultsKeyword(page *hrod.Page, keyword string) (searchResultsKeywordProbe, error) {
@@ -316,15 +329,29 @@ func probeSearchResultsKeyword(page *hrod.Page, keyword string) (searchResultsKe
 			return value;
 		};
 		const normalize = (value) => String(value ?? "").trim();
+		const urlKeyword = () => {
+			try {
+				const params = new URL(location.href).searchParams;
+				for (const name of ["keyword", "search_key", "query", "q"]) {
+					const value = normalize(params.get(name));
+					if (value) return value;
+				}
+			} catch (_) {}
+			return "";
+		};
 		const search = window.__INITIAL_STATE__?.search;
 		const stateKeyword = unwrap(search?.searchKeyword);
 		const stateKeywordText = normalize(stateKeyword);
+		const urlKeywordText = urlKeyword();
 		const feeds = unwrap(search?.feeds);
 		const hasStateFeeds = Array.isArray(feeds) && feeds.length > 0;
 		return JSON.stringify({
 			state_keyword: stateKeywordText.slice(0, 120),
 			has_state_keyword: stateKeywordText !== "",
 			keyword_matched: stateKeywordText === "" || stateKeywordText === normalize(keyword),
+			url_keyword: urlKeywordText.slice(0, 120),
+			has_url_keyword: urlKeywordText !== "",
+			url_keyword_matched: urlKeywordText !== "" && urlKeywordText === normalize(keyword),
 			has_state_feeds: hasStateFeeds,
 			has_visible_cards: document.querySelectorAll(feedCardSelector).length > 0,
 		});
@@ -341,6 +368,12 @@ func probeSearchResultsKeyword(page *hrod.Page, keyword string) (searchResultsKe
 		return searchResultsKeywordProbe{}, err
 	}
 	return probe, nil
+}
+
+func searchResultsReady(probe searchResultsKeywordProbe) bool {
+	stateReady := probe.HasStateKeyword && probe.KeywordMatched && probe.HasStateFeeds
+	domReady := probe.URLKeywordMatched && probe.HasVisibleCards
+	return stateReady || domReady
 }
 
 type searchInputProbe struct {

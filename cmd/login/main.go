@@ -66,7 +66,7 @@ func main() {
 	if err = action.Login(context.Background()); err != nil {
 		logrus.Fatalf("登录失败: %v", err)
 	} else {
-		if err := saveCookies(page); err != nil {
+		if err := saveCookies(page.Rod); err != nil {
 			logrus.Fatalf("failed to save cookies: %v", err)
 		}
 	}
