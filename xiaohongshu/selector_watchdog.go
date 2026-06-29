@@ -104,18 +104,32 @@ func selectorsForKind(kind XHSReadyKind) []string {
 }
 
 // ProbeForKind 按页面上下文探测相关选择器。
-// 只在正确的页面上下文中探测正确的选择器，避免误报（如搜索页探测详情选择器=0）。
-// 使用 spec 中的 VisibleOnly 判断可见性。
+// 只在选择器状态为 unknown(未检测) 或非 healthy(退化/可疑) 时重新探测，
+// 已确认 healthy 的跳过，避免每次页面就绪都重复 probe。
 func (w *SelectorWatchdog) ProbeForKind(page *hrod.Page, kind XHSReadyKind) (warnings []string) {
 	names := selectorsForKind(kind)
 	if len(names) == 0 {
 		return nil
 	}
 
-	// 收集 spec
+	// 过滤出需要重新探测的选择器（unknown 或非 healthy）
 	w.mu.RLock()
-	specs := make([]SelectorSpec, 0, len(names))
+	needProbe := make([]string, 0, len(names))
 	for _, name := range names {
+		if entry, ok := w.entries[name]; ok && entry.Status != SelectorHealthHealthy {
+			needProbe = append(needProbe, name)
+		}
+	}
+	w.mu.RUnlock()
+
+	if len(needProbe) == 0 {
+		return nil // 全部已确认 healthy，跳过
+	}
+
+	// 从 needProbe 构建 spec 列表
+	w.mu.RLock()
+	specs := make([]SelectorSpec, 0, len(needProbe))
+	for _, name := range needProbe {
 		if entry, ok := w.entries[name]; ok {
 			specs = append(specs, SelectorSpec{
 				Name:        entry.Name,
