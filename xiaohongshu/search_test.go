@@ -109,3 +109,70 @@ func TestFilterValidation(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, internalFilters, 5)
 }
+
+func TestSearchResultsReady(t *testing.T) {
+	tests := []struct {
+		name  string
+		probe searchResultsKeywordProbe
+		ready bool
+	}{
+		{
+			name: "state keyword and feeds ready",
+			probe: searchResultsKeywordProbe{
+				HasStateKeyword: true,
+				KeywordMatched:  true,
+				HasStateFeeds:   true,
+			},
+			ready: true,
+		},
+		{
+			name: "url keyword and dom ready without state keyword",
+			probe: searchResultsKeywordProbe{
+				URLKeywordMatched: true,
+				HasVisibleCards:   true,
+			},
+			ready: true,
+		},
+		{
+			name: "stale state keyword but url and dom ready",
+			probe: searchResultsKeywordProbe{
+				HasStateKeyword:   true,
+				KeywordMatched:    false,
+				URLKeywordMatched: true,
+				HasVisibleCards:   true,
+			},
+			ready: true,
+		},
+		{
+			name: "visible cards without current url keyword are not enough",
+			probe: searchResultsKeywordProbe{
+				HasStateKeyword:   true,
+				KeywordMatched:    false,
+				URLKeywordMatched: false,
+				HasVisibleCards:   true,
+			},
+			ready: false,
+		},
+		{
+			name: "state feeds without any keyword match are not enough",
+			probe: searchResultsKeywordProbe{
+				HasStateFeeds: true,
+			},
+			ready: false,
+		},
+		{
+			name: "matched url without cards is not ready",
+			probe: searchResultsKeywordProbe{
+				URLKeywordMatched: true,
+				HasVisibleCards:   false,
+			},
+			ready: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.ready, searchResultsReady(tt.probe))
+		})
+	}
+}

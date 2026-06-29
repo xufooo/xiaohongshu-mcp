@@ -20,9 +20,9 @@ import (
 
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/proto"
-	"github.com/ysmood/gson"
 	"github.com/xpzouying/headless_browser"
 	"github.com/xpzouying/xiaohongshu-mcp/pkg/humanize"
+	"github.com/ysmood/gson"
 )
 
 // Browser wraps a *headless_browser.Browser and humanizes the pages it creates.
