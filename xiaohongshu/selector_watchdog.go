@@ -13,10 +13,10 @@ import (
 type SelectorHealthKind string
 
 const (
-	SelectorHealthUnknown  SelectorHealthKind = "unknown"   // 未检测
-	SelectorHealthHealthy  SelectorHealthKind = "healthy"   // 上次检测正常
+	SelectorHealthUnknown    SelectorHealthKind = "unknown"    // 未检测
+	SelectorHealthHealthy   SelectorHealthKind = "healthy"    // 上次检测正常
 	SelectorHealthSuspicious SelectorHealthKind = "suspicious" // count=0 但非 Required
-	SelectorHealthDegraded SelectorHealthKind = "degraded"  // Required 选择器 count=0
+	SelectorHealthDegraded  SelectorHealthKind = "degraded"   // Required 选择器 count=0
 )
 
 // SelectorHealthEntry 单个选择器的健康记录
@@ -33,11 +33,23 @@ type SelectorHealthEntry struct {
 }
 
 // SelectorWatchdog 选择器健康看门狗
-// 负责检测上游（小红书）DOM 变更导致的选择器失效，发出警告。
-// 不阻断操作——只记录和报告，由调用方决定如何处理。
+//
+// 检测上游（小红书）DOM 变更导致的选择器失效，发出警告。
+// 不阻断操作——只记录和报告，由调用方决定是否降级。
+//
+// 使用方式：
+//  1. 服务启动时 RegisterAll() 注册核心选择器
+//  2. 每次页面导航成功后，按页面上下文调用 ProbeForKind()
+//  3. 通过 /health/selectors 端点查询状态
+//
+// 例：
+//
+//	watchdog := NewSelectorWatchdog()
+//	watchdog.RegisterAll()
+//	watchdog.ProbeForKind(page, XHSReadySearch) // 搜索页探测 search 相关选择器
 type SelectorWatchdog struct {
 	mu      sync.RWMutex
-	entries map[string]*SelectorHealthEntry // name -> entry
+	entries map[string]*SelectorHealthEntry
 }
 
 // NewSelectorWatchdog 创建看门狗
@@ -69,130 +81,100 @@ func (w *SelectorWatchdog) RegisterAll() {
 	w.Register(LikeButtonSpec)
 }
 
-// ProbeOne 用已有的页面 probe 一个选择器的健康状况。
-// 返回 (是否健康, 变更警告)
-func (w *SelectorWatchdog) ProbeOne(page *hrod.Page, name string) (healthy bool, warning string) {
-	w.mu.RLock()
-	entry, ok := w.entries[name]
-	w.mu.RUnlock()
-	if !ok {
-		return false, ""
+// selectorsForKind 获取指定页面上下文中需要探测的选择器名称列表
+func selectorsForKind(kind XHSReadyKind) []string {
+	switch kind {
+	case XHSReadySearch:
+		return []string{"search_input", "search_result"}
+	case XHSReadyDetail:
+		return []string{"feed_detail_ready", "like_button", "comment_box"}
+	case XHSReadyHome:
+		// 首页没有注册的 spec，暂不探测
+		return nil
+	default:
+		return nil
 	}
-
-	results, err := ProbeSelectors(page, []SelectorSpec{{
-		Name:        entry.Name,
-		Selector:    entry.Selector,
-		Required:    entry.Required,
-		VisibleOnly: false,
-	}})
-	if err != nil {
-		return false, fmt.Sprintf("探测选择器 %q 失败: %v", name, err)
-	}
-	if len(results) == 0 {
-		return false, fmt.Sprintf("探测选择器 %q 无返回结果", name)
-	}
-
-	r := results[0]
-	w.mu.Lock()
-	entry.LastChecked = time.Now()
-	entry.LastCount = r.Count
-	entry.LastVisible = r.VisibleCount
-	entry.Samples = r.Samples
-
-	prevStatus := entry.Status
-
-	if r.Count > 0 {
-		entry.Status = SelectorHealthHealthy
-	} else if entry.Required {
-		entry.Status = SelectorHealthDegraded
-	} else {
-		entry.Status = SelectorHealthSuspicious
-	}
-	currStatus := entry.Status
-	w.mu.Unlock()
-
-	// 仅在状态恶化时发出警告
-	var warn string
-	if currStatus == SelectorHealthDegraded && prevStatus != SelectorHealthDegraded {
-		warn = fmt.Sprintf("⚠️ 上游变更: 核心选择器 %q(%s) 命中数为 0, 功能可能不可用",
-			entry.Name, entry.Purpose)
-		logrus.Warn(warn)
-	} else if currStatus == SelectorHealthSuspicious && prevStatus == SelectorHealthHealthy {
-		warn = fmt.Sprintf("⚠️ 选择器 %q(%s) 命中数为 0(非必需), DOM 可能变化",
-			entry.Name, entry.Purpose)
-		logrus.Warn(warn)
-	}
-
-	return r.Count > 0, warn
 }
 
-// ProbeAll 用页面 probe 所有已注册的选择器。
-// 返回 (是否全部健康, 警告列表)
-func (w *SelectorWatchdog) ProbeAll(page *hrod.Page) (allHealthy bool, warnings []string) {
-	w.mu.RLock()
-	names := make([]string, 0, len(w.entries))
-	for name := range w.entries {
-		names = append(names, name)
+// ProbeForKind 按页面上下文探测相关选择器。
+// 只在正确的页面上下文中探测正确的选择器，避免误报（如搜索页探测详情选择器=0）。
+// 使用 spec 中的 VisibleOnly 判断可见性。
+func (w *SelectorWatchdog) ProbeForKind(page *hrod.Page, kind XHSReadyKind) (warnings []string) {
+	names := selectorsForKind(kind)
+	if len(names) == 0 {
+		return nil
 	}
-	w.mu.RUnlock()
 
+	// 收集 spec
+	w.mu.RLock()
 	specs := make([]SelectorSpec, 0, len(names))
 	for _, name := range names {
-		w.mu.RLock()
-		entry := w.entries[name]
-		w.mu.RUnlock()
-		if entry != nil {
+		if entry, ok := w.entries[name]; ok {
 			specs = append(specs, SelectorSpec{
 				Name:        entry.Name,
 				Selector:    entry.Selector,
 				Required:    entry.Required,
-				VisibleOnly: false,
+				VisibleOnly: entry.Name == "search_input" || entry.Name == "comment_box" || entry.Name == "like_button",
 			})
 		}
+	}
+	w.mu.RUnlock()
+
+	if len(specs) == 0 {
+		return nil
 	}
 
 	results, err := ProbeSelectors(page, specs)
 	if err != nil {
-		return false, []string{fmt.Sprintf("批量探测选择器失败: %v", err)}
+		return []string{fmt.Sprintf("探测选择器失败(kind=%s): %v", kind, err)}
 	}
 
-	allHealthy = true
 	for _, r := range results {
 		w.mu.Lock()
 		entry := w.entries[r.Name]
-		if entry != nil {
-			prevStatus := entry.Status
-			entry.LastChecked = time.Now()
-			entry.LastCount = r.Count
-			entry.LastVisible = r.VisibleCount
-			entry.Samples = r.Samples
-
-			if r.Count > 0 {
-				entry.Status = SelectorHealthHealthy
-			} else if entry.Required {
-				entry.Status = SelectorHealthDegraded
-				allHealthy = false
-			} else {
-				entry.Status = SelectorHealthSuspicious
-			}
-
-			// 状态恶化时记录
-			if entry.Status == SelectorHealthDegraded && prevStatus != SelectorHealthDegraded {
-				warn := fmt.Sprintf("⚠️ 上游变更: 核心选择器 %q(%s) 命中数为 0, 功能可能不可用",
-					entry.Name, entry.Purpose)
-				warnings = append(warnings, warn)
-				logrus.Warn(warn)
-			} else if entry.Status == SelectorHealthSuspicious && prevStatus == SelectorHealthHealthy {
-				warn := fmt.Sprintf("⚠️ 选择器 %q(%s) 命中数为 0(非必需), DOM 可能变化",
-					entry.Name, entry.Purpose)
-				warnings = append(warnings, warn)
-				logrus.Warn(warn)
-			}
+		if entry == nil {
+			w.mu.Unlock()
+			continue
 		}
-		w.mu.Unlock()
-	}
 
-	return allHealthy, warnings
+		prevStatus := entry.Status
+		entry.LastChecked = time.Now()
+		entry.LastCount = r.Count
+		entry.LastVisible = r.VisibleCount
+		entry.Samples = r.Samples
+
+		// 用 visible count 判断可见性要求的选择器，否则用原始 count
+		checkCount := r.Count
+		if entry.Name == "search_input" || entry.Name == "comment_box" || entry.Name == "like_button" {
+			checkCount = r.VisibleCount
+		}
+
+		if checkCount > 0 {
+			entry.Status = SelectorHealthHealthy
+		} else if entry.Required {
+			entry.Status = SelectorHealthDegraded
+		} else {
+			entry.Status = SelectorHealthSuspicious
+		}
+		currStatus := entry.Status
+		w.mu.Unlock()
+
+		// 状态恶化时打 warn
+		var warn string
+		if currStatus == SelectorHealthDegraded && prevStatus != SelectorHealthDegraded {
+			warn = fmt.Sprintf("⚠️ 上游变更: 核心选择器 %q(%s) 命中数为 0, 功能可能不可用",
+				entry.Name, entry.Purpose)
+			logrus.Warn(warn)
+		} else if currStatus == SelectorHealthSuspicious && prevStatus == SelectorHealthHealthy {
+			warn = fmt.Sprintf("⚠️ 选择器 %q(%s) 命中数为 0(非必需), DOM 可能变化",
+				entry.Name, entry.Purpose)
+			logrus.Warn(warn)
+		}
+		if warn != "" {
+			warnings = append(warnings, warn)
+		}
+	}
+	return warnings
 }
 
 // Status 返回所有选择器当前健康状态快照
@@ -201,7 +183,11 @@ func (w *SelectorWatchdog) Status() []SelectorHealthEntry {
 	defer w.mu.RUnlock()
 	result := make([]SelectorHealthEntry, 0, len(w.entries))
 	for _, e := range w.entries {
-		result = append(result, *e)
+		entry := *e
+		if entry.Samples != nil {
+			entry.Samples = append([]string{}, entry.Samples...) // 浅拷贝防止外部修改
+		}
+		result = append(result, entry)
 	}
 	return result
 }

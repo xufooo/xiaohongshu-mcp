@@ -22,9 +22,10 @@ const (
 )
 
 type XHSReadyOptions struct {
-	Kind    XHSReadyKind
-	FeedID  string
-	Timeout time.Duration
+	Kind           XHSReadyKind
+	FeedID         string
+	Timeout        time.Duration
+	SelectorWatchdog *SelectorWatchdog // 非必填，有则 probe 相关选择器
 }
 
 type xhsReadyProbe struct {
@@ -80,6 +81,13 @@ func WaitForXHSReady(page *hrod.Page, opts XHSReadyOptions) error {
 				return fmt.Errorf("页面出现风险信号: %s; %s", probe.RiskText, formatXHSReadyProbe(probe))
 			}
 			if isXHSReady(probe, opts.Kind, opts.FeedID, false) {
+				if opts.SelectorWatchdog != nil {
+					if warns := opts.SelectorWatchdog.ProbeForKind(page, opts.Kind); len(warns) > 0 {
+						for _, w := range warns {
+							logrus.Warn(w)
+						}
+					}
+				}
 				return nil
 			}
 		}
