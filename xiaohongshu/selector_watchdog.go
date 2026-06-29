@@ -55,12 +55,14 @@ type SelectorHealthEntry struct {
 type SelectorWatchdog struct {
 	mu      sync.RWMutex
 	entries map[string]*SelectorHealthEntry
+	probing map[string]bool
 }
 
 // NewSelectorWatchdog 创建看门狗
 func NewSelectorWatchdog() *SelectorWatchdog {
 	return &SelectorWatchdog{
 		entries: make(map[string]*SelectorHealthEntry),
+		probing: make(map[string]bool),
 	}
 }
 
@@ -112,39 +114,45 @@ func (w *SelectorWatchdog) ProbeForKind(page *hrod.Page, kind XHSReadyKind) (war
 		return nil
 	}
 
-	// 过滤出需要重新探测的选择器（unknown、非healthy、或距上次probe超过24h）
-	w.mu.RLock()
-	needProbe := make([]string, 0, len(names))
+	// 过滤出需要重新探测的选择器（unknown、非healthy、或距上次probe超过24h）。
+	// 同一选择器已有探测进行中时跳过，避免多个就绪点或后台 goroutine 重复 eval。
+	w.mu.Lock()
+	if w.probing == nil {
+		w.probing = make(map[string]bool)
+	}
+	probeNames := make([]string, 0, len(names))
+	specs := make([]SelectorSpec, 0, len(names))
 	for _, name := range names {
 		if entry, ok := w.entries[name]; ok {
+			if w.probing[name] {
+				continue
+			}
 			if entry.Status != SelectorHealthHealthy || time.Since(entry.LastChecked) >= 24*time.Hour {
-				needProbe = append(needProbe, name)
+				w.probing[name] = true
+				probeNames = append(probeNames, name)
+				specs = append(specs, SelectorSpec{
+					Name:        entry.Name,
+					Selector:    entry.Selector,
+					Required:    entry.Required,
+					VisibleOnly: entry.Name == "search_input" || entry.Name == "comment_box" || entry.Name == "like_button",
+				})
 			}
 		}
 	}
-	w.mu.RUnlock()
-
-	if len(needProbe) == 0 {
-		return nil // 全部已确认 healthy 且未过期，跳过
-	}
-
-	// 从 needProbe 构建 spec 列表
-	w.mu.RLock()
-	specs := make([]SelectorSpec, 0, len(needProbe))
-	for _, name := range needProbe {
-		if entry, ok := w.entries[name]; ok {
-			specs = append(specs, SelectorSpec{
-				Name:        entry.Name,
-				Selector:    entry.Selector,
-				Required:    entry.Required,
-				VisibleOnly: entry.Name == "search_input" || entry.Name == "comment_box" || entry.Name == "like_button",
-			})
+	w.mu.Unlock()
+	defer func() {
+		if len(probeNames) == 0 {
+			return
 		}
-	}
-	w.mu.RUnlock()
+		w.mu.Lock()
+		for _, name := range probeNames {
+			delete(w.probing, name)
+		}
+		w.mu.Unlock()
+	}()
 
 	if len(specs) == 0 {
-		return nil
+		return nil // 全部已确认 healthy 且未过期，跳过
 	}
 
 	results, err := ProbeSelectors(page, specs)
@@ -161,6 +169,8 @@ func (w *SelectorWatchdog) ProbeForKind(page *hrod.Page, kind XHSReadyKind) (war
 		}
 
 		prevStatus := entry.Status
+		name := entry.Name
+		purpose := entry.Purpose
 		entry.LastChecked = time.Now()
 		entry.LastCount = r.Count
 		entry.LastVisible = r.VisibleCount
@@ -186,11 +196,11 @@ func (w *SelectorWatchdog) ProbeForKind(page *hrod.Page, kind XHSReadyKind) (war
 		var warn string
 		if currStatus == SelectorHealthDegraded && prevStatus != SelectorHealthDegraded {
 			warn = fmt.Sprintf("⚠️ 上游变更: 核心选择器 %q(%s) 命中数为 0, 功能可能不可用",
-				entry.Name, entry.Purpose)
+				name, purpose)
 			logrus.Warn(warn)
 		} else if currStatus == SelectorHealthSuspicious && prevStatus == SelectorHealthHealthy {
 			warn = fmt.Sprintf("⚠️ 选择器 %q(%s) 命中数为 0(非必需), DOM 可能变化",
-				entry.Name, entry.Purpose)
+				name, purpose)
 			logrus.Warn(warn)
 		}
 		if warn != "" {
