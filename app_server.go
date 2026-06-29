@@ -23,6 +23,7 @@ type AppServer struct {
 	httpServer         *http.Server
 	rateLimiter        *ratelimit.Limiter
 	writeConfirm       *WriteConfirmationGate
+	selectorWatchdog   *SelectorWatchdog // 选择器健康看门狗，跟踪上游DOM变更
 }
 
 // NewAppServer 创建新的应用服务器实例
@@ -31,7 +32,11 @@ func NewAppServer(xiaohongshuService *XiaohongshuService, opts ...AppServerOptio
 		xiaohongshuService: xiaohongshuService,
 		rateLimiter:        ratelimit.New(configs.DefaultRateLimitConfig()),
 		writeConfirm:       NewWriteConfirmationGate(configs.UseWriteConfirmation()),
+		selectorWatchdog:   NewSelectorWatchdog(),
 	}
+
+	// 注册核心选择器到看门狗
+	appServer.selectorWatchdog.RegisterAll()
 
 	for _, opt := range opts {
 		opt(appServer)

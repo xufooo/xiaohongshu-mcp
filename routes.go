@@ -22,6 +22,7 @@ func setupRoutes(appServer *AppServer) *gin.Engine {
 
 	// 健康检查
 	router.GET("/health", healthHandler)
+	router.GET("/health/selectors", appServer.selectorsHealthHandler)
 
 	// MCP 端点 - 使用官方 SDK 的 Streamable HTTP Handler
 	mcpHandler := mcp.NewStreamableHTTPHandler(
