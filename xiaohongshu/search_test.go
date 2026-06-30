@@ -112,9 +112,10 @@ func TestFilterValidation(t *testing.T) {
 
 func TestSearchResultsReady(t *testing.T) {
 	tests := []struct {
-		name  string
-		probe searchResultsKeywordProbe
-		ready bool
+		name     string
+		probe    searchResultsKeywordProbe
+		baseline searchResultsBaseline
+		ready    bool
 	}{
 		{
 			name: "state keyword and feeds ready",
@@ -126,12 +127,37 @@ func TestSearchResultsReady(t *testing.T) {
 			ready: true,
 		},
 		{
+			name: "state keyword and stale state signature is not ready",
+			probe: searchResultsKeywordProbe{
+				HasStateKeyword: true,
+				KeywordMatched:  true,
+				HasStateFeeds:   true,
+				StateSignature:  "old-state",
+			},
+			baseline: searchResultsBaseline{
+				StateSignature: "old-state",
+			},
+			ready: false,
+		},
+		{
 			name: "url keyword and dom ready without state keyword",
 			probe: searchResultsKeywordProbe{
 				URLKeywordMatched: true,
 				HasVisibleCards:   true,
 			},
 			ready: true,
+		},
+		{
+			name: "url keyword and stale dom signature is not ready",
+			probe: searchResultsKeywordProbe{
+				URLKeywordMatched: true,
+				HasVisibleCards:   true,
+				DOMSignature:      "old-cards",
+			},
+			baseline: searchResultsBaseline{
+				DOMSignature: "old-cards",
+			},
+			ready: false,
 		},
 		{
 			name: "stale state keyword but url and dom ready",
@@ -169,13 +195,32 @@ func TestSearchResultsReady(t *testing.T) {
 			ready: false,
 		},
 		{
-			name: "matched input on search page with cards is ready",
+			name: "matched input on search page with refreshed cards is ready",
 			probe: searchResultsKeywordProbe{
 				InputMatched:    true,
 				OnSearchPage:    true,
 				HasVisibleCards: true,
+				DOMSignature:    "new-cards",
+			},
+			baseline: searchResultsBaseline{
+				DOMSignature: "old-cards",
 			},
 			ready: true,
+		},
+		{
+			name: "matched input on search page with stale cards is not ready",
+			probe: searchResultsKeywordProbe{
+				InputMatched:    true,
+				OnSearchPage:    true,
+				HasVisibleCards: true,
+				DOMSignature:    "old-cards",
+				StateSignature:  "old-state",
+			},
+			baseline: searchResultsBaseline{
+				DOMSignature:   "old-cards",
+				StateSignature: "old-state",
+			},
+			ready: false,
 		},
 		{
 			name: "matched input off search page is not ready",
@@ -189,7 +234,12 @@ func TestSearchResultsReady(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			require.Equal(t, tt.ready, searchResultsReady(tt.probe))
+			require.Equal(t, tt.ready, searchResultsReady(tt.probe, tt.baseline))
 		})
 	}
+}
+
+func TestSearchResultWatchdogUsesFeedCards(t *testing.T) {
+	require.Equal(t, SelectorFeedCard, SearchResultSpec.Selector)
+	require.True(t, SearchResultSpec.VisibleOnly)
 }

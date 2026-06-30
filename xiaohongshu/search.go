@@ -192,7 +192,7 @@ func (s *SearchAction) SearchByURLFallback(ctx context.Context, keyword string, 
 	if err := page.Navigate(searchURL); err != nil {
 		return nil, fmt.Errorf("导航搜索页失败: %w", err)
 	}
-	if err := waitForSearchResults(page, keyword); err != nil {
+	if err := waitForSearchResults(page, keyword, searchResultsBaseline{}); err != nil {
 		return nil, fmt.Errorf("URL兜底等待搜索结果失败: %w", err)
 	}
 
@@ -211,7 +211,7 @@ func (s *SearchAction) searchByUI(page *hrod.Page, keyword string) error {
 		if navErr := page.Navigate(makeSearchURL(keyword)); navErr != nil {
 			return fmt.Errorf("未找到搜索框: %w; URL兜底导航失败: %v", err, navErr)
 		}
-		if waitErr := waitForSearchResults(page, keyword); waitErr != nil {
+		if waitErr := waitForSearchResults(page, keyword, searchResultsBaseline{}); waitErr != nil {
 			return fmt.Errorf("URL兜底等待搜索结果失败: %w", waitErr)
 		}
 		return nil
@@ -241,19 +241,39 @@ func (s *SearchAction) searchByUI(page *hrod.Page, keyword string) error {
 	if err := page.SleepRandom(500*time.Millisecond, 2*time.Second); err != nil {
 		return err
 	}
+	baseline, err := captureSearchResultsBaseline(page)
+	if err != nil {
+		logrus.Warnf("读取搜索前结果签名失败，跳过旧结果防护: %v", err)
+	}
 	if err := page.Actor().Keyboard.Press(rodinput.Enter); err != nil {
 		return fmt.Errorf("提交搜索失败: %w", err)
 	}
 
-	if err := waitForSearchResults(page, keyword); err != nil {
+	if err := waitForSearchResults(page, keyword, baseline); err != nil {
 		return fmt.Errorf("等待搜索结果失败: %w", err)
 	}
 	return nil
 }
 
-func waitForSearchResults(page *hrod.Page, keyword string) error {
+type searchResultsBaseline struct {
+	StateSignature string
+	DOMSignature   string
+}
+
+func captureSearchResultsBaseline(page *hrod.Page) (searchResultsBaseline, error) {
+	probe, err := probeSearchResultsKeyword(page, "")
+	if err != nil {
+		return searchResultsBaseline{}, err
+	}
+	return searchResultsBaseline{
+		StateSignature: probe.StateSignature,
+		DOMSignature:   probe.DOMSignature,
+	}, nil
+}
+
+func waitForSearchResults(page *hrod.Page, keyword string, baseline searchResultsBaseline) error {
 	deadline := time.Now().Add(searchResultsWaitTimeout).UnixMilli()
-	err := page.Wait(rod.Eval(`(deadline, keyword, feedCardSelector, searchInputSelector, markedSearchInputSelector) => {
+	err := page.Wait(rod.Eval(`(deadline, keyword, feedCardSelector, searchInputSelector, markedSearchInputSelector, baselineStateSignature, baselineDOMSignature) => {
 		const unwrap = (value) => {
 			if (value && typeof value === "object") {
 				if ("value" in value) return value.value;
@@ -262,6 +282,10 @@ func waitForSearchResults(page *hrod.Page, keyword string) error {
 			return value;
 		};
 		const normalize = (value) => String(value ?? "").trim();
+		const noteIDFromHref = (href) => {
+			const match = String(href || "").match(/\/(?:explore|discovery\/item)\/([^/?#]+)/);
+			return match ? decodeURIComponent(match[1]) : "";
+		};
 		const visible = (el) => {
 			if (!el || !el.isConnected) return false;
 			const style = window.getComputedStyle(el);
@@ -273,6 +297,38 @@ func waitForSearchResults(page *hrod.Page, keyword string) error {
 				rect.height > 1;
 		};
 		const inputValue = (el) => normalize("value" in el ? el.value : (el.innerText || el.textContent));
+		const stateSignature = (items) => {
+			if (!Array.isArray(items) || items.length === 0) return "";
+			return JSON.stringify(items.slice(0, 6).map((item) => {
+				item = unwrap(item) || {};
+				const noteCard = unwrap(item.noteCard) || {};
+				return [
+					item.id || item.noteId || item.note_id || noteCard.noteId || "",
+					noteCard.displayTitle || item.title || item.desc || "",
+				].join("|");
+			}));
+		};
+		const domSignature = () => {
+			const cards = Array.from(document.querySelectorAll(feedCardSelector)).filter(visible).slice(0, 6);
+			if (cards.length === 0) return "";
+			return JSON.stringify(cards.map((card) => {
+				const link = Array.from(card.querySelectorAll("a[href]"))
+					.find((a) => /\/(?:explore|discovery\/item)\//.test(a.href));
+				const href = link?.href || "";
+				const title = normalize(card.querySelector(".title, .note-title, [class*='title']")?.textContent || link?.textContent || "");
+				return [
+					card.dataset?.noteId || card.dataset?.id || noteIDFromHref(href),
+					title,
+					href,
+				].join("|");
+			}));
+		};
+		const changed = (current, baseline) => baseline === "" || (current !== "" && current !== baseline);
+		const changedAny = (stateSig, domSig) => {
+			if (baselineStateSignature === "" && baselineDOMSignature === "") return true;
+			return (baselineStateSignature !== "" && stateSig !== "" && stateSig !== baselineStateSignature) ||
+				(baselineDOMSignature !== "" && domSig !== "" && domSig !== baselineDOMSignature);
+		};
 		const urlKeyword = () => {
 			try {
 				const params = new URL(location.href).searchParams;
@@ -293,18 +349,20 @@ func waitForSearchResults(page *hrod.Page, keyword string) error {
 		const feeds = search?.feeds;
 		const data = unwrap(feeds);
 		const hasStateFeeds = Array.isArray(data) && data.length > 0;
-		const hasVisibleCards = Array.from(document.querySelectorAll(feedCardSelector)).some(visible);
+		const stateSig = stateSignature(data);
+		const domSig = domSignature();
+		const hasVisibleCards = domSig !== "";
 		const urlKeywordText = urlKeyword();
 		const urlKeywordMatched = urlKeywordText !== "" && urlKeywordText === normalize(keyword);
 		const markedInput = document.querySelector(markedSearchInputSelector);
 		const searchInput = markedInput || Array.from(document.querySelectorAll(searchInputSelector)).find(visible);
 		const inputKeyword = searchInput ? inputValue(searchInput) : "";
 		const inputMatched = inputKeyword !== "" && inputKeyword === normalize(keyword) && /\/search/i.test(location.pathname);
-		return (hasStateKeyword && keywordMatched && hasStateFeeds) ||
-			(urlKeywordMatched && hasVisibleCards) ||
-			(inputMatched && hasVisibleCards) ||
+		return (hasStateKeyword && keywordMatched && hasStateFeeds && changed(stateSig, baselineStateSignature)) ||
+			(urlKeywordMatched && hasVisibleCards && changed(domSig, baselineDOMSignature)) ||
+			(inputMatched && hasVisibleCards && changedAny(stateSig, domSig)) ||
 			Date.now() >= deadline;
-	}`, deadline, keyword, SelectorFeedCard, SelectorSearchInput, SelectorMarkedSearchInput))
+	}`, deadline, keyword, SelectorFeedCard, SelectorSearchInput, SelectorMarkedSearchInput, baseline.StateSignature, baseline.DOMSignature))
 	if err != nil {
 		return err
 	}
@@ -313,7 +371,7 @@ func waitForSearchResults(page *hrod.Page, keyword string) error {
 	if err != nil {
 		return err
 	}
-	if searchResultsReady(probe) {
+	if searchResultsReady(probe, baseline) {
 		return nil
 	}
 	if probe.HasStateKeyword && !probe.KeywordMatched {
@@ -339,6 +397,8 @@ type searchResultsKeywordProbe struct {
 	OnSearchPage     bool   `json:"on_search_page"`
 	HasStateFeeds    bool   `json:"has_state_feeds"`
 	HasVisibleCards  bool   `json:"has_visible_cards"`
+	StateSignature   string `json:"state_signature"`
+	DOMSignature     string `json:"dom_signature"`
 }
 
 func probeSearchResultsKeyword(page *hrod.Page, keyword string) (searchResultsKeywordProbe, error) {
@@ -351,6 +411,10 @@ func probeSearchResultsKeyword(page *hrod.Page, keyword string) (searchResultsKe
 			return value;
 		};
 		const normalize = (value) => String(value ?? "").trim();
+		const noteIDFromHref = (href) => {
+			const match = String(href || "").match(/\/(?:explore|discovery\/item)\/([^/?#]+)/);
+			return match ? decodeURIComponent(match[1]) : "";
+		};
 		const visible = (el) => {
 			if (!el || !el.isConnected) return false;
 			const style = window.getComputedStyle(el);
@@ -362,6 +426,32 @@ func probeSearchResultsKeyword(page *hrod.Page, keyword string) (searchResultsKe
 				rect.height > 1;
 		};
 		const inputValue = (el) => normalize("value" in el ? el.value : (el.innerText || el.textContent));
+		const stateSignature = (items) => {
+			if (!Array.isArray(items) || items.length === 0) return "";
+			return JSON.stringify(items.slice(0, 6).map((item) => {
+				item = unwrap(item) || {};
+				const noteCard = unwrap(item.noteCard) || {};
+				return [
+					item.id || item.noteId || item.note_id || noteCard.noteId || "",
+					noteCard.displayTitle || item.title || item.desc || "",
+				].join("|");
+			}));
+		};
+		const domSignature = () => {
+			const cards = Array.from(document.querySelectorAll(feedCardSelector)).filter(visible).slice(0, 6);
+			if (cards.length === 0) return "";
+			return JSON.stringify(cards.map((card) => {
+				const link = Array.from(card.querySelectorAll("a[href]"))
+					.find((a) => /\/(?:explore|discovery\/item)\//.test(a.href));
+				const href = link?.href || "";
+				const title = normalize(card.querySelector(".title, .note-title, [class*='title']")?.textContent || link?.textContent || "");
+				return [
+					card.dataset?.noteId || card.dataset?.id || noteIDFromHref(href),
+					title,
+					href,
+				].join("|");
+			}));
+		};
 		const urlKeyword = () => {
 			try {
 				const params = new URL(location.href).searchParams;
@@ -384,6 +474,7 @@ func probeSearchResultsKeyword(page *hrod.Page, keyword string) (searchResultsKe
 		const inputKeyword = searchInput ? inputValue(searchInput) : "";
 		const feeds = unwrap(search?.feeds);
 		const hasStateFeeds = Array.isArray(feeds) && feeds.length > 0;
+		const domSig = domSignature();
 		return JSON.stringify({
 			state_keyword: stateKeywordText.slice(0, 120),
 			has_state_keyword: stateKeywordText !== "",
@@ -395,7 +486,9 @@ func probeSearchResultsKeyword(page *hrod.Page, keyword string) (searchResultsKe
 			input_matched: inputKeyword !== "" && inputKeyword === normalize(keyword),
 			on_search_page: /\/search/i.test(location.pathname),
 			has_state_feeds: hasStateFeeds,
-			has_visible_cards: Array.from(document.querySelectorAll(feedCardSelector)).some(visible),
+			has_visible_cards: domSig !== "",
+			state_signature: stateSignature(feeds).slice(0, 500),
+			dom_signature: domSig.slice(0, 500),
 		});
 	}`, keyword, SelectorFeedCard, SelectorSearchInput, SelectorMarkedSearchInput)
 	if err != nil {
@@ -412,11 +505,36 @@ func probeSearchResultsKeyword(page *hrod.Page, keyword string) (searchResultsKe
 	return probe, nil
 }
 
-func searchResultsReady(probe searchResultsKeywordProbe) bool {
-	stateReady := probe.HasStateKeyword && probe.KeywordMatched && probe.HasStateFeeds
-	domReady := probe.URLKeywordMatched && probe.HasVisibleCards
-	inputReady := probe.OnSearchPage && probe.InputMatched && probe.HasVisibleCards
+func searchResultsReady(probe searchResultsKeywordProbe, baseline searchResultsBaseline) bool {
+	stateReady := probe.HasStateKeyword &&
+		probe.KeywordMatched &&
+		probe.HasStateFeeds &&
+		signatureChanged(probe.StateSignature, baseline.StateSignature)
+	domReady := probe.URLKeywordMatched &&
+		probe.HasVisibleCards &&
+		signatureChanged(probe.DOMSignature, baseline.DOMSignature)
+	inputReady := probe.OnSearchPage &&
+		probe.InputMatched &&
+		probe.HasVisibleCards &&
+		searchResultsChanged(probe, baseline)
 	return stateReady || domReady || inputReady
+}
+
+func signatureChanged(current, baseline string) bool {
+	return baseline == "" || (current != "" && current != baseline)
+}
+
+func searchResultsChanged(probe searchResultsKeywordProbe, baseline searchResultsBaseline) bool {
+	if baseline.StateSignature == "" && baseline.DOMSignature == "" {
+		return true
+	}
+	if baseline.StateSignature != "" && probe.StateSignature != "" && probe.StateSignature != baseline.StateSignature {
+		return true
+	}
+	if baseline.DOMSignature != "" && probe.DOMSignature != "" && probe.DOMSignature != baseline.DOMSignature {
+		return true
+	}
+	return false
 }
 
 type searchInputProbe struct {
