@@ -44,11 +44,12 @@ var (
 		MaxMatches:  2,
 	}
 	SearchResultSpec = SelectorSpec{
-		Name:       "search_result",
-		Selector:   SelectorSearchResult,
-		Purpose:    "搜索结果容器",
-		Required:   true,
-		MaxMatches: 2,
+		Name:        "search_result",
+		Selector:    SelectorFeedCard,
+		Purpose:     "搜索结果卡片",
+		Required:    true,
+		VisibleOnly: true,
+		MaxMatches:  2,
 	}
 	FeedDetailReadySpec = SelectorSpec{
 		Name:       "feed_detail_ready",

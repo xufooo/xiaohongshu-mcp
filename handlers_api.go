@@ -453,7 +453,7 @@ func healthHandler(c *gin.Context) {
 func (s *AppServer) selectorsHealthHandler(c *gin.Context) {
 	status := s.selectorWatchdog.Status()
 	summary := s.selectorWatchdog.Summary()
-	
+
 	// 检查是否有退化（degraded）的选择器
 	hasDegraded := false
 	for _, entry := range status {
@@ -462,12 +462,12 @@ func (s *AppServer) selectorsHealthHandler(c *gin.Context) {
 			break
 		}
 	}
-	
+
 	respStatus := "healthy"
 	if hasDegraded {
 		respStatus = "degraded"
 	}
-	
+
 	respondSuccess(c, map[string]any{
 		"status":   respStatus,
 		"summary":  summary,

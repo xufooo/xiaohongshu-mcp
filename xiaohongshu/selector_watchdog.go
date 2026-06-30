@@ -157,7 +157,9 @@ func (w *SelectorWatchdog) ProbeForKind(page *hrod.Page, kind XHSReadyKind) (war
 
 	results, err := ProbeSelectors(page, specs)
 	if err != nil {
-		return []string{fmt.Sprintf("探测选择器失败(kind=%s): %v", kind, err)}
+		warn := fmt.Sprintf("探测选择器失败(kind=%s): %v", kind, err)
+		logrus.Warn(warn)
+		return []string{warn}
 	}
 
 	for _, r := range results {
