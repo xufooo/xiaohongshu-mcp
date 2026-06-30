@@ -1,6 +1,9 @@
 package xiaohongshu
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestInferXHSReadyKindFromSessionStateUsesDetailWhenNoteOpened(t *testing.T) {
 	got := inferXHSReadyKindFromSessionState("https://www.xiaohongshu.com/search_result_ai?keyword=test", true, "feed-1")
@@ -46,5 +49,69 @@ func TestInferXHSReadyKindFromSessionStateRequiresFeedIDForOpenedDetail(t *testi
 	got := inferXHSReadyKindFromSessionState("https://www.xiaohongshu.com/search_result_ai?keyword=test", true, "")
 	if got != XHSReadySearch {
 		t.Fatalf("opened session without feed ID should fall back to URL, got %s", got)
+	}
+}
+
+func TestBrowseSessionSemanticResultsUseStableRefs(t *testing.T) {
+	feed := Feed{
+		ID:        "feed-1",
+		XsecToken: "token-1",
+		NoteCard: NoteCard{
+			DisplayTitle: "标题一",
+			User:         User{Nickname: "作者一"},
+		},
+	}
+	session := &BrowseSession{
+		results: map[string]Feed{
+			"0":      feed,
+			"feed-1": feed,
+		},
+		seenNotes: map[string]bool{"feed-1": true},
+	}
+
+	results := session.semanticResultsLocked()
+	if len(results) != 1 {
+		t.Fatalf("semantic result count = %d, want 1", len(results))
+	}
+	if results[0].Ref != "0" || results[0].FeedID != "feed-1" || results[0].Title != "标题一" || results[0].Author != "作者一" || !results[0].Seen {
+		t.Fatalf("unexpected semantic result: %+v", results[0])
+	}
+}
+
+func TestBrowseSessionSemanticActionsFollowState(t *testing.T) {
+	session := &BrowseSession{
+		sourceURL:     "https://www.xiaohongshu.com/search_result_ai?keyword=test",
+		currentFeedID: "feed-1",
+		opened:        true,
+		read:          true,
+	}
+
+	actions := session.semanticActionsLocked(3)
+	refs := make(map[string]bool, len(actions))
+	for _, action := range actions {
+		refs[action.Ref] = true
+	}
+
+	for _, ref := range []string{"session_state", "like_current", "comment_current", "back_to_results", "close_session"} {
+		if !refs[ref] {
+			t.Fatalf("missing semantic action %q in %+v", ref, actions)
+		}
+	}
+	if refs["open_note:0"] || refs["read_current"] {
+		t.Fatalf("unexpected pre-read/result actions in %+v", actions)
+	}
+}
+
+func TestBrowseSessionTimelineKeepsRecentEntries(t *testing.T) {
+	session := &BrowseSession{}
+	for i := 0; i < maxBrowseSessionTimelineEntries+2; i++ {
+		session.recordTimelineLocked("action", "target", "ok", time.Unix(int64(i), 0), "note")
+	}
+
+	if len(session.timeline) != maxBrowseSessionTimelineEntries {
+		t.Fatalf("timeline count = %d, want %d", len(session.timeline), maxBrowseSessionTimelineEntries)
+	}
+	if session.timeline[0].At.Unix() != 2 {
+		t.Fatalf("oldest retained timeline entry = %d, want 2", session.timeline[0].At.Unix())
 	}
 }
