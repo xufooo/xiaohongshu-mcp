@@ -1037,9 +1037,6 @@ func (s *AppServer) handleSessionOpenNote(ctx context.Context, args SessionOpenN
 	if args.SessionID == "" || args.ResultRef == "" {
 		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "session打开笔记失败: 缺少session_id或result_ref参数"}}, IsError: true}
 	}
-	if args.XsecToken == "" {
-		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "session打开笔记失败: 缺少xsec_token参数"}}, IsError: true}
-	}
 	if blocked := s.rateLimitMCP(ctx, "session打开笔记", ratelimit.ActionOpenNote); blocked != nil {
 		return blocked
 	}

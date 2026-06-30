@@ -35,6 +35,7 @@ type SelectorHealthEntry struct {
 	LastVisible int                `json:"last_visible"`
 	Status      SelectorHealthKind `json:"status"`
 	Samples     []string           `json:"samples,omitempty"`
+	LastWarning string             `json:"last_warning,omitempty"`
 }
 
 // SelectorWatchdog 选择器健康看门狗
@@ -192,24 +193,35 @@ func (w *SelectorWatchdog) ProbeForKind(page *hrod.Page, kind XHSReadyKind) (war
 			entry.Status = SelectorHealthSuspicious
 		}
 		currStatus := entry.Status
+		warn := selectorHealthWarning(currStatus, name, purpose)
+		entry.LastWarning = warn
 		w.mu.Unlock()
 
-		// 状态恶化时打 warn
-		var warn string
+		// 状态恶化时打 warn，Status() 仍保留最近一次 warning 供健康检查读取。
+		shouldWarn := false
 		if currStatus == SelectorHealthDegraded && prevStatus != SelectorHealthDegraded {
-			warn = fmt.Sprintf("⚠️ 上游变更: 核心选择器 %q(%s) 命中数为 0, 功能可能不可用",
-				name, purpose)
+			shouldWarn = true
 			logrus.Warn(warn)
 		} else if currStatus == SelectorHealthSuspicious && prevStatus == SelectorHealthHealthy {
-			warn = fmt.Sprintf("⚠️ 选择器 %q(%s) 命中数为 0(非必需), DOM 可能变化",
-				name, purpose)
+			shouldWarn = true
 			logrus.Warn(warn)
 		}
-		if warn != "" {
+		if shouldWarn && warn != "" {
 			warnings = append(warnings, warn)
 		}
 	}
 	return warnings
+}
+
+func selectorHealthWarning(status SelectorHealthKind, name, purpose string) string {
+	switch status {
+	case SelectorHealthDegraded:
+		return fmt.Sprintf("⚠️ 上游变更: 核心选择器 %q(%s) 命中数为 0, 功能可能不可用", name, purpose)
+	case SelectorHealthSuspicious:
+		return fmt.Sprintf("⚠️ 选择器 %q(%s) 命中数为 0(非必需), DOM 可能变化", name, purpose)
+	default:
+		return ""
+	}
 }
 
 // Status 返回所有选择器当前健康状态快照

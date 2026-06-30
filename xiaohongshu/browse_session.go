@@ -13,7 +13,10 @@ import (
 	hrod "github.com/xpzouying/xiaohongshu-mcp/pkg/humanize/rod"
 )
 
-const DefaultBrowseSessionTimeout = 10 * time.Minute
+const (
+	DefaultBrowseSessionTimeout     = 10 * time.Minute
+	maxBrowseSessionTimelineEntries = 10
+)
 
 type BrowseSessionInfo struct {
 	ID            string         `json:"id"`
@@ -33,10 +36,52 @@ type BrowseSessionPageState struct {
 	Ready            bool                    `json:"ready"`
 	Risk             RiskSignal              `json:"risk"`
 	Counts           BrowseSessionPageCounts `json:"counts"`
+	Current          BrowseSessionCurrent    `json:"current"`
+	Results          []BrowseSessionResult   `json:"results,omitempty"`
+	Actions          []BrowseSessionAction   `json:"actions,omitempty"`
+	Timeline         []BrowseSessionEvent    `json:"timeline,omitempty"`
 	StateFragment    string                  `json:"state_fragment,omitempty"`
 	ResultsCount     int                     `json:"results_count"`
 	SeenCount        int                     `json:"seen_count"`
 	AvailableActions []string                `json:"available_actions,omitempty"`
+}
+
+type BrowseSessionCurrent struct {
+	Kind           XHSReadyKind `json:"kind"`
+	URL            string       `json:"url,omitempty"`
+	FeedID         string       `json:"feed_id,omitempty"`
+	Opened         bool         `json:"opened"`
+	Read           bool         `json:"read"`
+	ScrollY        int          `json:"scroll_y,omitempty"`
+	NextHint       string       `json:"next_hint,omitempty"`
+	ResultsCount   int          `json:"results_count"`
+	AvailableTools []string    `json:"available_tools,omitempty"`
+}
+
+type BrowseSessionResult struct {
+	Ref    string `json:"ref"`
+	FeedID string `json:"feed_id,omitempty"`
+	Title  string `json:"title,omitempty"`
+	Author string `json:"author,omitempty"`
+	Seen   bool   `json:"seen"`
+}
+
+type BrowseSessionAction struct {
+	Ref       string `json:"ref"`
+	Tool      string `json:"tool"`
+	Label     string `json:"label"`
+	ResultRef string `json:"result_ref,omitempty"`
+	FeedID    string `json:"feed_id,omitempty"`
+	Requires  string `json:"requires,omitempty"`
+	Confirm   bool   `json:"confirm,omitempty"`
+}
+
+type BrowseSessionEvent struct {
+	Action string    `json:"action"`
+	Target string    `json:"target,omitempty"`
+	Status string    `json:"status"`
+	At     time.Time `json:"at"`
+	Note   string    `json:"note,omitempty"`
 }
 
 type BrowseSessionPageCounts struct {
@@ -74,6 +119,7 @@ type BrowseSession struct {
 	read             bool
 	closed           bool
 	expiresAt        time.Time
+	timeline         []BrowseSessionEvent
 }
 
 type BrowseSessionManager struct {
@@ -227,6 +273,10 @@ func (s *BrowseSession) PageState(ctx context.Context) (*BrowseSessionPageState,
 	resultsCount := s.uniqueResultCountLocked()
 	seenCount := len(s.seenNotes)
 	availableActions := s.availableActionsLocked(resultsCount)
+	results := s.semanticResultsLocked()
+	actions := s.semanticActionsLocked(resultsCount)
+	current := s.currentStateLocked(kind, resultsCount, availableActions)
+	timeline := s.timelineLocked()
 	s.mu.Unlock()
 
 	return &BrowseSessionPageState{
@@ -246,6 +296,10 @@ func (s *BrowseSession) PageState(ctx context.Context) (*BrowseSessionPageState,
 			LikeButtonCount:    probe.LikeButtonCount,
 			PublishSignalCount: probe.PublishSignalCount,
 		},
+		Current:          current,
+		Results:          results,
+		Actions:          actions,
+		Timeline:         timeline,
 		StateFragment:    probe.StateFragment,
 		ResultsCount:     resultsCount,
 		SeenCount:        seenCount,
@@ -279,6 +333,7 @@ func (s *BrowseSession) Search(ctx context.Context, keyword string, filters ...F
 			s.results[feed.ID] = feed
 		}
 	}
+	s.recordTimelineLocked("search", keyword, "ok", time.Now(), fmt.Sprintf("results=%d", len(feeds)))
 	s.mu.Unlock()
 	s.probeWatchdogSelectorsForKind(ctx, XHSReadySearch, "")
 	return feeds, nil
@@ -317,6 +372,7 @@ func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, xsecToken strin
 	s.opened = true
 	s.read = false
 	s.seenNotes[feed.ID] = true
+	s.recordTimelineLocked("open_note", feed.ID, "ok", time.Now(), "opened from search result "+resultRef)
 	s.mu.Unlock()
 	s.probeWatchdogSelectorsForKind(ctx, XHSReadyDetail, feed.ID)
 	return nil
@@ -343,6 +399,7 @@ func (s *BrowseSession) Read(ctx context.Context, minDuration time.Duration) err
 	s.mu.Lock()
 	s.read = true
 	s.seenNotes[feedID] = true
+	s.recordTimelineLocked("read", feedID, "ok", time.Now(), fmt.Sprintf("duration=%s", minDuration))
 	s.mu.Unlock()
 	s.probeWatchdogSelectorsForKind(ctx, XHSReadyDetail, feedID)
 	return nil
@@ -368,6 +425,13 @@ func (s *BrowseSession) Like(ctx context.Context, unlike bool) error {
 			return err
 		}
 	}
+	s.mu.Lock()
+	if unlike {
+		s.recordTimelineLocked("unlike", feedID, "ok", time.Now(), "")
+	} else {
+		s.recordTimelineLocked("like", feedID, "ok", time.Now(), "")
+	}
+	s.mu.Unlock()
 	s.probeWatchdogSelectorsForKind(ctx, XHSReadyDetail, feedID)
 	return nil
 }
@@ -389,6 +453,9 @@ func (s *BrowseSession) Comment(ctx context.Context, content string) error {
 	if err := action.PostComment(ctx, feedID, xsecToken, content); err != nil {
 		return err
 	}
+	s.mu.Lock()
+	s.recordTimelineLocked("comment", feedID, "ok", time.Now(), compactTimelineNote(content))
+	s.mu.Unlock()
 	s.probeWatchdogSelectorsForKind(ctx, XHSReadyDetail, feedID)
 	return nil
 }
@@ -417,6 +484,7 @@ func (s *BrowseSession) Back(ctx context.Context) error {
 	s.currentXsecToken = ""
 	s.opened = false
 	s.read = false
+	s.recordTimelineLocked("back", sourceURL, "ok", time.Now(), "returned to source page")
 	s.mu.Unlock()
 	return nil
 }
@@ -656,6 +724,33 @@ func (s *BrowseSession) infoLocked() BrowseSessionInfo {
 	}
 }
 
+func (s *BrowseSession) currentStateLocked(kind XHSReadyKind, resultsCount int, availableActions []string) BrowseSessionCurrent {
+	return BrowseSessionCurrent{
+		Kind:           kind,
+		URL:            s.currentURL,
+		FeedID:         s.currentFeedID,
+		Opened:         s.opened,
+		Read:           s.read,
+		ScrollY:        s.scrollY,
+		NextHint:       s.nextHintLocked(resultsCount),
+		ResultsCount:   resultsCount,
+		AvailableTools: append([]string(nil), availableActions...),
+	}
+}
+
+func (s *BrowseSession) nextHintLocked(resultsCount int) string {
+	switch {
+	case s.opened && !s.read:
+		return "先调用 session_read 阅读当前笔记，再进行点赞或评论"
+	case s.opened && s.read:
+		return "可调用 session_like、session_comment，或 session_back 返回结果页"
+	case resultsCount > 0:
+		return "可用 session_open_note 打开 results 中的 result_ref"
+	default:
+		return "可调用 session_search 搜索笔记"
+	}
+}
+
 func (s *BrowseSession) uniqueResultCountLocked() int {
 	ids := make(map[string]bool, len(s.results))
 	for _, feed := range s.results {
@@ -667,6 +762,29 @@ func (s *BrowseSession) uniqueResultCountLocked() int {
 		return len(ids)
 	}
 	return len(s.results)
+}
+
+func (s *BrowseSession) semanticResultsLocked() []BrowseSessionResult {
+	results := make([]BrowseSessionResult, 0, s.uniqueResultCountLocked())
+	for index := 0; ; index++ {
+		ref := strconv.Itoa(index)
+		feed, ok := s.results[ref]
+		if !ok {
+			break
+		}
+		author := feed.NoteCard.User.Nickname
+		if author == "" {
+			author = feed.NoteCard.User.NickName
+		}
+		results = append(results, BrowseSessionResult{
+			Ref:    ref,
+			FeedID: feed.ID,
+			Title:  feed.NoteCard.DisplayTitle,
+			Author: author,
+			Seen:   feed.ID != "" && s.seenNotes[feed.ID],
+		})
+	}
+	return results
 }
 
 func (s *BrowseSession) availableActionsLocked(resultsCount int) []string {
@@ -684,6 +802,94 @@ func (s *BrowseSession) availableActionsLocked(resultsCount int) []string {
 		actions = append(actions, "session_back")
 	}
 	return actions
+}
+
+func (s *BrowseSession) semanticActionsLocked(resultsCount int) []BrowseSessionAction {
+	actions := []BrowseSessionAction{
+		{Ref: "session_state", Tool: "session_state", Label: "查看当前 session 状态"},
+		{Ref: "session_search", Tool: "session_search", Label: "搜索笔记"},
+	}
+	if resultsCount > 0 && !s.opened {
+		for index := 0; index < resultsCount; index++ {
+			ref := strconv.Itoa(index)
+			feed, ok := s.results[ref]
+			if !ok {
+				continue
+			}
+			actions = append(actions, BrowseSessionAction{
+				Ref:       "open_note:" + ref,
+				Tool:      "session_open_note",
+				Label:     "打开搜索结果 " + ref,
+				ResultRef: ref,
+				FeedID:    feed.ID,
+			})
+		}
+	}
+	if s.opened && !s.read {
+		actions = append(actions, BrowseSessionAction{
+			Ref:      "read_current",
+			Tool:     "session_read",
+			Label:    "阅读当前笔记",
+			FeedID:   s.currentFeedID,
+			Requires: "opened",
+		})
+	}
+	if s.opened && s.read {
+		actions = append(actions,
+			BrowseSessionAction{
+				Ref:      "like_current",
+				Tool:     "session_like",
+				Label:    "点赞当前笔记",
+				FeedID:   s.currentFeedID,
+				Requires: "read",
+				Confirm:  true,
+			},
+			BrowseSessionAction{
+				Ref:      "comment_current",
+				Tool:     "session_comment",
+				Label:    "评论当前笔记",
+				FeedID:   s.currentFeedID,
+				Requires: "read",
+				Confirm:  true,
+			},
+		)
+	}
+	if s.opened && s.sourceURL != "" {
+		actions = append(actions, BrowseSessionAction{
+			Ref:    "back_to_results",
+			Tool:   "session_back",
+			Label:  "返回搜索结果页",
+			FeedID: s.currentFeedID,
+		})
+	}
+	actions = append(actions, BrowseSessionAction{Ref: "close_session", Tool: "close_browse_session", Label: "关闭当前 session"})
+	return actions
+}
+
+func (s *BrowseSession) recordTimelineLocked(action, target, status string, at time.Time, note string) {
+	s.timeline = append(s.timeline, BrowseSessionEvent{
+		Action: action,
+		Target: target,
+		Status: status,
+		At:     at,
+		Note:   note,
+	})
+	if len(s.timeline) > maxBrowseSessionTimelineEntries {
+		s.timeline = append([]BrowseSessionEvent(nil), s.timeline[len(s.timeline)-maxBrowseSessionTimelineEntries:]...)
+	}
+}
+
+func (s *BrowseSession) timelineLocked() []BrowseSessionEvent {
+	return append([]BrowseSessionEvent(nil), s.timeline...)
+}
+
+func compactTimelineNote(value string) string {
+	value = strings.TrimSpace(value)
+	runes := []rune(value)
+	if len(runes) <= 40 {
+		return value
+	}
+	return string(runes[:40]) + "..."
 }
 
 func inferXHSReadyKindFromSessionURL(rawURL string) XHSReadyKind {
