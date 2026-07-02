@@ -103,6 +103,124 @@ func compactWriteSummary(value string) string {
 	return value[:117] + "..."
 }
 
+type mcpSessionNextStep struct {
+	Tool   string `json:"tool"`
+	Reason string `json:"reason"`
+	Hint   string `json:"hint,omitempty"`
+}
+
+type mcpSessionErrorPayload struct {
+	Error    string             `json:"error"`
+	NextStep mcpSessionNextStep `json:"next_step"`
+}
+
+func sessionMCPErrorResult(message string, next mcpSessionNextStep) *MCPToolResult {
+	text := message
+	if next.Tool != "" {
+		payload := mcpSessionErrorPayload{
+			Error:    message,
+			NextStep: next,
+		}
+		if data, err := json.MarshalIndent(payload, "", "  "); err == nil {
+			text = message + "\n" + string(data)
+		} else {
+			text = fmt.Sprintf("%s\nnext_step: %s", message, next.Tool)
+		}
+	}
+	return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: text}}, IsError: true}
+}
+
+func sessionMCPErrorFromErr(prefix string, err error, fallback mcpSessionNextStep) *MCPToolResult {
+	message := prefix
+	errText := ""
+	if err != nil {
+		errText = err.Error()
+		message += ": " + errText
+	}
+	return sessionMCPErrorResult(message, sessionNextStepForError(errText, fallback))
+}
+
+func sessionNextStepForError(errText string, fallback mcpSessionNextStep) mcpSessionNextStep {
+	switch {
+	case strings.Contains(errText, "不存在或已过期"),
+		strings.Contains(errText, "已过期"),
+		strings.Contains(errText, "已关闭"):
+		return sessionNextStepCreateSession()
+	case strings.Contains(errText, "未找到搜索结果引用"),
+		strings.Contains(errText, "搜索结果参数无效"):
+		return sessionNextStepSearch()
+	case strings.Contains(errText, "必须先打开笔记"),
+		strings.Contains(errText, "只能对已打开的笔记执行"):
+		return sessionNextStepOpenNote()
+	case strings.Contains(errText, "只能对已阅读的笔记执行"):
+		return sessionNextStepRead()
+	case strings.Contains(errText, "读取当前页面 URL"),
+		strings.Contains(errText, "页面不存在"),
+		strings.Contains(errText, "ready"),
+		strings.Contains(errText, "selector"),
+		strings.Contains(errText, "选择器"):
+		return sessionNextStepState()
+	default:
+		return fallback
+	}
+}
+
+func sessionNextStepCreateSession() mcpSessionNextStep {
+	return mcpSessionNextStep{
+		Tool:   "create_browse_session",
+		Reason: "当前 session 不可用或缺少 session_id",
+		Hint:   "先创建新的浏览会话，拿到 session_id 后继续使用 session_* 工具",
+	}
+}
+
+func sessionNextStepState() mcpSessionNextStep {
+	return mcpSessionNextStep{
+		Tool:   "session_state",
+		Reason: "需要重新确认当前 session 页面和可执行动作",
+		Hint:   "读取 current、results、actions 和 timeline 后再决定下一步",
+	}
+}
+
+func sessionNextStepSearch() mcpSessionNextStep {
+	return mcpSessionNextStep{
+		Tool:   "session_search",
+		Reason: "搜索结果引用不可用或已失效",
+		Hint:   "重新搜索后使用 results 中最新的 result_ref 打开笔记",
+	}
+}
+
+func sessionNextStepSearchInput() mcpSessionNextStep {
+	return mcpSessionNextStep{
+		Tool:   "session_search",
+		Reason: "缺少搜索关键词",
+		Hint:   "提供 session_id 和 keyword 后重新搜索",
+	}
+}
+
+func sessionNextStepOpenNote() mcpSessionNextStep {
+	return mcpSessionNextStep{
+		Tool:   "session_open_note",
+		Reason: "当前 session 还没有打开可操作的笔记",
+		Hint:   "先从 session_state.results 中选择 result_ref 打开笔记",
+	}
+}
+
+func sessionNextStepRead() mcpSessionNextStep {
+	return mcpSessionNextStep{
+		Tool:   "session_read",
+		Reason: "写操作前需要先完成当前笔记阅读",
+		Hint:   "先调用 session_read，再重新发起点赞或评论",
+	}
+}
+
+func sessionNextStepCommentInput() mcpSessionNextStep {
+	return mcpSessionNextStep{
+		Tool:   "session_comment",
+		Reason: "缺少评论内容",
+		Hint:   "提供 content 后重新调用 session_comment",
+	}
+}
+
 // handleCheckLoginStatus 处理检查登录状态
 func (s *AppServer) handleCheckLoginStatus(ctx context.Context) *MCPToolResult {
 	logrus.Info("MCP: 检查登录状态")
@@ -990,28 +1108,31 @@ func (s *AppServer) handleCreateBrowseSession(ctx context.Context) *MCPToolResul
 
 func (s *AppServer) handleCloseBrowseSession(ctx context.Context, args BrowseSessionIDArgs) *MCPToolResult {
 	if args.SessionID == "" {
-		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "关闭浏览会话失败: 缺少session_id参数"}}, IsError: true}
+		return sessionMCPErrorResult("关闭浏览会话失败: 缺少session_id参数", sessionNextStepCreateSession())
 	}
 	if err := s.xiaohongshuService.CloseBrowseSession(args.SessionID); err != nil {
-		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "关闭浏览会话失败: " + err.Error()}}, IsError: true}
+		return sessionMCPErrorFromErr("关闭浏览会话失败", err, sessionNextStepCreateSession())
 	}
 	return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "浏览会话已关闭: " + args.SessionID}}}
 }
 
 func (s *AppServer) handleSessionState(ctx context.Context, args BrowseSessionIDArgs) *MCPToolResult {
 	if args.SessionID == "" {
-		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "session状态获取失败: 缺少session_id参数"}}, IsError: true}
+		return sessionMCPErrorResult("session状态获取失败: 缺少session_id参数", sessionNextStepCreateSession())
 	}
 	state, err := s.xiaohongshuService.SessionState(ctx, args.SessionID)
 	if err != nil {
-		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "session状态获取失败: " + err.Error()}}, IsError: true}
+		return sessionMCPErrorFromErr("session状态获取失败", err, sessionNextStepCreateSession())
 	}
 	return jsonMCPResult(state, "session状态获取成功")
 }
 
 func (s *AppServer) handleSessionSearch(ctx context.Context, args SessionSearchArgs) *MCPToolResult {
-	if args.SessionID == "" || args.Keyword == "" {
-		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "session搜索失败: 缺少session_id或keyword参数"}}, IsError: true}
+	if args.SessionID == "" {
+		return sessionMCPErrorResult("session搜索失败: 缺少session_id参数", sessionNextStepCreateSession())
+	}
+	if args.Keyword == "" {
+		return sessionMCPErrorResult("session搜索失败: 缺少keyword参数", sessionNextStepSearchInput())
 	}
 	if blocked := s.rateLimitMCP(ctx, "session搜索", ratelimit.ActionSearch); blocked != nil {
 		return blocked
@@ -1025,7 +1146,7 @@ func (s *AppServer) handleSessionSearch(ctx context.Context, args SessionSearchA
 	}
 	result, err := s.xiaohongshuService.SessionSearch(ctx, args.SessionID, args.Keyword, filter)
 	if err != nil {
-		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "session搜索失败: " + err.Error()}}, IsError: true}
+		return sessionMCPErrorFromErr("session搜索失败", err, sessionNextStepState())
 	}
 	return jsonMCPResult(result, "session搜索成功")
 }
@@ -1034,22 +1155,25 @@ func (s *AppServer) handleSessionOpenNote(ctx context.Context, args SessionOpenN
 	args.SessionID = strings.TrimSpace(args.SessionID)
 	args.ResultRef = strings.TrimSpace(args.ResultRef)
 	args.XsecToken = strings.TrimSpace(args.XsecToken)
-	if args.SessionID == "" || args.ResultRef == "" {
-		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "session打开笔记失败: 缺少session_id或result_ref参数"}}, IsError: true}
+	if args.SessionID == "" {
+		return sessionMCPErrorResult("session打开笔记失败: 缺少session_id参数", sessionNextStepCreateSession())
+	}
+	if args.ResultRef == "" {
+		return sessionMCPErrorResult("session打开笔记失败: 缺少result_ref参数", sessionNextStepState())
 	}
 	if blocked := s.rateLimitMCP(ctx, "session打开笔记", ratelimit.ActionOpenNote); blocked != nil {
 		return blocked
 	}
 	info, err := s.xiaohongshuService.SessionOpenNote(ctx, args.SessionID, args.ResultRef, args.XsecToken)
 	if err != nil {
-		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "session打开笔记失败: " + err.Error()}}, IsError: true}
+		return sessionMCPErrorFromErr("session打开笔记失败", err, sessionNextStepState())
 	}
 	return jsonMCPResult(info, "session打开笔记成功")
 }
 
 func (s *AppServer) handleSessionRead(ctx context.Context, args SessionReadArgs) *MCPToolResult {
 	if args.SessionID == "" {
-		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "session阅读失败: 缺少session_id参数"}}, IsError: true}
+		return sessionMCPErrorResult("session阅读失败: 缺少session_id参数", sessionNextStepCreateSession())
 	}
 	if blocked := s.rateLimitMCP(ctx, "session阅读", ratelimit.ActionOpenNote); blocked != nil {
 		return blocked
@@ -1057,14 +1181,14 @@ func (s *AppServer) handleSessionRead(ctx context.Context, args SessionReadArgs)
 	minDuration := time.Duration(args.MinSeconds) * time.Second
 	info, err := s.xiaohongshuService.SessionRead(ctx, args.SessionID, minDuration)
 	if err != nil {
-		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "session阅读失败: " + err.Error()}}, IsError: true}
+		return sessionMCPErrorFromErr("session阅读失败", err, sessionNextStepOpenNote())
 	}
 	return jsonMCPResult(info, "session阅读成功")
 }
 
 func (s *AppServer) handleSessionLike(ctx context.Context, args SessionLikeArgs) *MCPToolResult {
 	if args.SessionID == "" {
-		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "session点赞失败: 缺少session_id参数"}}, IsError: true}
+		return sessionMCPErrorResult("session点赞失败: 缺少session_id参数", sessionNextStepCreateSession())
 	}
 	action := "session点赞"
 	if args.Unlike {
@@ -1080,14 +1204,17 @@ func (s *AppServer) handleSessionLike(ctx context.Context, args SessionLikeArgs)
 	}
 	result, err := s.xiaohongshuService.SessionLike(ctx, args.SessionID, args.Unlike)
 	if err != nil {
-		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "session点赞失败: " + err.Error()}}, IsError: true}
+		return sessionMCPErrorFromErr("session点赞失败", err, sessionNextStepState())
 	}
 	return jsonMCPResult(result, "session点赞成功")
 }
 
 func (s *AppServer) handleSessionComment(ctx context.Context, args SessionCommentArgs) *MCPToolResult {
-	if args.SessionID == "" || args.Content == "" {
-		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "session评论失败: 缺少session_id或content参数"}}, IsError: true}
+	if args.SessionID == "" {
+		return sessionMCPErrorResult("session评论失败: 缺少session_id参数", sessionNextStepCreateSession())
+	}
+	if args.Content == "" {
+		return sessionMCPErrorResult("session评论失败: 缺少content参数", sessionNextStepCommentInput())
 	}
 	key := writeConfirmationKey("session_comment", args.SessionID, args.Content)
 	summary := fmt.Sprintf("session评论: session_id=%s content=%q", args.SessionID, compactWriteSummary(args.Content))
@@ -1099,18 +1226,18 @@ func (s *AppServer) handleSessionComment(ctx context.Context, args SessionCommen
 	}
 	result, err := s.xiaohongshuService.SessionComment(ctx, args.SessionID, args.Content)
 	if err != nil {
-		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "session评论失败: " + err.Error()}}, IsError: true}
+		return sessionMCPErrorFromErr("session评论失败", err, sessionNextStepState())
 	}
 	return jsonMCPResult(result, "session评论成功")
 }
 
 func (s *AppServer) handleSessionBack(ctx context.Context, args BrowseSessionIDArgs) *MCPToolResult {
 	if args.SessionID == "" {
-		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "session返回失败: 缺少session_id参数"}}, IsError: true}
+		return sessionMCPErrorResult("session返回失败: 缺少session_id参数", sessionNextStepCreateSession())
 	}
 	info, err := s.xiaohongshuService.SessionBack(ctx, args.SessionID)
 	if err != nil {
-		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "session返回失败: " + err.Error()}}, IsError: true}
+		return sessionMCPErrorFromErr("session返回失败", err, sessionNextStepState())
 	}
 	return jsonMCPResult(info, "session返回成功")
 }
