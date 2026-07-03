@@ -1,6 +1,7 @@
 package xiaohongshu
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -99,6 +100,76 @@ func TestBrowseSessionSemanticActionsFollowState(t *testing.T) {
 	}
 	if refs["open_note:0"] || refs["read_current"] {
 		t.Fatalf("unexpected pre-read/result actions in %+v", actions)
+	}
+}
+
+func TestBrowseSessionRecommendedActionChoosesFirstUnseenResult(t *testing.T) {
+	seenFeed := Feed{
+		ID: "feed-seen",
+		NoteCard: NoteCard{
+			DisplayTitle: "已看过",
+		},
+	}
+	unseenFeed := Feed{
+		ID: "feed-unseen",
+		NoteCard: NoteCard{
+			DisplayTitle: "没看过",
+		},
+	}
+	session := &BrowseSession{
+		results: map[string]Feed{
+			"0": seenFeed,
+			"1": unseenFeed,
+		},
+		seenNotes: map[string]bool{"feed-seen": true},
+	}
+
+	action := session.recommendedActionLocked(true, session.semanticResultsLocked())
+	if action == nil {
+		t.Fatal("recommended action is nil")
+	}
+	if action.Tool != "session_open_note" || action.ResultRef != "1" || action.FeedID != "feed-unseen" {
+		t.Fatalf("recommended action = %+v, want open_note result_ref=1 feed-unseen", action)
+	}
+}
+
+func TestBrowseSessionRecommendedActionAvoidsWriteAfterRead(t *testing.T) {
+	session := &BrowseSession{
+		sourceURL:     "https://www.xiaohongshu.com/search_result_ai?keyword=test",
+		currentFeedID: "feed-1",
+		opened:        true,
+		read:          true,
+	}
+
+	action := session.recommendedActionLocked(true, nil)
+	if action == nil {
+		t.Fatal("recommended action is nil")
+	}
+	if action.Tool != "session_back" || action.Ref != "back_to_results" {
+		t.Fatalf("recommended action = %+v, want session_back", action)
+	}
+}
+
+func TestBrowseSessionSummaryIncludesRecommendedAction(t *testing.T) {
+	current := BrowseSessionCurrent{
+		NextHint: "可用 session_open_note 打开 results 中的 result_ref",
+	}
+	action := &BrowseSessionAction{
+		Tool:      "session_open_note",
+		ResultRef: "1",
+		FeedID:    "feed-1",
+	}
+
+	summary := browseSessionSummary(XHSReadySearch, true, 3, 1, current, action)
+	wantParts := []string{
+		"当前: search ready=true results=3 seen=1",
+		"下一步: 可用 session_open_note 打开 results 中的 result_ref",
+		"推荐: session_open_note result_ref=1 feed_id=feed-1",
+	}
+	for _, part := range wantParts {
+		if !strings.Contains(summary, part) {
+			t.Fatalf("summary %q missing %q", summary, part)
+		}
 	}
 }
 

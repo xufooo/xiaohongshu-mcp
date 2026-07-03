@@ -31,19 +31,21 @@ type BrowseSessionInfo struct {
 }
 
 type BrowseSessionPageState struct {
-	Session          BrowseSessionInfo       `json:"session"`
-	Kind             XHSReadyKind            `json:"kind"`
-	Ready            bool                    `json:"ready"`
-	Risk             RiskSignal              `json:"risk"`
-	Counts           BrowseSessionPageCounts `json:"counts"`
-	Current          BrowseSessionCurrent    `json:"current"`
-	Results          []BrowseSessionResult   `json:"results,omitempty"`
-	Actions          []BrowseSessionAction   `json:"actions,omitempty"`
-	Timeline         []BrowseSessionEvent    `json:"timeline,omitempty"`
-	StateFragment    string                  `json:"state_fragment,omitempty"`
-	ResultsCount     int                     `json:"results_count"`
-	SeenCount        int                     `json:"seen_count"`
-	AvailableActions []string                `json:"available_actions,omitempty"`
+	Session           BrowseSessionInfo        `json:"session"`
+	Summary           string                   `json:"summary,omitempty"`
+	Kind              XHSReadyKind             `json:"kind"`
+	Ready             bool                     `json:"ready"`
+	Risk              RiskSignal               `json:"risk"`
+	Counts            BrowseSessionPageCounts  `json:"counts"`
+	Current           BrowseSessionCurrent     `json:"current"`
+	Results           []BrowseSessionResult    `json:"results,omitempty"`
+	Actions           []BrowseSessionAction    `json:"actions,omitempty"`
+	RecommendedAction *BrowseSessionAction     `json:"recommended_action,omitempty"`
+	Timeline          []BrowseSessionEvent     `json:"timeline,omitempty"`
+	StateFragment     string                   `json:"state_fragment,omitempty"`
+	ResultsCount      int                      `json:"results_count"`
+	SeenCount         int                      `json:"seen_count"`
+	AvailableActions  []string                 `json:"available_actions,omitempty"`
 }
 
 type BrowseSessionCurrent struct {
@@ -275,12 +277,15 @@ func (s *BrowseSession) PageState(ctx context.Context) (*BrowseSessionPageState,
 	availableActions := s.availableActionsLocked(resultsCount)
 	results := s.semanticResultsLocked()
 	actions := s.semanticActionsLocked(resultsCount)
+	recommendedAction := s.recommendedActionLocked(ready, results)
 	current := s.currentStateLocked(kind, resultsCount, availableActions)
+	summary := browseSessionSummary(kind, ready, resultsCount, seenCount, current, recommendedAction)
 	timeline := s.timelineLocked()
 	s.mu.Unlock()
 
 	return &BrowseSessionPageState{
 		Session: info,
+		Summary: summary,
 		Kind:    kind,
 		Ready:   ready,
 		Risk:    risk,
@@ -296,14 +301,15 @@ func (s *BrowseSession) PageState(ctx context.Context) (*BrowseSessionPageState,
 			LikeButtonCount:    probe.LikeButtonCount,
 			PublishSignalCount: probe.PublishSignalCount,
 		},
-		Current:          current,
-		Results:          results,
-		Actions:          actions,
-		Timeline:         timeline,
-		StateFragment:    probe.StateFragment,
-		ResultsCount:     resultsCount,
-		SeenCount:        seenCount,
-		AvailableActions: availableActions,
+		Current:           current,
+		Results:           results,
+		Actions:           actions,
+		RecommendedAction: recommendedAction,
+		Timeline:          timeline,
+		StateFragment:     probe.StateFragment,
+		ResultsCount:      resultsCount,
+		SeenCount:         seenCount,
+		AvailableActions:  availableActions,
 	}, nil
 }
 
@@ -864,6 +870,92 @@ func (s *BrowseSession) semanticActionsLocked(resultsCount int) []BrowseSessionA
 	}
 	actions = append(actions, BrowseSessionAction{Ref: "close_session", Tool: "close_browse_session", Label: "关闭当前 session"})
 	return actions
+}
+
+func (s *BrowseSession) recommendedActionLocked(ready bool, results []BrowseSessionResult) *BrowseSessionAction {
+	if !ready {
+		return &BrowseSessionAction{
+			Ref:   "refresh_state",
+			Tool:  "session_state",
+			Label: "重新读取 session 状态",
+		}
+	}
+	if s.opened && !s.read {
+		return &BrowseSessionAction{
+			Ref:      "read_current",
+			Tool:     "session_read",
+			Label:    "阅读当前笔记",
+			FeedID:   s.currentFeedID,
+			Requires: "opened",
+		}
+	}
+	if s.opened && s.read && s.sourceURL != "" {
+		return &BrowseSessionAction{
+			Ref:    "back_to_results",
+			Tool:   "session_back",
+			Label:  "返回搜索结果页",
+			FeedID: s.currentFeedID,
+		}
+	}
+	if !s.opened {
+		for _, result := range results {
+			if result.Seen {
+				continue
+			}
+			return &BrowseSessionAction{
+				Ref:       "open_note:" + result.Ref,
+				Tool:      "session_open_note",
+				Label:     "打开未看过的搜索结果 " + result.Ref,
+				ResultRef: result.Ref,
+				FeedID:    result.FeedID,
+			}
+		}
+		if len(results) > 0 {
+			result := results[0]
+			return &BrowseSessionAction{
+				Ref:       "open_note:" + result.Ref,
+				Tool:      "session_open_note",
+				Label:     "打开搜索结果 " + result.Ref,
+				ResultRef: result.Ref,
+				FeedID:    result.FeedID,
+			}
+		}
+	}
+	return &BrowseSessionAction{
+		Ref:   "session_search",
+		Tool:  "session_search",
+		Label: "搜索笔记",
+	}
+}
+
+func browseSessionSummary(kind XHSReadyKind, ready bool, resultsCount, seenCount int, current BrowseSessionCurrent, recommendedAction *BrowseSessionAction) string {
+	lines := []string{
+		fmt.Sprintf("当前: %s ready=%t results=%d seen=%d", kind, ready, resultsCount, seenCount),
+	}
+	if current.FeedID != "" {
+		lines[0] += fmt.Sprintf(" feed_id=%s opened=%t read=%t", current.FeedID, current.Opened, current.Read)
+	}
+	if current.NextHint != "" {
+		lines = append(lines, "下一步: "+current.NextHint)
+	}
+	if recommendedAction != nil {
+		lines = append(lines, "推荐: "+formatBrowseSessionRecommendedAction(*recommendedAction))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func formatBrowseSessionRecommendedAction(action BrowseSessionAction) string {
+	parts := []string{action.Tool}
+	if action.ResultRef != "" {
+		parts = append(parts, "result_ref="+action.ResultRef)
+	}
+	if action.FeedID != "" {
+		parts = append(parts, "feed_id="+action.FeedID)
+	}
+	if action.ResultRef == "" && action.FeedID == "" && action.Ref != "" {
+		parts = append(parts, "ref="+action.Ref)
+	}
+	return strings.Join(parts, " ")
 }
 
 func (s *BrowseSession) recordTimelineLocked(action, target, status string, at time.Time, note string) {
