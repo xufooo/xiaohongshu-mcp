@@ -1,9 +1,12 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/xpzouying/xiaohongshu-mcp/xiaohongshu"
 )
 
 func TestSessionMCPErrorResultIncludesNextStepPayload(t *testing.T) {
@@ -36,5 +39,40 @@ func TestSessionMCPErrorFromErrSuggestsSearchForMissingResultRef(t *testing.T) {
 	text := result.Content[0].Text
 	if !strings.Contains(text, `"tool": "session_search"`) {
 		t.Fatalf("expected session_search next step, got %q", text)
+	}
+}
+
+func TestSessionStateResultKeepsJSONTextWithSummaryField(t *testing.T) {
+	state := &xiaohongshu.BrowseSessionPageState{
+		Summary:      "当前: search ready=true results=3 seen=1",
+		Kind:         xiaohongshu.XHSReadySearch,
+		Ready:        true,
+		ResultsCount: 3,
+		SeenCount:    1,
+		Current: xiaohongshu.BrowseSessionCurrent{
+			NextHint: "可用 session_open_note 打开 results 中的 result_ref",
+		},
+		RecommendedAction: &xiaohongshu.BrowseSessionAction{
+			Ref:       "open_note:2",
+			Tool:      "session_open_note",
+			ResultRef: "2",
+			FeedID:    "feed-2",
+		},
+	}
+
+	result := jsonMCPResult(state, "session状态获取成功")
+	text := result.Content[0].Text
+	if !strings.HasPrefix(strings.TrimSpace(text), "{") {
+		t.Fatalf("session state result should remain JSON text, got %q", text)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(text), &decoded); err != nil {
+		t.Fatalf("session state result should be valid JSON: %v\n%s", err, text)
+	}
+	if decoded["summary"] != "当前: search ready=true results=3 seen=1" {
+		t.Fatalf("summary field missing from JSON: %+v", decoded)
+	}
+	if _, ok := decoded["recommended_action"]; !ok {
+		t.Fatalf("recommended_action missing from JSON: %+v", decoded)
 	}
 }
