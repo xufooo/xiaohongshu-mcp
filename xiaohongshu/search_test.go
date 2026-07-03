@@ -2,6 +2,7 @@ package xiaohongshu
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 
@@ -180,6 +181,13 @@ func TestSearchResultsReady(t *testing.T) {
 			ready: false,
 		},
 		{
+			name: "explore feed cards without keyword evidence are not ready",
+			probe: searchResultsKeywordProbe{
+				HasVisibleCards: true,
+			},
+			ready: false,
+		},
+		{
 			name: "state feeds without any keyword match are not enough",
 			probe: searchResultsKeywordProbe{
 				HasStateFeeds: true,
@@ -237,6 +245,113 @@ func TestSearchResultsReady(t *testing.T) {
 			require.Equal(t, tt.ready, searchResultsReady(tt.probe, tt.baseline))
 		})
 	}
+}
+
+func TestWaitForSearchResultsWithURLFallbackSucceeds(t *testing.T) {
+	initialErr := errors.New("ui results not ready")
+	baseline := searchResultsBaseline{
+		StateSignature: "old-state",
+		DOMSignature:   "old-dom",
+	}
+	var waits []searchResultsBaseline
+	var navURL string
+
+	err := waitForSearchResultsWithURLFallback("Kimi", baseline, searchResultsFallbackHooks{
+		wait: func(got searchResultsBaseline) error {
+			waits = append(waits, got)
+			if len(waits) == 1 {
+				return initialErr
+			}
+			return nil
+		},
+		pageErr: func() error { return nil },
+		navigate: func(url string) error {
+			navURL = url
+			return nil
+		},
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, []searchResultsBaseline{baseline, {}}, waits)
+	require.Equal(t, makeSearchURL("Kimi"), navURL)
+}
+
+func TestWaitForSearchResultsWithURLFallbackSkipsFallbackWhenInitialWaitSucceeds(t *testing.T) {
+	var navigateCalled bool
+
+	err := waitForSearchResultsWithURLFallback("Kimi", searchResultsBaseline{}, searchResultsFallbackHooks{
+		wait: func(searchResultsBaseline) error { return nil },
+		pageErr: func() error {
+			t.Fatal("pageErr should not be called when initial wait succeeds")
+			return nil
+		},
+		navigate: func(string) error {
+			navigateCalled = true
+			return nil
+		},
+	})
+
+	require.NoError(t, err)
+	require.False(t, navigateCalled)
+}
+
+func TestWaitForSearchResultsWithURLFallbackSkipsFallbackWhenContextDone(t *testing.T) {
+	initialErr := errors.New("ui results not ready")
+	var waitCount int
+	var navigateCalled bool
+
+	err := waitForSearchResultsWithURLFallback("Kimi", searchResultsBaseline{}, searchResultsFallbackHooks{
+		wait: func(searchResultsBaseline) error {
+			waitCount++
+			return initialErr
+		},
+		pageErr: func() error { return context.Canceled },
+		navigate: func(string) error {
+			navigateCalled = true
+			return nil
+		},
+	})
+
+	require.ErrorIs(t, err, initialErr)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, 1, waitCount)
+	require.False(t, navigateCalled)
+}
+
+func TestWaitForSearchResultsWithURLFallbackReportsNavigationFailure(t *testing.T) {
+	initialErr := errors.New("ui results not ready")
+	navErr := errors.New("navigation failed")
+
+	err := waitForSearchResultsWithURLFallback("Kimi", searchResultsBaseline{}, searchResultsFallbackHooks{
+		wait:     func(searchResultsBaseline) error { return initialErr },
+		pageErr:  func() error { return nil },
+		navigate: func(string) error { return navErr },
+	})
+
+	require.ErrorIs(t, err, initialErr)
+	require.Contains(t, err.Error(), navErr.Error())
+}
+
+func TestWaitForSearchResultsWithURLFallbackReportsFallbackWaitFailure(t *testing.T) {
+	initialErr := errors.New("ui results not ready")
+	fallbackErr := errors.New("fallback results not ready")
+	var waitCount int
+
+	err := waitForSearchResultsWithURLFallback("Kimi", searchResultsBaseline{}, searchResultsFallbackHooks{
+		wait: func(searchResultsBaseline) error {
+			waitCount++
+			if waitCount == 1 {
+				return initialErr
+			}
+			return fallbackErr
+		},
+		pageErr:  func() error { return nil },
+		navigate: func(string) error { return nil },
+	})
+
+	require.ErrorIs(t, err, initialErr)
+	require.Contains(t, err.Error(), fallbackErr.Error())
+	require.Equal(t, 2, waitCount)
 }
 
 func TestSearchResultWatchdogUsesFeedCards(t *testing.T) {
