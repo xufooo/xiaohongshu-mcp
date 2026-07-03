@@ -249,8 +249,38 @@ func (s *SearchAction) searchByUI(page *hrod.Page, keyword string) error {
 		return fmt.Errorf("提交搜索失败: %w", err)
 	}
 
-	if err := waitForSearchResults(page, keyword, baseline); err != nil {
-		return fmt.Errorf("等待搜索结果失败: %w", err)
+	if err := waitForSearchResultsWithURLFallback(keyword, baseline, searchResultsFallbackHooks{
+		wait: func(baseline searchResultsBaseline) error {
+			return waitForSearchResults(page, keyword, baseline)
+		},
+		pageErr:  page.Err,
+		navigate: page.Navigate,
+	}); err != nil {
+		return err
+	}
+	return nil
+}
+
+type searchResultsFallbackHooks struct {
+	wait     func(searchResultsBaseline) error
+	pageErr  func() error
+	navigate func(string) error
+}
+
+func waitForSearchResultsWithURLFallback(keyword string, baseline searchResultsBaseline, hooks searchResultsFallbackHooks) error {
+	err := hooks.wait(baseline)
+	if err == nil {
+		return nil
+	}
+	if ctxErr := hooks.pageErr(); ctxErr != nil {
+		return fmt.Errorf("等待搜索结果失败: %w (context: %w)", err, ctxErr)
+	}
+	logrus.Warnf("UI搜索结果未就绪，使用搜索URL兜底: %v", err)
+	if navErr := hooks.navigate(makeSearchURL(keyword)); navErr != nil {
+		return fmt.Errorf("等待搜索结果失败: %w; URL兜底导航失败: %v", err, navErr)
+	}
+	if waitErr := hooks.wait(searchResultsBaseline{}); waitErr != nil {
+		return fmt.Errorf("等待搜索结果失败: %w; URL兜底等待搜索结果失败: %v", err, waitErr)
 	}
 	return nil
 }
