@@ -192,7 +192,7 @@ func normalizeCommentLoadConfig(config CommentLoadConfig) CommentLoadConfig {
 func sessionCommentPageLoadConfig(progress commentProgress, progressErr error) CommentLoadConfig {
 	config := DefaultCommentLoadConfig()
 	if progressErr == nil {
-		config.MaxCommentItems = progress.Count + 10
+		config.MaxCommentItems = progress.Count + rand.Intn(6) + 5
 		if progress.Total > 0 && config.MaxCommentItems > progress.Total {
 			config.MaxCommentItems = progress.Total
 		}
