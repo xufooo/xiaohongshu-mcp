@@ -189,6 +189,19 @@ func normalizeCommentLoadConfig(config CommentLoadConfig) CommentLoadConfig {
 	return config
 }
 
+func sessionCommentPageLoadConfig(progress commentProgress, progressErr error) CommentLoadConfig {
+	config := DefaultCommentLoadConfig()
+	if progressErr == nil {
+		config.MaxCommentItems = progress.Count + 10
+		if progress.Total > 0 && config.MaxCommentItems > progress.Total {
+			config.MaxCommentItems = progress.Total
+		}
+	} else {
+		config.MaxCommentItems = 10
+	}
+	return config
+}
+
 // ========== 评论加载器 ==========
 
 type commentLoader struct {

@@ -1,6 +1,7 @@
 package xiaohongshu
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -78,6 +79,30 @@ func TestNormalizeCommentLoadConfigUsesFastForMissingOrInvalidSpeed(t *testing.T
 		if cfg.ScrollSpeed != speed {
 			t.Fatalf("valid speed %q changed to %q", speed, cfg.ScrollSpeed)
 		}
+	}
+}
+
+func TestSessionCommentPageLoadConfigTargetsNextTenComments(t *testing.T) {
+	cfg := sessionCommentPageLoadConfig(commentProgress{Count: 12}, nil)
+
+	if cfg.MaxCommentItems != 22 {
+		t.Fatalf("expected next page target 22, got %d", cfg.MaxCommentItems)
+	}
+}
+
+func TestSessionCommentPageLoadConfigCapsTargetAtTotal(t *testing.T) {
+	cfg := sessionCommentPageLoadConfig(commentProgress{Count: 18, Total: 20}, nil)
+
+	if cfg.MaxCommentItems != 20 {
+		t.Fatalf("expected target capped at total 20, got %d", cfg.MaxCommentItems)
+	}
+}
+
+func TestSessionCommentPageLoadConfigFallsBackToFirstPageOnProgressError(t *testing.T) {
+	cfg := sessionCommentPageLoadConfig(commentProgress{}, errors.New("progress unavailable"))
+
+	if cfg.MaxCommentItems != 10 {
+		t.Fatalf("expected first page target 10, got %d", cfg.MaxCommentItems)
 	}
 }
 
