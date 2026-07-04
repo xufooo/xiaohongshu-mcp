@@ -565,7 +565,23 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 		}),
 	)
 
-	// 工具 19: session 点赞
+	// 工具 19: session 详情
+	mcp.AddTool(server,
+		&mcp.Tool{
+			Name:        "session_detail",
+			Description: "在浏览会话当前已打开的笔记页面上直接从可见DOM提取笔记正文、作者、互动状态和评论列表",
+			Annotations: &mcp.ToolAnnotations{
+				Title:        "Session Detail",
+				ReadOnlyHint: true,
+			},
+		},
+		withPanicRecovery("session_detail", func(ctx context.Context, req *mcp.CallToolRequest, args BrowseSessionIDArgs) (*mcp.CallToolResult, any, error) {
+			result := appServer.handleSessionDetail(ctx, args)
+			return convertToMCPResult(result), nil, nil
+		}),
+	)
+
+	// 工具 20: session 点赞
 	mcp.AddTool(server,
 		&mcp.Tool{
 			Name:        "session_like",
@@ -581,7 +597,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 		}),
 	)
 
-	// 工具 20: session 评论
+	// 工具 21: session 评论
 	mcp.AddTool(server,
 		&mcp.Tool{
 			Name:        "session_comment",
@@ -597,7 +613,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 		}),
 	)
 
-	// 工具 21: session 返回
+	// 工具 22: session 返回
 	mcp.AddTool(server,
 		&mcp.Tool{
 			Name:        "session_back",
@@ -613,7 +629,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 		}),
 	)
 
-	// 工具 22: 关闭浏览会话
+	// 工具 23: 关闭浏览会话
 	mcp.AddTool(server,
 		&mcp.Tool{
 			Name:        "close_browse_session",
@@ -629,7 +645,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 		}),
 	)
 
-	logrus.Infof("Registered %d MCP tools", 22)
+	logrus.Infof("Registered %d MCP tools", 23)
 }
 
 // convertToMCPResult 将自定义的 MCPToolResult 转换为官方 SDK 的格式

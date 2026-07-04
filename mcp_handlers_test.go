@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/xpzouying/xiaohongshu-mcp/xiaohongshu"
 )
@@ -74,5 +76,42 @@ func TestSessionStateResultKeepsJSONTextWithSummaryField(t *testing.T) {
 	}
 	if _, ok := decoded["recommended_action"]; !ok {
 		t.Fatalf("recommended_action missing from JSON: %+v", decoded)
+	}
+}
+
+func TestSessionDetailMissingSessionIDSuggestsCreateSession(t *testing.T) {
+	result := (&AppServer{}).handleSessionDetail(context.Background(), BrowseSessionIDArgs{})
+	if result == nil || !result.IsError {
+		t.Fatalf("session detail without session_id should return an error result: %+v", result)
+	}
+	text := result.Content[0].Text
+	if !strings.Contains(text, "session详情获取失败: 缺少session_id参数") {
+		t.Fatalf("error text missing session_detail message: %q", text)
+	}
+	if !strings.Contains(text, `"tool": "create_browse_session"`) {
+		t.Fatalf("expected create_browse_session next step, got %q", text)
+	}
+}
+
+func TestSessionOpenNoteAllowsMissingXsecTokenThroughValidation(t *testing.T) {
+	app := &AppServer{
+		xiaohongshuService: &XiaohongshuService{
+			browseSessions: xiaohongshu.NewBrowseSessionManager(time.Minute),
+		},
+	}
+
+	result := app.handleSessionOpenNote(context.Background(), SessionOpenNoteArgs{
+		SessionID: "missing-session",
+		ResultRef: "0",
+	})
+	if result == nil || !result.IsError {
+		t.Fatalf("session open note without xsec_token should reach session layer and return an error result: %+v", result)
+	}
+	text := result.Content[0].Text
+	if strings.Contains(text, "缺少xsec_token参数") {
+		t.Fatalf("xsec_token should not be required by parameter validation, got %q", text)
+	}
+	if !strings.Contains(text, `"next_step"`) {
+		t.Fatalf("expected next_step payload when xsec_token is omitted, got %q", text)
 	}
 }

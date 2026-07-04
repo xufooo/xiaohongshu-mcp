@@ -277,10 +277,10 @@ func waitForSearchResultsWithURLFallback(keyword string, baseline searchResultsB
 	}
 	logrus.Warnf("UI搜索结果未就绪，使用搜索URL兜底: %v", err)
 	if navErr := hooks.navigate(makeSearchURL(keyword)); navErr != nil {
-		return fmt.Errorf("等待搜索结果失败: %w; URL兜底导航失败: %v", err, navErr)
+		return fmt.Errorf("等待搜索结果失败: %w; URL兜底导航失败: %w", err, navErr)
 	}
 	if waitErr := hooks.wait(searchResultsBaseline{}); waitErr != nil {
-		return fmt.Errorf("等待搜索结果失败: %w; URL兜底等待搜索结果失败: %v", err, waitErr)
+		return fmt.Errorf("等待搜索结果失败: %w; URL兜底等待搜索结果失败: %w", err, waitErr)
 	}
 	return nil
 }

@@ -411,6 +411,34 @@ func (s *BrowseSession) Read(ctx context.Context, minDuration time.Duration) err
 	return nil
 }
 
+func (s *BrowseSession) Detail(ctx context.Context) (*FeedDetailResponse, error) {
+	if err := s.beginLockedOperation(); err != nil {
+		return nil, err
+	}
+	defer s.finishOperation()
+
+	feedID, err := s.currentOpenedFeedID()
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	page := s.page
+	s.mu.Unlock()
+	if page == nil {
+		return nil, fmt.Errorf("browse session 页面不存在: %s", s.id)
+	}
+	detail, err := ExtractFeedDetailFromDOM(page.Context(ctx), feedID)
+	if err != nil {
+		return nil, err
+	}
+
+	s.mu.Lock()
+	s.recordTimelineLocked("detail", feedID, "ok", time.Now(), "")
+	s.mu.Unlock()
+	s.probeWatchdogSelectorsForKind(ctx, XHSReadyDetail, feedID)
+	return detail, nil
+}
+
 func (s *BrowseSession) Like(ctx context.Context, unlike bool) error {
 	if err := s.beginLockedOperation(); err != nil {
 		return err
@@ -602,7 +630,7 @@ func (s *BrowseSession) currentOpenedFeedID() (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.opened || s.currentFeedID == "" {
-		return "", fmt.Errorf("互动或阅读前必须先打开笔记")
+		return "", fmt.Errorf("必须先打开笔记")
 	}
 	return s.currentFeedID, nil
 }
@@ -747,9 +775,9 @@ func (s *BrowseSession) currentStateLocked(kind XHSReadyKind, resultsCount int, 
 func (s *BrowseSession) nextHintLocked(resultsCount int) string {
 	switch {
 	case s.opened && !s.read:
-		return "先调用 session_read 阅读当前笔记，再进行点赞或评论"
+		return "可调用 session_detail 提取当前笔记；点赞或评论前先调用 session_read"
 	case s.opened && s.read:
-		return "可调用 session_like、session_comment，或 session_back 返回结果页"
+		return "可调用 session_detail、session_like、session_comment，或 session_back 返回结果页"
 	case resultsCount > 0:
 		return "可用 session_open_note 打开 results 中的 result_ref"
 	default:
@@ -798,6 +826,9 @@ func (s *BrowseSession) availableActionsLocked(resultsCount int) []string {
 	if resultsCount > 0 && !s.opened {
 		actions = append(actions, "session_open_note")
 	}
+	if s.opened {
+		actions = append(actions, "session_detail")
+	}
 	if s.opened && !s.read {
 		actions = append(actions, "session_read")
 	}
@@ -832,16 +863,32 @@ func (s *BrowseSession) semanticActionsLocked(resultsCount int) []BrowseSessionA
 		}
 	}
 	if s.opened && !s.read {
-		actions = append(actions, BrowseSessionAction{
-			Ref:      "read_current",
-			Tool:     "session_read",
-			Label:    "阅读当前笔记",
-			FeedID:   s.currentFeedID,
-			Requires: "opened",
-		})
+		actions = append(actions,
+			BrowseSessionAction{
+				Ref:      "detail_current",
+				Tool:     "session_detail",
+				Label:    "提取当前笔记详情",
+				FeedID:   s.currentFeedID,
+				Requires: "opened",
+			},
+			BrowseSessionAction{
+				Ref:      "read_current",
+				Tool:     "session_read",
+				Label:    "阅读当前笔记",
+				FeedID:   s.currentFeedID,
+				Requires: "opened",
+			},
+		)
 	}
 	if s.opened && s.read {
 		actions = append(actions,
+			BrowseSessionAction{
+				Ref:      "detail_current",
+				Tool:     "session_detail",
+				Label:    "提取当前笔记详情",
+				FeedID:   s.currentFeedID,
+				Requires: "opened",
+			},
 			BrowseSessionAction{
 				Ref:      "like_current",
 				Tool:     "session_like",

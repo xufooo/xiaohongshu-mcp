@@ -1186,6 +1186,18 @@ func (s *AppServer) handleSessionRead(ctx context.Context, args SessionReadArgs)
 	return jsonMCPResult(info, "session阅读成功")
 }
 
+func (s *AppServer) handleSessionDetail(ctx context.Context, args BrowseSessionIDArgs) *MCPToolResult {
+	args.SessionID = strings.TrimSpace(args.SessionID)
+	if args.SessionID == "" {
+		return sessionMCPErrorResult("session详情获取失败: 缺少session_id参数", sessionNextStepCreateSession())
+	}
+	detail, err := s.xiaohongshuService.SessionDetail(ctx, args.SessionID)
+	if err != nil {
+		return sessionMCPErrorFromErr("session详情获取失败", err, sessionNextStepOpenNote())
+	}
+	return jsonMCPResult(detail, "session详情获取成功")
+}
+
 func (s *AppServer) handleSessionLike(ctx context.Context, args SessionLikeArgs) *MCPToolResult {
 	if args.SessionID == "" {
 		return sessionMCPErrorResult("session点赞失败: 缺少session_id参数", sessionNextStepCreateSession())

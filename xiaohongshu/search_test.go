@@ -329,7 +329,7 @@ func TestWaitForSearchResultsWithURLFallbackReportsNavigationFailure(t *testing.
 	})
 
 	require.ErrorIs(t, err, initialErr)
-	require.Contains(t, err.Error(), navErr.Error())
+	require.ErrorIs(t, err, navErr)
 }
 
 func TestWaitForSearchResultsWithURLFallbackReportsFallbackWaitFailure(t *testing.T) {
@@ -350,7 +350,7 @@ func TestWaitForSearchResultsWithURLFallbackReportsFallbackWaitFailure(t *testin
 	})
 
 	require.ErrorIs(t, err, initialErr)
-	require.Contains(t, err.Error(), fallbackErr.Error())
+	require.ErrorIs(t, err, fallbackErr)
 	require.Equal(t, 2, waitCount)
 }
 
