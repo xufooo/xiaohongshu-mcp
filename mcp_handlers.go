@@ -1191,13 +1191,7 @@ func (s *AppServer) handleSessionDetail(ctx context.Context, args SessionDetailA
 	if args.SessionID == "" {
 		return sessionMCPErrorResult("session详情获取失败: 缺少session_id参数", sessionNextStepCreateSession())
 	}
-	pages := 0
-	if args.Pages != "" {
-		if n, err := strconv.Atoi(args.Pages); err == nil {
-			pages = n
-		}
-	}
-	detail, err := s.xiaohongshuService.SessionDetail(ctx, args.SessionID, args.LoadComments, pages)
+	detail, err := s.xiaohongshuService.SessionDetail(ctx, args.SessionID, args.LoadComments, args.Pages)
 	if err != nil {
 		return sessionMCPErrorFromErr("session详情获取失败", err, sessionNextStepOpenNote())
 	}

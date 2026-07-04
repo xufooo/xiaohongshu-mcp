@@ -434,42 +434,14 @@ func (s *BrowseSession) Detail(ctx context.Context, loadComments bool, pages int
 	if loadComments {
 		commentPage := page.Context(ctx)
 		action := NewFeedDetailActionWithState(commentPage, s.state)
-		if pages == 0 {
-			// 默认：翻1页（向后兼容）
-			progress, err := getCommentProgress(commentPage)
-			config := sessionCommentPageLoadConfig(progress, err)
-			if err := action.loadAllCommentsWithConfig(commentPage, config); err != nil {
-				logrus.Warnf("session detail load comments failed: %v", err)
-			}
-		} else if pages > 0 {
-			// 翻指定页数
-			for range pages {
-				progress, err := getCommentProgress(commentPage)
-				config := sessionCommentPageLoadConfig(progress, err)
-				if err := action.loadAllCommentsWithConfig(commentPage, config); err != nil {
-					logrus.Warnf("session detail load comments failed: %v", err)
-					break
-				}
-			}
-		} else {
-			// pages < 0：翻到尽头
-			for {
-				progress, err := getCommentProgress(commentPage)
-				config := sessionCommentPageLoadConfig(progress, err)
-				if err := action.loadAllCommentsWithConfig(commentPage, config); err != nil {
-					logrus.Warnf("session detail load comments failed: %v", err)
-					break
-				}
-				progress, err = getCommentProgress(commentPage)
-				if err != nil {
-					logrus.Warnf("session detail read comment progress failed: %v", err)
-					break
-				}
-				if shouldStopSessionCommentPaging(progress) {
-					break
-				}
-			}
-		}
+		loadSessionCommentsForDetail(pages, sessionCommentLoadOps{
+			getProgress: func() (commentProgress, error) {
+				return getCommentProgress(commentPage)
+			},
+			load: func(config CommentLoadConfig) error {
+				return action.loadAllCommentsWithConfig(commentPage, config)
+			},
+		})
 	}
 	detail, err := ExtractFeedDetailFromDOM(page.Context(ctx), feedID)
 	if err != nil {
@@ -481,6 +453,58 @@ func (s *BrowseSession) Detail(ctx context.Context, loadComments bool, pages int
 	s.mu.Unlock()
 	s.probeWatchdogSelectorsForKind(ctx, XHSReadyDetail, feedID)
 	return detail, nil
+}
+
+type sessionCommentLoadOps struct {
+	getProgress func() (commentProgress, error)
+	load        func(CommentLoadConfig) error
+}
+
+func loadSessionCommentsForDetail(pages int, ops sessionCommentLoadOps) {
+	if pages == 0 {
+		// 默认：翻1页（向后兼容）
+		progress, err := ops.getProgress()
+		config := sessionCommentPageLoadConfig(progress, err)
+		if err := ops.load(config); err != nil {
+			logrus.Warnf("session detail load comments failed: %v", err)
+		}
+	} else if pages > 0 {
+		// 翻指定页数
+		for range pages {
+			progress, err := ops.getProgress()
+			config := sessionCommentPageLoadConfig(progress, err)
+			if err := ops.load(config); err != nil {
+				logrus.Warnf("session detail load comments failed: %v", err)
+				break
+			}
+			progress, err = ops.getProgress()
+			if err != nil {
+				logrus.Warnf("session detail read comment progress failed: %v", err)
+				continue
+			}
+			if shouldStopSessionCommentPaging(progress) {
+				break
+			}
+		}
+	} else {
+		// pages < 0：翻到尽头
+		for {
+			progress, err := ops.getProgress()
+			config := sessionCommentPageLoadConfig(progress, err)
+			if err := ops.load(config); err != nil {
+				logrus.Warnf("session detail load comments failed: %v", err)
+				break
+			}
+			progress, err = ops.getProgress()
+			if err != nil {
+				logrus.Warnf("session detail read comment progress failed: %v", err)
+				break
+			}
+			if shouldStopSessionCommentPaging(progress) {
+				break
+			}
+		}
+	}
 }
 
 func shouldStopSessionCommentPaging(progress commentProgress) bool {
