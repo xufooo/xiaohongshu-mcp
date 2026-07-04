@@ -412,7 +412,7 @@ func (s *BrowseSession) Read(ctx context.Context, minDuration time.Duration) err
 	return nil
 }
 
-func (s *BrowseSession) Detail(ctx context.Context, loadComments bool, pages *int) (*FeedDetailResponse, error) {
+func (s *BrowseSession) Detail(ctx context.Context, loadComments bool, pages int) (*FeedDetailResponse, error) {
 	if err := s.beginLockedOperation(); err != nil {
 		return nil, err
 	}
@@ -434,14 +434,16 @@ func (s *BrowseSession) Detail(ctx context.Context, loadComments bool, pages *in
 	if loadComments {
 		commentPage := page.Context(ctx)
 		action := NewFeedDetailActionWithState(commentPage, s.state)
-		if pages == nil {
+		if pages == 0 {
+			// 默认：翻1页（向后兼容）
 			progress, err := getCommentProgress(commentPage)
 			config := sessionCommentPageLoadConfig(progress, err)
 			if err := action.loadAllCommentsWithConfig(commentPage, config); err != nil {
 				logrus.Warnf("session detail load comments failed: %v", err)
 			}
-		} else if *pages > 0 {
-			for range *pages {
+		} else if pages > 0 {
+			// 翻指定页数
+			for range pages {
 				progress, err := getCommentProgress(commentPage)
 				config := sessionCommentPageLoadConfig(progress, err)
 				if err := action.loadAllCommentsWithConfig(commentPage, config); err != nil {
@@ -450,6 +452,7 @@ func (s *BrowseSession) Detail(ctx context.Context, loadComments bool, pages *in
 				}
 			}
 		} else {
+			// pages < 0：翻到尽头
 			for {
 				progress, err := getCommentProgress(commentPage)
 				config := sessionCommentPageLoadConfig(progress, err)
