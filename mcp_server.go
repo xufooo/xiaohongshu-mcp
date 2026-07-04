@@ -110,6 +110,11 @@ type BrowseSessionIDArgs struct {
 	SessionID string `json:"session_id" jsonschema:"浏览会话ID，由create_browse_session返回"`
 }
 
+type SessionDetailArgs struct {
+	SessionID     string `json:"session_id" jsonschema:"浏览会话ID，由create_browse_session返回"`
+	LoadComments bool   `json:"load_comments,omitempty" jsonschema:"是否先加载更多评论再提取，默认false只提取当前可见DOM"`
+}
+
 type SessionSearchArgs struct {
 	SessionID string       `json:"session_id" jsonschema:"浏览会话ID，由create_browse_session返回"`
 	Keyword   string       `json:"keyword" jsonschema:"搜索关键词"`
@@ -575,7 +580,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 				ReadOnlyHint: true,
 			},
 		},
-		withPanicRecovery("session_detail", func(ctx context.Context, req *mcp.CallToolRequest, args BrowseSessionIDArgs) (*mcp.CallToolResult, any, error) {
+		withPanicRecovery("session_detail", func(ctx context.Context, req *mcp.CallToolRequest, args SessionDetailArgs) (*mcp.CallToolResult, any, error) {
 			result := appServer.handleSessionDetail(ctx, args)
 			return convertToMCPResult(result), nil, nil
 		}),

@@ -131,14 +131,14 @@ func TestBrowseSessionDetailRequiresOpenedNote(t *testing.T) {
 	}
 	t.Cleanup(session.Close)
 
-	_, err := session.Detail(context.Background())
+	_, err := session.Detail(context.Background(), false)
 	if err == nil || !strings.Contains(err.Error(), "必须先打开笔记") {
 		t.Fatalf("Detail() error = %v, want 必须先打开笔记", err)
 	}
 
 	errCh := make(chan error, 1)
 	go func() {
-		_, err := session.Detail(context.Background())
+		_, err := session.Detail(context.Background(), false)
 		errCh <- err
 	}()
 	select {
@@ -161,14 +161,14 @@ func TestBrowseSessionDetailRequiresPage(t *testing.T) {
 	}
 	t.Cleanup(session.Close)
 
-	_, err := session.Detail(context.Background())
+	_, err := session.Detail(context.Background(), false)
 	if err == nil || !strings.Contains(err.Error(), "browse session 页面不存在") {
 		t.Fatalf("Detail() error = %v, want browse session 页面不存在", err)
 	}
 
 	errCh := make(chan error, 1)
 	go func() {
-		_, err := session.Detail(context.Background())
+		_, err := session.Detail(context.Background(), false)
 		errCh <- err
 	}()
 	select {
