@@ -5,7 +5,6 @@ import (
 	crand "crypto/rand"
 	"encoding/hex"
 	"fmt"
-	"math/rand"
 	"strconv"
 	"strings"
 	"sync"
@@ -432,15 +431,9 @@ func (s *BrowseSession) Detail(ctx context.Context, loadComments bool) (*FeedDet
 	WaitForXHSReady(page.Context(ctx), XHSReadyOptions{Kind: XHSReadyDetail, FeedID: feedID})
 	if loadComments {
 		commentPage := page.Context(ctx)
-		config := DefaultCommentLoadConfig()
-		progress, err := getCommentProgress(commentPage)
-		count := 0
-		if err == nil {
-			count = progress.Count
-		}
-		config.MaxCommentItems = count + rand.Intn(6) + 5
-		action := NewFeedDetailActionWithState(commentPage, s.state)
-		if err := action.loadAllCommentsWithConfig(commentPage, config); err != nil {
+		if err := scrollToCommentsArea(commentPage); err != nil {
+			logrus.Warnf("session detail load comments failed: %v", err)
+		} else if err := scrollCommentPageForMore(commentPage, DefaultCommentLoadConfig().ScrollSpeed); err != nil {
 			logrus.Warnf("session detail load comments failed: %v", err)
 		}
 	}

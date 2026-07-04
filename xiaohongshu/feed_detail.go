@@ -310,9 +310,18 @@ func (cl *commentLoader) logComplete(progress commentProgress) {
 // scrolling path. Comment loading is a read-only operation; the old path added
 // 300--800ms of artificial delay plus several browser round trips per attempt.
 func (cl *commentLoader) scrollForMoreComments() error {
-	multiplier := commentScrollMultiplier(cl.config.ScrollSpeed)
+	return scrollCommentPageForMore(cl.page, cl.config.ScrollSpeed)
+}
 
-	_, err := cl.page.Eval(fmt.Sprintf(`() => {
+func scrollCommentPageForMore(page *hrod.Page, speed string) error {
+	_, err := page.Eval(commentPageScrollScript(speed))
+	return err
+}
+
+func commentPageScrollScript(speed string) string {
+	multiplier := commentScrollMultiplier(speed)
+
+	return fmt.Sprintf(`() => {
 		// Keep the last loaded comment in view before advancing. This makes the
 		// page's intersection-based lazy loader reliable.
 		const comments = document.querySelectorAll(".parent-comment");
@@ -332,7 +341,6 @@ func (cl *commentLoader) scrollForMoreComments() error {
 		}
 		return true;
 	}`, multiplier))
-	return err
 }
 
 func commentScrollMultiplier(speed string) float64 {

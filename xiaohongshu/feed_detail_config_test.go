@@ -1,6 +1,7 @@
 package xiaohongshu
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -43,6 +44,23 @@ func TestCommentScrollMultiplier(t *testing.T) {
 	for _, tt := range tests {
 		if got := commentScrollMultiplier(tt.speed); got != tt.want {
 			t.Errorf("commentScrollMultiplier(%q) = %v, want %v", tt.speed, got, tt.want)
+		}
+	}
+}
+
+func TestCommentPageScrollScriptPreservesLazyLoadTrigger(t *testing.T) {
+	script := commentPageScrollScript("fast")
+
+	for _, want := range []string{
+		`document.querySelectorAll(".parent-comment")`,
+		`scrollIntoView({ block: "end", behavior: "auto" })`,
+		`Math.max(window.innerHeight * 3.0, 900)`,
+		`document.querySelector(".note-scroller")`,
+		`document.querySelector(".interaction-container")`,
+		`new WheelEvent("wheel"`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("comment page scroll script missing %q:\n%s", want, script)
 		}
 	}
 }
