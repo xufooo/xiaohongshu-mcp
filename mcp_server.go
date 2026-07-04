@@ -574,7 +574,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 	mcp.AddTool(server,
 		&mcp.Tool{
 			Name:        "session_detail",
-			Description: "在浏览会话当前已打开的笔记页面上直接从可见DOM提取笔记正文、作者、互动状态和评论列表",
+			Description: "在浏览会话当前已打开的笔记页面上直接从可见DOM提取笔记正文、作者、互动状态和评论列表；load_comments=true 时会先加载更多评论，默认false只提取当前可见DOM",
 			Annotations: &mcp.ToolAnnotations{
 				Title:        "Session Detail",
 				ReadOnlyHint: true,
