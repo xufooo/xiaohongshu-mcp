@@ -131,14 +131,14 @@ func TestBrowseSessionDetailRequiresOpenedNote(t *testing.T) {
 	}
 	t.Cleanup(session.Close)
 
-	_, err := session.Detail(context.Background(), false)
+	_, err := session.Detail(context.Background(), false, nil)
 	if err == nil || !strings.Contains(err.Error(), "必须先打开笔记") {
 		t.Fatalf("Detail() error = %v, want 必须先打开笔记", err)
 	}
 
 	errCh := make(chan error, 1)
 	go func() {
-		_, err := session.Detail(context.Background(), false)
+		_, err := session.Detail(context.Background(), false, nil)
 		errCh <- err
 	}()
 	select {
@@ -161,14 +161,14 @@ func TestBrowseSessionDetailRequiresPage(t *testing.T) {
 	}
 	t.Cleanup(session.Close)
 
-	_, err := session.Detail(context.Background(), false)
+	_, err := session.Detail(context.Background(), false, nil)
 	if err == nil || !strings.Contains(err.Error(), "browse session 页面不存在") {
 		t.Fatalf("Detail() error = %v, want browse session 页面不存在", err)
 	}
 
 	errCh := make(chan error, 1)
 	go func() {
-		_, err := session.Detail(context.Background(), false)
+		_, err := session.Detail(context.Background(), false, nil)
 		errCh <- err
 	}()
 	select {
@@ -178,6 +178,43 @@ func TestBrowseSessionDetailRequiresPage(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("Detail() did not return after previous error; operation lock may not be released")
+	}
+}
+
+func TestShouldStopSessionCommentPaging(t *testing.T) {
+	tests := []struct {
+		name     string
+		progress commentProgress
+		want     bool
+	}{
+		{
+			name:     "not at end",
+			progress: commentProgress{Count: 10, Total: 30},
+			want:     false,
+		},
+		{
+			name:     "at end marker",
+			progress: commentProgress{Count: 10, Total: 30, AtEnd: true},
+			want:     true,
+		},
+		{
+			name:     "total reached",
+			progress: commentProgress{Count: 30, Total: 30},
+			want:     true,
+		},
+		{
+			name:     "no comments",
+			progress: commentProgress{NoComments: true},
+			want:     true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldStopSessionCommentPaging(tt.progress); got != tt.want {
+				t.Fatalf("shouldStopSessionCommentPaging() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 

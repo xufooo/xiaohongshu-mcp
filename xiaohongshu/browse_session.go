@@ -412,7 +412,7 @@ func (s *BrowseSession) Read(ctx context.Context, minDuration time.Duration) err
 	return nil
 }
 
-func (s *BrowseSession) Detail(ctx context.Context, loadComments bool) (*FeedDetailResponse, error) {
+func (s *BrowseSession) Detail(ctx context.Context, loadComments bool, pages *int) (*FeedDetailResponse, error) {
 	if err := s.beginLockedOperation(); err != nil {
 		return nil, err
 	}
@@ -433,11 +433,39 @@ func (s *BrowseSession) Detail(ctx context.Context, loadComments bool) (*FeedDet
 	}
 	if loadComments {
 		commentPage := page.Context(ctx)
-		progress, err := getCommentProgress(commentPage)
-		config := sessionCommentPageLoadConfig(progress, err)
 		action := NewFeedDetailActionWithState(commentPage, s.state)
-		if err := action.loadAllCommentsWithConfig(commentPage, config); err != nil {
-			logrus.Warnf("session detail load comments failed: %v", err)
+		if pages == nil {
+			progress, err := getCommentProgress(commentPage)
+			config := sessionCommentPageLoadConfig(progress, err)
+			if err := action.loadAllCommentsWithConfig(commentPage, config); err != nil {
+				logrus.Warnf("session detail load comments failed: %v", err)
+			}
+		} else if *pages > 0 {
+			for range *pages {
+				progress, err := getCommentProgress(commentPage)
+				config := sessionCommentPageLoadConfig(progress, err)
+				if err := action.loadAllCommentsWithConfig(commentPage, config); err != nil {
+					logrus.Warnf("session detail load comments failed: %v", err)
+					break
+				}
+			}
+		} else {
+			for {
+				progress, err := getCommentProgress(commentPage)
+				config := sessionCommentPageLoadConfig(progress, err)
+				if err := action.loadAllCommentsWithConfig(commentPage, config); err != nil {
+					logrus.Warnf("session detail load comments failed: %v", err)
+					break
+				}
+				progress, err = getCommentProgress(commentPage)
+				if err != nil {
+					logrus.Warnf("session detail read comment progress failed: %v", err)
+					break
+				}
+				if shouldStopSessionCommentPaging(progress) {
+					break
+				}
+			}
 		}
 	}
 	detail, err := ExtractFeedDetailFromDOM(page.Context(ctx), feedID)
@@ -450,6 +478,14 @@ func (s *BrowseSession) Detail(ctx context.Context, loadComments bool) (*FeedDet
 	s.mu.Unlock()
 	s.probeWatchdogSelectorsForKind(ctx, XHSReadyDetail, feedID)
 	return detail, nil
+}
+
+func shouldStopSessionCommentPaging(progress commentProgress) bool {
+	if progress.NoComments {
+		return true
+	}
+	loader := &commentLoader{config: DefaultCommentLoadConfig()}
+	return loader.shouldStop(progress)
 }
 
 func (s *BrowseSession) Like(ctx context.Context, unlike bool) error {

@@ -1191,7 +1191,7 @@ func (s *AppServer) handleSessionDetail(ctx context.Context, args SessionDetailA
 	if args.SessionID == "" {
 		return sessionMCPErrorResult("session详情获取失败: 缺少session_id参数", sessionNextStepCreateSession())
 	}
-	detail, err := s.xiaohongshuService.SessionDetail(ctx, args.SessionID, args.LoadComments)
+	detail, err := s.xiaohongshuService.SessionDetail(ctx, args.SessionID, args.LoadComments, args.Pages)
 	if err != nil {
 		return sessionMCPErrorFromErr("session详情获取失败", err, sessionNextStepOpenNote())
 	}
