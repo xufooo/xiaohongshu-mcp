@@ -113,7 +113,7 @@ type BrowseSessionIDArgs struct {
 type SessionDetailArgs struct {
 	SessionID     string `json:"session_id" jsonschema:"浏览会话ID，由create_browse_session返回"`
 	LoadComments bool   `json:"load_comments,omitempty" jsonschema:"是否先加载更多评论再提取，默认false只提取当前可见DOM"`
-	Pages        int   `json:"pages,omitempty" jsonschema:"加载评论页数；不传默认1页，-1表示加载到尽头"`
+	Pages        int   `json:"pages" jsonschema:"加载评论页数；不传默认1页，-1表示加载到尽头"`
 }
 
 type SessionSearchArgs struct {
