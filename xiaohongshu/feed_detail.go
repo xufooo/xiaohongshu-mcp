@@ -294,12 +294,22 @@ func (cl *commentLoader) load() error {
 		}
 
 		noProgressRounds++
-		if noProgressRounds >= maxNoProgressRounds {
+		if cl.shouldAbortNoProgress(progress, noProgressRounds) {
 			return fmt.Errorf("加载评论停滞: 已加载 %d 条，页面未报告结束", progress.Count)
 		}
 	}
 
 	return fmt.Errorf("达到评论加载最大尝试次数: 已加载 %d 条", progress.Count)
+}
+
+func (cl *commentLoader) shouldAbortNoProgress(progress commentProgress, noProgressRounds int) bool {
+	if noProgressRounds < maxNoProgressRounds {
+		return false
+	}
+	if cl.config.MaxCommentItems <= 0 && progress.Total > 0 && progress.Count < progress.Total {
+		return false
+	}
+	return true
 }
 
 func (cl *commentLoader) shouldStop(progress commentProgress) bool {
