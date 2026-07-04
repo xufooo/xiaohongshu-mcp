@@ -1,6 +1,7 @@
 package xiaohongshu
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -93,13 +94,90 @@ func TestBrowseSessionSemanticActionsFollowState(t *testing.T) {
 		refs[action.Ref] = true
 	}
 
-	for _, ref := range []string{"session_state", "like_current", "comment_current", "back_to_results", "close_session"} {
+	for _, ref := range []string{"session_state", "detail_current", "like_current", "comment_current", "back_to_results", "close_session"} {
 		if !refs[ref] {
 			t.Fatalf("missing semantic action %q in %+v", ref, actions)
 		}
 	}
 	if refs["open_note:0"] || refs["read_current"] {
 		t.Fatalf("unexpected pre-read/result actions in %+v", actions)
+	}
+}
+
+func TestBrowseSessionAvailableActionsIncludeDetailForOpenedNote(t *testing.T) {
+	session := &BrowseSession{
+		currentFeedID: "feed-1",
+		opened:        true,
+	}
+
+	actions := session.availableActionsLocked(0)
+	found := false
+	for _, action := range actions {
+		if action == "session_detail" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("session_detail missing from available actions: %+v", actions)
+	}
+}
+
+func TestBrowseSessionDetailRequiresOpenedNote(t *testing.T) {
+	session := &BrowseSession{
+		opened:    false,
+		timeout:   time.Minute,
+		expiresAt: time.Now().Add(time.Minute),
+	}
+	t.Cleanup(session.Close)
+
+	_, err := session.Detail(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "必须先打开笔记") {
+		t.Fatalf("Detail() error = %v, want 必须先打开笔记", err)
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := session.Detail(context.Background())
+		errCh <- err
+	}()
+	select {
+	case err := <-errCh:
+		if err == nil || !strings.Contains(err.Error(), "必须先打开笔记") {
+			t.Fatalf("Detail() after error = %v, want 必须先打开笔记", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Detail() did not return after previous error; operation lock may not be released")
+	}
+}
+
+func TestBrowseSessionDetailRequiresPage(t *testing.T) {
+	session := &BrowseSession{
+		id:            "session-1",
+		opened:        true,
+		currentFeedID: "feed-1",
+		timeout:       time.Minute,
+		expiresAt:     time.Now().Add(time.Minute),
+	}
+	t.Cleanup(session.Close)
+
+	_, err := session.Detail(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "browse session 页面不存在") {
+		t.Fatalf("Detail() error = %v, want browse session 页面不存在", err)
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := session.Detail(context.Background())
+		errCh <- err
+	}()
+	select {
+	case err := <-errCh:
+		if err == nil || !strings.Contains(err.Error(), "browse session 页面不存在") {
+			t.Fatalf("Detail() after error = %v, want browse session 页面不存在", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Detail() did not return after previous error; operation lock may not be released")
 	}
 }
 

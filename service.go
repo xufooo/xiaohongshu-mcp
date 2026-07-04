@@ -724,6 +724,19 @@ func (s *XiaohongshuService) SessionRead(ctx context.Context, id string, minDura
 	return &info, nil
 }
 
+func (s *XiaohongshuService) SessionDetail(ctx context.Context, id string) (*xiaohongshu.FeedDetailResponse, error) {
+	session, err := s.browseSessions.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	detail, err := session.Detail(ctx)
+	if err != nil {
+		s.recordRiskFromSession(session, err)
+		return nil, err
+	}
+	return detail, nil
+}
+
 func (s *XiaohongshuService) SessionLike(ctx context.Context, id string, unlike bool) (*ActionResult, error) {
 	session, err := s.browseSessions.Get(id)
 	if err != nil {
