@@ -2,7 +2,7 @@ package xiaohongshu
 
 import (
 	"context"
-	crand "crypto/rand"
+	"crypto/rand"
 	"encoding/hex"
 	"fmt"
 	"strconv"
@@ -428,13 +428,15 @@ func (s *BrowseSession) Detail(ctx context.Context, loadComments bool) (*FeedDet
 	if page == nil {
 		return nil, fmt.Errorf("browse session 页面不存在: %s", s.id)
 	}
-	WaitForXHSReady(page.Context(ctx), XHSReadyOptions{Kind: XHSReadyDetail, FeedID: feedID})
+	if err := WaitForXHSReady(page.Context(ctx), XHSReadyOptions{Kind: XHSReadyDetail, FeedID: feedID}); err != nil {
+		return nil, err
+	}
 	if loadComments {
 		commentPage := page.Context(ctx)
 		if err := scrollToCommentsArea(commentPage); err != nil {
-			logrus.Warnf("session detail load comments failed: %v", err)
+			logrus.Warnf("session detail scroll to comments failed: %v", err)
 		} else if err := scrollCommentPageForMore(commentPage, DefaultCommentLoadConfig().ScrollSpeed); err != nil {
-			logrus.Warnf("session detail load comments failed: %v", err)
+			logrus.Warnf("session detail load more comments failed: %v", err)
 		}
 	}
 	detail, err := ExtractFeedDetailFromDOM(page.Context(ctx), feedID)
@@ -1057,7 +1059,7 @@ func inferXHSReadyKindFromSessionState(rawURL string, opened bool, feedID string
 
 func newBrowseSessionID() string {
 	var buf [8]byte
-	if _, err := crand.Read(buf[:]); err == nil {
+	if _, err := rand.Read(buf[:]); err == nil {
 		return hex.EncodeToString(buf[:])
 	}
 	return strconv.FormatInt(time.Now().UnixNano(), 36)
