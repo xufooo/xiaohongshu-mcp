@@ -80,7 +80,7 @@ func TestSessionStateResultKeepsJSONTextWithSummaryField(t *testing.T) {
 }
 
 func TestSessionDetailMissingSessionIDSuggestsCreateSession(t *testing.T) {
-	result := (&AppServer{}).handleSessionDetail(context.Background(), BrowseSessionIDArgs{})
+	result := (&AppServer{}).handleSessionDetail(context.Background(), SessionDetailArgs{})
 	if result == nil || !result.IsError {
 		t.Fatalf("session detail without session_id should return an error result: %+v", result)
 	}

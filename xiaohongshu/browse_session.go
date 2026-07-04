@@ -2,14 +2,16 @@ package xiaohongshu
 
 import (
 	"context"
-	"crypto/rand"
+	crand "crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"math/rand"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/sirupsen/logrus"
 	hrod "github.com/xpzouying/xiaohongshu-mcp/pkg/humanize/rod"
 )
 
@@ -411,7 +413,7 @@ func (s *BrowseSession) Read(ctx context.Context, minDuration time.Duration) err
 	return nil
 }
 
-func (s *BrowseSession) Detail(ctx context.Context) (*FeedDetailResponse, error) {
+func (s *BrowseSession) Detail(ctx context.Context, loadComments bool) (*FeedDetailResponse, error) {
 	if err := s.beginLockedOperation(); err != nil {
 		return nil, err
 	}
@@ -426,6 +428,21 @@ func (s *BrowseSession) Detail(ctx context.Context) (*FeedDetailResponse, error)
 	s.mu.Unlock()
 	if page == nil {
 		return nil, fmt.Errorf("browse session 页面不存在: %s", s.id)
+	}
+	WaitForXHSReady(page.Context(ctx), XHSReadyOptions{Kind: XHSReadyDetail, FeedID: feedID})
+	if loadComments {
+		commentPage := page.Context(ctx)
+		config := DefaultCommentLoadConfig()
+		progress, err := getCommentProgress(commentPage)
+		count := 0
+		if err == nil {
+			count = progress.Count
+		}
+		config.MaxCommentItems = count + rand.Intn(6) + 5
+		action := NewFeedDetailActionWithState(commentPage, s.state)
+		if err := action.loadAllCommentsWithConfig(commentPage, config); err != nil {
+			logrus.Warnf("session detail load comments failed: %v", err)
+		}
 	}
 	detail, err := ExtractFeedDetailFromDOM(page.Context(ctx), feedID)
 	if err != nil {
@@ -777,7 +794,7 @@ func (s *BrowseSession) nextHintLocked(resultsCount int) string {
 	case s.opened && !s.read:
 		return "可调用 session_detail 提取当前笔记；点赞或评论前先调用 session_read"
 	case s.opened && s.read:
-		return "可调用 session_detail、session_like、session_comment，或 session_back 返回结果页"
+		return "可调用 session_detail 提取当前笔记，或设置 load_comments=true 加载更多评论"
 	case resultsCount > 0:
 		return "可用 session_open_note 打开 results 中的 result_ref"
 	default:
@@ -1047,7 +1064,7 @@ func inferXHSReadyKindFromSessionState(rawURL string, opened bool, feedID string
 
 func newBrowseSessionID() string {
 	var buf [8]byte
-	if _, err := rand.Read(buf[:]); err == nil {
+	if _, err := crand.Read(buf[:]); err == nil {
 		return hex.EncodeToString(buf[:])
 	}
 	return strconv.FormatInt(time.Now().UnixNano(), 36)
