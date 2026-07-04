@@ -724,7 +724,7 @@ func (s *XiaohongshuService) SessionRead(ctx context.Context, id string, minDura
 	return &info, nil
 }
 
-func (s *XiaohongshuService) SessionDetail(ctx context.Context, id string, loadComments bool, pages *int) (*xiaohongshu.FeedDetailResponse, error) {
+func (s *XiaohongshuService) SessionDetail(ctx context.Context, id string, loadComments bool, pages int) (*xiaohongshu.FeedDetailResponse, error) {
 	session, err := s.browseSessions.Get(id)
 	if err != nil {
 		return nil, err
