@@ -461,49 +461,15 @@ type sessionCommentLoadOps struct {
 }
 
 func loadSessionCommentsForDetail(pages int, ops sessionCommentLoadOps) {
-	if pages == 0 {
-		// 默认：翻1页（向后兼容）
-		progress, err := ops.getProgress()
-		config := sessionCommentPageLoadConfig(progress, err)
-		if err := ops.load(config); err != nil {
-			logrus.Warnf("session detail load comments failed: %v", err)
-		}
-	} else if pages > 0 {
-		// 翻指定页数
-		for range pages {
-			progress, err := ops.getProgress()
-			config := sessionCommentPageLoadConfig(progress, err)
-			if err := ops.load(config); err != nil {
-				logrus.Warnf("session detail load comments failed: %v", err)
-				break
-			}
-			progress, err = ops.getProgress()
-			if err != nil {
-				logrus.Warnf("session detail read comment progress failed: %v", err)
-				continue
-			}
-			if shouldStopSessionCommentPaging(progress) {
-				break
-			}
-		}
-	} else {
-		// pages < 0：翻到尽头
-		for {
-			progress, err := ops.getProgress()
-			config := sessionCommentPageLoadConfig(progress, err)
-			if err := ops.load(config); err != nil {
-				logrus.Warnf("session detail load comments failed: %v", err)
-				break
-			}
-			progress, err = ops.getProgress()
-			if err != nil {
-				logrus.Warnf("session detail read comment progress failed: %v", err)
-				break
-			}
-			if shouldStopSessionCommentPaging(progress) {
-				break
-			}
-		}
+	progress, err := ops.getProgress()
+	config := sessionCommentPageLoadConfig(progress, err)
+	if pages > 0 {
+		config.MaxCommentItems = progress.Count + pages*20
+	} else if pages < 0 {
+		config.MaxCommentItems = 0
+	}
+	if err := ops.load(config); err != nil {
+		logrus.Warnf("session detail load comments failed: %v", err)
 	}
 }
 

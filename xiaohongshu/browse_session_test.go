@@ -219,25 +219,20 @@ func TestShouldStopSessionCommentPaging(t *testing.T) {
 	}
 }
 
-func TestLoadSessionCommentsForDetailStopsPositivePagesAtEnd(t *testing.T) {
-	progresses := []commentProgress{
-		{Count: 0, Total: 10},
-		{Count: 10, Total: 10},
-	}
+func TestLoadSessionCommentsForDetailSetsPositivePagesTargetOnce(t *testing.T) {
 	progressCalls := 0
 	loadCalls := 0
 
 	loadSessionCommentsForDetail(3, sessionCommentLoadOps{
 		getProgress: func() (commentProgress, error) {
-			if progressCalls >= len(progresses) {
-				t.Fatalf("unexpected progress call %d", progressCalls+1)
-			}
-			progress := progresses[progressCalls]
 			progressCalls++
-			return progress, nil
+			return commentProgress{Count: 7, Total: 100}, nil
 		},
-		load: func(CommentLoadConfig) error {
+		load: func(config CommentLoadConfig) error {
 			loadCalls++
+			if config.MaxCommentItems != 67 {
+				t.Fatalf("MaxCommentItems = %d, want 67", config.MaxCommentItems)
+			}
 			return nil
 		},
 	})
@@ -245,8 +240,8 @@ func TestLoadSessionCommentsForDetailStopsPositivePagesAtEnd(t *testing.T) {
 	if loadCalls != 1 {
 		t.Fatalf("load calls = %d, want 1", loadCalls)
 	}
-	if progressCalls != 2 {
-		t.Fatalf("progress calls = %d, want 2", progressCalls)
+	if progressCalls != 1 {
+		t.Fatalf("progress calls = %d, want 1", progressCalls)
 	}
 }
 
@@ -258,6 +253,32 @@ func TestLoadSessionCommentsForDetailDefaultsToOnePage(t *testing.T) {
 		getProgress: func() (commentProgress, error) {
 			progressCalls++
 			return commentProgress{Count: 0, Total: 10}, nil
+		},
+		load: func(config CommentLoadConfig) error {
+			loadCalls++
+			if config.MaxCommentItems < 5 || config.MaxCommentItems > 10 {
+				t.Fatalf("default MaxCommentItems = %d, want between 5 and 10", config.MaxCommentItems)
+			}
+			return nil
+		},
+	})
+
+	if loadCalls != 1 {
+		t.Fatalf("load calls = %d, want 1", loadCalls)
+	}
+	if progressCalls != 1 {
+		t.Fatalf("progress calls = %d, want 1", progressCalls)
+	}
+}
+
+func TestLoadSessionCommentsForDetailDoesNotReadProgressAfterLoad(t *testing.T) {
+	progressCalls := 0
+	loadCalls := 0
+
+	loadSessionCommentsForDetail(3, sessionCommentLoadOps{
+		getProgress: func() (commentProgress, error) {
+			progressCalls++
+			return commentProgress{Count: 20, Total: 100}, nil
 		},
 		load: func(CommentLoadConfig) error {
 			loadCalls++
@@ -273,66 +294,33 @@ func TestLoadSessionCommentsForDetailDefaultsToOnePage(t *testing.T) {
 	}
 }
 
-func TestLoadSessionCommentsForDetailContinuesPositivePagesWhenPostLoadProgressFails(t *testing.T) {
-	progressCalls := 0
-	loadCalls := 0
-
-	loadSessionCommentsForDetail(3, sessionCommentLoadOps{
-		getProgress: func() (commentProgress, error) {
-			progressCalls++
-			if progressCalls%2 == 0 {
-				return commentProgress{}, errors.New("progress unavailable")
-			}
-			return commentProgress{Count: loadCalls, Total: 10}, nil
-		},
-		load: func(CommentLoadConfig) error {
-			loadCalls++
-			return nil
-		},
-	})
-
-	if loadCalls != 3 {
-		t.Fatalf("load calls = %d, want 3", loadCalls)
-	}
-	if progressCalls != 6 {
-		t.Fatalf("progress calls = %d, want 6", progressCalls)
-	}
-}
-
-func TestLoadSessionCommentsForDetailLoadsNegativePagesUntilEnd(t *testing.T) {
-	progresses := []commentProgress{
-		{Count: 0, Total: 5},
-		{Count: 2, Total: 5},
-		{Count: 2, Total: 5},
-		{Count: 5, Total: 5},
-	}
+func TestLoadSessionCommentsForDetailLoadsNegativePagesWithoutLimit(t *testing.T) {
 	progressCalls := 0
 	loadCalls := 0
 
 	loadSessionCommentsForDetail(-1, sessionCommentLoadOps{
 		getProgress: func() (commentProgress, error) {
-			if progressCalls >= len(progresses) {
-				t.Fatalf("unexpected progress call %d", progressCalls+1)
-			}
-			progress := progresses[progressCalls]
 			progressCalls++
-			return progress, nil
+			return commentProgress{Count: 15, Total: 100}, nil
 		},
-		load: func(CommentLoadConfig) error {
+		load: func(config CommentLoadConfig) error {
 			loadCalls++
+			if config.MaxCommentItems != 0 {
+				t.Fatalf("MaxCommentItems = %d, want 0", config.MaxCommentItems)
+			}
 			return nil
 		},
 	})
 
-	if loadCalls != 2 {
-		t.Fatalf("load calls = %d, want 2", loadCalls)
+	if loadCalls != 1 {
+		t.Fatalf("load calls = %d, want 1", loadCalls)
 	}
-	if progressCalls != 4 {
-		t.Fatalf("progress calls = %d, want 4", progressCalls)
+	if progressCalls != 1 {
+		t.Fatalf("progress calls = %d, want 1", progressCalls)
 	}
 }
 
-func TestLoadSessionCommentsForDetailUsesFallbackConfigForPositivePages(t *testing.T) {
+func TestLoadSessionCommentsForDetailOverridesFallbackConfigForPositivePages(t *testing.T) {
 	progressCalls := 0
 	loadCalls := 0
 
@@ -343,18 +331,18 @@ func TestLoadSessionCommentsForDetailUsesFallbackConfigForPositivePages(t *testi
 		},
 		load: func(config CommentLoadConfig) error {
 			loadCalls++
-			if config.MaxCommentItems != 10 {
-				t.Fatalf("fallback MaxCommentItems = %d, want 10", config.MaxCommentItems)
+			if config.MaxCommentItems != 40 {
+				t.Fatalf("MaxCommentItems = %d, want 40", config.MaxCommentItems)
 			}
 			return nil
 		},
 	})
 
-	if loadCalls != 2 {
-		t.Fatalf("load calls = %d, want 2", loadCalls)
+	if loadCalls != 1 {
+		t.Fatalf("load calls = %d, want 1", loadCalls)
 	}
-	if progressCalls != 4 {
-		t.Fatalf("progress calls = %d, want 4", progressCalls)
+	if progressCalls != 1 {
+		t.Fatalf("progress calls = %d, want 1", progressCalls)
 	}
 }
 
