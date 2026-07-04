@@ -82,11 +82,22 @@ func TestNormalizeCommentLoadConfigUsesFastForMissingOrInvalidSpeed(t *testing.T
 	}
 }
 
-func TestSessionCommentPageLoadConfigTargetsNextTenComments(t *testing.T) {
-	cfg := sessionCommentPageLoadConfig(commentProgress{Count: 12}, nil)
+func TestSessionCommentPageLoadConfigTargetsNextFiveToTenComments(t *testing.T) {
+	progress := commentProgress{Count: 12}
+	sawBelowFixedNextTen := false
 
-	if cfg.MaxCommentItems != 22 {
-		t.Fatalf("expected next page target 22, got %d", cfg.MaxCommentItems)
+	for range 100 {
+		cfg := sessionCommentPageLoadConfig(progress, nil)
+		if cfg.MaxCommentItems < 17 || cfg.MaxCommentItems > 22 {
+			t.Fatalf("expected next page target between 17 and 22, got %d", cfg.MaxCommentItems)
+		}
+		if cfg.MaxCommentItems < 22 {
+			sawBelowFixedNextTen = true
+		}
+	}
+
+	if !sawBelowFixedNextTen {
+		t.Fatalf("expected randomized target below fixed next-ten target")
 	}
 }
 
