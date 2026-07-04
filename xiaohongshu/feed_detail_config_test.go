@@ -31,6 +31,24 @@ func TestCommentLoadConfigLimitControlsMaxAttempts(t *testing.T) {
 	}
 }
 
+func TestCommentLoaderDoesNotAbortUnlimitedKnownTotalOnShortStall(t *testing.T) {
+	loader := &commentLoader{config: CommentLoadConfig{MaxCommentItems: 0}}
+	progress := commentProgress{Count: 30, Total: 99}
+
+	if loader.shouldAbortNoProgress(progress, maxNoProgressRounds) {
+		t.Fatal("unlimited comment loading with a known remaining total should keep scrolling after a short stall")
+	}
+}
+
+func TestCommentLoaderAbortsLimitedLoadOnShortStall(t *testing.T) {
+	loader := &commentLoader{config: CommentLoadConfig{MaxCommentItems: 80}}
+	progress := commentProgress{Count: 30, Total: 99}
+
+	if !loader.shouldAbortNoProgress(progress, maxNoProgressRounds) {
+		t.Fatal("limited comment loading should still abort after the configured no-progress rounds")
+	}
+}
+
 func TestCommentScrollMultiplier(t *testing.T) {
 	tests := []struct {
 		speed string
