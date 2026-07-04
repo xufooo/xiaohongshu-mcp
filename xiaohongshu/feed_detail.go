@@ -340,7 +340,7 @@ func commentPageScrollScript(speed string) string {
 			window.scrollBy({ top: distance, left: 0, behavior: "auto" });
 		}
 		return true;
-	}`, multiplier))
+	}`, multiplier)
 }
 
 func commentScrollMultiplier(speed string) float64 {
