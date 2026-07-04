@@ -2,6 +2,7 @@ package xiaohongshu
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -215,6 +216,145 @@ func TestShouldStopSessionCommentPaging(t *testing.T) {
 				t.Fatalf("shouldStopSessionCommentPaging() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestLoadSessionCommentsForDetailStopsPositivePagesAtEnd(t *testing.T) {
+	progresses := []commentProgress{
+		{Count: 0, Total: 10},
+		{Count: 10, Total: 10},
+	}
+	progressCalls := 0
+	loadCalls := 0
+
+	loadSessionCommentsForDetail(3, sessionCommentLoadOps{
+		getProgress: func() (commentProgress, error) {
+			if progressCalls >= len(progresses) {
+				t.Fatalf("unexpected progress call %d", progressCalls+1)
+			}
+			progress := progresses[progressCalls]
+			progressCalls++
+			return progress, nil
+		},
+		load: func(CommentLoadConfig) error {
+			loadCalls++
+			return nil
+		},
+	})
+
+	if loadCalls != 1 {
+		t.Fatalf("load calls = %d, want 1", loadCalls)
+	}
+	if progressCalls != 2 {
+		t.Fatalf("progress calls = %d, want 2", progressCalls)
+	}
+}
+
+func TestLoadSessionCommentsForDetailDefaultsToOnePage(t *testing.T) {
+	progressCalls := 0
+	loadCalls := 0
+
+	loadSessionCommentsForDetail(0, sessionCommentLoadOps{
+		getProgress: func() (commentProgress, error) {
+			progressCalls++
+			return commentProgress{Count: 0, Total: 10}, nil
+		},
+		load: func(CommentLoadConfig) error {
+			loadCalls++
+			return nil
+		},
+	})
+
+	if loadCalls != 1 {
+		t.Fatalf("load calls = %d, want 1", loadCalls)
+	}
+	if progressCalls != 1 {
+		t.Fatalf("progress calls = %d, want 1", progressCalls)
+	}
+}
+
+func TestLoadSessionCommentsForDetailContinuesPositivePagesWhenPostLoadProgressFails(t *testing.T) {
+	progressCalls := 0
+	loadCalls := 0
+
+	loadSessionCommentsForDetail(3, sessionCommentLoadOps{
+		getProgress: func() (commentProgress, error) {
+			progressCalls++
+			if progressCalls%2 == 0 {
+				return commentProgress{}, errors.New("progress unavailable")
+			}
+			return commentProgress{Count: loadCalls, Total: 10}, nil
+		},
+		load: func(CommentLoadConfig) error {
+			loadCalls++
+			return nil
+		},
+	})
+
+	if loadCalls != 3 {
+		t.Fatalf("load calls = %d, want 3", loadCalls)
+	}
+	if progressCalls != 6 {
+		t.Fatalf("progress calls = %d, want 6", progressCalls)
+	}
+}
+
+func TestLoadSessionCommentsForDetailLoadsNegativePagesUntilEnd(t *testing.T) {
+	progresses := []commentProgress{
+		{Count: 0, Total: 5},
+		{Count: 2, Total: 5},
+		{Count: 2, Total: 5},
+		{Count: 5, Total: 5},
+	}
+	progressCalls := 0
+	loadCalls := 0
+
+	loadSessionCommentsForDetail(-1, sessionCommentLoadOps{
+		getProgress: func() (commentProgress, error) {
+			if progressCalls >= len(progresses) {
+				t.Fatalf("unexpected progress call %d", progressCalls+1)
+			}
+			progress := progresses[progressCalls]
+			progressCalls++
+			return progress, nil
+		},
+		load: func(CommentLoadConfig) error {
+			loadCalls++
+			return nil
+		},
+	})
+
+	if loadCalls != 2 {
+		t.Fatalf("load calls = %d, want 2", loadCalls)
+	}
+	if progressCalls != 4 {
+		t.Fatalf("progress calls = %d, want 4", progressCalls)
+	}
+}
+
+func TestLoadSessionCommentsForDetailUsesFallbackConfigForPositivePages(t *testing.T) {
+	progressCalls := 0
+	loadCalls := 0
+
+	loadSessionCommentsForDetail(2, sessionCommentLoadOps{
+		getProgress: func() (commentProgress, error) {
+			progressCalls++
+			return commentProgress{}, errors.New("progress unavailable")
+		},
+		load: func(config CommentLoadConfig) error {
+			loadCalls++
+			if config.MaxCommentItems != 10 {
+				t.Fatalf("fallback MaxCommentItems = %d, want 10", config.MaxCommentItems)
+			}
+			return nil
+		},
+	})
+
+	if loadCalls != 2 {
+		t.Fatalf("load calls = %d, want 2", loadCalls)
+	}
+	if progressCalls != 4 {
+		t.Fatalf("progress calls = %d, want 4", progressCalls)
 	}
 }
 
