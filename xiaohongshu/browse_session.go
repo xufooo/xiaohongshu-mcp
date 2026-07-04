@@ -433,10 +433,11 @@ func (s *BrowseSession) Detail(ctx context.Context, loadComments bool) (*FeedDet
 	}
 	if loadComments {
 		commentPage := page.Context(ctx)
-		if err := scrollToCommentsArea(commentPage); err != nil {
-			logrus.Warnf("session detail scroll to comments failed: %v", err)
-		} else if err := scrollCommentPageForMore(commentPage, DefaultCommentLoadConfig().ScrollSpeed); err != nil {
-			logrus.Warnf("session detail load more comments failed: %v", err)
+		progress, err := getCommentProgress(commentPage)
+		config := sessionCommentPageLoadConfig(progress, err)
+		action := NewFeedDetailActionWithState(commentPage, s.state)
+		if err := action.loadAllCommentsWithConfig(commentPage, config); err != nil {
+			logrus.Warnf("session detail load comments failed: %v", err)
 		}
 	}
 	detail, err := ExtractFeedDetailFromDOM(page.Context(ctx), feedID)
