@@ -494,7 +494,11 @@ func (s *XiaohongshuService) GetFeedDetail(ctx context.Context, feedID, xsecToke
 
 // GetFeedDetailWithConfig 使用配置获取Feed详情
 func (s *XiaohongshuService) GetFeedDetailWithConfig(ctx context.Context, feedID, xsecToken string, loadAllComments bool, config xiaohongshu.CommentLoadConfig) (*FeedDetailResponse, error) {
-	detailCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
+	timeout := 120 * time.Second
+	if loadAllComments {
+		timeout = 240 * time.Second
+	}
+	detailCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	page, err := s.acquirePageFor(detailCtx, "feed_detail")
