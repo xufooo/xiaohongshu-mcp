@@ -329,41 +329,87 @@ func (cl *commentLoader) logComplete(progress commentProgress) {
 		progress.Count, progress.Total, cl.stats.attempts, cl.stats.totalClicked, cl.stats.totalSkipped)
 }
 
-// scrollForMoreComments uses a direct browser scroll instead of the humanized
-// scrolling path. Comment loading is a read-only operation; the old path added
-// 300--800ms of artificial delay plus several browser round trips per attempt.
+type commentWheelAnchor struct {
+	X float64 `json:"x"`
+	Y float64 `json:"y"`
+}
+
+// 评论懒加载依赖真实滚轮输入和最后一条评论附近的可见位置。
 func (cl *commentLoader) scrollForMoreComments() error {
 	return scrollCommentPageForMore(cl.page, cl.config.ScrollSpeed)
 }
 
 func scrollCommentPageForMore(page *hrod.Page, speed string) error {
-	_, err := page.Eval(commentPageScrollScript(speed))
-	return err
+	if err := moveToCommentWheelAnchor(page); err != nil {
+		return err
+	}
+	viewportHeight, err := getViewportHeight(page)
+	if err != nil {
+		return err
+	}
+	if err := page.Actor().Mouse.Scroll(0, commentScrollDistance(viewportHeight, speed)); err != nil {
+		return err
+	}
+	return page.Sleep(commentPollInterval)
 }
 
-func commentPageScrollScript(speed string) string {
-	multiplier := commentScrollMultiplier(speed)
-
-	return fmt.Sprintf(`() => {
-		// Keep the last loaded comment in view before advancing. This makes the
-		// page's intersection-based lazy loader reliable.
-		const comments = document.querySelectorAll(".parent-comment");
-		comments[comments.length - 1]?.scrollIntoView({ block: "end", behavior: "auto" });
-		const distance = Math.max(window.innerHeight * %.1f, 900);
-		const target = document.querySelector(".note-scroller") ||
-			document.querySelector(".interaction-container") ||
-			document.scrollingElement;
-		if (target && target !== document.scrollingElement) {
-			target.scrollBy({ top: distance, left: 0, behavior: "auto" });
-			target.dispatchEvent(new WheelEvent("wheel", {
-				deltaY: distance, deltaMode: WheelEvent.DOM_DELTA_PIXEL,
-				bubbles: true, cancelable: true, view: window,
-			}));
-		} else {
-			window.scrollBy({ top: distance, left: 0, behavior: "auto" });
+func moveToCommentWheelAnchor(page *hrod.Page) error {
+	comments, err := page.Rod.Timeout(2 * time.Second).Elements(".parent-comment")
+	if err == nil && len(comments) > 0 {
+		lastComment := hrod.NewElement(comments[len(comments)-1], page.Actor())
+		if err := lastComment.ScrollIntoView(); err != nil {
+			logrus.Warnf("滚动到最后一条评论失败: %v", err)
 		}
-		return true;
-	}`, multiplier)
+	} else if container, err := page.Rod.Timeout(2 * time.Second).Element(".comments-container"); err == nil {
+		commentContainer := hrod.NewElement(container, page.Actor())
+		if err := commentContainer.ScrollIntoView(); err != nil {
+			logrus.Warnf("滚动到评论区失败: %v", err)
+		}
+	}
+
+	result, err := page.Eval(commentWheelAnchorScript())
+	if err != nil {
+		return err
+	}
+	if result == nil {
+		return fmt.Errorf("读取评论滚轮锚点失败: 无返回")
+	}
+
+	var anchor commentWheelAnchor
+	if err := json.Unmarshal([]byte(result.Value.Str()), &anchor); err != nil {
+		return fmt.Errorf("解析评论滚轮锚点失败: %w", err)
+	}
+	return page.MovePoint(proto.Point{X: anchor.X, Y: anchor.Y})
+}
+
+func commentWheelAnchorScript() string {
+	return `() => {
+		const comments = document.querySelectorAll(".parent-comment");
+		const target = comments[comments.length - 1] ||
+			document.querySelector(".comments-container") ||
+			document.body;
+		const rect = target.getBoundingClientRect();
+		const width = window.innerWidth || document.documentElement.clientWidth || 800;
+		const height = window.innerHeight || document.documentElement.clientHeight || 600;
+		const x = Math.min(Math.max(rect.left + Math.min(rect.width / 2, 240), 16), width - 16);
+		const y = Math.min(Math.max(rect.top + Math.min(rect.height / 2, 120), 16), height - 16);
+		return JSON.stringify({ x, y });
+	}`
+}
+
+func getViewportHeight(page *hrod.Page) (int, error) {
+	result, err := page.Eval(`() => window.innerHeight || document.documentElement.clientHeight || 800`)
+	if err != nil {
+		return 0, fmt.Errorf("读取视口高度失败: %w", err)
+	}
+	if result == nil {
+		return 0, fmt.Errorf("读取视口高度失败: 无返回")
+	}
+	return result.Value.Int(), nil
+}
+
+func commentScrollDistance(viewportHeight int, speed string) float64 {
+	return max(float64(viewportHeight)*commentScrollMultiplier(speed), 900)
 }
 
 func commentScrollMultiplier(speed string) float64 {
@@ -843,8 +889,9 @@ func scrollToCommentsArea(page *hrod.Page) error {
 	logrus.Info("滚动到评论区...")
 
 	// 先定位到评论区
-	if el, err := page.Timeout(2 * time.Second).Element(".comments-container"); err == nil {
-		if err := el.ScrollIntoView(); err != nil {
+	if el, err := page.Rod.Timeout(2 * time.Second).Element(".comments-container"); err == nil {
+		commentContainer := hrod.NewElement(el, page.Actor())
+		if err := commentContainer.ScrollIntoView(); err != nil {
 			logrus.Warnf("滚动到评论区失败: %v", err)
 		}
 	}
@@ -854,9 +901,10 @@ func scrollToCommentsArea(page *hrod.Page) error {
 		return err
 	}
 
-	// 触发一次小滚动，激活懒加载机制。评论读取无需鼠标的人化轨迹。
-	_, err := page.Eval(`() => window.scrollBy({ top: 100, left: 0, behavior: "auto" })`)
-	return err
+	if err := moveToCommentWheelAnchor(page); err != nil {
+		return err
+	}
+	return page.Actor().Mouse.Scroll(0, 100)
 }
 
 func scrollToLastComment(page *hrod.Page) {

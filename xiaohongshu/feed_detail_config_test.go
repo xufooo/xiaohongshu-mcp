@@ -31,12 +31,14 @@ func TestCommentLoadConfigLimitControlsMaxAttempts(t *testing.T) {
 	}
 }
 
-func TestCommentLoaderDoesNotAbortUnlimitedKnownTotalOnShortStall(t *testing.T) {
+func TestCommentLoaderDoesNotAbortUnlimitedKnownTotalBeforeGlobalTimeout(t *testing.T) {
 	loader := &commentLoader{config: CommentLoadConfig{MaxCommentItems: 0}}
 	progress := commentProgress{Count: 30, Total: 99}
 
-	if loader.shouldAbortNoProgress(progress, maxNoProgressRounds) {
-		t.Fatal("unlimited comment loading with a known remaining total should keep scrolling after a short stall")
+	for _, rounds := range []int{maxNoProgressRounds, 100} {
+		if loader.shouldAbortNoProgress(progress, rounds) {
+			t.Fatalf("unlimited comment loading with a known remaining total should keep scrolling until loader limits or timeout, rounds=%d", rounds)
+		}
 	}
 }
 
@@ -67,19 +69,49 @@ func TestCommentScrollMultiplier(t *testing.T) {
 	}
 }
 
-func TestCommentPageScrollScriptPreservesLazyLoadTrigger(t *testing.T) {
-	script := commentPageScrollScript("fast")
+func TestCommentScrollDistance(t *testing.T) {
+	tests := []struct {
+		speed          string
+		viewportHeight int
+		want           float64
+	}{
+		{speed: "slow", viewportHeight: 1000, want: 1000},
+		{speed: "normal", viewportHeight: 1000, want: 1500},
+		{speed: "fast", viewportHeight: 1000, want: 3000},
+		{speed: "fast", viewportHeight: 200, want: 900},
+	}
+
+	for _, tt := range tests {
+		if got := commentScrollDistance(tt.viewportHeight, tt.speed); got != tt.want {
+			t.Fatalf("commentScrollDistance(%d, %q) = %v, want %v",
+				tt.viewportHeight, tt.speed, got, tt.want)
+		}
+	}
+}
+
+func TestCommentWheelAnchorScriptOnlyMeasuresVisibleCommentArea(t *testing.T) {
+	script := commentWheelAnchorScript()
 
 	for _, want := range []string{
 		`document.querySelectorAll(".parent-comment")`,
-		`scrollIntoView({ block: "end", behavior: "auto" })`,
-		`Math.max(window.innerHeight * 3.0, 900)`,
-		`document.querySelector(".note-scroller")`,
-		`document.querySelector(".interaction-container")`,
-		`new WheelEvent("wheel"`,
+		`document.querySelector(".comments-container")`,
+		`getBoundingClientRect()`,
+		`JSON.stringify`,
 	} {
 		if !strings.Contains(script, want) {
-			t.Fatalf("comment page scroll script missing %q:\n%s", want, script)
+			t.Fatalf("comment wheel anchor script missing %q:\n%s", want, script)
+		}
+	}
+
+	for _, unwanted := range []string{
+		`window.scrollBy`,
+		`scrollBy({`,
+		`WheelEvent`,
+		`.note-scroller`,
+		`.interaction-container`,
+	} {
+		if strings.Contains(script, unwanted) {
+			t.Fatalf("comment wheel anchor script should not contain %q:\n%s", unwanted, script)
 		}
 	}
 }
