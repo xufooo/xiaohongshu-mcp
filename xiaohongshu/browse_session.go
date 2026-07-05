@@ -477,8 +477,10 @@ func shouldStopSessionCommentPaging(progress commentProgress) bool {
 	if progress.NoComments {
 		return true
 	}
-	loader := &commentLoader{config: DefaultCommentLoadConfig()}
-	return loader.shouldStop(progress)
+	if progress.AtEnd {
+		return true
+	}
+	return progress.Total > 0 && progress.Count >= progress.Total
 }
 
 func (s *BrowseSession) Like(ctx context.Context, unlike bool) error {
