@@ -432,7 +432,7 @@ func (s *BrowseSession) Detail(ctx context.Context, loadComments bool, pages int
 		return nil, err
 	}
 	if loadComments {
-		commentPage := page.Context(ctx)
+		commentPage := page.Context(ctx).Timeout(commentLoadTimeout)
 		action := NewFeedDetailActionWithState(commentPage, s.state)
 		loadSessionCommentsForDetail(pages, sessionCommentLoadOps{
 			getProgress: func() (commentProgress, error) {
