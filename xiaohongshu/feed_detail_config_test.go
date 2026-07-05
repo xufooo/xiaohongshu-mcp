@@ -35,7 +35,7 @@ func TestCommentLoaderDoesNotAbortUnlimitedKnownTotalBeforeGlobalTimeout(t *test
 	loader := &commentLoader{config: CommentLoadConfig{MaxCommentItems: 0}}
 	progress := commentProgress{Count: 30, Total: 99}
 
-	for _, rounds := range []int{maxNoProgressRounds, 100} {
+	for _, rounds := range []int{stagnantLimit, 100} {
 		if loader.shouldAbortNoProgress(progress, rounds) {
 			t.Fatalf("unlimited comment loading with a known remaining total should keep scrolling until loader limits or timeout, rounds=%d", rounds)
 		}
@@ -46,7 +46,7 @@ func TestCommentLoaderAbortsLimitedLoadOnShortStall(t *testing.T) {
 	loader := &commentLoader{config: CommentLoadConfig{MaxCommentItems: 80}}
 	progress := commentProgress{Count: 30, Total: 99}
 
-	if !loader.shouldAbortNoProgress(progress, maxNoProgressRounds) {
+	if !loader.shouldAbortNoProgress(progress, stagnantLimit) {
 		t.Fatal("limited comment loading should still abort after the configured no-progress rounds")
 	}
 }

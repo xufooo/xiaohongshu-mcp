@@ -21,7 +21,7 @@ import (
 // ========== 配置常量 ==========
 const (
 	defaultMaxAttempts     = 500
-	stagnantLimit          = 20
+	stagnantLimit          = 12
 	minScrollDelta         = 10
 	maxClickPerRound       = 3
 	stagnantCheckThreshold = 2 // 达到目标后需要停滞几次才确认
@@ -30,7 +30,6 @@ const (
 	finalSprintPushCount   = 15
 	commentPollInterval    = 100 * time.Millisecond
 	commentProgressTimeout = 3 * time.Second
-	maxNoProgressRounds    = 3
 	// The note is available before the asynchronously populated comment ref on
 	// some versions of the web client. Keep this short: it is only used when
 	// the note reports comments but the state snapshot has none.
@@ -156,17 +155,21 @@ func (f *FeedDetailAction) GetFeedDetailWithConfig(ctx context.Context, feedID, 
 		logrus.Debugf("加载评论前提取详情失败: %v", initialDetailErr)
 	}
 
-	// Bound the scroll loop independently so the main page context remains
-	// usable for extracting a partial result after comment loading times out.
+	// Bound the scroll loop independently so comment loading failures return a
+	// scoped error instead of consuming the main page context.
 	commentPage := page.Timeout(commentLoadTimeout)
 	commentStart := time.Now()
-	if err := f.loadAllCommentsWithConfig(commentPage, config); err != nil {
-		logrus.Warnf("加载全部评论失败: %v", err)
-	}
+	commentLoadErr := f.loadAllCommentsWithConfig(commentPage, config)
 	reader.RecordCommentDwell(feedID, time.Since(commentStart), true)
+	if commentLoadErr != nil {
+		logrus.Warnf("加载全部评论失败，尝试提取已加载详情: %v", commentLoadErr)
+	}
 
 	detail, err := f.extractFeedDetail(page, feedID)
 	if err != nil {
+		if commentLoadErr != nil {
+			return nil, fmt.Errorf("加载全部评论失败: %v；提取详情失败: %w", commentLoadErr, err)
+		}
 		if initialDetail != nil {
 			logrus.Warnf("评论加载后提取详情失败，返回加载前快照: %v", err)
 			return initialDetail, nil
@@ -303,7 +306,7 @@ func (cl *commentLoader) load() error {
 }
 
 func (cl *commentLoader) shouldAbortNoProgress(progress commentProgress, noProgressRounds int) bool {
-	if noProgressRounds < maxNoProgressRounds {
+	if noProgressRounds < stagnantLimit {
 		return false
 	}
 	if cl.config.MaxCommentItems <= 0 && progress.Total > 0 && progress.Count < progress.Total {
@@ -347,10 +350,14 @@ func scrollCommentPageForMore(page *hrod.Page, speed string) error {
 	if err != nil {
 		return err
 	}
-	if err := page.Actor().Mouse.Scroll(0, commentScrollDistance(viewportHeight, speed)); err != nil {
+	scrollDistance := commentScrollDistance(viewportHeight, speed) + float64(rand.Intn(101)-50)
+	if scrollDistance < minScrollDelta {
+		scrollDistance = minScrollDelta
+	}
+	if err := page.Actor().Mouse.Scroll(0, scrollDistance); err != nil {
 		return err
 	}
-	return page.Sleep(commentPollInterval)
+	return sleepRandom(page, scrollWaitRange.min, scrollWaitRange.max)
 }
 
 func moveToCommentWheelAnchor(page *hrod.Page) error {
