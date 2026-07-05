@@ -939,8 +939,15 @@ func getTotalCommentCount(page *hrod.Page) int {
 	// 使用retry-go来处理可能的DOM查询失败
 	err := retry.Do(
 		func() error {
-			// 使用 Go 获取总评论数元素
+			// 使用 Go 获取总评论数元素，多选择器备用
 			totalEl, err := page.Timeout(2 * time.Second).Element(".comments-container .total")
+			if err != nil {
+				// 备用选择器
+				totalEl, err = page.Timeout(1 * time.Second).Element(".comment-total")
+				if err != nil {
+					totalEl, err = page.Timeout(1 * time.Second).Element(".total")
+				}
+			}
 			if err != nil {
 				return err
 			}
