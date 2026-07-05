@@ -24,12 +24,10 @@ const (
 	stagnantLimit          = 12
 	minScrollDelta         = 10
 	maxClickPerRound       = 3
-	stagnantCheckThreshold = 2 // 达到目标后需要停滞几次才确认
 	largeScrollTrigger     = 5 // 停滞多少次后触发大滚动
 	buttonClickInterval    = 3 // 每隔多少次尝试点击一次按钮
 	finalSprintPushCount   = 15
 	commentPollInterval    = 100 * time.Millisecond
-	commentProgressTimeout = 3 * time.Second
 	// The note is available before the asynchronously populated comment ref on
 	// some versions of the web client. Keep this short: it is only used when
 	// the note reports comments but the state snapshot has none.
@@ -70,11 +68,10 @@ func DefaultCommentLoadConfig() CommentLoadConfig {
 		ClickMoreReplies:    false,
 		MaxRepliesThreshold: 10,
 		MaxCommentItems:     0,
-		ScrollSpeed:         "",
+		ScrollSpeed:         "fast",
 	}
 }
 
-// FeedDetailAction 获取Feed详情动作
 type FeedDetailAction struct {
 	page  *hrod.Page
 	state *ActionStateStore
@@ -90,22 +87,45 @@ func NewFeedDetailActionWithState(page *hrod.Page, state *ActionStateStore) *Fee
 
 // ========== 主要业务逻辑 ==========
 
-func (f *FeedDetailAction) GetFeedDetail(ctx context.Context, feedID, xsecToken string, loadAllComments bool) (*FeedDetailResponse, error) {
-	return f.GetFeedDetailWithConfig(ctx, feedID, xsecToken, loadAllComments, DefaultCommentLoadConfig())
+func (f *FeedDetailAction) GetFeedDetail(ctx context.Context, feedID, xsecToken string, loadAllComments bool, config CommentLoadConfig) (*FeedDetailResponse, error) {
+	return f.GetFeedDetailWithConfig(ctx, feedID, xsecToken, loadAllComments, config)
 }
 
 func (f *FeedDetailAction) GetFeedDetailWithConfig(ctx context.Context, feedID, xsecToken string, loadAllComments bool, config CommentLoadConfig) (*FeedDetailResponse, error) {
-	page := f.page.Context(ctx)
-
-	if err := navigateToFeedDetail(page, feedID, xsecToken); err != nil {
-		return nil, fmt.Errorf("导航到详情页失败: %w", err)
-	}
-
-	// 等待页面加载完成
-	if err := waitForPage(page); err != nil {
+	if err := validateFeedAccessArgs(feedID, xsecToken); err != nil {
 		return nil, err
 	}
 
+	config = normalizeCommentLoadConfig(config)
+	page := f.page.Context(ctx).Timeout(feedDetailPageTimeout)
+	url := makeFeedDetailURL(feedID, xsecToken)
+
+	logrus.Infof("打开 feed 详情页: %s", url)
+	logrus.Infof("配置: 点击更多=%v, 回复阈值=%d, 最大评论数=%d, 滚动速度=%s",
+		config.ClickMoreReplies, config.MaxRepliesThreshold, config.MaxCommentItems, config.ScrollSpeed)
+
+	opener := NewNoteOpenActionWithState(page, f.state)
+	if err := opener.OpenFromCards(ctx, feedID, xsecToken, ""); err != nil {
+		logrus.Warnf("从卡片打开笔记失败，使用详情 URL 兜底: %v", err)
+		// XHS continuously mutates the document after navigation. Waiting for DOM
+		// stability can therefore consume the full request deadline even though the
+		// note state is already available.
+		err := retry.Do(
+			func() error {
+				return opener.OpenByURLFallback(ctx, feedID, xsecToken)
+			},
+			retry.Attempts(3),
+			retry.Delay(500*time.Millisecond),
+			retry.MaxJitter(1000*time.Millisecond),
+			retry.OnRetry(func(n uint, err error) {
+				logrus.Debugf("页面导航重试 #%d: %v", n, err)
+			}),
+		)
+		if err != nil {
+			logrus.Errorf("页面导航失败: %v", err)
+			return nil, err
+		}
+	}
 	if err := sleepRandom(page, 1000, 1000); err != nil {
 		return nil, err
 	}
@@ -141,12 +161,10 @@ func (f *FeedDetailAction) GetFeedDetailWithConfig(ctx context.Context, feedID, 
 	reader.RecordCommentDwell(feedID, time.Since(commentStart), true)
 	if commentLoadErr != nil {
 		if strings.Contains(commentLoadErr.Error(), "context deadline exceeded") ||
-			strings.Contains(commentLoadErr.Error(), "timeout") ||
-			strings.Contains(commentLoadErr.Error(), "Timeout") {
-			logrus.Warnf("评论加载超时(%s)，返回已加载的部分数据: %v",
-				time.Since(commentStart).Round(time.Second), commentLoadErr)
+			strings.Contains(commentLoadErr.Error(), "timeout") {
+			logrus.Warnf("评论加载超时(%s)，返回已加载数据: %v", time.Since(commentStart).Round(time.Second), commentLoadErr)
 		} else {
-			logrus.Warnf("加载全部评论失败，返回已加载的部分数据: %v", commentLoadErr)
+			logrus.Warnf("加载全部评论失败，返回已加载数据: %v", commentLoadErr)
 		}
 	}
 
@@ -269,11 +287,11 @@ func (cl *commentLoader) load() error {
 		if cl.shouldStopAtTarget(currentCount) {
 			return nil
 		}
-		// Total 到达检查：当 Total > 0 且已加载数 >= Total 时停止
+
+		// Total 到达检查
 		if cl.config.MaxCommentItems <= 0 {
 			totalCount := getTotalCommentCount(cl.page)
 			if totalCount > 0 && currentCount >= totalCount {
-				logrus.Infof("✓ 已加载全部评论: %d/%d, 停止加载", currentCount, totalCount)
 				return nil
 			}
 		}
@@ -281,11 +299,12 @@ func (cl *commentLoader) load() error {
 		if err := cl.performScroll(); err != nil {
 			return err
 		}
-		// 安全停止：停滞多轮且已有足够评论，页面可能不显示 Total 或 "THE END"
+
+		// 安全停止：停滞多轮且已有足够评论
 		if cl.state.stagnantChecks >= stagnantLimit && currentCount >= 10 {
-			logrus.Infof("✓ 安全停止: 已加载 %d 条评论，停滞 %d 轮", currentCount, cl.state.stagnantChecks)
 			return nil
 		}
+
 		if err := cl.handleStagnation(); err != nil {
 			return err
 		}
@@ -300,29 +319,6 @@ func (cl *commentLoader) load() error {
 type commentWheelAnchor struct {
 	X float64 `json:"x"`
 	Y float64 `json:"y"`
-}
-
-// 评论懒加载依赖真实滚轮输入和最后一条评论附近的可见位置。
-func (cl *commentLoader) scrollForMoreComments() error {
-	return scrollCommentPageForMore(cl.page, cl.config.ScrollSpeed)
-}
-
-func scrollCommentPageForMore(page *hrod.Page, speed string) error {
-	if err := moveToCommentWheelAnchor(page); err != nil {
-		return err
-	}
-	viewportHeight, err := getViewportHeight(page)
-	if err != nil {
-		return err
-	}
-	scrollDistance := commentScrollDistance(viewportHeight, speed) + float64(rand.Intn(101)-50)
-	if scrollDistance < minScrollDelta {
-		scrollDistance = minScrollDelta
-	}
-	if err := page.Actor().Mouse.Scroll(0, scrollDistance); err != nil {
-		return err
-	}
-	return sleepRandom(page, scrollWaitRange.min, scrollWaitRange.max)
 }
 
 func moveToCommentWheelAnchor(page *hrod.Page) error {
@@ -344,40 +340,28 @@ func moveToCommentWheelAnchor(page *hrod.Page) error {
 		return err
 	}
 	if result == nil {
-		return fmt.Errorf("评论滚轮锚点脚本未返回结果")
+		return fmt.Errorf("读取评论滚轮锚点失败: 无返回")
 	}
 
 	var anchor commentWheelAnchor
 	if err := json.Unmarshal([]byte(result.Value.Str()), &anchor); err != nil {
-		return fmt.Errorf("解析评论滚轮锚点: %w", err)
+		return fmt.Errorf("解析评论滚轮锚点失败: %w", err)
 	}
-
-	if anchor.X == 0 && anchor.Y == 0 {
-		return fmt.Errorf("未找到评论滚轮锚点")
-	}
-
-	return nil
+	return page.MovePoint(proto.Point{X: anchor.X, Y: anchor.Y})
 }
 
 func commentWheelAnchorScript() string {
 	return `() => {
-		const comments = document.querySelectorAll('.parent-comment');
-		const container = document.querySelector('.comments-container');
-		let targetX = window.innerWidth / 2;
-		let targetY = window.innerHeight / 2;
-
-		if (comments.length > 0) {
-			const last = comments[comments.length - 1];
-			const rect = last.getBoundingClientRect();
-			targetX = rect.left + rect.width / 2;
-			targetY = rect.top + rect.height / 2 + 50;
-		} else if (container) {
-			const rect = container.getBoundingClientRect();
-			targetX = rect.left + rect.width / 2;
-			targetY = rect.top + rect.height / 2;
-		}
-
-		return JSON.stringify({ x: targetX, y: targetY });
+		const comments = document.querySelectorAll(".parent-comment");
+		const target = comments[comments.length - 1] ||
+			document.querySelector(".comments-container") ||
+			document.body;
+		const rect = target.getBoundingClientRect();
+		const width = window.innerWidth || document.documentElement.clientWidth || 800;
+		const height = window.innerHeight || document.documentElement.clientHeight || 600;
+		const x = Math.min(Math.max(rect.left + Math.min(rect.width / 2, 240), 16), width - 16);
+		const y = Math.min(Math.max(rect.top + Math.min(rect.height / 2, 120), 16), height - 16);
+		return JSON.stringify({ x, y });
 	}`
 }
 
@@ -559,131 +543,258 @@ func getScrollInterval(speed string) time.Duration {
 
 // ========== 按钮点击 ==========
 
-func clickShowMoreButtonsSmart(page *hrod.Page, maxRepliesThreshold int) (int, int, error) {
-	clicked, skipped := 0, 0
-	buttons, err := page.Timeout(3 * time.Second).Elements(".show-more,.folding-btn,.comment-more,.load-more-reply")
+func clickShowMoreButtonsSmart(page *hrod.Page, maxRepliesThreshold int) (clicked, skipped int, err error) {
+	elements, err := page.Elements(".show-more")
 	if err != nil {
-		return 0, 0, nil
+		return 0, 0, page.Err()
 	}
 
-	for _, btn := range buttons {
-		btn := hrod.NewElement(btn, page.Actor())
-		if err := btn.ScrollIntoView(); err != nil {
+	replyCountRegex := regexp.MustCompile(`展开\s*(\d+)\s*条回复`)
+	maxClick := maxClickPerRound + rand.Intn(maxClickPerRound)
+	clickedInRound := 0
+
+	for _, el := range elements {
+		if clickedInRound >= maxClick {
+			break
+		}
+
+		if !isElementClickable(el) {
 			continue
 		}
-		parentComment := findParentCommentElement(btn)
-		replyCount := 0
-		if parentComment != nil {
-			replyCount = countChildReplies(parentComment)
+
+		text, err := el.Text()
+		if err != nil {
+			continue
 		}
-		if maxRepliesThreshold > 0 && replyCount > maxRepliesThreshold {
+
+		if shouldSkipButton(text, maxRepliesThreshold, replyCountRegex) {
 			skipped++
 			continue
 		}
-		if err := btn.Click(); err == nil {
+
+		clickSuccess, err := clickElementWithHumanBehavior(page, el, text)
+		if err != nil {
+			return clicked, skipped, err
+		}
+		if clickSuccess {
 			clicked++
+			clickedInRound++
 		}
 	}
+
 	return clicked, skipped, nil
 }
 
-func findParentCommentElement(btn *hrod.Element) *hrod.Element {
-	parent := btn
-	for i := 0; i < 10; i++ {
-		if parent == nil {
-			return nil
-		}
-		if strings.Contains(parent.Attribute("class"), "parent-comment") {
-			return parent
-		}
-		parent = parent.Parent()
+func isElementClickable(el *hrod.Element) bool {
+	visible, err := el.Visible()
+	if err != nil || !visible {
+		return false
 	}
-	return nil
+
+	box, err := el.Shape()
+	return err == nil && len(box.Quads) > 0
 }
 
-func countChildReplies(parent *hrod.Element) int {
-	replyElements, err := parent.Elements(".reply,.child-comment,.sub-comment")
-	if err != nil {
-		return 0
+func shouldSkipButton(text string, threshold int, regex *regexp.Regexp) bool {
+	if threshold <= 0 {
+		return false
 	}
-	return len(replyElements)
+
+	matches := regex.FindStringSubmatch(text)
+	if len(matches) > 1 {
+		if replyCount, err := strconv.Atoi(matches[1]); err == nil && replyCount > threshold {
+			logrus.Debugf("跳过'%s'（回复数 %d > 阈值 %d）", text, replyCount, threshold)
+			return true
+		}
+	}
+	return false
+}
+
+func clickElementWithHumanBehavior(page *hrod.Page, el *hrod.Element, text string) (bool, error) {
+	var clickSuccess bool
+
+	// 使用retry-go进行点击操作重试
+	err := retry.Do(
+		func() error {
+			// 滚动到元素
+			if err := el.ScrollIntoView(); err != nil {
+				return err
+			}
+
+			if err := sleepRandom(page, reactionTimeRange.min, reactionTimeRange.max); err != nil {
+				return err
+			}
+
+			// 鼠标悬停
+			if box, err := el.Shape(); err == nil && len(box.Quads) > 0 {
+				x := float64(box.Quads[0][0]+box.Quads[0][4]) / 2
+				y := float64(box.Quads[0][1]+box.Quads[0][5]) / 2
+				if err := page.MovePoint(proto.Point{X: x, Y: y}); err != nil {
+					return err
+				}
+				if err := sleepRandom(page, hoverTimeRange.min, hoverTimeRange.max); err != nil {
+					return err
+				}
+			}
+
+			// 点击
+			if err := el.Click(proto.InputMouseButtonLeft, 1); err != nil {
+				return err // 返回错误以触发重试
+			}
+
+			// 模拟人类阅读时间
+			if err := sleepRandom(page, readTimeRange.min, readTimeRange.max); err != nil {
+				return err
+			}
+			clickSuccess = true
+			return nil
+		},
+		retry.Attempts(3),
+		retry.Delay(100*time.Millisecond),
+		retry.MaxJitter(200*time.Millisecond),
+		retry.OnRetry(func(n uint, err error) {
+			logrus.Debugf("点击重试 #%d: %s, 错误: %v", n, text, err)
+		}),
+	)
+
+	if err != nil {
+		logrus.Debugf("点击失败 '%s': %v", text, err)
+		return false, page.Err()
+	}
+
+	if clickSuccess {
+		logrus.Debugf("点击了'%s'", text)
+	}
+
+	return clickSuccess, nil
 }
 
 // ========== 滚动相关 ==========
 
-func commentScrollDistance(viewportHeight int, speed string) float64 {
+func humanScroll(page *hrod.Page, speed string, largeMode bool, pushCount int) (bool, int, int, error) {
+	beforeTop := getScrollTop(page)
+	viewportHeightResult, err := page.Eval(`() => window.innerHeight`)
+	if err != nil {
+		return false, 0, 0, fmt.Errorf("读取视口高度失败: %w", err)
+	}
+	if viewportHeightResult == nil {
+		return false, 0, 0, fmt.Errorf("读取视口高度失败: 无返回")
+	}
+	viewportHeight := viewportHeightResult.Value.Int()
+
+	baseRatio := getScrollRatio(speed)
+	if largeMode {
+		baseRatio *= 2.0
+	}
+
+	scrolled := false
+	actualDelta := 0
+	currentScrollTop := beforeTop
+
+	for i := 0; i < max(1, pushCount); i++ {
+		scrollDelta := calculateScrollDelta(viewportHeight, baseRatio)
+		if err := page.Actor().Mouse.Scroll(0, scrollDelta); err != nil {
+			logrus.Warnf("人化滚动失败: %v", err)
+		}
+		if err := smartScroll(page, scrollDelta); err != nil {
+			return false, 0, 0, err
+		}
+
+		if err := sleepRandom(page, scrollWaitRange.min, scrollWaitRange.max); err != nil {
+			return false, 0, 0, err
+		}
+
+		currentScrollTop = getScrollTop(page)
+		deltaThisTime := currentScrollTop - beforeTop
+		actualDelta += deltaThisTime
+
+		if deltaThisTime > 5 {
+			scrolled = true
+		}
+
+		beforeTop = currentScrollTop
+
+		if i < pushCount-1 {
+			if err := sleepRandom(page, humanDelayRange.min, humanDelayRange.max); err != nil {
+				return false, 0, 0, err
+			}
+		}
+	}
+
+	if !scrolled && pushCount > 0 {
+		scrollHeightResult, err := page.Eval(`() => document.body.scrollHeight`)
+		if err != nil {
+			return false, 0, 0, fmt.Errorf("读取页面高度失败: %w", err)
+		}
+		if scrollHeightResult == nil {
+			return false, 0, 0, fmt.Errorf("读取页面高度失败: 无返回")
+		}
+		scrollHeight := scrollHeightResult.Value.Int()
+		currentScrollTop := getScrollTop(page)
+		if err := page.Actor().Mouse.Scroll(0, float64(scrollHeight-currentScrollTop)); err != nil {
+			logrus.Warnf("滚动到底部失败: %v", err)
+		}
+		if err := smartScroll(page, float64(scrollHeight-currentScrollTop)); err != nil {
+			return false, 0, 0, err
+		}
+		if err := sleepRandom(page, postScrollRange.min, postScrollRange.max); err != nil {
+			return false, 0, 0, err
+		}
+		currentScrollTop = getScrollTop(page)
+		actualDelta = currentScrollTop - beforeTop + actualDelta
+		scrolled = actualDelta > 5
+	}
+
+	if scrolled {
+		logrus.Debugf("滚动: %d -> %d (Δ%d, large=%v, push=%d)",
+			beforeTop-actualDelta, currentScrollTop, actualDelta, largeMode, pushCount)
+	}
+
+	return scrolled, actualDelta, currentScrollTop, nil
+}
+
+func getScrollRatio(speed string) float64 {
 	switch speed {
 	case "slow":
-		return float64(viewportHeight) * 0.2
+		return 0.5
 	case "fast":
-		return float64(viewportHeight) * 0.8
-	default:
-		return float64(viewportHeight) * 0.4
+		return 0.9
+	default: // normal
+		return 0.7
 	}
 }
 
-func getViewportHeight(page *hrod.Page) (int, error) {
-	result, err := page.Eval(`() => window.innerHeight`)
-	if err != nil {
-		return 0, err
+func calculateScrollDelta(viewportHeight int, baseRatio float64) float64 {
+	scrollDelta := float64(viewportHeight) * (baseRatio + rand.Float64()*0.2)
+	if scrollDelta < 400 {
+		scrollDelta = 400
 	}
-	if result == nil {
-		return 0, fmt.Errorf("获取视口高度未返回结果")
-	}
-	height := result.Value.Int()
-	if height <= 0 {
-		return 1080, nil
-	}
-	return height, nil
-}
-
-type scrollResult struct {
-	scrollTop    float64
-	scrollDelta  float64
-	scrollHeight float64
-}
-
-func humanScroll(page *hrod.Page, speed string, largeMode bool, pushCount int) (float64, float64, int, error) {
-	maxScrollDelta := 300.0
-	if largeMode {
-		maxScrollDelta = 1000.0
-	}
-	delta := maxScrollDelta*0.5 + maxScrollDelta*0.5*rand.Float64()
-	delta = delta * float64(pushCount)
-	result, err := page.Eval(fmt.Sprintf(`() => {
-		const st = window.pageYOffset || document.documentElement.scrollTop || document.body.scrollTop || 0;
-		window.scrollBy(0, %f);
-		return JSON.stringify({scrollTop: st, scrollDelta: %f, scrollHeight: document.body.scrollHeight});
-	}`, delta, delta))
-	if err != nil {
-		return 0, 0, 0, err
-	}
-	if result == nil {
-		return 0, 0, 0, fmt.Errorf("humanScroll 未返回结果")
-	}
-	var sr scrollResult
-	if err := json.Unmarshal([]byte(result.Value.Str()), &sr); err != nil {
-		return 0, 0, 0, err
-	}
-	return sr.scrollTop, sr.scrollDelta, int(sr.scrollTop), nil
+	return scrollDelta + float64(rand.Intn(100)-50)
 }
 
 func scrollToCommentsArea(page *hrod.Page) error {
-	commentsContainer, err := page.Timeout(5 * time.Second).Element(".comments-container")
-	if err == nil {
-		container := hrod.NewElement(commentsContainer, page.Actor())
-		return container.ScrollIntoView()
+	logrus.Info("滚动到评论区...")
+
+	// 先定位到评论区
+	if el, err := page.Rod.Timeout(2 * time.Second).Element(".comments-container"); err == nil {
+		commentContainer := hrod.NewElement(el, page.Actor())
+		if err := commentContainer.ScrollIntoView(); err != nil {
+			logrus.Warnf("滚动到评论区失败: %v", err)
+		}
 	}
-	commentArea, err := page.Timeout(3 * time.Second).Element(".comment-area,.comment-list")
-	if err == nil {
-		area := hrod.NewElement(commentArea, page.Actor())
-		return area.ScrollIntoView()
-	}
-	logrus.Warnf("未找到评论区，尝试滚动到页面底部")
-	if err := page.Actor().Mouse.Scroll(0, 500); err != nil {
+	// Give the browser a short opportunity to activate the comment lazy loader.
+	// This is synchronization, not a humanization delay.
+	if err := page.Sleep(commentPollInterval); err != nil {
 		return err
 	}
-	return nil
+
+	if err := moveToCommentWheelAnchor(page); err != nil {
+		return err
+	}
+	if err := page.Actor().Mouse.Scroll(0, 100); err != nil {
+		return err
+	}
+	return smartScroll(page, 100)
 }
 
 func scrollToLastComment(page *hrod.Page) {
@@ -699,6 +810,31 @@ func scrollToLastComment(page *hrod.Page) {
 	}
 }
 
+// smartScroll dispatches the wheel event to the same scroll containers used by
+// the web client. Mouse wheel input keeps the action human-like, while this
+// event wakes the comment lazy loader on site versions that ignore body scroll.
+func smartScroll(page *hrod.Page, delta float64) error {
+	_, err := page.Eval(commentLazyLoadWheelScript(), delta)
+	return err
+}
+
+func commentLazyLoadWheelScript() string {
+	return `(delta) => {
+		const targetElement = document.querySelector('.note-scroller')
+			|| document.querySelector('.interaction-container')
+			|| document.documentElement;
+
+		const wheelEvent = new WheelEvent('wheel', {
+			deltaY: delta,
+			deltaMode: 0,
+			bubbles: true,
+			cancelable: true,
+			view: window
+		});
+		targetElement.dispatchEvent(wheelEvent);
+	}`
+}
+
 // ========== DOM 查询 ==========
 
 func getCommentProgress(page *hrod.Page) (commentProgress, error) {
@@ -706,8 +842,8 @@ func getCommentProgress(page *hrod.Page) (commentProgress, error) {
 
 	result, err := page.Eval(`() => {
 		const totalEl = document.querySelector(".comments-container .total") ||
-		                document.querySelector(".comment-total") ||
-		                document.querySelector(".total");
+			document.querySelector(".comment-total") ||
+			document.querySelector(".total");
 		const totalText = totalEl?.innerText || "";
 		const totalMatch = totalText.match(/共\s*(\d+)\s*条评论/);
 		const endText = document.querySelector(".end-container")?.textContent || "";
@@ -730,6 +866,41 @@ func getCommentProgress(page *hrod.Page) (commentProgress, error) {
 		return progress, fmt.Errorf("解析评论加载状态: %w", err)
 	}
 	return progress, nil
+}
+
+func getScrollTop(page *hrod.Page) int {
+	var result int
+
+	// 使用retry-go来处理可能的DOM查询失败
+	err := retry.Do(
+		func() error {
+			evalResult, err := page.Eval(`() => {
+				return window.pageYOffset || document.documentElement.scrollTop || document.body.scrollTop || 0;
+			}`)
+			if err != nil {
+				return err
+			}
+			if evalResult == nil {
+				return fmt.Errorf("读取滚动位置未返回结果")
+			}
+
+			result = evalResult.Value.Int()
+			return nil
+		},
+		retry.Attempts(3),
+		retry.Delay(100*time.Millisecond),
+		retry.MaxJitter(200*time.Millisecond),
+		retry.OnRetry(func(n uint, err error) {
+			logrus.Debugf("获取滚动位置重试 #%d: %v", n, err)
+		}),
+	)
+
+	if err != nil {
+		logrus.Warnf("获取滚动位置失败: %v", err)
+		return 0 // 失败时返回0
+	}
+
+	return result
 }
 
 func getCommentCount(page *hrod.Page) int {
@@ -768,15 +939,8 @@ func getTotalCommentCount(page *hrod.Page) int {
 	// 使用retry-go来处理可能的DOM查询失败
 	err := retry.Do(
 		func() error {
-			// 尝试多个选择器获取总评论数元素
+			// 使用 Go 获取总评论数元素
 			totalEl, err := page.Timeout(2 * time.Second).Element(".comments-container .total")
-			if err != nil {
-				// 备用选择器
-				totalEl, err = page.Timeout(1 * time.Second).Element(".comment-total")
-				if err != nil {
-					totalEl, err = page.Timeout(1 * time.Second).Element(".total")
-				}
-			}
 			if err != nil {
 				return err
 			}
@@ -818,36 +982,62 @@ func getTotalCommentCount(page *hrod.Page) int {
 	return result
 }
 
-func getScrollTop(page *hrod.Page) int {
-	var result int
+func checkNoCommentsArea(page *hrod.Page) bool {
+	// 查找无评论区域
+	noCommentsEl, err := page.Timeout(2 * time.Second).Element(".no-comments-text")
+	if err != nil {
+		// 未找到无评论元素，说明有评论或评论区正常
+		return false
+	}
+
+	// 获取文本内容
+	text, err := noCommentsEl.Text()
+	if err != nil {
+		return false
+	}
+
+	// 检查是否包含"这是一片荒地"等关键词
+	text = strings.TrimSpace(text)
+	return strings.Contains(text, "这是一片荒地")
+}
+
+func checkEndContainer(page *hrod.Page) bool {
+	var result bool
 
 	// 使用retry-go来处理可能的DOM查询失败
 	err := retry.Do(
 		func() error {
-			evalResult, err := page.Eval(`() => {
-				return window.pageYOffset || document.documentElement.scrollTop || document.body.scrollTop || 0;
-			}`)
+			// 使用 Go 查找结束容器
+			endEl, err := page.Timeout(2 * time.Second).Element(".end-container")
 			if err != nil {
-				return err
-			}
-			if evalResult == nil {
-				return fmt.Errorf("读取滚动位置未返回结果")
+				// 未找到元素，说明未到底部
+				result = false
+				return nil
 			}
 
-			result = evalResult.Value.Int()
+			// 获取文本内容
+			text, err := endEl.Text()
+			if err != nil {
+				result = false
+				return nil
+			}
+
+			// 转换为大写并检查
+			textUpper := strings.ToUpper(strings.TrimSpace(text))
+			result = strings.Contains(textUpper, "THE END") || strings.Contains(textUpper, "THEEND")
 			return nil
 		},
 		retry.Attempts(3),
 		retry.Delay(100*time.Millisecond),
 		retry.MaxJitter(200*time.Millisecond),
 		retry.OnRetry(func(n uint, err error) {
-			logrus.Debugf("读取滚动位置重试 #%d: %v", n, err)
+			logrus.Debugf("检查结束容器重试 #%d: %v", n, err)
 		}),
 	)
 
 	if err != nil {
-		logrus.Warnf("读取滚动位置失败: %v", err)
-		return 0 // 失败时返回0
+		logrus.Warnf("检查结束容器失败: %v", err)
+		return false // 失败时返回false
 	}
 
 	return result
@@ -855,169 +1045,226 @@ func getScrollTop(page *hrod.Page) int {
 
 // ========== 页面检查 ==========
 
-func checkEndContainer(page *hrod.Page) bool {
-	_, err := page.Timeout(1 * time.Second).Element(".end-container")
-	return err == nil
-}
-
-func checkNoCommentsArea(page *hrod.Page) bool {
-	_, err := page.Timeout(1 * time.Second).Element(".no-comments-text")
-	return err == nil
-}
-
 func checkPageAccessible(page *hrod.Page) error {
-	title, err := page.Rod.Timeout(5 * time.Second).Eval(`() => document.title`)
-	if err != nil {
-		return fmt.Errorf("页面不可访问: %w", err)
+	if err := page.Sleep(500 * time.Millisecond); err != nil {
+		return err
 	}
-	if title.Value.Str() == "" || title.Value.Str() == "页面不存在" {
-		return errors.New(errors.ErrNoteNotFound, "笔记不存在或已被删除")
-	}
-	return nil
-}
 
-func waitForPage(page *hrod.Page) error {
-	// 使用 retry-go 实现页面等待逻辑
-	return retry.Do(
-		func() error {
-			ready, err := page.Rod.Timeout(3 * time.Second).HasR("body")
-			if err != nil {
-				return err
-			}
-			if !ready {
-				return fmt.Errorf("页面尚未就绪")
-			}
-			return nil
-		},
-		retry.Attempts(5),
-		retry.Delay(500*time.Millisecond),
-		retry.MaxJitter(1000*time.Millisecond),
-		retry.OnRetry(func(n uint, err error) {
-			logrus.Debugf("等待页面重试 #%d: %v", n, err)
-		}),
-	)
+	// 查找错误提示容器
+	wrapperEl, err := page.Timeout(2 * time.Second).Element(".access-wrapper, .error-wrapper, .not-found-wrapper, .blocked-wrapper")
+	if err != nil {
+		// 未找到错误容器，说明页面可访问
+		return nil
+	}
+
+	// 获取文本内容
+	text, err := wrapperEl.Text()
+	if err != nil {
+		// 无法获取文本，假设页面可访问
+		return nil
+	}
+
+	// 检查关键词
+	keywords := []string{
+		"当前笔记暂时无法浏览",
+		"该内容因违规已被删除",
+		"该笔记已被删除",
+		"内容不存在",
+		"笔记不存在",
+		"已失效",
+		"私密笔记",
+		"仅作者可见",
+		"因用户设置，你无法查看",
+		"因违规无法查看",
+	}
+
+	for _, kw := range keywords {
+		if strings.Contains(text, kw) {
+			logrus.Warnf("笔记不可访问: %s", kw)
+			return fmt.Errorf("笔记不可访问: %s", kw)
+		}
+	}
+
+	// 如果有文本但不匹配关键词，返回未知错误
+	trimmedText := strings.TrimSpace(text)
+	if trimmedText != "" {
+		logrus.Warnf("笔记不可访问（未知原因）: %s", trimmedText)
+		return fmt.Errorf("笔记不可访问: %s", trimmedText)
+	}
+
+	return nil
 }
 
 // ========== 数据提取 ==========
 
 func (f *FeedDetailAction) extractFeedDetail(page *hrod.Page, feedID string) (*FeedDetailResponse, error) {
-	return extractFeedDetailFromPage(page, feedID)
-}
-
-// extractFeedDetailFromPage 从页面提取Feed详情
-func extractFeedDetailFromPage(page *hrod.Page, feedID string) (*FeedDetailResponse, error) {
-	result, err := page.Eval(feedDetailExtractScript)
-	if err != nil {
-		return nil, fmt.Errorf("执行提取脚本失败: %w", err)
-	}
-	if result == nil {
-		return nil, fmt.Errorf("提取脚本未返回结果")
+	if err := page.Wait(rod.Eval(`(id, selector, deadline) => {
+		const s = window.__INITIAL_STATE__;
+		const hasState = s?.note?.noteDetailMap?.[id] != null;
+		const hasDOM = document.querySelector(selector) !== null;
+		return hasDOM || hasState || Date.now() >= deadline;
+	}`, feedID, SelectorFeedDetailReady, time.Now().Add(10*time.Second).UnixMilli())); err != nil {
+		return nil, fmt.Errorf("等待笔记详情加载失败: %w", err)
 	}
 
-	var response FeedDetailResponse
-	if err := json.Unmarshal([]byte(result.Value.Str()), &response); err != nil {
-		return nil, fmt.Errorf("解析提取结果失败: %w", err)
-	}
+	deadline := time.Now().Add(initialCommentStateTimeout)
+	var lastErr error
 
-	// 处理图片 URL
-	for i := range response.Images {
-		if response.Images[i] == "" {
-			response.Images = append(response.Images[:i], response.Images[i+1:]...)
-			i--
+	for {
+		response, err := ExtractFeedDetailFromDOM(page, feedID)
+		if err != nil {
+			lastErr = err
+			// DOM 结构变更或虚拟列表未渲染时，降级读取 __INITIAL_STATE__。
+			response, err = readFeedDetailState(page, feedID)
+			if err != nil {
+				lastErr = err
+			}
+		}
+
+		// A non-zero displayed count with an empty list is a transient state while
+		// the web client hydrates its comments ref. Do not return that incomplete
+		// snapshot as a successful result. A genuinely empty or unavailable list
+		// still returns after the short bounded wait.
+		if response != nil && (!shouldWaitForInitialComments(response) || time.Now().After(deadline)) {
+			return response, nil
+		}
+		if time.Now().After(deadline) && lastErr != nil {
+			return nil, lastErr
+		}
+
+		if response != nil {
+			logrus.Debugf("评论 DOM 尚未就绪: note=%s, reported=%s", feedID, response.Note.InteractInfo.CommentCount)
+		}
+		if err := page.Sleep(commentPollInterval); err != nil {
+			return nil, err
 		}
 	}
-
-	if feedID != "" {
-		response.FeedID = feedID
-	}
-
-	return &response, nil
 }
 
-func shouldUseInitialCommentSnapshot(initial, detail *FeedDetailResponse) bool {
-	if initial == nil || detail == nil {
-		return false
-	}
-	// 如果加载评论后的详情没有评论数据，但加载前有，则使用加载前的
-	if len(initial.Comments) > 0 && len(detail.Comments) == 0 {
-		return true
-	}
-	// 如果加载后评论数明显减少（异常情况），也使用加载前的
-	if len(initial.Comments) > 0 && len(detail.Comments) < len(initial.Comments)/2 {
-		return true
-	}
-	return false
-}
-
-// 导航到Feed详情页
-func navigateToFeedDetail(page *hrod.Page, feedID, xsecToken string) error {
-	return retry.Do(
+// readFeedDetailState normalizes Vue refs before serializing the state. The
+// site has used both direct values and ref wrappers (value/_value) for
+// noteDetailMap and comments. json.Unmarshal silently turns a wrapped comments
+// value into an empty CommentList, so unwrapping must happen in the page.
+func readFeedDetailState(page *hrod.Page, feedID string) (*FeedDetailResponse, error) {
+	var response *FeedDetailResponse
+	err := retry.Do(
 		func() error {
-			return page.Navigate(fmt.Sprintf("https://www.xiaohongshu.com/explore/%s?xsec_token=%s", feedID, xsecToken))
+			var err error
+			response, err = readFeedDetailStateOnce(page, feedID)
+			return err
 		},
 		retry.Attempts(3),
-		retry.Delay(500*time.Millisecond),
-		retry.MaxJitter(1000*time.Millisecond),
+		retry.Delay(200*time.Millisecond),
+		retry.MaxJitter(300*time.Millisecond),
 		retry.OnRetry(func(n uint, err error) {
-			logrus.Debugf("页面导航重试 #%d: %v", n, err)
+			logrus.Debugf("提取Feed详情重试 #%d: %v", n, err)
 		}),
 	)
+	if err != nil {
+		return nil, err
+	}
+	return response, nil
 }
 
-// 提取脚本
-const feedDetailExtractScript = `() => {
-	// 提取笔记标题
-	const titleEl = document.querySelector("#detail-title,.note-title,.title,.article-title");
-	const title = titleEl ? titleEl.textContent.trim() : "";
+func readFeedDetailStateOnce(page *hrod.Page, feedID string) (*FeedDetailResponse, error) {
+	result, err := page.Eval(`(feedID) => {
+		const hasOwn = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
+		const isObject = (value) => value !== null && typeof value === "object";
 
-	// 提取笔记内容
-	const descEl = document.querySelector(".desc,.content,.note-text,.article-content");
-	const desc = descEl ? descEl.textContent.trim() : "";
+		const unwrapRef = (value) => {
+			const seen = new Set();
+			let current = value;
+			while (isObject(current) && !seen.has(current)) {
+				seen.add(current);
+				if ((current.__v_isReactive || current.__v_isReadonly) &&
+					isObject(current.__v_raw) && current.__v_raw !== current) {
+					current = current.__v_raw;
+					continue;
+				}
+				if (current.__v_isRef === true) {
+					const next = current.value;
+					if (next === current) break;
+					current = next;
+					continue;
+				}
+				if (hasOwn(current, "_value")) {
+					const next = current._value;
+					if (next === current) break;
+					current = next;
+					continue;
+				}
+				if (hasOwn(current, "value")) {
+					const next = current.value;
+					if (next === current) break;
+					current = next;
+					continue;
+				}
+				break;
+			}
+			return current;
+		};
 
-	// 提取作者信息
-	const authorEl = document.querySelector(".author,.username,.user-name,.article-author");
-	const authorName = authorEl ? authorEl.textContent.trim() : "";
+		// JSON.stringify invokes getters and proxy traps. Its replacer also sees
+		// nested refs which are not covered by unwrapping just note/comments.
+		// Parsing the JSON result makes the evaluated value a plain, deep snapshot
+		// before it crosses the Go/CDP boundary.
+		const snapshot = (value) => {
+			const json = JSON.stringify(unwrapRef(value), (_key, nested) => unwrapRef(nested));
+			return json === undefined ? undefined : JSON.parse(json);
+		};
 
-	// 提取图片
-	const images = [];
-	document.querySelectorAll("img.note-image,.carousel img,.swiper img,.article-image").forEach(img => {
-		const src = img.getAttribute("src") || img.getAttribute("data-src") || "";
-		if (src && !images.includes(src)) {
-			images.push(src);
-		}
-	});
+		const state = window.__INITIAL_STATE__;
+		const noteState = unwrapRef(state?.note);
+		const noteDetailMap = unwrapRef(noteState?.noteDetailMap);
+		const detail = unwrapRef(noteDetailMap?.[feedID]);
+		if (!detail) return "";
 
-	// 提取互动数据
-	const likeEl = document.querySelector(".like-wrapper .count,.like-count,.interact-count");
-	const likeCount = likeEl ? likeEl.textContent.trim() : "0";
-	const collectEl = document.querySelector(".collect-wrapper .count,.collect-count,.fav-count");
-	const collectCount = collectEl ? collectEl.textContent.trim() : "0";
-	const shareEl = document.querySelector(".share-wrapper .count,.share-count");
-	const shareCount = shareEl ? shareEl.textContent.trim() : "0";
+		return JSON.stringify(snapshot({
+			note: detail.note,
+			comments: detail.comments,
+		}));
+	}`, feedID)
+	if err != nil {
+		return nil, fmt.Errorf("提取Feed详情失败: %w", err)
+	}
+	if result == nil || result.Value.Str() == "" {
+		return nil, errors.ErrNoFeedDetail
+	}
 
-	// 提取评论
-	const comments = [];
-	document.querySelectorAll(".parent-comment").forEach(comment => {
-		const userEl = comment.querySelector(".comment-user,.username,.author");
-		const contentEl = comment.querySelector(".comment-content,.content,.text");
-		const timeEl = comment.querySelector(".comment-time,.time,.date");
-		comments.push({
-			user: userEl ? userEl.textContent.trim() : "",
-			content: contentEl ? contentEl.textContent.trim() : "",
-			time: timeEl ? timeEl.textContent.trim() : "",
-		});
-	});
+	var noteDetail struct {
+		Note     FeedDetail  `json:"note"`
+		Comments CommentList `json:"comments"`
+	}
+	if err := json.Unmarshal([]byte(result.Value.Str()), &noteDetail); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal feed detail: %w", err)
+	}
 
-	return JSON.stringify({
-		feedID: "",
-		title: title,
-		content: desc,
-		author: authorName,
-		authorID: "",
-		images: images,
-		likeCount: likeCount,
-		collectCount: collectCount,
-		shareCount: shareCount,
-		comments: comments,
-	});
-}`
+	return &FeedDetailResponse{Note: noteDetail.Note, Comments: noteDetail.Comments}, nil
+}
+
+func shouldWaitForInitialComments(response *FeedDetailResponse) bool {
+	if len(response.Comments.List) != 0 {
+		return false
+	}
+	commentCount, err := strconv.Atoi(strings.TrimSpace(response.Note.InteractInfo.CommentCount))
+	return err == nil && commentCount > 0
+}
+
+func shouldUseInitialCommentSnapshot(initial, current *FeedDetailResponse) bool {
+	return initial != nil && current != nil &&
+		len(initial.Comments.List) > 0 && len(current.Comments.List) == 0
+}
+
+func makeFeedDetailURL(feedID, xsecToken string) string {
+	return fmt.Sprintf("https://www.xiaohongshu.com/explore/%s?xsec_token=%s&xsec_source=pc_feed", feedID, xsecToken)
+}
+
+func validateFeedAccessArgs(feedID, xsecToken string) error {
+	if strings.TrimSpace(feedID) == "" {
+		return fmt.Errorf("缺少feed_id参数")
+	}
+	if strings.TrimSpace(xsecToken) == "" {
+		return fmt.Errorf("缺少xsec_token参数")
+	}
+	return nil
+}
