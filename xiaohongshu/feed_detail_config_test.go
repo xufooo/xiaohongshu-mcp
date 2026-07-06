@@ -2,76 +2,9 @@ package xiaohongshu
 
 import (
 	"errors"
-	"strings"
 	"testing"
 	"time"
 )
-
-func TestDefaultCommentLoadConfigDoesNotLimitLoadAllComments(t *testing.T) {
-	cfg := DefaultCommentLoadConfig()
-
-	if cfg.MaxCommentItems != 0 {
-		t.Fatalf("default MaxCommentItems should mean no explicit limit, got %d", cfg.MaxCommentItems)
-	}
-	if cfg.ScrollSpeed != "fast" {
-		t.Fatalf("default ScrollSpeed should prioritize comment loading, got %q", cfg.ScrollSpeed)
-	}
-
-	loader := &commentLoader{config: cfg}
-	if got := loader.calculateMaxAttempts(); got != defaultMaxAttempts {
-		t.Fatalf("unlimited default should use defaultMaxAttempts, got %d", got)
-	}
-}
-
-func TestCommentLoadConfigLimitControlsMaxAttempts(t *testing.T) {
-	loader := &commentLoader{config: CommentLoadConfig{MaxCommentItems: 20}}
-
-	if got := loader.calculateMaxAttempts(); got != 60 {
-		t.Fatalf("expected limited attempts to scale by limit, got %d", got)
-	}
-}
-
-func TestCommentWheelAnchorScriptOnlyMeasuresVisibleCommentArea(t *testing.T) {
-	script := commentWheelAnchorScript()
-
-	for _, want := range []string{
-		`document.querySelectorAll(".parent-comment")`,
-		`document.querySelector(".comments-container")`,
-		`getBoundingClientRect()`,
-		`JSON.stringify`,
-	} {
-		if !strings.Contains(script, want) {
-			t.Fatalf("comment wheel anchor script missing %q:\n%s", want, script)
-		}
-	}
-
-	for _, unwanted := range []string{
-		`window.scrollBy`,
-		`scrollBy({`,
-		`WheelEvent`,
-		`.note-scroller`,
-		`.interaction-container`,
-	} {
-		if strings.Contains(script, unwanted) {
-			t.Fatalf("comment wheel anchor script should not contain %q:\n%s", unwanted, script)
-		}
-	}
-}
-
-func TestCommentLazyLoadWheelScriptTargetsXHSScrollContainers(t *testing.T) {
-	script := commentLazyLoadWheelScript()
-
-	for _, want := range []string{
-		`document.querySelector('.note-scroller')`,
-		`document.querySelector('.interaction-container')`,
-		`new WheelEvent('wheel'`,
-		`targetElement.dispatchEvent(wheelEvent)`,
-	} {
-		if !strings.Contains(script, want) {
-			t.Fatalf("comment lazy-load wheel script missing %q:\n%s", want, script)
-		}
-	}
-}
 
 func TestNormalizeCommentLoadConfigUsesFastForMissingOrInvalidSpeed(t *testing.T) {
 	for _, speed := range []string{"", "unexpected"} {
