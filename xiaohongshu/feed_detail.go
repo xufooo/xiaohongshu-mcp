@@ -212,9 +212,16 @@ func loadCommentsByJS(page *hrod.Page, config CommentLoadConfig) error {
 func loadCommentsScript() string {
 	return `(maxItems, speed) => {
 		const delay={slow:1200,normal:700,fast:400}[speed]||700;
-		const MAX=200, slp=ms=>new Promise(r=>setTimeout(r,ms));
-		// Find scrollable ancestor of the comments area
+		const MAX=500, slp=ms=>new Promise(r=>setTimeout(r,ms));
+		// Dispatch wheel event on the note-scroller to trigger XHS lazy loading
+		function fireWheel(ct, dy){
+			const ev=new WheelEvent("wheel",{deltaY:dy,deltaMode:0,bubbles:true,cancelable:true});
+			ct.dispatchEvent(ev);
+		}
+		// Find the correct scroll container (note-scroller is the one XHS uses)
 		function findScrollContainer(){
+			const ns=document.querySelector(".note-scroller");
+			if(ns&&ns.scrollHeight>ns.clientHeight+5) return ns;
 			const cc=document.querySelector(".comments-container")||document.querySelector(".interaction-container");
 			if(!cc) return document.documentElement;
 			cc.scrollIntoView({block:"center"});
@@ -228,24 +235,28 @@ func loadCommentsScript() string {
 			return cc;
 		}
 		const ct=findScrollContainer();
-		// Scroll last comment into view to trigger lazy load
+		// Scroll and fire wheel to trigger comment lazy loading
 		function scrollLast(){
 			const all=document.querySelectorAll(".parent-comment");
 			if(all.length>0){
 				const last=all[all.length-1];
-				last.scrollIntoView({block:"nearest",behavior:"instant"});
+				// Scroll to end of last comment (pushes container to edge)
+				last.scrollIntoView({block:"end",behavior:"instant"});
+				// Nudge container further and fire wheel event
+				ct.scrollBy(0,200);
+				fireWheel(ct,200);
 			}else{
 				ct.scrollBy(0,300);
+				fireWheel(ct,300);
 			}
 		}
 		return (async()=>{
 			await slp(800);
 			for(let i=0;i<MAX;i++){
 				const n=document.querySelectorAll(".parent-comment").length;
-				const e=document.querySelector(".end-container");
-				const end=e&&/THE\\s*END/i.test(e.textContent||"");
-				if((maxItems>0&&n>=maxItems)||end) return JSON.stringify({count:n,reachedEnd:end,rounds:i+1,status:"ok"});
+				if(maxItems>0&&n>=maxItems) return JSON.stringify({count:n,reachedEnd:false,rounds:i+1,status:"ok"});
 				scrollLast();
+				if(i>0&&i%50===0) await slp(2000); // breath every 50 rounds
 				await slp(delay);
 			}
 			return JSON.stringify({count:document.querySelectorAll(".parent-comment").length,reachedEnd:false,rounds:MAX,status:"max_rounds"});
