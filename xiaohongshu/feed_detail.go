@@ -212,21 +212,40 @@ func loadCommentsByJS(page *hrod.Page, config CommentLoadConfig) error {
 func loadCommentsScript() string {
 	return `(maxItems, speed) => {
 		const delay={slow:1200,normal:700,fast:400}[speed]||700;
-		const ratio={slow:0.5,normal:0.7,fast:0.9}[speed]||0.7;
 		const MAX=200, slp=ms=>new Promise(r=>setTimeout(r,ms));
-		const ct=document.querySelector(".note-scroller")||document.querySelector(".interaction-container")||document.documentElement;
+		// Find scrollable ancestor of the comments area
+		function findScrollContainer(){
+			const cc=document.querySelector(".comments-container")||document.querySelector(".interaction-container");
+			if(!cc) return document.documentElement;
+			cc.scrollIntoView({block:"center"});
+			let el=cc;
+			for(let i=0;i<10;i++){
+				const p=el.parentElement;
+				if(!p) break;
+				if(p.scrollHeight>p.clientHeight+5) return p;
+				el=p;
+			}
+			return cc;
+		}
+		const ct=findScrollContainer();
+		// Scroll last comment into view to trigger lazy load
+		function scrollLast(){
+			const all=document.querySelectorAll(".parent-comment");
+			if(all.length>0){
+				const last=all[all.length-1];
+				last.scrollIntoView({block:"nearest",behavior:"instant"});
+			}else{
+				ct.scrollBy(0,300);
+			}
+		}
 		return (async()=>{
-			const cc=document.querySelector(".comments-container");
-			if(cc) cc.scrollIntoView({block:"center"});
-			await slp(500);
+			await slp(800);
 			for(let i=0;i<MAX;i++){
 				const n=document.querySelectorAll(".parent-comment").length;
 				const e=document.querySelector(".end-container");
 				const end=e&&/THE\\s*END/i.test(e.textContent||"");
 				if((maxItems>0&&n>=maxItems)||end) return JSON.stringify({count:n,reachedEnd:end,rounds:i+1,status:"ok"});
-				const v=window.innerHeight||800, d=Math.max(v*ratio,400);
-				ct.scrollBy(0,d);
-				try{ct.dispatchEvent(new WheelEvent("wheel",{deltaY:d,bubbles:true,cancelable:true}))}catch(e){}
+				scrollLast();
 				await slp(delay);
 			}
 			return JSON.stringify({count:document.querySelectorAll(".parent-comment").length,reachedEnd:false,rounds:MAX,status:"max_rounds"});
