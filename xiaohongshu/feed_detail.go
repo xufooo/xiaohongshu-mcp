@@ -12,6 +12,7 @@ import (
 
 	"github.com/avast/retry-go/v4"
 	"github.com/go-rod/rod"
+	"github.com/go-rod/rod/lib/proto"
 	"github.com/sirupsen/logrus"
 	"github.com/xpzouying/xiaohongshu-mcp/errors"
 	hrod "github.com/xpzouying/xiaohongshu-mcp/pkg/humanize/rod"
@@ -197,70 +198,103 @@ type commentProgress struct {
 }
 
 func loadCommentsByJS(page *hrod.Page, config CommentLoadConfig) error {
-	logrus.Info("开始加载评论(JS)...")
-	result, err := page.Eval(loadCommentsScript(), config.MaxCommentItems, config.ScrollSpeed)
-	if err != nil {
-		return fmt.Errorf("JS加载失败: %w", err)
+	logrus.Info("开始加载评论(CDP Mouse.Scroll)...")
+	logrus.Infof("配置: maxItems=%d, speed=%s", config.MaxCommentItems, config.ScrollSpeed)
+
+	await := map[string]time.Duration{"slow": 1200, "normal": 700, "fast": 400}[config.ScrollSpeed]
+	scrollDelta := map[string]float64{"slow": 150, "normal": 250, "fast": 350}[config.ScrollSpeed]
+	maxRounds := 500
+
+	// 先确保评论区可见
+	if err := scrollToCommentsArea(page); err != nil {
+		logrus.Warnf("定位评论区失败: %v", err)
 	}
-	if result == nil {
-		return fmt.Errorf("JS加载无返回")
+	// 移动鼠标到页面中央（获取焦点，确保 Mouse.Scroll 生效）
+	if err := page.Mouse.MoveTo(proto.NewPoint(400, 400)); err != nil {
+		logrus.Warnf("鼠标定位失败: %v", err)
 	}
-	logrus.Infof("JS结果: %s", result.Value.Str())
+	if err := page.Sleep(time.Second); err != nil {
+		return err
+	}
+
+	lastCount := -1
+	staleChecks := 0
+	const maxStaleChecks = 20 // 连续20次无增长即退出
+
+	progressFunc := func() (int, bool, bool) {
+		result, err := page.Eval(commentProgressScript())
+		if err != nil {
+			logrus.Warnf("评论进度检查失败: %v", err)
+			return lastCount, false, false
+		}
+		if result == nil {
+			return lastCount, false, false
+		}
+		var p struct {
+			Count      int  `json:"count"`
+			AtEnd      bool `json:"atEnd"`
+			NoComments bool `json:"noComments"`
+		}
+		if err := json.Unmarshal([]byte(result.Value.Str()), &p); err != nil {
+			return lastCount, false, false
+		}
+		return p.Count, p.AtEnd, p.NoComments
+	}
+
+	for i := 0; i < maxRounds; i++ {
+		// 使用原始 CDP Mouse.Scroll（真实滚轮事件，isTrusted=true，无 humanize 延迟）
+		if err := page.Mouse.Scroll(0, scrollDelta, 1); err != nil {
+			logrus.Warnf("Mouse.Scroll 失败: %v", err)
+		}
+		if err := page.Sleep(await * time.Millisecond); err != nil {
+			return err
+		}
+
+		// 每5轮检查一次进度（非致命，超时继续）
+		if i%5 == 0 {
+			count, atEnd, noComments := progressFunc()
+			if noComments {
+				logrus.Info("✓ 笔记无评论（荒地），跳过加载")
+				return nil
+			}
+			if atEnd {
+				logrus.Infof("✓ 检测到评论已到底: count=%d", count)
+				return nil
+			}
+			logrus.Debugf("评论进度: %d/%d, atEnd=%v", count, config.MaxCommentItems, atEnd)
+
+			if config.MaxCommentItems > 0 && count >= config.MaxCommentItems {
+				logrus.Infof("✓ 已达到目标评论数: %d", count)
+				return nil
+			}
+
+			if count > lastCount {
+				lastCount = count
+				staleChecks = 0
+			} else {
+				staleChecks++
+				if staleChecks >= maxStaleChecks {
+					logrus.Infof("✓ 评论数连续%d轮无增长(%d)，停止", staleChecks*5, count)
+					return nil
+				}
+			}
+		}
+	}
+
+	logrus.Infof("✓ 达到最大轮数(%d)，停止加载", maxRounds)
 	return nil
 }
 
-func loadCommentsScript() string {
-	return `(maxItems, speed) => {
-		const delay={slow:1200,normal:700,fast:400}[speed]||700;
-		const MAX=500, slp=ms=>new Promise(r=>setTimeout(r,ms));
-		// Dispatch wheel event on the note-scroller to trigger XHS lazy loading
-		function fireWheel(ct, dy){
-			const ev=new WheelEvent("wheel",{deltaY:dy,deltaMode:0,bubbles:true,cancelable:true});
-			ct.dispatchEvent(ev);
-		}
-		// Find the correct scroll container (note-scroller is the one XHS uses)
-		function findScrollContainer(){
-			const ns=document.querySelector(".note-scroller");
-			if(ns&&ns.scrollHeight>ns.clientHeight+5) return ns;
-			const cc=document.querySelector(".comments-container")||document.querySelector(".interaction-container");
-			if(!cc) return document.documentElement;
-			cc.scrollIntoView({block:"center"});
-			let el=cc;
-			for(let i=0;i<10;i++){
-				const p=el.parentElement;
-				if(!p) break;
-				if(p.scrollHeight>p.clientHeight+5) return p;
-				el=p;
-			}
-			return cc;
-		}
-		const ct=findScrollContainer();
-		// Scroll and fire wheel to trigger comment lazy loading
-		function scrollLast(){
-			const all=document.querySelectorAll(".parent-comment");
-			if(all.length>0){
-				const last=all[all.length-1];
-				// Scroll to end of last comment (pushes container to edge)
-				last.scrollIntoView({block:"end",behavior:"instant"});
-				// Nudge container further and fire wheel event
-				ct.scrollBy(0,200);
-				fireWheel(ct,200);
-			}else{
-				ct.scrollBy(0,300);
-				fireWheel(ct,300);
-			}
-		}
-		return (async()=>{
-			await slp(800);
-			for(let i=0;i<MAX;i++){
-				const n=document.querySelectorAll(".parent-comment").length;
-				if(maxItems>0&&n>=maxItems) return JSON.stringify({count:n,reachedEnd:false,rounds:i+1,status:"ok"});
-				scrollLast();
-				if(i>0&&i%50===0) await slp(2000); // breath every 50 rounds
-				await slp(delay);
-			}
-			return JSON.stringify({count:document.querySelectorAll(".parent-comment").length,reachedEnd:false,rounds:MAX,status:"max_rounds"});
-		})();
+func commentProgressScript() string {
+	return `() => {
+		const endEl = document.querySelector(".end-container");
+		const endText = endEl?.textContent || "";
+		const noCommentsText = document.querySelector(".no-comments-text")?.textContent || "";
+		return JSON.stringify({
+			count: document.querySelectorAll(".parent-comment").length,
+			atEnd: /THE\\s*END/i.test(endText),
+			noComments: noCommentsText.includes("这是一片荒地"),
+		});
 	}`
 }
 
