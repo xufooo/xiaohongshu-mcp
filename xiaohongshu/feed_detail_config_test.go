@@ -90,6 +90,95 @@ func TestCommentProgressScriptCountsParentAndSubComments(t *testing.T) {
 	}
 }
 
+func TestCommentCursorTracksScrollAndExpansionState(t *testing.T) {
+	cursor := CommentCursor{
+		FeedID:      "feed-1",
+		Round:       3,
+		ReturnedIDs: []string{"comment-1"},
+		ExpandRound: 2,
+		CreatedAt:   time.Unix(123, 0),
+	}
+
+	if cursor.FeedID != "feed-1" || cursor.Round != 3 || cursor.ExpandRound != 2 {
+		t.Fatalf("cursor state not retained: %+v", cursor)
+	}
+	if len(cursor.ReturnedIDs) != 1 || cursor.ReturnedIDs[0] != "comment-1" {
+		t.Fatalf("cursor returned ids not retained: %+v", cursor.ReturnedIDs)
+	}
+}
+
+func TestLoadCommentsBatchAndExtractCommentsAPIsExist(t *testing.T) {
+	source, err := os.ReadFile("feed_detail.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(source)
+
+	for _, want := range []string{
+		`func LoadCommentsBatch(page *hrod.Page, config CommentLoadConfig, cursor *CommentCursor, maxItems int) ([]Comment, *CommentCursor, bool, error)`,
+		`scrollNoteScroller(page, scrollDelta)`,
+		`nextVisibleShowMoreButton(page, config.MaxRepliesThreshold)`,
+		`dispatchMouseClick(page, button.X, button.Y)`,
+		`page.Timeout(2*time.Second).Eval(`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("batch comment loader missing %s", want)
+		}
+	}
+
+	domSource, err := os.ReadFile("dom_extract.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(domSource), `func ExtractCommentsFromDOM(page *hrod.Page, feedID string) ([]Comment, error)`) {
+		t.Fatal("ExtractCommentsFromDOM API missing")
+	}
+}
+
+func TestCommentBatchKeyUsesIDOrIndexedContentPrefix(t *testing.T) {
+	if got := commentBatchKey(2, Comment{ID: "comment-1", Content: "ignored"}); got != "comment-1" {
+		t.Fatalf("commentBatchKey() with ID = %q, want comment-1", got)
+	}
+
+	longContent := "abcdefghijklmnopqrstuvwxyz1234567890"
+	if got := commentBatchKey(2, Comment{Content: longContent}); got != "idx_2_abcdefghijklmnopqrstuvwxyz1234" {
+		t.Fatalf("commentBatchKey() fallback = %q", got)
+	}
+}
+
+func TestLoadCommentsBatchRestoresCursorWithMainLoopSleepCadence(t *testing.T) {
+	source, err := os.ReadFile("feed_detail.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(source)
+
+	for _, want := range []string{
+		`if cursor != nil && cursor.Round > 0 {`,
+		`for i := 0; i < cursor.Round; i++ {`,
+		`if err := page.Sleep(await); err != nil {`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("cursor restore cadence missing %s", want)
+		}
+	}
+}
+
+func TestBatchTotalItemsOnlyUsesKnownCommentProgressTotal(t *testing.T) {
+	source, err := os.ReadFile("feed_detail.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(source)
+
+	if strings.Contains(script, `len(nextCursor.ReturnedIDs)`) {
+		t.Fatal("TotalItems must not fall back to returned cursor IDs")
+	}
+	if !strings.Contains(script, `knownCommentTotal(commentPage)`) {
+		t.Fatal("batch detail should set TotalItems only from known comment progress total")
+	}
+}
+
 func TestNextShowMoreButtonOnlyTargetsReplyExpansionButtons(t *testing.T) {
 	source, err := os.ReadFile("feed_detail.go")
 	if err != nil {

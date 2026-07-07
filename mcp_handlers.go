@@ -29,6 +29,55 @@ func newMCPFeedDetailContext(parent context.Context) (context.Context, context.C
 	return context.WithTimeout(parent, mcpFeedDetailOperationTimeout)
 }
 
+func parseMCPMaxItems(args map[string]any) int {
+	maxItems := 20
+	for _, key := range []string{"max_items", "limit"} {
+		raw, ok := args[key]
+		if !ok {
+			continue
+		}
+		switch v := raw.(type) {
+		case float64:
+			maxItems = int(v)
+		case string:
+			if parsed, err := strconv.Atoi(v); err == nil {
+				maxItems = parsed
+			}
+		case int:
+			maxItems = v
+		}
+		break
+	}
+	if maxItems <= 0 {
+		maxItems = 20
+	}
+	if maxItems > 50 {
+		maxItems = 50
+	}
+	return maxItems
+}
+
+func hasMCPBatchRequest(args map[string]any, cursorID string) bool {
+	if strings.TrimSpace(cursorID) != "" {
+		return true
+	}
+	raw, ok := args["max_items"]
+	if !ok {
+		return false
+	}
+	switch v := raw.(type) {
+	case float64:
+		return v > 0
+	case string:
+		parsed, err := strconv.Atoi(strings.TrimSpace(v))
+		return err == nil && parsed > 0
+	case int:
+		return v > 0
+	default:
+		return false
+	}
+}
+
 // parseVisibility 从 MCP 参数中解析可见范围
 func parseVisibility(args map[string]interface{}) string {
 	v, ok := args["visibility"]
@@ -736,10 +785,17 @@ func (s *AppServer) handleGetFeedDetail(ctx context.Context, args map[string]any
 		config.ScrollSpeed = raw
 	}
 
-	logrus.Infof("MCP: 获取Feed详情 - Feed ID: %s, loadAllComments=%v, config=%+v", feedID, loadAll, config)
+	cursorID := ""
+	if raw, ok := args["cursor"].(string); ok {
+		cursorID = strings.TrimSpace(raw)
+	}
+	batchRequested := hasMCPBatchRequest(args, cursorID)
+	maxItems := parseMCPMaxItems(args)
+
+	logrus.Infof("MCP: 获取Feed详情 - Feed ID: %s, loadAllComments=%v, batch=%v, maxItems=%d, config=%+v", feedID, loadAll, batchRequested, maxItems, config)
 
 	operationCtx := ctx
-	if loadAll {
+	if loadAll || batchRequested {
 		if deadline, ok := ctx.Deadline(); ok {
 			logrus.Infof("MCP get_feed_detail 请求 deadline: %s；使用最长 %s 操作超时",
 				deadline.Format(time.RFC3339), mcpFeedDetailOperationTimeout)
@@ -753,7 +809,13 @@ func (s *AppServer) handleGetFeedDetail(ctx context.Context, args map[string]any
 		defer cancel()
 	}
 
-	result, err := s.xiaohongshuService.GetFeedDetailWithConfig(operationCtx, feedID, xsecToken, loadAll, config)
+	var result *FeedDetailResponse
+	var err error
+	if batchRequested {
+		result, err = s.xiaohongshuService.GetFeedDetailCommentsBatch(operationCtx, feedID, xsecToken, cursorID, maxItems, config)
+	} else {
+		result, err = s.xiaohongshuService.GetFeedDetailWithConfig(operationCtx, feedID, xsecToken, loadAll, config)
+	}
 	if err != nil {
 		return &MCPToolResult{
 			Content: []MCPContent{{

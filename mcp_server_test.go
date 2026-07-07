@@ -50,3 +50,16 @@ func TestSessionDetailInputSchemaKeepsPagesOptional(t *testing.T) {
 		t.Fatalf("session_id should remain required: %+v", schema.Required)
 	}
 }
+
+func TestFeedDetailInputSchemaIncludesCommentCursorBatchFields(t *testing.T) {
+	schema, err := jsonschema.For[FeedDetailArgs](nil)
+	if err != nil {
+		t.Fatalf("jsonschema.For[FeedDetailArgs]() error = %v", err)
+	}
+	if _, ok := schema.Properties["cursor"]; !ok {
+		t.Fatalf("cursor property missing from schema: %+v", schema.Properties)
+	}
+	if _, ok := schema.Properties["max_items"]; !ok {
+		t.Fatalf("max_items property missing from schema: %+v", schema.Properties)
+	}
+}

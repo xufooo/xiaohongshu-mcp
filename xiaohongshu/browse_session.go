@@ -420,6 +420,55 @@ func (s *BrowseSession) DetailForFeed(ctx context.Context, expectedFeedID string
 	return s.detail(ctx, expectedFeedID, loadComments, 0, config, true)
 }
 
+func (s *BrowseSession) DetailCommentsBatch(ctx context.Context, expectedFeedID string, cursor *CommentCursor, maxItems int, config CommentLoadConfig) (*FeedDetailResponse, *CommentCursor, bool, error) {
+	if err := s.beginLockedOperation(); err != nil {
+		return nil, nil, false, err
+	}
+	defer s.finishOperation()
+
+	feedID, err := s.currentOpenedFeedIDFor(expectedFeedID)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	s.mu.Lock()
+	page := s.page
+	s.mu.Unlock()
+	if page == nil {
+		return nil, nil, false, fmt.Errorf("browse session 页面不存在: %s", s.id)
+	}
+	if err := WaitForXHSReady(page.Context(ctx), XHSReadyOptions{Kind: XHSReadyDetail, FeedID: feedID}); err != nil {
+		return nil, nil, false, err
+	}
+
+	detail, err := ExtractFeedDetailFromDOM(page.Context(ctx), feedID)
+	if err != nil {
+		return nil, nil, false, err
+	}
+
+	commentPage := page.Context(ctx).Timeout(commentLoadTimeout)
+	comments, nextCursor, hasMore, err := LoadCommentsBatch(commentPage, config, cursor, maxItems)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	if nextCursor != nil && nextCursor.FeedID == "" {
+		nextCursor.FeedID = feedID
+	}
+
+	detail.Comments = CommentList{
+		List:    comments,
+		HasMore: hasMore,
+	}
+	if totalItems := knownCommentTotal(commentPage); totalItems > 0 {
+		detail.Comments.TotalItems = totalItems
+	}
+
+	s.mu.Lock()
+	s.recordTimelineLocked("detail_comments_batch", feedID, "ok", time.Now(), fmt.Sprintf("maxItems=%d hasMore=%v", maxItems, hasMore))
+	s.mu.Unlock()
+	s.probeWatchdogSelectorsForKind(ctx, XHSReadyDetail, feedID)
+	return detail, nextCursor, hasMore, nil
+}
+
 func (s *BrowseSession) detail(ctx context.Context, expectedFeedID string, loadComments bool, pages int, config CommentLoadConfig, useConfig bool) (*FeedDetailResponse, error) {
 	if err := s.beginLockedOperation(); err != nil {
 		return nil, err

@@ -26,6 +26,9 @@ type XiaohongshuService struct {
 	actionState    *xiaohongshu.ActionStateStore
 	browseSessions *xiaohongshu.BrowseSessionManager
 	rateLimiter    *ratelimit.Limiter
+
+	commentCursors   sync.Map
+	commentCursorTTL time.Duration
 }
 
 // NewXiaohongshuService 创建小红书服务实例
@@ -41,11 +44,41 @@ func NewXiaohongshuService() *XiaohongshuService {
 			cookies.GetCookiesFilePath(),
 		),
 		browseSessions: xiaohongshu.NewBrowseSessionManager(xiaohongshu.DefaultBrowseSessionTimeout),
+		commentCursorTTL: 5 * time.Minute,
 	}
 }
 
 func (s *XiaohongshuService) SetRateLimiter(limiter *ratelimit.Limiter) {
 	s.rateLimiter = limiter
+}
+
+func (s *XiaohongshuService) setCommentCursor(id string, cursor *xiaohongshu.CommentCursor) {
+	if strings.TrimSpace(id) == "" || cursor == nil {
+		return
+	}
+	ttl := s.commentCursorTTL
+	if ttl <= 0 {
+		ttl = 5 * time.Minute
+	}
+	s.commentCursors.Store(id, cursor)
+	time.AfterFunc(ttl, func() {
+		if value, ok := s.commentCursors.Load(id); ok && value == cursor {
+			s.commentCursors.Delete(id)
+		}
+	})
+}
+
+func (s *XiaohongshuService) getCommentCursor(id string) (*xiaohongshu.CommentCursor, bool) {
+	value, ok := s.commentCursors.Load(strings.TrimSpace(id))
+	if !ok {
+		return nil, false
+	}
+	cursor, ok := value.(*xiaohongshu.CommentCursor)
+	return cursor, ok
+}
+
+func (s *XiaohongshuService) delCommentCursor(id string) {
+	s.commentCursors.Delete(strings.TrimSpace(id))
 }
 
 func (s *XiaohongshuService) startReadNetworkCapture(page *hrod.Page) *xiaohongshu.NetworkCapture {
@@ -534,6 +567,75 @@ func (s *XiaohongshuService) GetFeedDetailWithConfig(ctx context.Context, feedID
 	return response, nil
 }
 
+func (s *XiaohongshuService) GetFeedDetailCommentsBatch(ctx context.Context, feedID, xsecToken, cursorID string, maxItems int, config xiaohongshu.CommentLoadConfig) (*FeedDetailResponse, error) {
+	var cursor *xiaohongshu.CommentCursor
+	if strings.TrimSpace(cursorID) != "" {
+		stored, ok := s.getCommentCursor(cursorID)
+		if !ok {
+			return nil, fmt.Errorf("cursor expired, please start a new session")
+		}
+		if stored.FeedID != "" && stored.FeedID != feedID {
+			return nil, fmt.Errorf("cursor feed_id mismatch")
+		}
+		cursor = stored
+	}
+
+	if sid, ok := s.activeSessionForFeed(feedID); ok {
+		detail, nextCursor, hasMore, err := s.SessionDetailCommentsBatch(ctx, sid, feedID, cursor, maxItems, config)
+		if err != nil {
+			return nil, err
+		}
+		nextCursorID := ""
+		if hasMore && nextCursor != nil {
+			nextCursorID = fmt.Sprintf("cc_%s_%d", feedID, time.Now().UnixMilli())
+			s.setCommentCursor(nextCursorID, nextCursor)
+		}
+		if cursorID != "" {
+			s.delCommentCursor(cursorID)
+		}
+		detail.Comments.Cursor = nextCursorID
+		detail.Comments.HasMore = hasMore
+		return &FeedDetailResponse{FeedID: feedID, Data: detail}, nil
+	}
+
+	detailCtx := ctx
+	if detailCtx == nil {
+		detailCtx = context.Background()
+	}
+
+	page, err := s.acquirePageFor(detailCtx, "feed_detail_comments_batch")
+	if err != nil {
+		return nil, err
+	}
+	defer s.browserManager.Release(page)
+
+	action := xiaohongshu.NewFeedDetailActionWithState(page.Context(detailCtx), s.actionState)
+	capture := s.startReadNetworkCapture(page)
+	detail, nextCursor, hasMore, err := action.GetFeedDetailCommentsBatch(detailCtx, feedID, xsecToken, cursor, maxItems, config)
+	network := stopReadNetworkCapture(capture)
+	if err != nil {
+		s.recordRiskFromPage(page, err)
+		return nil, err
+	}
+
+	nextCursorID := ""
+	if hasMore && nextCursor != nil {
+		nextCursorID = fmt.Sprintf("cc_%s_%d", feedID, time.Now().UnixMilli())
+		s.setCommentCursor(nextCursorID, nextCursor)
+	}
+	if cursorID != "" {
+		s.delCommentCursor(cursorID)
+	}
+	detail.Comments.Cursor = nextCursorID
+	detail.Comments.HasMore = hasMore
+
+	return &FeedDetailResponse{
+		FeedID:  feedID,
+		Data:    detail,
+		Network: network,
+	}, nil
+}
+
 // UserProfile 获取用户信息
 func (s *XiaohongshuService) UserProfile(ctx context.Context, userID, xsecToken string) (*UserProfileResponse, error) {
 	page, err := s.acquirePageFor(ctx, "user_profile")
@@ -786,6 +888,19 @@ func (s *XiaohongshuService) SessionDetailForFeed(ctx context.Context, id, feedI
 		return nil, err
 	}
 	return detail, nil
+}
+
+func (s *XiaohongshuService) SessionDetailCommentsBatch(ctx context.Context, id, feedID string, cursor *xiaohongshu.CommentCursor, maxItems int, config xiaohongshu.CommentLoadConfig) (*xiaohongshu.FeedDetailResponse, *xiaohongshu.CommentCursor, bool, error) {
+	session, err := s.browseSessions.Get(id)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	detail, nextCursor, hasMore, err := session.DetailCommentsBatch(ctx, feedID, cursor, maxItems, config)
+	if err != nil {
+		s.recordRiskFromSession(session, err)
+		return nil, nil, false, err
+	}
+	return detail, nextCursor, hasMore, nil
 }
 
 func (s *XiaohongshuService) SessionLike(ctx context.Context, id string, unlike bool) (*ActionResult, error) {

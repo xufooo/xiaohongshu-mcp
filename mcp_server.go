@@ -60,6 +60,8 @@ type FeedDetailArgs struct {
 	FeedID           string `json:"feed_id" jsonschema:"小红书笔记ID，从Feed列表获取"`
 	XsecToken        string `json:"xsec_token" jsonschema:"访问令牌，从Feed列表的xsecToken字段获取"`
 	LoadAllComments  bool   `json:"load_all_comments,omitempty" jsonschema:"是否加载全部评论。false仅返回前10条一级评论（默认），true滚动加载更多评论"`
+	Cursor           string `json:"cursor,omitempty" jsonschema:"评论分批加载游标。首次分批加载不传，后续传上次返回的comments.cursor继续加载"`
+	MaxItems         int    `json:"max_items,omitempty" jsonschema:"评论分批加载每批最多返回数量，默认20，最大50"`
 	Limit            int    `json:"limit,omitempty" jsonschema:"【仅当load_all_comments为true时生效】限制加载的一级评论数量。例如20表示最多加载20条；不传或传0表示加载所有"`
 	ClickMoreReplies bool   `json:"click_more_replies,omitempty" jsonschema:"【仅当load_all_comments为true时生效】是否展开二级回复。true展开子评论，false不展开（默认）"`
 	ReplyLimit       int    `json:"reply_limit,omitempty" jsonschema:"【仅当click_more_replies为true时生效】跳过回复数过多的评论。例如10表示跳过超过10条回复的，默认10"`
@@ -322,9 +324,15 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 				"xsec_token":        args.XsecToken,
 				"load_all_comments": args.LoadAllComments,
 			}
+			if args.Cursor != "" {
+				argsMap["cursor"] = args.Cursor
+			}
+			if args.MaxItems > 0 {
+				argsMap["max_items"] = args.MaxItems
+			}
 
-			// 只有当 load_all_comments=true 时，才处理其他参数
-			if args.LoadAllComments {
+			// 只有当加载全部评论或分批加载时，才处理其他评论参数
+			if args.LoadAllComments || args.Cursor != "" || args.MaxItems > 0 {
 				argsMap["click_more_replies"] = args.ClickMoreReplies
 
 				if args.Limit > 0 {

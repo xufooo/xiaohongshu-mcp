@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/xpzouying/xiaohongshu-mcp/errors"
 	hrod "github.com/xpzouying/xiaohongshu-mcp/pkg/humanize/rod"
@@ -218,6 +219,56 @@ func ExtractFeedDetailFromDOM(page *hrod.Page, feedID string) (*FeedDetailRespon
 		return nil, fmt.Errorf("解析 DOM Feed 详情失败: %w", err)
 	}
 	return &response, nil
+}
+
+func ExtractCommentsFromDOM(page *hrod.Page, feedID string) ([]Comment, error) {
+	result, err := page.Timeout(2*time.Second).Eval(`(feedID) => {
+		const clean = (value) => (value || "").replace(/\s+/g, " ").trim();
+		const comments = Array.from(document.querySelectorAll(".parent-comment")).map((parent) => {
+			const top = parent.querySelector(":scope > .comment-item") || parent;
+			const content = clean(top.querySelector(".content, .note-text, [class*='content']")?.innerText || top.innerText);
+			const user = clean(top.querySelector(".author-wrapper .name, .name, .nickname, [class*='name']")?.innerText);
+			const likeText = clean(top.querySelector(".interactions .like, .like, [class*='like']")?.innerText);
+			const subComments = Array.from(parent.querySelectorAll(":scope > .children-comments > .comment-item-sub, :scope > .reply-container > .list-container > .comment-item")).map((sub) => {
+				const subContent = clean(sub.querySelector(".content, .note-text, [class*='content']")?.innerText || sub.innerText);
+				const subUser = clean(sub.querySelector(".author-wrapper .name, .name, .nickname, [class*='name']")?.innerText);
+				const subLikeText = clean(sub.querySelector(".interactions .like, .like, [class*='like']")?.innerText);
+				return {
+					id: sub.dataset?.id || sub.getAttribute("data-comment-id") || "",
+					noteId: feedID,
+					content: subContent,
+					likeCount: (subLikeText.match(/([\d.万wWkK]+)/) || ["", ""])[1],
+					userInfo: { nickname: subUser, nickName: subUser },
+					subComments: [],
+					showTags: []
+				};
+			}).filter((subComment) => subComment.content);
+			return {
+				id: parent.dataset?.id || parent.getAttribute("data-comment-id") || top.dataset?.id || top.getAttribute("data-comment-id") || "",
+				noteId: feedID,
+				content,
+				likeCount: (likeText.match(/([\d.万wWkK]+)/) || ["", ""])[1],
+				userInfo: { nickname: user, nickName: user },
+				subCommentCount: subComments.length ? String(subComments.length) : "",
+				subComments,
+				showTags: []
+			};
+		}).filter((comment) => comment.content);
+		if (comments.length === 0) return "";
+		return JSON.stringify(comments);
+	}`, feedID)
+	if err != nil {
+		return nil, fmt.Errorf("提取 DOM 评论失败: %w", err)
+	}
+	if result == nil || strings.TrimSpace(result.Value.Str()) == "" {
+		return nil, errors.ErrNoFeedDetail
+	}
+
+	var comments []Comment
+	if err := json.Unmarshal([]byte(result.Value.Str()), &comments); err != nil {
+		return nil, fmt.Errorf("解析 DOM 评论失败: %w", err)
+	}
+	return comments, nil
 }
 
 // ExtractInteractStateFromDOM 从详情页可见按钮状态读取点赞/收藏状态。
