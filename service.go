@@ -502,12 +502,10 @@ func (s *XiaohongshuService) GetFeedDetailWithConfig(ctx context.Context, feedID
 		}
 		return &FeedDetailResponse{FeedID: feedID, Data: detail}, nil
 	}
-	timeout := 120 * time.Second
-	if loadAllComments {
-		timeout = 240 * time.Second
+	detailCtx := ctx
+	if detailCtx == nil {
+		detailCtx = context.Background()
 	}
-	detailCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
 
 	page, err := s.acquirePageFor(detailCtx, "feed_detail")
 	if err != nil {

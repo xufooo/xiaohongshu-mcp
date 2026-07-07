@@ -205,6 +205,10 @@ func loadCommentsByJS(page *hrod.Page, config CommentLoadConfig) error {
 
 	await, scrollDelta := commentScrollSettings(config.ScrollSpeed)
 	maxRounds := 500
+	commentDeadline := time.Now().Add(commentLoadTimeout)
+	remainingDeadline := func() time.Duration {
+		return time.Until(commentDeadline)
+	}
 
 	// 先确保评论区可见
 	if err := scrollToCommentsArea(page); err != nil {
@@ -219,7 +223,7 @@ func loadCommentsByJS(page *hrod.Page, config CommentLoadConfig) error {
 	const maxStaleChecks = 20 // 连续20次无增长即退出
 
 	progressFunc := func() (int, bool, bool) {
-		result, err := page.Eval(commentProgressScript())
+		result, err := page.Timeout(2*time.Second).Eval(commentProgressScript())
 		if err != nil {
 			logrus.Warnf("评论进度检查失败: %v", err)
 			return lastCount, false, false
@@ -239,6 +243,10 @@ func loadCommentsByJS(page *hrod.Page, config CommentLoadConfig) error {
 	}
 
 	for i := 0; i < maxRounds; i++ {
+		if remaining := remainingDeadline(); remaining < 30*time.Second {
+			logrus.Warnf("评论加载剩余时间不足(%s)，停止新滚动", remaining.Round(time.Second))
+			break
+		}
 		if err := scrollNoteScroller(page, scrollDelta); err != nil {
 			logrus.Warnf("评论容器滚动失败: %v", err)
 		}
@@ -248,6 +256,18 @@ func loadCommentsByJS(page *hrod.Page, config CommentLoadConfig) error {
 
 		// 每5轮检查一次进度（非致命，超时继续）
 		if i%5 == 0 {
+			if config.ClickMoreReplies {
+				button, err := nextVisibleShowMoreButton(page, config.MaxRepliesThreshold)
+				if err != nil {
+					logrus.Warnf("检查可见子评论展开按钮失败: %v", err)
+				} else if button != nil {
+					logrus.Infof("滚动中点击展开子评论: %s", button.Text)
+					if err := dispatchMouseClick(page, button.X, button.Y); err != nil {
+						logrus.Warnf("滚动中展开子评论失败: %v", err)
+					}
+				}
+			}
+
 			count, atEnd, noComments := progressFunc()
 			if noComments {
 				logrus.Info("✓ 笔记无评论（荒地），跳过加载")
@@ -278,7 +298,12 @@ func loadCommentsByJS(page *hrod.Page, config CommentLoadConfig) error {
 	}
 
 	if config.ClickMoreReplies {
-		if err := clickMoreReplies(page, config.MaxRepliesThreshold); err != nil {
+		if remaining := remainingDeadline(); remaining < 15*time.Second {
+			logrus.Warnf("评论加载剩余时间不足(%s)，跳过末尾子评论展开", remaining.Round(time.Second))
+			logrus.Info("✓ 评论加载流程结束")
+			return nil
+		}
+		if err := clickMoreReplies(page, config.MaxRepliesThreshold, remainingDeadline); err != nil {
 			return err
 		}
 	}
@@ -300,13 +325,17 @@ func commentScrollSettings(speed string) (time.Duration, float64) {
 }
 
 func scrollNoteScroller(page *hrod.Page, delta float64) error {
-	result, err := page.Eval(`(delta) => {
+	result, err := page.Timeout(2*time.Second).Eval(`(delta) => {
 		const scroller = document.querySelector(".note-scroller");
 		if (!scroller) return false;
 		scroller.scrollBy(0, delta);
 		return true;
 	}`, delta)
 	if err != nil {
+		if isEvalTimeout(err) {
+			logrus.Warnf("评论容器滚动 Eval 超时: %v", err)
+			return nil
+		}
 		return err
 	}
 	if result == nil || !result.Value.Bool() {
@@ -321,7 +350,7 @@ func commentProgressScript() string {
 		const endText = endEl?.textContent || "";
 		const noCommentsText = document.querySelector(".no-comments-text")?.textContent || "";
 		const parentCount = document.querySelectorAll(".parent-comment").length;
-		const subCount = document.querySelectorAll(".parent-comment > .reply-container > .list-container > .comment-item").length;
+		const subCount = document.querySelectorAll(".parent-comment > .children-comments > .comment-item-sub, .parent-comment > .reply-container > .list-container > .comment-item").length;
 		return JSON.stringify({
 			count: parentCount + subCount,
 			atEnd: /THE\s*END/i.test(endText),
@@ -331,10 +360,10 @@ func commentProgressScript() string {
 }
 
 func countReplyItems(page *hrod.Page, parentIndex int) (int, error) {
-	val, err := page.Eval(`(parentIndex) => {
+	val, err := page.Timeout(2*time.Second).Eval(`(parentIndex) => {
 		const parent = document.querySelectorAll(".parent-comment")[parentIndex];
 		if (!parent) return -1;
-		return parent.querySelectorAll(":scope > .reply-container > .list-container > .comment-item").length;
+		return parent.querySelectorAll(":scope > .children-comments > .comment-item-sub, :scope > .reply-container > .list-container > .comment-item").length;
 	}`, parentIndex)
 	if err != nil {
 		return 0, err
@@ -372,11 +401,21 @@ type showMoreButtonSnapshot struct {
 	ParentIndex int     `json:"parentIndex"`
 }
 
-func clickMoreReplies(page *hrod.Page, maxRepliesThreshold int) error {
+func clickMoreReplies(page *hrod.Page, maxRepliesThreshold int, remainingDeadline func() time.Duration) error {
 	const maxRounds = 20
 	for i := 0; i < maxRounds; i++ {
+		if remainingDeadline != nil {
+			if remaining := remainingDeadline(); remaining < 15*time.Second {
+				logrus.Warnf("评论加载剩余时间不足(%s)，停止展开子评论", remaining.Round(time.Second))
+				break
+			}
+		}
 		button, err := nextShowMoreButton(page, maxRepliesThreshold)
 		if err != nil {
+			if isEvalTimeout(err) {
+				logrus.Warnf("检查子评论展开按钮超时，跳过本轮: %v", err)
+				continue
+			}
 			return err
 		}
 		if button == nil {
@@ -405,12 +444,12 @@ func clickMoreReplies(page *hrod.Page, maxRepliesThreshold int) error {
 }
 
 func nextShowMoreButton(page *hrod.Page, maxRepliesThreshold int) (*showMoreButtonSnapshot, error) {
-	result, err := page.Eval(`(maxRepliesThreshold) => {
+	result, err := page.Timeout(2*time.Second).Eval(`(maxRepliesThreshold) => {
 		const clean = (value) => (value || "").replace(/\s+/g, " ").trim();
 		const scroller = document.querySelector(".note-scroller");
 		const parents = Array.from(document.querySelectorAll(".parent-comment"));
 		const buttons = parents
-			.flatMap((parent) => Array.from(parent.querySelectorAll(":scope > .reply-container .show-more")));
+			.flatMap((parent) => Array.from(parent.querySelectorAll(":scope > .children-comments .show-more, :scope > .reply-container .show-more")));
 		for (const btn of buttons) {
 			const text = clean(btn.innerText || btn.textContent);
 			if (!text) continue;
@@ -461,6 +500,55 @@ func nextShowMoreButton(page *hrod.Page, maxRepliesThreshold int) (*showMoreButt
 	return &button, nil
 }
 
+func nextVisibleShowMoreButton(page *hrod.Page, maxRepliesThreshold int) (*showMoreButtonSnapshot, error) {
+	result, err := page.Timeout(2*time.Second).Eval(`(maxRepliesThreshold) => {
+		const clean = (value) => (value || "").replace(/\s+/g, " ").trim();
+		const scroller = document.querySelector(".note-scroller");
+		const sRect = scroller?.getBoundingClientRect();
+		const visibleTop = sRect ? Math.max(0, sRect.top) : 0;
+		const visibleBottom = sRect ? Math.min(window.innerHeight, sRect.bottom) : window.innerHeight;
+		const parents = Array.from(document.querySelectorAll(".parent-comment"));
+		const buttons = parents
+			.flatMap((parent) => Array.from(parent.querySelectorAll(":scope > .children-comments .show-more, :scope > .reply-container .show-more")));
+		for (const btn of buttons) {
+			const text = clean(btn.innerText || btn.textContent);
+			if (!text) continue;
+			if (!text.includes("展开") || text.includes("收起")) continue;
+			const parent = btn.closest(".parent-comment");
+			const parentIndex = parents.indexOf(parent);
+			if (parentIndex < 0) continue;
+			const rect = btn.getBoundingClientRect();
+			if (rect.width <= 0 || rect.height <= 0) continue;
+			if (rect.top < visibleTop || rect.bottom > visibleBottom) continue;
+			const match = text.match(/(\d+(?:\.\d+)?)\s*([万千])?/);
+			let count = match ? Number(match[1]) : 0;
+			if (match?.[2] === "万") count *= 10000;
+			if (match?.[2] === "千") count *= 1000;
+			count = Math.floor(count);
+			if (maxRepliesThreshold > 0 && count > maxRepliesThreshold) continue;
+			return JSON.stringify({
+				text,
+				x: rect.left + rect.width / 2,
+				y: rect.top + rect.height / 2,
+				count,
+				parentIndex,
+			});
+		}
+		return "";
+	}`, maxRepliesThreshold)
+	if err != nil {
+		return nil, err
+	}
+	if result == nil || strings.TrimSpace(result.Value.Str()) == "" {
+		return nil, nil
+	}
+	var button showMoreButtonSnapshot
+	if err := json.Unmarshal([]byte(result.Value.Str()), &button); err != nil {
+		return nil, fmt.Errorf("解析可见展开按钮位置失败: %w", err)
+	}
+	return &button, nil
+}
+
 func dispatchMouseClick(page *hrod.Page, x, y float64) error {
 	return page.ClickPoint(proto.Point{X: x, Y: y})
 }
@@ -471,7 +559,7 @@ func sleepRandom(page *hrod.Page, minMs, maxMs int) error {
 
 // scrollToCommentsArea 使用JS定位到评论区（comment_feed.go 引用）
 func scrollToCommentsArea(page *hrod.Page) error {
-	_, err := page.Eval(`() => {
+	_, err := page.Timeout(2*time.Second).Eval(`() => {
 		const cc = document.querySelector('.comments-container');
 		const scroller = document.querySelector('.note-scroller');
 		if (cc && scroller) {
@@ -480,7 +568,19 @@ func scrollToCommentsArea(page *hrod.Page) error {
 		}
 		if (cc) { cc.scrollIntoView({block:'center'}); }
 	}`)
+	if err != nil && isEvalTimeout(err) {
+		logrus.Warnf("定位评论区 Eval 超时: %v", err)
+		return nil
+	}
 	return err
+}
+
+func isEvalTimeout(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "timeout") || strings.Contains(msg, "deadline exceeded")
 }
 
 // ========== DOM 查询 ==========
@@ -488,7 +588,7 @@ func scrollToCommentsArea(page *hrod.Page) error {
 func getCommentProgress(page *hrod.Page) (commentProgress, error) {
 	var progress commentProgress
 
-	result, err := page.Eval(`() => {
+	result, err := page.Timeout(2*time.Second).Eval(`() => {
 		const totalEl = document.querySelector(".comments-container .total") ||
 			document.querySelector(".comment-total") ||
 			document.querySelector(".total");
@@ -497,7 +597,7 @@ func getCommentProgress(page *hrod.Page) (commentProgress, error) {
 		const endText = document.querySelector(".end-container")?.textContent || "";
 		const noCommentsText = document.querySelector(".no-comments-text")?.textContent || "";
 		const parentCount = document.querySelectorAll(".parent-comment").length;
-		const subCount = document.querySelectorAll(".parent-comment > .reply-container > .list-container > .comment-item").length;
+		const subCount = document.querySelectorAll(".parent-comment > .children-comments > .comment-item-sub, .parent-comment > .reply-container > .list-container > .comment-item").length;
 
 		return JSON.stringify({
 			count: parentCount + subCount,
@@ -524,7 +624,7 @@ func getScrollTop(page *hrod.Page) int {
 	// 使用retry-go来处理可能的DOM查询失败
 	err := retry.Do(
 		func() error {
-			evalResult, err := page.Eval(`() => {
+			evalResult, err := page.Timeout(2*time.Second).Eval(`() => {
 				return window.pageYOffset || document.documentElement.scrollTop || document.body.scrollTop || 0;
 			}`)
 			if err != nil {
@@ -824,7 +924,7 @@ func readFeedDetailState(page *hrod.Page, feedID string) (*FeedDetailResponse, e
 }
 
 func readFeedDetailStateOnce(page *hrod.Page, feedID string) (*FeedDetailResponse, error) {
-	result, err := page.Eval(`(feedID) => {
+	result, err := page.Timeout(2*time.Second).Eval(`(feedID) => {
 		const hasOwn = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
 		const isObject = (value) => value !== null && typeof value === "object";
 

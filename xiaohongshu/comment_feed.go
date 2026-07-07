@@ -355,15 +355,7 @@ func findCommentElement(page *hrod.Page, commentID, userID string) (*hrod.Elemen
 
 		// === 5. 继续向下滚动 ===
 		logrus.Infof("继续向下滚动...")
-		viewportHeightResult, err := page.Eval(`() => window.innerHeight`)
-		if err != nil {
-			return nil, fmt.Errorf("读取视口高度失败: %w", err)
-		}
-		if viewportHeightResult == nil {
-			return nil, fmt.Errorf("读取视口高度失败: 无返回")
-		}
-		viewportHeight := viewportHeightResult.Value.Int()
-		if err := page.Actor().Mouse.Scroll(0, float64(viewportHeight)*0.8); err != nil {
+		if err := scrollNoteScroller(page, 600); err != nil {
 			logrus.Warnf("滚动失败: %v", err)
 		}
 		if err := sleepForCommentStep(page, 500*time.Millisecond, 1200*time.Millisecond); err != nil {
@@ -421,7 +413,7 @@ func findCommentElement(page *hrod.Page, commentID, userID string) (*hrod.Elemen
 // browseBeforeComment triggers the post's lazy-loaded content before interacting
 // with the comment box.
 func browseBeforeComment(page *hrod.Page) error {
-	if err := page.Actor().Mouse.Scroll(0, 400); err != nil {
+	if err := scrollNoteScroller(page, 400); err != nil {
 		return err
 	}
 	return sleepForCommentStep(page, 500*time.Millisecond, 1200*time.Millisecond)

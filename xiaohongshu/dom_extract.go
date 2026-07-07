@@ -156,7 +156,7 @@ func ExtractFeedDetailFromDOM(page *hrod.Page, feedID string) (*FeedDetailRespon
 			const content = clean(top.querySelector(".content, .note-text, [class*='content']")?.innerText || top.innerText);
 			const user = clean(top.querySelector(".author-wrapper .name, .name, .nickname, [class*='name']")?.innerText);
 			const likeText = clean(top.querySelector(".interactions .like, .like, [class*='like']")?.innerText);
-			const subComments = Array.from(parent.querySelectorAll(":scope > .reply-container > .list-container > .comment-item")).map((sub) => {
+			const subComments = Array.from(parent.querySelectorAll(":scope > .children-comments > .comment-item-sub, :scope > .reply-container > .list-container > .comment-item")).map((sub) => {
 				const subContent = clean(sub.querySelector(".content, .note-text, [class*='content']")?.innerText || sub.innerText);
 				const subUser = clean(sub.querySelector(".author-wrapper .name, .name, .nickname, [class*='name']")?.innerText);
 				const subLikeText = clean(sub.querySelector(".interactions .like, .like, [class*='like']")?.innerText);
