@@ -83,7 +83,7 @@ func TestCommentScrollSettingsUseSlowEmbeddedDefaults(t *testing.T) {
 func TestCommentProgressScriptCountsParentAndSubComments(t *testing.T) {
 	script := commentProgressScript()
 
-	for _, want := range []string{`querySelectorAll(".parent-comment").length`, `querySelectorAll(".parent-comment > .reply-container > .list-container > .comment-item").length`} {
+	for _, want := range []string{`querySelectorAll(".parent-comment").length`, `querySelectorAll(".parent-comment > .children-comments > .comment-item-sub, .parent-comment > .reply-container > .list-container > .comment-item").length`} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("commentProgressScript() missing %s in:\n%s", want, script)
 		}
@@ -101,7 +101,7 @@ func TestNextShowMoreButtonOnlyTargetsReplyExpansionButtons(t *testing.T) {
 		t.Fatal("nextShowMoreButton must not use the broad .show-more selector")
 	}
 	for _, want := range []string{
-		`.flatMap((parent) => Array.from(parent.querySelectorAll(":scope > .reply-container .show-more")))`,
+		`.flatMap((parent) => Array.from(parent.querySelectorAll(":scope > .children-comments .show-more, :scope > .reply-container .show-more")))`,
 		`!text.includes("展开") || text.includes("收起")`,
 	} {
 		if !strings.Contains(script, want) {
@@ -172,6 +172,90 @@ func TestScrollNoteScrollerReturnsErrorWhenScrollerMissing(t *testing.T) {
 		if !strings.Contains(script, want) {
 			t.Fatalf("scrollNoteScroller missing false-result handling %s", want)
 		}
+	}
+}
+
+func TestFeedDetailEvalCallsUseShortIndependentTimeouts(t *testing.T) {
+	source, err := os.ReadFile("feed_detail.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(source)
+
+	if strings.Contains(script, `page.Eval(`) {
+		t.Fatal("feed_detail.go should wrap page Eval calls with page.Timeout(2*time.Second)")
+	}
+	if got := strings.Count(script, `page.Timeout(2*time.Second).Eval(`); got < 8 {
+		t.Fatalf("expected feed_detail.go Eval calls to use 2s timeout wrappers, got %d", got)
+	}
+}
+
+func TestCommentLoadDeadlineStopsLateScrollAndReplyExpansion(t *testing.T) {
+	source, err := os.ReadFile("feed_detail.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(source)
+
+	for _, want := range []string{
+		`remaining < 30*time.Second`,
+		`停止新滚动`,
+		`remaining < 15*time.Second`,
+		`跳过末尾子评论展开`,
+		`clickMoreReplies(page, config.MaxRepliesThreshold, remainingDeadline)`,
+		`func clickMoreReplies(page *hrod.Page, maxRepliesThreshold int, remainingDeadline func() time.Duration) error`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("comment load deadline guard missing %s", want)
+		}
+	}
+}
+
+func TestClickMoreRepliesSoftFailsEvalTimeouts(t *testing.T) {
+	source, err := os.ReadFile("feed_detail.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(source)
+
+	for _, want := range []string{
+		`if isEvalTimeout(err) {`,
+		`logrus.Warnf("检查子评论展开按钮超时，跳过本轮: %v", err)`,
+		`continue`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("clickMoreReplies timeout soft-fail missing %s", want)
+		}
+	}
+}
+
+func TestReadStageUsesNoteScrollerForPanelScrolls(t *testing.T) {
+	source, err := os.ReadFile("read_stage.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(source)
+
+	if strings.Contains(script, `Mouse.Scroll`) {
+		t.Fatal("read_stage.go should use .note-scroller scrollBy for note panel scrolling")
+	}
+	if got := strings.Count(script, `scrollNoteScroller(page,`); got < 4 {
+		t.Fatalf("read_stage.go should route panel scrolls through scrollNoteScroller, got %d calls", got)
+	}
+}
+
+func TestCommentFeedUsesNoteScrollerForCommentAreaScrolls(t *testing.T) {
+	source, err := os.ReadFile("comment_feed.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(source)
+
+	if strings.Contains(script, `Mouse.Scroll`) {
+		t.Fatal("comment_feed.go should use .note-scroller scrollBy for comment area scrolling")
+	}
+	if got := strings.Count(script, `scrollNoteScroller(page,`); got < 2 {
+		t.Fatalf("comment_feed.go should route comment area scrolls through scrollNoteScroller, got %d calls", got)
 	}
 }
 

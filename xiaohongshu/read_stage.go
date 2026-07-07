@@ -101,7 +101,7 @@ func (a *ReadStageAction) Read(ctx context.Context, feedID string, minDuration t
 		scrollStep = 280
 	}
 	for time.Since(start) < minDuration*2/3 {
-		if err := page.Actor().Mouse.Scroll(0, float64(scrollStep)); err != nil {
+		if err := scrollNoteScroller(page, float64(scrollStep)); err != nil {
 			return err
 		}
 		_ = a.state.RecordFeedScroll(feedID, 1)
@@ -113,7 +113,7 @@ func (a *ReadStageAction) Read(ctx context.Context, feedID string, minDuration t
 		}
 		// 偶尔回看（10%概率）
 		if time.Since(start) > minDuration/3 && time.Duration(time.Now().UnixNano())%10 == 0 {
-			_ = page.Actor().Mouse.Scroll(0, float64(-scrollStep/2))
+			_ = scrollNoteScroller(page, float64(-scrollStep/2))
 		}
 	}
 
@@ -123,7 +123,7 @@ func (a *ReadStageAction) Read(ctx context.Context, feedID string, minDuration t
 	commentStart := time.Now()
 	commentScrolled := false
 	for time.Now().Before(commentDeadline) {
-		if err := page.Actor().Mouse.Scroll(0, 100); err != nil {
+		if err := scrollNoteScroller(page, 100); err != nil {
 			return err
 		}
 		commentScrolled = true
@@ -164,7 +164,7 @@ func (a *ReadStageAction) DwellInComments(ctx context.Context, feedID string, mi
 	start := time.Now()
 	scrolled := false
 	for time.Since(start) < minDuration {
-		if err := page.Actor().Mouse.Scroll(0, 120); err != nil {
+		if err := scrollNoteScroller(page, 120); err != nil {
 			return err
 		}
 		scrolled = true
