@@ -413,12 +413,20 @@ func (s *BrowseSession) Read(ctx context.Context, minDuration time.Duration) err
 }
 
 func (s *BrowseSession) Detail(ctx context.Context, loadComments bool, pages int) (*FeedDetailResponse, error) {
+	return s.detail(ctx, "", loadComments, pages, DefaultCommentLoadConfig(), false)
+}
+
+func (s *BrowseSession) DetailForFeed(ctx context.Context, expectedFeedID string, loadComments bool, config CommentLoadConfig) (*FeedDetailResponse, error) {
+	return s.detail(ctx, expectedFeedID, loadComments, 0, config, true)
+}
+
+func (s *BrowseSession) detail(ctx context.Context, expectedFeedID string, loadComments bool, pages int, config CommentLoadConfig, useConfig bool) (*FeedDetailResponse, error) {
 	if err := s.beginLockedOperation(); err != nil {
 		return nil, err
 	}
 	defer s.finishOperation()
 
-	feedID, err := s.currentOpenedFeedID()
+	feedID, err := s.currentOpenedFeedIDFor(expectedFeedID)
 	if err != nil {
 		return nil, err
 	}
@@ -433,14 +441,19 @@ func (s *BrowseSession) Detail(ctx context.Context, loadComments bool, pages int
 	}
 	if loadComments {
 		commentPage := page.Context(ctx).Timeout(commentLoadTimeout)
-		loadSessionCommentsForDetail(pages, sessionCommentLoadOps{
+		ops := sessionCommentLoadOps{
 			getProgress: func() (commentProgress, error) {
 				return getCommentProgress(commentPage)
 			},
 			load: func(config CommentLoadConfig) error {
 				return loadCommentsByJS(commentPage, config)
 			},
-		})
+		}
+		if useConfig {
+			loadSessionCommentsForDetailWithConfig(config, ops)
+		} else {
+			loadSessionCommentsForDetail(pages, ops)
+		}
 	}
 	detail, err := ExtractFeedDetailFromDOM(page.Context(ctx), feedID)
 	if err != nil {
@@ -472,6 +485,13 @@ func loadSessionCommentsForDetail(pages int, ops sessionCommentLoadOps) {
 	}
 }
 
+func loadSessionCommentsForDetailWithConfig(config CommentLoadConfig, ops sessionCommentLoadOps) {
+	config = normalizeCommentLoadConfig(config)
+	if err := ops.load(config); err != nil {
+		logrus.Warnf("session detail load comments failed: %v", err)
+	}
+}
+
 func shouldStopSessionCommentPaging(progress commentProgress) bool {
 	if progress.NoComments {
 		return true
@@ -483,15 +503,23 @@ func shouldStopSessionCommentPaging(progress commentProgress) bool {
 }
 
 func (s *BrowseSession) Like(ctx context.Context, unlike bool) error {
+	return s.like(ctx, "", unlike)
+}
+
+func (s *BrowseSession) LikeForFeed(ctx context.Context, expectedFeedID string, unlike bool) error {
+	return s.like(ctx, expectedFeedID, unlike)
+}
+
+func (s *BrowseSession) like(ctx context.Context, expectedFeedID string, unlike bool) error {
 	if err := s.beginLockedOperation(); err != nil {
 		return err
 	}
 	defer s.finishOperation()
 
-	if err := s.ensureReadableInteraction(); err != nil {
+	feedID, xsecToken, err := s.currentFeedFor(expectedFeedID)
+	if err != nil {
 		return err
 	}
-	feedID, xsecToken := s.currentFeed()
 	action := NewLikeActionWithState(s.page.Context(ctx), s.state)
 	if unlike {
 		if err := action.Unlike(ctx, feedID, xsecToken); err != nil {
@@ -503,6 +531,7 @@ func (s *BrowseSession) Like(ctx context.Context, unlike bool) error {
 		}
 	}
 	s.mu.Lock()
+	s.read = true
 	if unlike {
 		s.recordTimelineLocked("unlike", feedID, "ok", time.Now(), "")
 	} else {
@@ -513,7 +542,55 @@ func (s *BrowseSession) Like(ctx context.Context, unlike bool) error {
 	return nil
 }
 
+func (s *BrowseSession) Favorite(ctx context.Context, unfavorite bool) error {
+	return s.favorite(ctx, "", unfavorite)
+}
+
+func (s *BrowseSession) FavoriteForFeed(ctx context.Context, expectedFeedID string, unfavorite bool) error {
+	return s.favorite(ctx, expectedFeedID, unfavorite)
+}
+
+func (s *BrowseSession) favorite(ctx context.Context, expectedFeedID string, unfavorite bool) error {
+	if err := s.beginLockedOperation(); err != nil {
+		return err
+	}
+	defer s.finishOperation()
+
+	feedID, xsecToken, err := s.currentFeedFor(expectedFeedID)
+	if err != nil {
+		return err
+	}
+	action := NewFavoriteActionWithState(s.page.Context(ctx), s.state)
+	if unfavorite {
+		if err := action.Unfavorite(ctx, feedID, xsecToken); err != nil {
+			return err
+		}
+	} else {
+		if err := action.Favorite(ctx, feedID, xsecToken); err != nil {
+			return err
+		}
+	}
+	s.mu.Lock()
+	s.read = true
+	if unfavorite {
+		s.recordTimelineLocked("unfavorite", feedID, "ok", time.Now(), "")
+	} else {
+		s.recordTimelineLocked("favorite", feedID, "ok", time.Now(), "")
+	}
+	s.mu.Unlock()
+	s.probeWatchdogSelectorsForKind(ctx, XHSReadyDetail, feedID)
+	return nil
+}
+
 func (s *BrowseSession) Comment(ctx context.Context, content string) error {
+	return s.comment(ctx, "", content)
+}
+
+func (s *BrowseSession) CommentForFeed(ctx context.Context, expectedFeedID, content string) error {
+	return s.comment(ctx, expectedFeedID, content)
+}
+
+func (s *BrowseSession) comment(ctx context.Context, expectedFeedID, content string) error {
 	if strings.TrimSpace(content) == "" {
 		return fmt.Errorf("评论内容不能为空")
 	}
@@ -522,16 +599,47 @@ func (s *BrowseSession) Comment(ctx context.Context, content string) error {
 	}
 	defer s.finishOperation()
 
-	if err := s.ensureReadableInteraction(); err != nil {
+	feedID, xsecToken, err := s.currentFeedFor(expectedFeedID)
+	if err != nil {
 		return err
 	}
-	feedID, xsecToken := s.currentFeed()
 	action := NewCommentFeedActionWithState(s.page.Context(ctx), s.state)
 	if err := action.PostComment(ctx, feedID, xsecToken, content); err != nil {
 		return err
 	}
 	s.mu.Lock()
+	s.read = true
 	s.recordTimelineLocked("comment", feedID, "ok", time.Now(), compactTimelineNote(content))
+	s.mu.Unlock()
+	s.probeWatchdogSelectorsForKind(ctx, XHSReadyDetail, feedID)
+	return nil
+}
+
+func (s *BrowseSession) Reply(ctx context.Context, commentID, userID, content string) error {
+	return s.reply(ctx, "", commentID, userID, content)
+}
+
+func (s *BrowseSession) ReplyForFeed(ctx context.Context, expectedFeedID, commentID, userID, content string) error {
+	return s.reply(ctx, expectedFeedID, commentID, userID, content)
+}
+
+func (s *BrowseSession) reply(ctx context.Context, expectedFeedID, commentID, userID, content string) error {
+	if err := s.beginLockedOperation(); err != nil {
+		return err
+	}
+	defer s.finishOperation()
+
+	feedID, xsecToken, err := s.currentFeedFor(expectedFeedID)
+	if err != nil {
+		return err
+	}
+	action := NewCommentFeedActionWithState(s.page.Context(ctx), s.state)
+	if err := action.ReplyToComment(ctx, feedID, xsecToken, commentID, userID, content); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.read = true
+	s.recordTimelineLocked("reply", feedID, "ok", time.Now(), compactTimelineNote(content))
 	s.mu.Unlock()
 	s.probeWatchdogSelectorsForKind(ctx, XHSReadyDetail, feedID)
 	return nil
@@ -670,18 +778,36 @@ func (s *BrowseSession) resolveResult(resultRef string) (Feed, bool) {
 }
 
 func (s *BrowseSession) currentOpenedFeedID() (string, error) {
+	return s.currentOpenedFeedIDFor("")
+}
+
+func (s *BrowseSession) currentOpenedFeedIDFor(expectedFeedID string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.opened || s.currentFeedID == "" {
 		return "", fmt.Errorf("必须先打开笔记")
 	}
+	if expectedFeedID != "" && s.currentFeedID != expectedFeedID {
+		return "", fmt.Errorf("session 当前笔记 %s 与目标笔记 %s 不一致", s.currentFeedID, expectedFeedID)
+	}
 	return s.currentFeedID, nil
 }
 
 func (s *BrowseSession) currentFeed() (string, string) {
+	feedID, xsecToken, _ := s.currentFeedFor("")
+	return feedID, xsecToken
+}
+
+func (s *BrowseSession) currentFeedFor(expectedFeedID string) (string, string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.currentFeedID, s.currentXsecToken
+	if !s.opened || s.currentFeedID == "" {
+		return "", "", fmt.Errorf("互动只能对已打开的笔记执行")
+	}
+	if expectedFeedID != "" && s.currentFeedID != expectedFeedID {
+		return "", "", fmt.Errorf("session 当前笔记 %s 与目标笔记 %s 不一致", s.currentFeedID, expectedFeedID)
+	}
+	return s.currentFeedID, s.currentXsecToken, nil
 }
 
 func (s *BrowseSession) ensureReadableInteraction() error {

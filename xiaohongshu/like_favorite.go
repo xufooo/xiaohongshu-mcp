@@ -141,7 +141,18 @@ func (a *LikeAction) perform(ctx context.Context, feedID, xsecToken string, targ
 		actionType = actionUnlike
 	}
 
-	page, err := a.preparePage(ctx, actionType, feedID, xsecToken)
+	var page *hrod.Page
+	var err error
+	if a.state != nil {
+		page = a.page.Context(ctx).Timeout(60 * time.Second)
+		reader := NewReadStageAction(page, a.state)
+		if err := reader.ReadMin(ctx, feedID, 20*time.Second); err != nil {
+			return fmt.Errorf("%s前阅读阶段失败: %w", actionType, err)
+		}
+		page, err = a.preparePage(ctx, actionType, feedID, xsecToken)
+	} else {
+		page, err = a.preparePage(ctx, actionType, feedID, xsecToken)
+	}
 	if err != nil {
 		return err
 	}
@@ -215,7 +226,18 @@ func (a *FavoriteAction) perform(ctx context.Context, feedID, xsecToken string, 
 		actionType = actionUnfavorite
 	}
 
-	page, err := a.preparePage(ctx, actionType, feedID, xsecToken)
+	var page *hrod.Page
+	var err error
+	if a.state != nil {
+		page = a.page.Context(ctx).Timeout(60 * time.Second)
+		reader := NewReadStageAction(page, a.state)
+		if err := reader.ReadMin(ctx, feedID, 20*time.Second); err != nil {
+			return fmt.Errorf("%s前阅读阶段失败: %w", actionType, err)
+		}
+		page, err = a.preparePage(ctx, actionType, feedID, xsecToken)
+	} else {
+		page, err = a.preparePage(ctx, actionType, feedID, xsecToken)
+	}
 	if err != nil {
 		return err
 	}

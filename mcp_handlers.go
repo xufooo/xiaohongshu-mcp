@@ -78,6 +78,28 @@ func (s *AppServer) requireBrowserAvailableForMCP(name string) *MCPToolResult {
 	}
 }
 
+// requireBrowserForMCPWithFeed 检查浏览器可用性，但允许 feedID 匹配活跃 session 时通过
+//（P2: 旧工具委托 session 式行为链）。
+func (s *AppServer) requireBrowserForMCPWithFeed(name, feedID string) *MCPToolResult {
+	if s.xiaohongshuService == nil {
+		return nil
+	}
+	info, ok := s.xiaohongshuService.ActiveBrowseSessionInfo()
+	if !ok {
+		return nil
+	}
+	if info.CurrentFeedID != "" && info.CurrentFeedID == feedID {
+		return nil
+	}
+	msg := fmt.Sprintf("browser busy - session active on different note: session_id=%s current_feed=%s. Use session tools or close_browse_session first.",
+		info.ID, info.CurrentFeedID)
+	logrus.Warnf("MCP: %s blocked (feed mismatch) session=%s target=%s", name, info.CurrentFeedID, feedID)
+	return &MCPToolResult{
+		Content: []MCPContent{{Type: "text", Text: msg}},
+		IsError: true,
+	}
+}
+
 func (s *AppServer) requireWriteConfirmation(action, key, summary, token string) *MCPToolResult {
 	if s.writeConfirm == nil || !s.writeConfirm.Enabled() {
 		return nil
@@ -626,7 +648,7 @@ func (s *AppServer) handleGetFeedDetail(ctx context.Context, args map[string]any
 	}
 	xsecToken = strings.TrimSpace(xsecToken)
 
-	if blocked := s.requireBrowserAvailableForMCP("获取Feed详情"); blocked != nil {
+	if blocked := s.requireBrowserForMCPWithFeed("获取Feed详情", feedID); blocked != nil {
 		return blocked
 	}
 	if blocked := s.rateLimitMCP(ctx, "获取Feed详情", ratelimit.ActionOpenNote); blocked != nil {
@@ -849,7 +871,7 @@ func (s *AppServer) handleLikeFeed(ctx context.Context, args map[string]interfac
 	confirmToken, _ := args["confirm_token"].(string)
 	key := writeConfirmationKey("like_feed", feedID, xsecToken, unlike)
 	summary := fmt.Sprintf("%s: feed_id=%s", action, feedID)
-	if blocked := s.requireBrowserAvailableForMCP(action); blocked != nil {
+	if blocked := s.requireBrowserForMCPWithFeed(action, feedID); blocked != nil {
 		return blocked
 	}
 	if confirm := s.requireWriteConfirmation("like_feed", key, summary, confirmToken); confirm != nil {
@@ -896,7 +918,7 @@ func (s *AppServer) handleFavoriteFeed(ctx context.Context, args map[string]inte
 	confirmToken, _ := args["confirm_token"].(string)
 	key := writeConfirmationKey("favorite_feed", feedID, xsecToken, unfavorite)
 	summary := fmt.Sprintf("%s: feed_id=%s", action, feedID)
-	if blocked := s.requireBrowserAvailableForMCP(action); blocked != nil {
+	if blocked := s.requireBrowserForMCPWithFeed(action, feedID); blocked != nil {
 		return blocked
 	}
 	if confirm := s.requireWriteConfirmation("favorite_feed", key, summary, confirmToken); confirm != nil {
@@ -967,7 +989,7 @@ func (s *AppServer) handlePostComment(ctx context.Context, args map[string]inter
 	confirmToken, _ := args["confirm_token"].(string)
 	key := writeConfirmationKey("post_comment", feedID, xsecToken, content)
 	summary := fmt.Sprintf("发表评论: feed_id=%s content=%q", feedID, compactWriteSummary(content))
-	if blocked := s.requireBrowserAvailableForMCP("发表评论"); blocked != nil {
+	if blocked := s.requireBrowserForMCPWithFeed("发表评论", feedID); blocked != nil {
 		return blocked
 	}
 	if confirm := s.requireWriteConfirmation("post_comment", key, summary, confirmToken); confirm != nil {
@@ -1056,7 +1078,7 @@ func (s *AppServer) handleReplyComment(ctx context.Context, args map[string]inte
 	confirmToken, _ := args["confirm_token"].(string)
 	key := writeConfirmationKey("reply_comment", feedID, xsecToken, commentID, userID, content)
 	summary := fmt.Sprintf("回复评论: feed_id=%s comment_id=%s user_id=%s content=%q", feedID, commentID, userID, compactWriteSummary(content))
-	if blocked := s.requireBrowserAvailableForMCP("回复评论"); blocked != nil {
+	if blocked := s.requireBrowserForMCPWithFeed("回复评论", feedID); blocked != nil {
 		return blocked
 	}
 	if confirm := s.requireWriteConfirmation("reply_comment", key, summary, confirmToken); confirm != nil {

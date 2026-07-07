@@ -492,8 +492,16 @@ func (s *XiaohongshuService) GetFeedDetail(ctx context.Context, feedID, xsecToke
 	return s.GetFeedDetailWithConfig(ctx, feedID, xsecToken, loadAllComments, xiaohongshu.DefaultCommentLoadConfig())
 }
 
-// GetFeedDetailWithConfig 使用配置获取Feed详情
+// GetFeedDetailWithConfig 使用配置获取Feed详情。
+// 当存在活跃 session 且已打开同一笔记时，委托给 session。
 func (s *XiaohongshuService) GetFeedDetailWithConfig(ctx context.Context, feedID, xsecToken string, loadAllComments bool, config xiaohongshu.CommentLoadConfig) (*FeedDetailResponse, error) {
+	if sid, ok := s.activeSessionForFeed(feedID); ok {
+		detail, err := s.SessionDetailForFeed(ctx, sid, feedID, loadAllComments, config)
+		if err != nil {
+			return nil, err
+		}
+		return &FeedDetailResponse{FeedID: feedID, Data: detail}, nil
+	}
 	timeout := 120 * time.Second
 	if loadAllComments {
 		timeout = 240 * time.Second
@@ -553,8 +561,11 @@ func (s *XiaohongshuService) UserProfile(ctx context.Context, userID, xsecToken 
 
 }
 
-// PostCommentToFeed 发表评论到Feed
+// PostCommentToFeed 发表评论到Feed。当存在活跃 session 且已打开同一笔记时，委托给 session。
 func (s *XiaohongshuService) PostCommentToFeed(ctx context.Context, feedID, xsecToken, content string) (*PostCommentResponse, error) {
+	if sid, ok := s.activeSessionForFeed(feedID); ok {
+		return s.SessionCommentForFeed(ctx, sid, feedID, content)
+	}
 	page, err := s.acquirePageFor(ctx, "comment")
 	if err != nil {
 		return nil, err
@@ -571,8 +582,11 @@ func (s *XiaohongshuService) PostCommentToFeed(ctx context.Context, feedID, xsec
 	return &PostCommentResponse{FeedID: feedID, Success: true, Message: "评论发表成功"}, nil
 }
 
-// LikeFeed 点赞笔记
+// LikeFeed 点赞笔记。当存在活跃 session 且已打开同一笔记时，委托给 session。
 func (s *XiaohongshuService) LikeFeed(ctx context.Context, feedID, xsecToken string) (*ActionResult, error) {
+	if sid, ok := s.activeSessionForFeed(feedID); ok {
+		return s.SessionLikeForFeed(ctx, sid, feedID, false)
+	}
 	page, err := s.acquirePageFor(ctx, "like")
 	if err != nil {
 		return nil, err
@@ -587,8 +601,11 @@ func (s *XiaohongshuService) LikeFeed(ctx context.Context, feedID, xsecToken str
 	return &ActionResult{FeedID: feedID, Success: true, Message: "点赞成功或已点赞"}, nil
 }
 
-// UnlikeFeed 取消点赞笔记
+// UnlikeFeed 取消点赞笔记。当存在活跃 session 且已打开同一笔记时，委托给 session。
 func (s *XiaohongshuService) UnlikeFeed(ctx context.Context, feedID, xsecToken string) (*ActionResult, error) {
+	if sid, ok := s.activeSessionForFeed(feedID); ok {
+		return s.SessionLikeForFeed(ctx, sid, feedID, true)
+	}
 	page, err := s.acquirePageFor(ctx, "unlike")
 	if err != nil {
 		return nil, err
@@ -603,8 +620,11 @@ func (s *XiaohongshuService) UnlikeFeed(ctx context.Context, feedID, xsecToken s
 	return &ActionResult{FeedID: feedID, Success: true, Message: "取消点赞成功或未点赞"}, nil
 }
 
-// FavoriteFeed 收藏笔记
+// FavoriteFeed 收藏笔记。当存在活跃 session 且已打开同一笔记时，委托给 session。
 func (s *XiaohongshuService) FavoriteFeed(ctx context.Context, feedID, xsecToken string) (*ActionResult, error) {
+	if sid, ok := s.activeSessionForFeed(feedID); ok {
+		return s.SessionFavoriteForFeed(ctx, sid, feedID, false)
+	}
 	page, err := s.acquirePageFor(ctx, "favorite")
 	if err != nil {
 		return nil, err
@@ -619,8 +639,11 @@ func (s *XiaohongshuService) FavoriteFeed(ctx context.Context, feedID, xsecToken
 	return &ActionResult{FeedID: feedID, Success: true, Message: "收藏成功或已收藏"}, nil
 }
 
-// UnfavoriteFeed 取消收藏笔记
+// UnfavoriteFeed 取消收藏笔记。当存在活跃 session 且已打开同一笔记时，委托给 session。
 func (s *XiaohongshuService) UnfavoriteFeed(ctx context.Context, feedID, xsecToken string) (*ActionResult, error) {
+	if sid, ok := s.activeSessionForFeed(feedID); ok {
+		return s.SessionFavoriteForFeed(ctx, sid, feedID, true)
+	}
 	page, err := s.acquirePageFor(ctx, "unfavorite")
 	if err != nil {
 		return nil, err
@@ -635,8 +658,11 @@ func (s *XiaohongshuService) UnfavoriteFeed(ctx context.Context, feedID, xsecTok
 	return &ActionResult{FeedID: feedID, Success: true, Message: "取消收藏成功或未收藏"}, nil
 }
 
-// ReplyCommentToFeed 回复指定评论
+// ReplyCommentToFeed 回复指定评论。当存在活跃 session 且已打开同一笔记时，委托给 session。
 func (s *XiaohongshuService) ReplyCommentToFeed(ctx context.Context, feedID, xsecToken, commentID, userID, content string) (*ReplyCommentResponse, error) {
+	if sid, ok := s.activeSessionForFeed(feedID); ok {
+		return s.SessionReplyForFeed(ctx, sid, feedID, commentID, userID, content)
+	}
 	page, err := s.acquirePageFor(ctx, "reply")
 	if err != nil {
 		return nil, err
@@ -679,6 +705,16 @@ func (s *XiaohongshuService) ActiveBrowseSessionInfo() (xiaohongshu.BrowseSessio
 		return xiaohongshu.BrowseSessionInfo{}, false
 	}
 	return s.browseSessions.ActiveInfo()
+}
+
+// activeSessionForFeed 检查是否存在活跃 session 且当前已打开同一篇笔记。
+// 如果存在则返回 session ID，用于 P2 旧工具委托到 session 式行为链。
+func (s *XiaohongshuService) activeSessionForFeed(feedID string) (string, bool) {
+	info, ok := s.ActiveBrowseSessionInfo()
+	if !ok || info.CurrentFeedID == "" || info.CurrentFeedID != feedID {
+		return "", false
+	}
+	return info.ID, true
 }
 
 func (s *XiaohongshuService) SessionState(ctx context.Context, id string) (*xiaohongshu.BrowseSessionPageState, error) {
@@ -741,16 +777,37 @@ func (s *XiaohongshuService) SessionDetail(ctx context.Context, id string, loadC
 	return detail, nil
 }
 
-func (s *XiaohongshuService) SessionLike(ctx context.Context, id string, unlike bool) (*ActionResult, error) {
+func (s *XiaohongshuService) SessionDetailForFeed(ctx context.Context, id, feedID string, loadComments bool, config xiaohongshu.CommentLoadConfig) (*xiaohongshu.FeedDetailResponse, error) {
 	session, err := s.browseSessions.Get(id)
 	if err != nil {
 		return nil, err
 	}
-	info := session.Info()
-	if err := session.Like(ctx, unlike); err != nil {
+	detail, err := session.DetailForFeed(ctx, feedID, loadComments, config)
+	if err != nil {
 		s.recordRiskFromSession(session, err)
 		return nil, err
 	}
+	return detail, nil
+}
+
+func (s *XiaohongshuService) SessionLike(ctx context.Context, id string, unlike bool) (*ActionResult, error) {
+	return s.sessionLike(ctx, id, "", unlike)
+}
+
+func (s *XiaohongshuService) SessionLikeForFeed(ctx context.Context, id, feedID string, unlike bool) (*ActionResult, error) {
+	return s.sessionLike(ctx, id, feedID, unlike)
+}
+
+func (s *XiaohongshuService) sessionLike(ctx context.Context, id, feedID string, unlike bool) (*ActionResult, error) {
+	session, err := s.browseSessions.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	if err := session.LikeForFeed(ctx, feedID, unlike); err != nil {
+		s.recordRiskFromSession(session, err)
+		return nil, err
+	}
+	info := session.Info()
 	action := "点赞成功或已点赞"
 	if unlike {
 		action = "取消点赞成功或未点赞"
@@ -758,17 +815,77 @@ func (s *XiaohongshuService) SessionLike(ctx context.Context, id string, unlike 
 	return &ActionResult{FeedID: info.CurrentFeedID, Success: true, Message: action}, nil
 }
 
-func (s *XiaohongshuService) SessionComment(ctx context.Context, id, content string) (*PostCommentResponse, error) {
+func (s *XiaohongshuService) SessionFavorite(ctx context.Context, id string, unfavorite bool) (*ActionResult, error) {
+	return s.sessionFavorite(ctx, id, "", unfavorite)
+}
+
+func (s *XiaohongshuService) SessionFavoriteForFeed(ctx context.Context, id, feedID string, unfavorite bool) (*ActionResult, error) {
+	return s.sessionFavorite(ctx, id, feedID, unfavorite)
+}
+
+func (s *XiaohongshuService) sessionFavorite(ctx context.Context, id, feedID string, unfavorite bool) (*ActionResult, error) {
 	session, err := s.browseSessions.Get(id)
 	if err != nil {
 		return nil, err
 	}
-	info := session.Info()
-	if err := session.Comment(ctx, content); err != nil {
+	if err := session.FavoriteForFeed(ctx, feedID, unfavorite); err != nil {
 		s.recordRiskFromSession(session, err)
 		return nil, err
 	}
+	info := session.Info()
+	action := "收藏成功或已收藏"
+	if unfavorite {
+		action = "取消收藏成功或未收藏"
+	}
+	return &ActionResult{FeedID: info.CurrentFeedID, Success: true, Message: action}, nil
+}
+
+func (s *XiaohongshuService) SessionComment(ctx context.Context, id, content string) (*PostCommentResponse, error) {
+	return s.sessionComment(ctx, id, "", content)
+}
+
+func (s *XiaohongshuService) SessionCommentForFeed(ctx context.Context, id, feedID, content string) (*PostCommentResponse, error) {
+	return s.sessionComment(ctx, id, feedID, content)
+}
+
+func (s *XiaohongshuService) sessionComment(ctx context.Context, id, feedID, content string) (*PostCommentResponse, error) {
+	session, err := s.browseSessions.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	if err := session.CommentForFeed(ctx, feedID, content); err != nil {
+		s.recordRiskFromSession(session, err)
+		return nil, err
+	}
+	info := session.Info()
 	return &PostCommentResponse{FeedID: info.CurrentFeedID, Success: true, Message: "评论发表成功"}, nil
+}
+
+func (s *XiaohongshuService) SessionReply(ctx context.Context, id, commentID, userID, content string) (*ReplyCommentResponse, error) {
+	return s.sessionReply(ctx, id, "", commentID, userID, content)
+}
+
+func (s *XiaohongshuService) SessionReplyForFeed(ctx context.Context, id, feedID, commentID, userID, content string) (*ReplyCommentResponse, error) {
+	return s.sessionReply(ctx, id, feedID, commentID, userID, content)
+}
+
+func (s *XiaohongshuService) sessionReply(ctx context.Context, id, feedID, commentID, userID, content string) (*ReplyCommentResponse, error) {
+	session, err := s.browseSessions.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	if err := session.ReplyForFeed(ctx, feedID, commentID, userID, content); err != nil {
+		s.recordRiskFromSession(session, err)
+		return nil, err
+	}
+	info := session.Info()
+	return &ReplyCommentResponse{
+		FeedID:          info.CurrentFeedID,
+		TargetCommentID: commentID,
+		TargetUserID:    userID,
+		Success:         true,
+		Message:         "评论回复成功",
+	}, nil
 }
 
 func (s *XiaohongshuService) SessionBack(ctx context.Context, id string) (*xiaohongshu.BrowseSessionInfo, error) {

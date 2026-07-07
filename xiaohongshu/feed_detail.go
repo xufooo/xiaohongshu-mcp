@@ -20,7 +20,8 @@ import (
 
 // ========== 配置常量 ==========
 const (
-	commentPollInterval    = 100 * time.Millisecond
+	commentPollInterval       = 100 * time.Millisecond
+	replyExpansionRetryDelay  = time.Second
 	// The note is available before the asynchronously populated comment ref on
 	// some versions of the web client. Keep this short: it is only used when
 	// the note reports comments but the state snapshot has none.
@@ -298,13 +299,19 @@ func commentScrollSettings(speed string) (time.Duration, float64) {
 }
 
 func scrollNoteScroller(page *hrod.Page, delta float64) error {
-	_, err := page.Eval(`(delta) => {
+	result, err := page.Eval(`(delta) => {
 		const scroller = document.querySelector(".note-scroller");
 		if (!scroller) return false;
 		scroller.scrollBy(0, delta);
 		return true;
 	}`, delta)
-	return err
+	if err != nil {
+		return err
+	}
+	if result == nil || !result.Value.Bool() {
+		return fmt.Errorf("评论容器不存在")
+	}
+	return nil
 }
 
 func commentProgressScript() string {
@@ -313,7 +320,7 @@ func commentProgressScript() string {
 		const endText = endEl?.textContent || "";
 		const noCommentsText = document.querySelector(".no-comments-text")?.textContent || "";
 		const parentCount = document.querySelectorAll(".parent-comment").length;
-		const subCount = document.querySelectorAll(".comment-item-sub").length;
+		const subCount = document.querySelectorAll(".parent-comment > .reply-container > .list-container > .comment-item").length;
 		return JSON.stringify({
 			count: parentCount + subCount,
 			atEnd: /THE\s*END/i.test(endText),
@@ -322,11 +329,46 @@ func commentProgressScript() string {
 	}`
 }
 
+func countReplyItems(page *hrod.Page, parentIndex int) (int, error) {
+	val, err := page.Eval(`(parentIndex) => {
+		const parent = document.querySelectorAll(".parent-comment")[parentIndex];
+		if (!parent) return -1;
+		return parent.querySelectorAll(":scope > .reply-container > .list-container > .comment-item").length;
+	}`, parentIndex)
+	if err != nil {
+		return 0, err
+	}
+	count := int(val.Value.Int())
+	if count < 0 {
+		return 0, fmt.Errorf("父评论不存在: index=%d", parentIndex)
+	}
+	return count, nil
+}
+
+func waitReplyItemsChanged(page *hrod.Page, parentIndex, before int, timeout time.Duration) error {
+	return retry.Do(
+		func() error {
+			cur, err := countReplyItems(page, parentIndex)
+			if err != nil {
+				return err
+			}
+			if cur > before {
+				return nil
+			}
+			return fmt.Errorf("子评论数量未增长: before=%d cur=%d", before, cur)
+		},
+		retry.Delay(replyExpansionRetryDelay),
+		retry.Attempts(uint(timeout / replyExpansionRetryDelay)),
+		retry.LastErrorOnly(true),
+	)
+}
+
 type showMoreButtonSnapshot struct {
-	Text  string  `json:"text"`
-	X     float64 `json:"x"`
-	Y     float64 `json:"y"`
-	Count int     `json:"count"`
+	Text        string  `json:"text"`
+	X           float64 `json:"x"`
+	Y           float64 `json:"y"`
+	Count       int     `json:"count"`
+	ParentIndex int     `json:"parentIndex"`
 }
 
 func clickMoreReplies(page *hrod.Page, maxRepliesThreshold int) error {
@@ -340,8 +382,18 @@ func clickMoreReplies(page *hrod.Page, maxRepliesThreshold int) error {
 			return nil
 		}
 		logrus.Infof("点击展开子评论: %s", button.Text)
+		// Scope the growth wait to the clicked parent. This assumes the parent
+		// comment DOM order remains stable between the button snapshot and retry.
+		before, err := countReplyItems(page, button.ParentIndex)
+		if err != nil {
+			logrus.Warnf("获取展开前子评论数量失败: %v", err)
+			before = 0
+		}
 		if err := dispatchMouseClick(page, button.X, button.Y); err != nil {
 			return err
+		}
+		if err := waitReplyItemsChanged(page, button.ParentIndex, before, 7*time.Second); err != nil {
+			logrus.Debugf("等待子评论增长超时，继续下一轮: %v", err)
 		}
 		if err := page.Sleep(4 * time.Second); err != nil {
 			return err
@@ -355,11 +407,16 @@ func nextShowMoreButton(page *hrod.Page, maxRepliesThreshold int) (*showMoreButt
 	result, err := page.Eval(`(maxRepliesThreshold) => {
 		const clean = (value) => (value || "").replace(/\s+/g, " ").trim();
 		const scroller = document.querySelector(".note-scroller");
-		const buttons = Array.from(document.querySelectorAll(".children-comments .show-more"));
+		const parents = Array.from(document.querySelectorAll(".parent-comment"));
+		const buttons = parents
+			.flatMap((parent) => Array.from(parent.querySelectorAll(":scope > .reply-container .show-more")));
 		for (const btn of buttons) {
 			const text = clean(btn.innerText || btn.textContent);
 			if (!text) continue;
-			if (!text.includes("展开") && !text.includes("回复")) continue;
+			if (!text.includes("展开") || text.includes("收起")) continue;
+			const parent = btn.closest(".parent-comment");
+			const parentIndex = parents.indexOf(parent);
+			if (parentIndex < 0) continue;
 			let rect = btn.getBoundingClientRect();
 			if (rect.width <= 0 || rect.height <= 0) continue;
 			const match = text.match(/(\d+(?:\.\d+)?)\s*([万千])?/);
@@ -368,21 +425,14 @@ func nextShowMoreButton(page *hrod.Page, maxRepliesThreshold int) (*showMoreButt
 			if (match?.[2] === "千") count *= 1000;
 			count = Math.floor(count);
 			if (maxRepliesThreshold > 0 && count > maxRepliesThreshold) continue;
+			btn.scrollIntoView({ block: "center", inline: "nearest" });
+			rect = btn.getBoundingClientRect();
 			if (scroller) {
 				const sRect = scroller.getBoundingClientRect();
-				scroller.scrollBy(0, rect.top - sRect.top - sRect.height / 2 + rect.height / 2);
-				rect = btn.getBoundingClientRect();
 				const visibleTop = Math.max(0, sRect.top);
 				const visibleBottom = Math.min(window.innerHeight, sRect.bottom);
 				if (rect.top < visibleTop || rect.bottom > visibleBottom) {
-					scroller.scrollBy(0, rect.top - visibleTop - 5);
-					rect = btn.getBoundingClientRect();
-				}
-			} else {
-				btn.scrollIntoView({block: "center"});
-				rect = btn.getBoundingClientRect();
-				if (rect.top < 0 || rect.bottom > window.innerHeight) {
-					window.scrollBy(0, rect.top - 5);
+					scroller.scrollBy(0, rect.top - sRect.top - sRect.height / 2 + rect.height / 2);
 					rect = btn.getBoundingClientRect();
 				}
 			}
@@ -392,6 +442,7 @@ func nextShowMoreButton(page *hrod.Page, maxRepliesThreshold int) (*showMoreButt
 				x: rect.left + rect.width / 2,
 				y: rect.top + rect.height / 2,
 				count,
+				parentIndex,
 			});
 		}
 		return "";
@@ -410,52 +461,7 @@ func nextShowMoreButton(page *hrod.Page, maxRepliesThreshold int) (*showMoreButt
 }
 
 func dispatchMouseClick(page *hrod.Page, x, y float64) error {
-	leftButton := 1
-	modifiers := 0
-	timestamp := proto.TimeSinceEpoch(float64(time.Now().UnixNano()) / float64(time.Second))
-	evt := proto.InputDispatchMouseEvent{
-		Type:        proto.InputDispatchMouseEventTypeMouseMoved,
-		X:           x,
-		Y:           y,
-		Modifiers:   modifiers,
-		Timestamp:   timestamp,
-		Button:      proto.InputMouseButtonNone,
-		PointerType: proto.InputDispatchMouseEventPointerTypeMouse,
-	}
-	err := evt.Call(page.Rod)
-	if err != nil {
-		return err
-	}
-	evt = proto.InputDispatchMouseEvent{
-		Type:        proto.InputDispatchMouseEventTypeMousePressed,
-		X:           x,
-		Y:           y,
-		Modifiers:   modifiers,
-		Timestamp:   timestamp,
-		Button:      proto.InputMouseButtonLeft,
-		Buttons:     &leftButton,
-		ClickCount:  1,
-		PointerType: proto.InputDispatchMouseEventPointerTypeMouse,
-	}
-	err = evt.Call(page.Rod)
-	if err != nil {
-		return err
-	}
-	evt = proto.InputDispatchMouseEvent{
-		Type:        proto.InputDispatchMouseEventTypeMouseReleased,
-		X:           x,
-		Y:           y,
-		Modifiers:   modifiers,
-		Timestamp:   timestamp,
-		Button:      proto.InputMouseButtonLeft,
-		ClickCount:  1,
-		PointerType: proto.InputDispatchMouseEventPointerTypeMouse,
-	}
-	err = evt.Call(page.Rod)
-	if err != nil {
-		return err
-	}
-	return nil
+	return page.ClickPoint(proto.Point{X: x, Y: y})
 }
 
 func sleepRandom(page *hrod.Page, minMs, maxMs int) error {
@@ -490,7 +496,7 @@ func getCommentProgress(page *hrod.Page) (commentProgress, error) {
 		const endText = document.querySelector(".end-container")?.textContent || "";
 		const noCommentsText = document.querySelector(".no-comments-text")?.textContent || "";
 		const parentCount = document.querySelectorAll(".parent-comment").length;
-		const subCount = document.querySelectorAll(".comment-item-sub").length;
+		const subCount = document.querySelectorAll(".parent-comment > .reply-container > .list-container > .comment-item").length;
 
 		return JSON.stringify({
 			count: parentCount + subCount,
