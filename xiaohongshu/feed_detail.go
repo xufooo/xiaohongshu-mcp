@@ -276,10 +276,8 @@ func loadCommentsByJS(page *hrod.Page, config CommentLoadConfig) error {
 		}
 	}
 
-	if config.ClickMoreReplies {
-		if err := clickMoreReplies(page, config.MaxRepliesThreshold); err != nil {
-			return err
-		}
+	if err := clickMoreReplies(page, config.MaxRepliesThreshold); err != nil {
+		return err
 	}
 
 	logrus.Info("✓ 评论加载流程结束")
