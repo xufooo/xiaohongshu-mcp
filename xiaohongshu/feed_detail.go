@@ -36,20 +36,12 @@ const (
 // ========== 数据结构 ==========
 
 type CommentLoadConfig struct {
-	// ClickMoreReplies 是否在滚动加载完评论后，自动点击"展开 X 条回复"按钮展开子评论。
-	// 默认 false。session_detail(load_comments=true) 路径会自动设为 true。
 	ClickMoreReplies    bool
-	// MaxRepliesThreshold 单个展开按钮的最大子评论数阈值，超过则不展开。0 表示不限制。
 	MaxRepliesThreshold int
-	// MaxCommentItems 目标评论总数（父评论+子评论合计）。0 表示滚动到结尾。
 	MaxCommentItems     int
-	// ScrollSpeed 滚动速度：slow(1200ms/100px)、normal(1000ms/150px)、fast(1000ms/150px)
 	ScrollSpeed         string
 }
 
-// DefaultCommentLoadConfig 返回默认评论加载配置。
-// 默认不展开子评论，不限制评论数，使用 fast 滚动速度。
-// 各调用方可根据需要覆盖字段。session 路径会自动打开 ClickMoreReplies。
 func DefaultCommentLoadConfig() CommentLoadConfig {
 	return CommentLoadConfig{
 		ClickMoreReplies:    false,
