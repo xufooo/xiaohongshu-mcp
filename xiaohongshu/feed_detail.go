@@ -198,20 +198,15 @@ type commentProgress struct {
 }
 
 func loadCommentsByJS(page *hrod.Page, config CommentLoadConfig) error {
-	logrus.Info("开始加载评论(CDP Mouse.Scroll)...")
+	logrus.Info("开始加载评论(note-scroller JS scrollBy)...")
 	logrus.Infof("配置: maxItems=%d, speed=%s", config.MaxCommentItems, config.ScrollSpeed)
 
-	await := map[string]time.Duration{"slow": 1200, "normal": 700, "fast": 400}[config.ScrollSpeed]
-	scrollDelta := map[string]float64{"slow": 150, "normal": 250, "fast": 350}[config.ScrollSpeed]
+	await, scrollDelta := commentScrollSettings(config.ScrollSpeed)
 	maxRounds := 500
 
 	// 先确保评论区可见
 	if err := scrollToCommentsArea(page); err != nil {
 		logrus.Warnf("定位评论区失败: %v", err)
-	}
-	// 移动鼠标到页面中央（获取焦点，确保 Mouse.Scroll 生效）
-	if err := page.Mouse.MoveTo(proto.NewPoint(400, 400)); err != nil {
-		logrus.Warnf("鼠标定位失败: %v", err)
 	}
 	if err := page.Sleep(time.Second); err != nil {
 		return err
@@ -242,11 +237,10 @@ func loadCommentsByJS(page *hrod.Page, config CommentLoadConfig) error {
 	}
 
 	for i := 0; i < maxRounds; i++ {
-		// 使用原始 CDP Mouse.Scroll（真实滚轮事件，isTrusted=true，无 humanize 延迟）
-		if err := page.Mouse.Scroll(0, scrollDelta, 1); err != nil {
-			logrus.Warnf("Mouse.Scroll 失败: %v", err)
+		if err := scrollNoteScroller(page, scrollDelta); err != nil {
+			logrus.Warnf("评论容器滚动失败: %v", err)
 		}
-		if err := page.Sleep(await * time.Millisecond); err != nil {
+		if err := page.Sleep(await); err != nil {
 			return err
 		}
 
@@ -259,13 +253,13 @@ func loadCommentsByJS(page *hrod.Page, config CommentLoadConfig) error {
 			}
 			if atEnd {
 				logrus.Infof("✓ 检测到评论已到底: count=%d", count)
-				return nil
+				break
 			}
 			logrus.Debugf("评论进度: %d/%d, atEnd=%v", count, config.MaxCommentItems, atEnd)
 
 			if config.MaxCommentItems > 0 && count >= config.MaxCommentItems {
 				logrus.Infof("✓ 已达到目标评论数: %d", count)
-				return nil
+				break
 			}
 
 			if count > lastCount {
@@ -275,14 +269,42 @@ func loadCommentsByJS(page *hrod.Page, config CommentLoadConfig) error {
 				staleChecks++
 				if staleChecks >= maxStaleChecks {
 					logrus.Infof("✓ 评论数连续%d轮无增长(%d)，停止", staleChecks*5, count)
-					return nil
+					break
 				}
 			}
 		}
 	}
 
-	logrus.Infof("✓ 达到最大轮数(%d)，停止加载", maxRounds)
+	if config.ClickMoreReplies {
+		if err := clickMoreReplies(page, config.MaxRepliesThreshold); err != nil {
+			return err
+		}
+	}
+
+	logrus.Info("✓ 评论加载流程结束")
 	return nil
+}
+
+func commentScrollSettings(speed string) (time.Duration, float64) {
+	await := map[string]time.Duration{"slow": 1200 * time.Millisecond, "normal": time.Second, "fast": time.Second}[speed]
+	scrollDelta := map[string]float64{"slow": 100, "normal": 150, "fast": 150}[speed]
+	if await < time.Second {
+		await = time.Second
+	}
+	if scrollDelta == 0 {
+		scrollDelta = 100
+	}
+	return await, scrollDelta
+}
+
+func scrollNoteScroller(page *hrod.Page, delta float64) error {
+	_, err := page.Eval(`(delta) => {
+		const scroller = document.querySelector(".note-scroller");
+		if (!scroller) return false;
+		scroller.scrollBy(0, delta);
+		return true;
+	}`, delta)
+	return err
 }
 
 func commentProgressScript() string {
@@ -290,12 +312,144 @@ func commentProgressScript() string {
 		const endEl = document.querySelector(".end-container");
 		const endText = endEl?.textContent || "";
 		const noCommentsText = document.querySelector(".no-comments-text")?.textContent || "";
+		const parentCount = document.querySelectorAll(".parent-comment").length;
+		const subCount = document.querySelectorAll(".comment-item-sub").length;
 		return JSON.stringify({
-			count: document.querySelectorAll(".parent-comment").length,
-			atEnd: /THE\\s*END/i.test(endText),
+			count: parentCount + subCount,
+			atEnd: /THE\s*END/i.test(endText),
 			noComments: noCommentsText.includes("这是一片荒地"),
 		});
 	}`
+}
+
+type showMoreButtonSnapshot struct {
+	Text  string  `json:"text"`
+	X     float64 `json:"x"`
+	Y     float64 `json:"y"`
+	Count int     `json:"count"`
+}
+
+func clickMoreReplies(page *hrod.Page, maxRepliesThreshold int) error {
+	const maxRounds = 20
+	for i := 0; i < maxRounds; i++ {
+		button, err := nextShowMoreButton(page, maxRepliesThreshold)
+		if err != nil {
+			return err
+		}
+		if button == nil {
+			return nil
+		}
+		logrus.Infof("点击展开子评论: %s", button.Text)
+		if err := dispatchMouseClick(page, button.X, button.Y); err != nil {
+			return err
+		}
+		if err := page.Sleep(4 * time.Second); err != nil {
+			return err
+		}
+	}
+	logrus.Infof("展开子评论达到最大轮数(%d)，停止", maxRounds)
+	return nil
+}
+
+func nextShowMoreButton(page *hrod.Page, maxRepliesThreshold int) (*showMoreButtonSnapshot, error) {
+	result, err := page.Eval(`(maxRepliesThreshold) => {
+		const clean = (value) => (value || "").replace(/\s+/g, " ").trim();
+		const scroller = document.querySelector(".note-scroller");
+		const buttons = Array.from(document.querySelectorAll(".children-comments .show-more"));
+		for (const btn of buttons) {
+			const text = clean(btn.innerText || btn.textContent);
+			if (!text) continue;
+			if (!text.includes("展开") && !text.includes("回复")) continue;
+			let rect = btn.getBoundingClientRect();
+			if (rect.width <= 0 || rect.height <= 0) continue;
+			const match = text.match(/(\d+(?:\.\d+)?)\s*([万千])?/);
+			let count = match ? Number(match[1]) : 0;
+			if (match?.[2] === "万") count *= 10000;
+			if (match?.[2] === "千") count *= 1000;
+			count = Math.floor(count);
+			if (maxRepliesThreshold > 0 && count > maxRepliesThreshold) continue;
+			if (scroller) {
+				const sRect = scroller.getBoundingClientRect();
+				scroller.scrollBy(0, rect.top - sRect.top - sRect.height / 2 + rect.height / 2);
+				rect = btn.getBoundingClientRect();
+				const visibleTop = Math.max(0, sRect.top);
+				const visibleBottom = Math.min(window.innerHeight, sRect.bottom);
+				if (rect.top < visibleTop || rect.bottom > visibleBottom) {
+					scroller.scrollBy(0, rect.top - visibleTop - 5);
+					rect = btn.getBoundingClientRect();
+				}
+			} else {
+				btn.scrollIntoView({block: "center"});
+				rect = btn.getBoundingClientRect();
+				if (rect.top < 0 || rect.bottom > window.innerHeight) {
+					window.scrollBy(0, rect.top - 5);
+					rect = btn.getBoundingClientRect();
+				}
+			}
+			if (rect.width <= 0 || rect.height <= 0) continue;
+			return JSON.stringify({
+				text,
+				x: rect.left + rect.width / 2,
+				y: rect.top + rect.height / 2,
+				count,
+			});
+		}
+		return "";
+	}`, maxRepliesThreshold)
+	if err != nil {
+		return nil, err
+	}
+	if result == nil || strings.TrimSpace(result.Value.Str()) == "" {
+		return nil, nil
+	}
+	var button showMoreButtonSnapshot
+	if err := json.Unmarshal([]byte(result.Value.Str()), &button); err != nil {
+		return nil, fmt.Errorf("解析展开按钮位置失败: %w", err)
+	}
+	return &button, nil
+}
+
+func dispatchMouseClick(page *hrod.Page, x, y float64) error {
+	leftButton := 1
+	modifiers := 0
+	timestamp := proto.TimeSinceEpoch(float64(time.Now().UnixNano()) / float64(time.Second))
+	if err := proto.InputDispatchMouseEvent{
+		Type:        proto.InputDispatchMouseEventTypeMouseMoved,
+		X:           x,
+		Y:           y,
+		Modifiers:   modifiers,
+		Timestamp:   timestamp,
+		Button:      proto.InputMouseButtonNone,
+		PointerType: proto.InputDispatchMouseEventPointerTypeMouse,
+	}.Call(page.Rod); err != nil {
+		return err
+	}
+	if err := proto.InputDispatchMouseEvent{
+		Type:        proto.InputDispatchMouseEventTypeMousePressed,
+		X:           x,
+		Y:           y,
+		Modifiers:   modifiers,
+		Timestamp:   timestamp,
+		Button:      proto.InputMouseButtonLeft,
+		Buttons:     &leftButton,
+		ClickCount:  1,
+		PointerType: proto.InputDispatchMouseEventPointerTypeMouse,
+	}.Call(page.Rod); err != nil {
+		return err
+	}
+	if err := proto.InputDispatchMouseEvent{
+		Type:        proto.InputDispatchMouseEventTypeMouseReleased,
+		X:           x,
+		Y:           y,
+		Modifiers:   modifiers,
+		Timestamp:   timestamp,
+		Button:      proto.InputMouseButtonLeft,
+		ClickCount:  1,
+		PointerType: proto.InputDispatchMouseEventPointerTypeMouse,
+	}.Call(page.Rod); err != nil {
+		return err
+	}
+	return nil
 }
 
 func sleepRandom(page *hrod.Page, minMs, maxMs int) error {
@@ -306,6 +460,11 @@ func sleepRandom(page *hrod.Page, minMs, maxMs int) error {
 func scrollToCommentsArea(page *hrod.Page) error {
 	_, err := page.Eval(`() => {
 		const cc = document.querySelector('.comments-container');
+		const scroller = document.querySelector('.note-scroller');
+		if (cc && scroller) {
+			scroller.scrollTo(0, Math.max(0, cc.offsetTop - 80));
+			return;
+		}
 		if (cc) { cc.scrollIntoView({block:'center'}); }
 	}`)
 	return err
@@ -324,9 +483,11 @@ func getCommentProgress(page *hrod.Page) (commentProgress, error) {
 		const totalMatch = totalText.match(/共\s*(\d+)\s*条评论/);
 		const endText = document.querySelector(".end-container")?.textContent || "";
 		const noCommentsText = document.querySelector(".no-comments-text")?.textContent || "";
+		const parentCount = document.querySelectorAll(".parent-comment").length;
+		const subCount = document.querySelectorAll(".comment-item-sub").length;
 
 		return JSON.stringify({
-			count: document.querySelectorAll(".parent-comment").length,
+			count: parentCount + subCount,
 			total: totalMatch ? Number(totalMatch[1]) : 0,
 			atEnd: /THE\s*END/i.test(endText),
 			noComments: noCommentsText.includes("这是一片荒地"),

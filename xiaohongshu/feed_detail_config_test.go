@@ -2,6 +2,8 @@ package xiaohongshu
 
 import (
 	"errors"
+	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -64,6 +66,47 @@ func TestCommentLoadTimeoutLeavesTimeForDetailExtraction(t *testing.T) {
 	}
 	if got := feedDetailPageTimeout - commentLoadTimeout; got != time.Minute {
 		t.Fatalf("expected one minute for detail extraction, got %s", got)
+	}
+}
+
+func TestCommentScrollSettingsUseSlowEmbeddedDefaults(t *testing.T) {
+	await, delta := commentScrollSettings("slow")
+
+	if await < time.Second {
+		t.Fatalf("slow comment scroll interval = %s, want at least 1s", await)
+	}
+	if delta < 50 || delta > 150 {
+		t.Fatalf("slow comment scroll delta = %.0f, want 50-150", delta)
+	}
+}
+
+func TestCommentProgressScriptCountsParentAndSubComments(t *testing.T) {
+	script := commentProgressScript()
+
+	for _, want := range []string{`querySelectorAll(".parent-comment").length`, `querySelectorAll(".comment-item-sub").length`} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("commentProgressScript() missing %s in:\n%s", want, script)
+		}
+	}
+}
+
+func TestNextShowMoreButtonOnlyTargetsReplyExpansionButtons(t *testing.T) {
+	source, err := os.ReadFile("feed_detail.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(source)
+
+	if strings.Contains(script, `querySelectorAll(".children-comments .show-more, .show-more")`) {
+		t.Fatal("nextShowMoreButton must not use the broad .show-more selector")
+	}
+	for _, want := range []string{
+		`querySelectorAll(".children-comments .show-more")`,
+		`!text.includes("展开") && !text.includes("回复")`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("nextShowMoreButton missing %s", want)
+		}
 	}
 }
 

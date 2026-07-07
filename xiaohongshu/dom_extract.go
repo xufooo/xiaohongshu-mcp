@@ -155,13 +155,28 @@ func ExtractFeedDetailFromDOM(page *hrod.Page, feedID string) (*FeedDetailRespon
 			const content = clean(comment.querySelector(".content, .note-text, [class*='content']")?.innerText || comment.innerText);
 			const user = clean(comment.querySelector(".name, .nickname, [class*='name']")?.innerText);
 			const likeText = clean(comment.querySelector(".like, [class*='like']")?.innerText);
+			const subComments = Array.from(comment.querySelectorAll(".children-comments > .comment-item-sub")).map((sub) => {
+				const subContent = clean(sub.querySelector(".content, .note-text, [class*='content']")?.innerText || sub.innerText);
+				const subUser = clean(sub.querySelector(".name, .nickname, [class*='name']")?.innerText);
+				const subLikeText = clean(sub.querySelector(".like, [class*='like']")?.innerText);
+				return {
+					id: sub.dataset?.id || sub.getAttribute("data-comment-id") || "",
+					noteId: feedID,
+					content: subContent,
+					likeCount: (subLikeText.match(/([\d.万wWkK]+)/) || ["", ""])[1],
+					userInfo: { nickname: subUser, nickName: subUser },
+					subComments: [],
+					showTags: []
+				};
+			}).filter((subComment) => subComment.content);
 			return {
 				id: comment.dataset?.id || comment.getAttribute("data-comment-id") || "",
 				noteId: feedID,
 				content,
 				likeCount: (likeText.match(/([\d.万wWkK]+)/) || ["", ""])[1],
 				userInfo: { nickname: user, nickName: user },
-				subComments: [],
+				subCommentCount: subComments.length ? String(subComments.length) : "",
+				subComments,
 				showTags: []
 			};
 		}).filter((comment) => comment.content);
