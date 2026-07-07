@@ -3,6 +3,7 @@ package xiaohongshu
 import (
 	"context"
 	"encoding/json"
+	stderrors "errors"
 	"fmt"
 	"math/rand"
 	"regexp"
@@ -40,6 +41,14 @@ type CommentLoadConfig struct {
 	MaxRepliesThreshold int
 	MaxCommentItems     int
 	ScrollSpeed         string
+}
+
+type CommentCursor struct {
+	FeedID      string    `json:"feed_id"`
+	Round       int       `json:"round"`        // 已完成的滚动轮次
+	ReturnedIDs []string  `json:"returned_ids"` // 已返回的评论ID
+	ExpandRound int       `json:"expand_round"` // 已完成的展开轮次
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 func DefaultCommentLoadConfig() CommentLoadConfig {
@@ -163,6 +172,80 @@ func (f *FeedDetailAction) GetFeedDetailWithConfig(ctx context.Context, feedID, 
 		return initialDetail, nil
 	}
 	return detail, nil
+}
+
+func (f *FeedDetailAction) GetFeedDetailCommentsBatch(ctx context.Context, feedID, xsecToken string, cursor *CommentCursor, maxItems int, config CommentLoadConfig) (*FeedDetailResponse, *CommentCursor, bool, error) {
+	if err := validateFeedAccessArgs(feedID, xsecToken); err != nil {
+		return nil, nil, false, err
+	}
+
+	config = normalizeCommentLoadConfig(config)
+	page := f.page.Context(ctx).Timeout(feedDetailPageTimeout)
+	url := makeFeedDetailURL(feedID, xsecToken)
+
+	logrus.Infof("打开 feed 详情页(评论分批): %s", url)
+	opener := NewNoteOpenActionWithState(page, f.state)
+	if err := opener.OpenFromCards(ctx, feedID, xsecToken, ""); err != nil {
+		logrus.Warnf("从卡片打开笔记失败，使用详情 URL 兜底: %v", err)
+		err := retry.Do(
+			func() error {
+				return opener.OpenByURLFallback(ctx, feedID, xsecToken)
+			},
+			retry.Attempts(3),
+			retry.Delay(500*time.Millisecond),
+			retry.MaxJitter(1000*time.Millisecond),
+			retry.OnRetry(func(n uint, err error) {
+				logrus.Debugf("页面导航重试 #%d: %v", n, err)
+			}),
+		)
+		if err != nil {
+			return nil, nil, false, err
+		}
+	}
+	if err := sleepRandom(page, 1000, 1000); err != nil {
+		return nil, nil, false, err
+	}
+	if err := checkPageAccessible(page); err != nil {
+		return nil, nil, false, err
+	}
+
+	reader := NewReadStageAction(page, f.state)
+	if err := reader.Read(ctx, feedID, 5*time.Second); err != nil {
+		return nil, nil, false, fmt.Errorf("阅读阶段失败: %w", err)
+	}
+
+	detail, err := f.extractFeedDetail(page, feedID)
+	if err != nil {
+		return nil, nil, false, err
+	}
+
+	commentPage := page.Timeout(commentLoadTimeout)
+	commentStart := time.Now()
+	comments, nextCursor, hasMore, err := LoadCommentsBatch(commentPage, config, cursor, maxItems)
+	reader.RecordCommentDwell(feedID, time.Since(commentStart), true)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	if nextCursor != nil && nextCursor.FeedID == "" {
+		nextCursor.FeedID = feedID
+	}
+
+	detail.Comments = CommentList{
+		List:    comments,
+		HasMore: hasMore,
+	}
+	if totalItems := knownCommentTotal(commentPage); totalItems > 0 {
+		detail.Comments.TotalItems = totalItems
+	}
+	return detail, nextCursor, hasMore, nil
+}
+
+func knownCommentTotal(page *hrod.Page) int {
+	progress, err := getCommentProgress(page)
+	if err != nil || progress.Total <= 0 {
+		return 0
+	}
+	return progress.Total
 }
 
 func normalizeCommentLoadConfig(config CommentLoadConfig) CommentLoadConfig {
@@ -310,6 +393,223 @@ func loadCommentsByJS(page *hrod.Page, config CommentLoadConfig) error {
 
 	logrus.Info("✓ 评论加载流程结束")
 	return nil
+}
+
+func LoadCommentsBatch(page *hrod.Page, config CommentLoadConfig, cursor *CommentCursor, maxItems int) ([]Comment, *CommentCursor, bool, error) {
+	config = normalizeCommentLoadConfig(config)
+	if maxItems <= 0 {
+		maxItems = 20
+	}
+
+	logrus.Infof("开始分批加载评论(note-scroller JS scrollBy): maxItems=%d, cursor=%+v", maxItems, cursor)
+	await, scrollDelta := commentScrollSettings(config.ScrollSpeed)
+	maxRounds := 500
+	commentDeadline := time.Now().Add(commentLoadTimeout)
+	remainingDeadline := func() time.Duration {
+		return time.Until(commentDeadline)
+	}
+
+	feedID := ""
+	batchCursor := &CommentCursor{CreatedAt: time.Now()}
+	returned := make(map[string]struct{})
+	if cursor != nil {
+		feedID = cursor.FeedID
+		batchCursor.FeedID = cursor.FeedID
+		batchCursor.Round = cursor.Round
+		batchCursor.ExpandRound = cursor.ExpandRound
+		batchCursor.CreatedAt = cursor.CreatedAt
+		if batchCursor.CreatedAt.IsZero() {
+			batchCursor.CreatedAt = time.Now()
+		}
+		batchCursor.ReturnedIDs = append([]string(nil), cursor.ReturnedIDs...)
+		for _, id := range cursor.ReturnedIDs {
+			if id != "" {
+				returned[id] = struct{}{}
+			}
+		}
+	}
+	if feedID == "" {
+		if id, err := currentFeedIDFromPage(page); err == nil {
+			feedID = id
+			batchCursor.FeedID = id
+		}
+	}
+
+	if err := scrollToCommentsArea(page); err != nil {
+		logrus.Warnf("定位评论区失败: %v", err)
+	}
+	if cursor != nil && cursor.Round > 0 {
+		for i := 0; i < cursor.Round; i++ {
+			if remaining := remainingDeadline(); remaining < 30*time.Second {
+				break
+			}
+			if err := scrollNoteScroller(page, scrollDelta); err != nil {
+				logrus.Warnf("恢复评论滚动位置失败: %v", err)
+			}
+			if err := page.Sleep(await); err != nil {
+				return nil, batchCursor, true, err
+			}
+		}
+	}
+	if err := page.Sleep(time.Second); err != nil {
+		return nil, batchCursor, true, err
+	}
+
+	collect := func(limit int) ([]Comment, bool, error) {
+		if limit <= 0 {
+			return nil, true, nil
+		}
+		comments, err := ExtractCommentsFromDOM(page, feedID)
+		if err != nil {
+			if stderrors.Is(err, errors.ErrNoFeedDetail) {
+				return nil, false, nil
+			}
+			return nil, false, err
+		}
+		var batch []Comment
+		for i, comment := range flattenComments(comments) {
+			key := commentBatchKey(i, comment)
+			if key == "" {
+				continue
+			}
+			if _, ok := returned[key]; ok {
+				continue
+			}
+			if len(batch) >= limit {
+				return batch, true, nil
+			}
+			returned[key] = struct{}{}
+			batchCursor.ReturnedIDs = append(batchCursor.ReturnedIDs, key)
+			batch = append(batch, comment)
+		}
+		return batch, false, nil
+	}
+
+	batch, moreVisible, err := collect(maxItems)
+	if err != nil {
+		return nil, batchCursor, true, err
+	}
+	if len(batch) >= maxItems {
+		progress, _ := getCommentProgress(page)
+		return batch, batchCursor, moreVisible || (!progress.AtEnd && !progress.NoComments), nil
+	}
+
+	lastCount := -1
+	staleChecks := 0
+	const maxStaleChecks = 20
+
+	for i := 0; i < maxRounds && len(batch) < maxItems; i++ {
+		if remaining := remainingDeadline(); remaining < 30*time.Second {
+			logrus.Warnf("评论分批加载剩余时间不足(%s)，停止新滚动", remaining.Round(time.Second))
+			break
+		}
+		if err := scrollNoteScroller(page, scrollDelta); err != nil {
+			logrus.Warnf("评论容器滚动失败: %v", err)
+		}
+		batchCursor.Round++
+		if err := page.Sleep(await); err != nil {
+			return batch, batchCursor, true, err
+		}
+
+		if config.ClickMoreReplies {
+			button, err := nextVisibleShowMoreButton(page, config.MaxRepliesThreshold)
+			if err != nil {
+				logrus.Warnf("检查可见子评论展开按钮失败: %v", err)
+			} else if button != nil {
+				before, countErr := countReplyItems(page, button.ParentIndex)
+				if countErr != nil {
+					before = -1
+				}
+				logrus.Infof("分批加载中点击展开子评论: %s", button.Text)
+				if err := dispatchMouseClick(page, button.X, button.Y); err != nil {
+					logrus.Warnf("分批加载中展开子评论失败: %v", err)
+				} else {
+					batchCursor.ExpandRound++
+					if before >= 0 {
+						if err := waitReplyItemsChanged(page, button.ParentIndex, before, 7*time.Second); err != nil {
+							logrus.Debugf("等待子评论增长超时，继续滚动: %v", err)
+						}
+					}
+				}
+			}
+		}
+
+		progress, progressErr := getCommentProgress(page)
+		if progressErr != nil {
+			logrus.Warnf("评论进度检查失败: %v", progressErr)
+		} else {
+			if progress.NoComments {
+				return batch, batchCursor, false, nil
+			}
+			if progress.Count > lastCount {
+				lastCount = progress.Count
+				staleChecks = 0
+			} else {
+				staleChecks++
+				if staleChecks >= maxStaleChecks {
+					logrus.Infof("评论数连续%d轮无增长(%d)，停止分批加载", staleChecks, progress.Count)
+					return batch, batchCursor, !progress.AtEnd, nil
+				}
+			}
+			if progress.AtEnd {
+				more, moreVisible, collectErr := collect(maxItems - len(batch))
+				if collectErr != nil {
+					return batch, batchCursor, false, collectErr
+				}
+				batch = append(batch, more...)
+				return batch, batchCursor, moreVisible, nil
+			}
+		}
+
+		more, _, collectErr := collect(maxItems - len(batch))
+		if collectErr != nil {
+			return batch, batchCursor, true, collectErr
+		}
+		batch = append(batch, more...)
+	}
+
+	progress, progressErr := getCommentProgress(page)
+	hasMore := true
+	if progressErr == nil {
+		hasMore = !progress.AtEnd && !progress.NoComments
+	}
+	return batch, batchCursor, hasMore, nil
+}
+
+func commentBatchKey(parentIndex int, comment Comment) string {
+	if comment.ID != "" {
+		return comment.ID
+	}
+	if comment.Content == "" {
+		return ""
+	}
+	return fmt.Sprintf("idx_%d_%.30s", parentIndex, comment.Content)
+}
+
+func flattenComments(comments []Comment) []Comment {
+	flat := make([]Comment, 0, len(comments))
+	for _, comment := range comments {
+		subComments := comment.SubComments
+		comment.SubComments = nil
+		flat = append(flat, comment)
+		flat = append(flat, subComments...)
+	}
+	return flat
+}
+
+func currentFeedIDFromPage(page *hrod.Page) (string, error) {
+	result, err := page.Timeout(2*time.Second).Eval(`() => {
+		const fromPath = String(location.pathname || "").match(/\/(?:explore|discovery\/item)\/([^/?#]+)/);
+		if (fromPath?.[1]) return decodeURIComponent(fromPath[1]);
+		return "";
+	}`)
+	if err != nil {
+		return "", err
+	}
+	if result == nil {
+		return "", nil
+	}
+	return strings.TrimSpace(result.Value.Str()), nil
 }
 
 func commentScrollSettings(speed string) (time.Duration, float64) {

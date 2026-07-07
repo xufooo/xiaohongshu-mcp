@@ -115,3 +115,50 @@ func TestSessionOpenNoteAllowsMissingXsecTokenThroughValidation(t *testing.T) {
 		t.Fatalf("expected next_step payload when xsec_token is omitted, got %q", text)
 	}
 }
+
+func TestParseMCPMaxItemsDefaultsAndCaps(t *testing.T) {
+	tests := []struct {
+		name string
+		args map[string]any
+		want int
+	}{
+		{name: "default", args: map[string]any{}, want: 20},
+		{name: "float", args: map[string]any{"max_items": float64(35)}, want: 35},
+		{name: "string", args: map[string]any{"max_items": "12"}, want: 12},
+		{name: "legacy limit", args: map[string]any{"limit": 9}, want: 9},
+		{name: "max cap", args: map[string]any{"max_items": 80}, want: 50},
+		{name: "zero default", args: map[string]any{"max_items": 0}, want: 20},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := parseMCPMaxItems(tt.args); got != tt.want {
+				t.Fatalf("parseMCPMaxItems() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestHasMCPBatchRequestRequiresCursorOrPositiveMaxItems(t *testing.T) {
+	tests := []struct {
+		name     string
+		args     map[string]any
+		cursorID string
+		want     bool
+	}{
+		{name: "none", args: map[string]any{}, want: false},
+		{name: "cursor", args: map[string]any{}, cursorID: "cc_feed_1", want: true},
+		{name: "positive max items", args: map[string]any{"max_items": 12}, want: true},
+		{name: "zero max items", args: map[string]any{"max_items": 0}, want: false},
+		{name: "blank max items", args: map[string]any{"max_items": ""}, want: false},
+		{name: "legacy limit only", args: map[string]any{"limit": 12}, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := hasMCPBatchRequest(tt.args, tt.cursorID); got != tt.want {
+				t.Fatalf("hasMCPBatchRequest() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
