@@ -50,6 +50,7 @@ type CommentLoadConfig struct {
 // DefaultCommentLoadConfig 返回默认评论加载配置。
 // 默认不展开子评论，不限制评论数，使用 fast 滚动速度。
 // 各调用方可根据需要覆盖字段。session 路径会自动打开 ClickMoreReplies。
+func DefaultCommentLoadConfig() CommentLoadConfig {
 	return CommentLoadConfig{
 		ClickMoreReplies:    false,
 		MaxRepliesThreshold: 10,
