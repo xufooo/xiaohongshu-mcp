@@ -42,7 +42,21 @@ func (f *CommentFeedAction) PostComment(ctx context.Context, feedID, xsecToken, 
 		return fmt.Errorf("评论内容不能为空")
 	}
 
-	page, err := f.preparePage(ctx, feedID, xsecToken, "comment", 60*time.Second)
+	var page *hrod.Page
+	var err error
+	if f.state != nil {
+		page = f.page.Context(ctx).Timeout(120 * time.Second)
+		if err := checkPageAccessible(page); err != nil {
+			return err
+		}
+		reader := NewReadStageAction(page, f.state)
+		if err := reader.ReadMin(ctx, feedID, 45*time.Second); err != nil {
+			return fmt.Errorf("评论前阅读阶段失败: %w", err)
+		}
+		page, err = f.preparePage(ctx, feedID, xsecToken, "comment", 120*time.Second)
+	} else {
+		page, err = f.preparePage(ctx, feedID, xsecToken, "comment", 120*time.Second)
+	}
 	if err != nil {
 		return err
 	}
@@ -51,8 +65,10 @@ func (f *CommentFeedAction) PostComment(ctx context.Context, feedID, xsecToken, 
 	if err := checkPageAccessible(page); err != nil {
 		return err
 	}
-	if err := browseBeforeComment(page); err != nil {
-		return fmt.Errorf("评论前浏览页面失败: %w", err)
+	if f.state == nil {
+		if err := browseBeforeComment(page); err != nil {
+			return fmt.Errorf("评论前浏览页面失败: %w", err)
+		}
 	}
 
 	elem, err := page.Element("div.input-box div.content-edit span")
@@ -120,7 +136,24 @@ func (f *CommentFeedAction) ReplyToComment(ctx context.Context, feedID, xsecToke
 	}
 
 	// 增加超时时间，因为需要滚动查找评论，同时保留调用方取消语义。
-	page, err := f.preparePage(ctx, feedID, xsecToken, "reply", 5*time.Minute)
+	var page *hrod.Page
+	var err error
+	if f.state != nil {
+		page = f.page.Context(ctx).Timeout(5 * time.Minute)
+		if err := checkPageAccessible(page); err != nil {
+			return err
+		}
+		reader := NewReadStageAction(page, f.state)
+		if err := reader.ReadMin(ctx, feedID, 45*time.Second); err != nil {
+			return fmt.Errorf("回复前阅读阶段失败: %w", err)
+		}
+		if err := reader.DwellInComments(ctx, feedID, 60*time.Second); err != nil {
+			return fmt.Errorf("回复前评论区停留失败: %w", err)
+		}
+		page, err = f.preparePage(ctx, feedID, xsecToken, "reply", 5*time.Minute)
+	} else {
+		page, err = f.preparePage(ctx, feedID, xsecToken, "reply", 5*time.Minute)
+	}
 	if err != nil {
 		return err
 	}
@@ -129,8 +162,10 @@ func (f *CommentFeedAction) ReplyToComment(ctx context.Context, feedID, xsecToke
 	if err := checkPageAccessible(page); err != nil {
 		return err
 	}
-	if err := browseBeforeComment(page); err != nil {
-		return fmt.Errorf("回复前浏览页面失败: %w", err)
+	if f.state == nil {
+		if err := browseBeforeComment(page); err != nil {
+			return fmt.Errorf("回复前浏览页面失败: %w", err)
+		}
 	}
 
 	// 等待评论容器加载

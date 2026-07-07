@@ -83,7 +83,7 @@ func TestCommentScrollSettingsUseSlowEmbeddedDefaults(t *testing.T) {
 func TestCommentProgressScriptCountsParentAndSubComments(t *testing.T) {
 	script := commentProgressScript()
 
-	for _, want := range []string{`querySelectorAll(".parent-comment").length`, `querySelectorAll(".comment-item-sub").length`} {
+	for _, want := range []string{`querySelectorAll(".parent-comment").length`, `querySelectorAll(".parent-comment > .reply-container > .list-container > .comment-item").length`} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("commentProgressScript() missing %s in:\n%s", want, script)
 		}
@@ -101,12 +101,92 @@ func TestNextShowMoreButtonOnlyTargetsReplyExpansionButtons(t *testing.T) {
 		t.Fatal("nextShowMoreButton must not use the broad .show-more selector")
 	}
 	for _, want := range []string{
-		`querySelectorAll(".children-comments .show-more")`,
-		`!text.includes("展开") && !text.includes("回复")`,
+		`.flatMap((parent) => Array.from(parent.querySelectorAll(":scope > .reply-container .show-more")))`,
+		`!text.includes("展开") || text.includes("收起")`,
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("nextShowMoreButton missing %s", want)
 		}
+	}
+}
+
+func TestDOMParentCommentIDFallsBackToParentDataCommentID(t *testing.T) {
+	source, err := os.ReadFile("dom_extract.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `id: parent.dataset?.id || parent.getAttribute("data-comment-id") || top.dataset?.id || top.getAttribute("data-comment-id") || "",`
+	if !strings.Contains(string(source), want) {
+		t.Fatalf("parent comment id fallback missing parent data-comment-id")
+	}
+}
+
+func TestReplyExpansionRetryUsesSlowerDelayThanCommentPolling(t *testing.T) {
+	source, err := os.ReadFile("feed_detail.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(source)
+
+	for _, want := range []string{
+		`replyExpansionRetryDelay`,
+		`time.Second`,
+		`retry.Delay(replyExpansionRetryDelay)`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("reply expansion retry missing %s", want)
+		}
+	}
+}
+
+func TestReplyExpansionWaitComparesClickedParentReplyCount(t *testing.T) {
+	source, err := os.ReadFile("feed_detail.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(source)
+
+	for _, want := range []string{
+		`ParentIndex int`,
+		"`json:\"parentIndex\"`",
+		`countReplyItems(page, button.ParentIndex)`,
+		`waitReplyItemsChanged(page, button.ParentIndex, before, 7*time.Second)`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("reply expansion wait missing clicked-parent count handling %s", want)
+		}
+	}
+}
+
+func TestScrollNoteScrollerReturnsErrorWhenScrollerMissing(t *testing.T) {
+	source, err := os.ReadFile("feed_detail.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(source)
+
+	for _, want := range []string{
+		`result == nil || !result.Value.Bool()`,
+		`return fmt.Errorf("评论容器不存在")`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("scrollNoteScroller missing false-result handling %s", want)
+		}
+	}
+}
+
+func TestReplyExpansionClickUsesHumanizedClickPoint(t *testing.T) {
+	source, err := os.ReadFile("feed_detail.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(source)
+
+	if !strings.Contains(script, `return page.ClickPoint(proto.Point{X: x, Y: y})`) {
+		t.Fatal("dispatchMouseClick should delegate to page.ClickPoint")
+	}
+	if strings.Contains(script, `InputDispatchMouseEvent`) {
+		t.Fatal("dispatchMouseClick should not manually dispatch CDP mouse events")
 	}
 }
 
