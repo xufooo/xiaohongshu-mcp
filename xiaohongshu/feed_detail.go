@@ -413,7 +413,7 @@ func dispatchMouseClick(page *hrod.Page, x, y float64) error {
 	leftButton := 1
 	modifiers := 0
 	timestamp := proto.TimeSinceEpoch(float64(time.Now().UnixNano()) / float64(time.Second))
-	if err := proto.InputDispatchMouseEvent{
+	evt := proto.InputDispatchMouseEvent{
 		Type:        proto.InputDispatchMouseEventTypeMouseMoved,
 		X:           x,
 		Y:           y,
@@ -421,10 +421,12 @@ func dispatchMouseClick(page *hrod.Page, x, y float64) error {
 		Timestamp:   timestamp,
 		Button:      proto.InputMouseButtonNone,
 		PointerType: proto.InputDispatchMouseEventPointerTypeMouse,
-	}.Call(page.Rod); err != nil {
+	}
+	err := evt.Call(page.Rod)
+	if err != nil {
 		return err
 	}
-	if err := proto.InputDispatchMouseEvent{
+	evt = proto.InputDispatchMouseEvent{
 		Type:        proto.InputDispatchMouseEventTypeMousePressed,
 		X:           x,
 		Y:           y,
@@ -434,10 +436,12 @@ func dispatchMouseClick(page *hrod.Page, x, y float64) error {
 		Buttons:     &leftButton,
 		ClickCount:  1,
 		PointerType: proto.InputDispatchMouseEventPointerTypeMouse,
-	}.Call(page.Rod); err != nil {
+	}
+	err = evt.Call(page.Rod)
+	if err != nil {
 		return err
 	}
-	if err := proto.InputDispatchMouseEvent{
+	evt = proto.InputDispatchMouseEvent{
 		Type:        proto.InputDispatchMouseEventTypeMouseReleased,
 		X:           x,
 		Y:           y,
@@ -446,7 +450,9 @@ func dispatchMouseClick(page *hrod.Page, x, y float64) error {
 		Button:      proto.InputMouseButtonLeft,
 		ClickCount:  1,
 		PointerType: proto.InputDispatchMouseEventPointerTypeMouse,
-	}.Call(page.Rod); err != nil {
+	}
+	err = evt.Call(page.Rod)
+	if err != nil {
 		return err
 	}
 	return nil
