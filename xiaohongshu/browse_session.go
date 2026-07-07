@@ -944,9 +944,9 @@ func (s *BrowseSession) currentStateLocked(kind XHSReadyKind, resultsCount int, 
 func (s *BrowseSession) nextHintLocked(resultsCount int) string {
 	switch {
 	case s.opened && !s.read:
-		return "可调用 session_detail 提取当前笔记；点赞或评论前先调用 session_read"
+		return "可调用 session_detail 提取当前笔记；load_comments=true 可加载评论和展开子评论；点赞或评论前先调用 session_read"
 	case s.opened && s.read:
-		return "可调用 session_detail 提取当前笔记，或设置 load_comments=true 加载更多评论"
+		return "可调用 session_detail 提取当前笔记，或设置 load_comments=true 加载更多评论（含自动展开子评论）"
 	case resultsCount > 0:
 		return "可用 session_open_note 打开 results 中的 result_ref"
 	default:
