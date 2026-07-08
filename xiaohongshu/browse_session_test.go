@@ -3,6 +3,7 @@ package xiaohongshu
 import (
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -91,8 +92,10 @@ func TestBrowseSessionSemanticActionsFollowState(t *testing.T) {
 
 	actions := session.semanticActionsLocked(3)
 	refs := make(map[string]bool, len(actions))
+	labels := make(map[string]string, len(actions))
 	for _, action := range actions {
 		refs[action.Ref] = true
+		labels[action.Ref] = action.Label
 	}
 
 	for _, ref := range []string{"session_state", "detail_current", "like_current", "comment_current", "back_to_results", "close_session"} {
@@ -102,6 +105,9 @@ func TestBrowseSessionSemanticActionsFollowState(t *testing.T) {
 	}
 	if refs["open_note:0"] || refs["read_current"] {
 		t.Fatalf("unexpected pre-read/result actions in %+v", actions)
+	}
+	if labels["back_to_results"] != "关闭当前笔记面板" {
+		t.Fatalf("back action label = %q, want 关闭当前笔记面板", labels["back_to_results"])
 	}
 }
 
@@ -374,11 +380,13 @@ func TestBrowseSessionRecommendedActionChoosesFirstUnseenResult(t *testing.T) {
 	if action.Tool != "session_open_note" || action.ResultRef != "1" || action.FeedID != "feed-unseen" {
 		t.Fatalf("recommended action = %+v, want open_note result_ref=1 feed-unseen", action)
 	}
+	if action.Label != "打开下一张未读笔记" {
+		t.Fatalf("recommended label = %q, want 打开下一张未读笔记", action.Label)
+	}
 }
 
 func TestBrowseSessionRecommendedActionAvoidsWriteAfterRead(t *testing.T) {
 	session := &BrowseSession{
-		sourceURL:     "https://www.xiaohongshu.com/search_result_ai?keyword=test",
 		currentFeedID: "feed-1",
 		opened:        true,
 		read:          true,
@@ -390,6 +398,77 @@ func TestBrowseSessionRecommendedActionAvoidsWriteAfterRead(t *testing.T) {
 	}
 	if action.Tool != "session_back" || action.Ref != "back_to_results" {
 		t.Fatalf("recommended action = %+v, want session_back", action)
+	}
+	if action.Label != "关闭当前笔记面板" {
+		t.Fatalf("recommended label = %q, want 关闭当前笔记面板", action.Label)
+	}
+}
+
+func TestOpenedSessionBackActionDoesNotRequireSourceURL(t *testing.T) {
+	session := &BrowseSession{
+		currentFeedID: "feed-1",
+		opened:        true,
+		read:          true,
+	}
+
+	available := session.availableActionsLocked(0)
+	found := false
+	for _, action := range available {
+		if action == "session_back" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("session_back missing from available actions without sourceURL: %+v", available)
+	}
+
+	semantic := session.semanticActionsLocked(0)
+	found = false
+	for _, action := range semantic {
+		if action.Tool == "session_back" && action.Label == "关闭当前笔记面板" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("session_back missing from semantic actions without sourceURL: %+v", semantic)
+	}
+}
+
+func TestBackUsesOverlayCloseStrategy(t *testing.T) {
+	data, err := os.ReadFile("note_close.go")
+	if err != nil {
+		t.Fatalf("read note_close.go: %v", err)
+	}
+	source := string(data)
+	for _, want := range []string{
+		`const noteCloseProbeDelay = 500 * time.Millisecond`,
+		`page.Keyboard.Press("Escape")`,
+		`document.querySelector('.note-container')`,
+		`page.Eval`,
+		`page.Navigate(sourceURL)`,
+		`WaitForXHSReady(page, XHSReadyOptions{Kind: inferXHSReadyKindFromURL(sourceURL)})`,
+	} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("note_close.go missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{
+		`type noteCloseProbe struct`,
+		`isOnXHSDomain`,
+		`page.Mouse.MoveTo`,
+		`proto.Point`,
+		`history.back()`,
+		`.note-detail-mask`,
+		`mask.Click`,
+	} {
+		if strings.Contains(source, forbidden) {
+			t.Fatalf("note_close.go must not contain %q", forbidden)
+		}
+	}
+	if lines := strings.Count(strings.TrimRight(source, "\n"), "\n") + 1; lines > 80 {
+		t.Fatalf("note_close.go has %d lines, want <= 80", lines)
 	}
 }
 

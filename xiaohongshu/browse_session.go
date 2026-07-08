@@ -701,26 +701,34 @@ func (s *BrowseSession) Back(ctx context.Context) error {
 	defer s.finishOperation()
 
 	s.mu.Lock()
+	page := s.page
 	sourceURL := s.sourceURL
+	feedID := s.currentFeedID
 	s.mu.Unlock()
-	if sourceURL == "" {
-		return fmt.Errorf("当前 session 没有来源 URL")
+
+	if page == nil {
+		return fmt.Errorf("browse session 页面不存在: %s", s.id)
 	}
-	if err := s.page.Context(ctx).Navigate(sourceURL); err != nil {
-		return err
+
+	method, err := closeNoteOverlay(page.Context(ctx), sourceURL)
+	if err != nil {
+		return fmt.Errorf("关闭笔记面板失败: %w", err)
 	}
-	if err := WaitForXHSReady(s.page.Context(ctx), XHSReadyOptions{Kind: inferXHSReadyKindFromURL(sourceURL)}); err != nil {
-		return err
-	}
+	logrus.Debugf("关闭笔记面板方式: %s", method)
 
 	s.mu.Lock()
 	s.currentFeedID = ""
 	s.currentXsecToken = ""
 	s.opened = false
 	s.read = false
-	s.recordTimelineLocked("back", sourceURL, "ok", time.Now(), "returned to source page")
+	s.recordTimelineLocked("back", feedID, "ok", time.Now(), "closed note panel")
 	s.mu.Unlock()
+	s.refreshPageState()
 	return nil
+}
+
+func (s *BrowseSession) CloseNote(ctx context.Context) error {
+	return s.Back(ctx)
 }
 
 func (s *BrowseSession) Close() {
@@ -1053,7 +1061,7 @@ func (s *BrowseSession) availableActionsLocked(resultsCount int) []string {
 	if s.opened && s.read {
 		actions = append(actions, "session_like", "session_comment")
 	}
-	if s.opened && s.sourceURL != "" {
+	if s.opened {
 		actions = append(actions, "session_back")
 	}
 	return actions
@@ -1125,11 +1133,11 @@ func (s *BrowseSession) semanticActionsLocked(resultsCount int) []BrowseSessionA
 			},
 		)
 	}
-	if s.opened && s.sourceURL != "" {
+	if s.opened {
 		actions = append(actions, BrowseSessionAction{
 			Ref:    "back_to_results",
 			Tool:   "session_back",
-			Label:  "返回搜索结果页",
+			Label:  "关闭当前笔记面板",
 			FeedID: s.currentFeedID,
 		})
 	}
@@ -1154,11 +1162,11 @@ func (s *BrowseSession) recommendedActionLocked(ready bool, results []BrowseSess
 			Requires: "opened",
 		}
 	}
-	if s.opened && s.read && s.sourceURL != "" {
+	if s.opened && s.read {
 		return &BrowseSessionAction{
 			Ref:    "back_to_results",
 			Tool:   "session_back",
-			Label:  "返回搜索结果页",
+			Label:  "关闭当前笔记面板",
 			FeedID: s.currentFeedID,
 		}
 	}
@@ -1170,7 +1178,7 @@ func (s *BrowseSession) recommendedActionLocked(ready bool, results []BrowseSess
 			return &BrowseSessionAction{
 				Ref:       "open_note:" + result.Ref,
 				Tool:      "session_open_note",
-				Label:     "打开未看过的搜索结果 " + result.Ref,
+				Label:     "打开下一张未读笔记",
 				ResultRef: result.Ref,
 				FeedID:    result.FeedID,
 			}
