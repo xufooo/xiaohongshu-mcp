@@ -1005,9 +1005,11 @@ func (s *BrowseSession) nextHintLocked(resultsCount int) string {
 	case s.opened && s.read:
 		return "可调用 session_detail 提取当前笔记，或设置 load_comments=true 加载更多评论（含自动展开子评论）"
 	case resultsCount > 0:
-		return "可用 session_open_note 打开 results 中的 result_ref"
+		return "已关闭笔记面板，可继续：搜索新关键词 (session_search)、打开其他笔记 (session_open_note)、或滚动浏览"
+	case !s.opened && resultsCount == 0:
+		return "可搜索关键词 (session_search) 查找笔记"
 	default:
-		return "可调用 session_search 搜索笔记"
+		return "可搜索关键词 (session_search) 查找笔记"
 	}
 }
 
