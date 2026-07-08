@@ -368,8 +368,13 @@ func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, xsecToken strin
 		return fmt.Errorf("读取当前页面 URL: %w", err)
 	}
 	opener := NewNoteOpenActionWithState(s.page.Context(ctx), s.state)
-	if err := opener.OpenFromCards(ctx, feed.ID, feed.XsecToken, OpenSourceSearch); err != nil {
-		return err
+	err = opener.OpenFromCards(ctx, feed.ID, feed.XsecToken, OpenSourceSearch)
+	if err != nil {
+		// DOM 中找不到卡片时降级到 URL 直接打开（SPA 重渲染后卡片 ID 可能不在当前 DOM 中）
+		logrus.Debugf("从卡片打开笔记失败，降级到 URL 打开: %v", err)
+		if fbErr := opener.OpenByURLFallback(ctx, feed.ID, feed.XsecToken); fbErr != nil {
+			return fmt.Errorf("卡片打开失败(%w)，URL 降级也失败: %w", err, fbErr)
+		}
 	}
 
 	s.mu.Lock()
@@ -1005,7 +1010,7 @@ func (s *BrowseSession) nextHintLocked(resultsCount int) string {
 	case s.opened && s.read:
 		return "可调用 session_detail 提取当前笔记，或设置 load_comments=true 加载更多评论（含自动展开子评论）"
 	case resultsCount > 0:
-		return "已关闭笔记面板，可继续：搜索新关键词 (session_search)、打开其他笔记 (session_open_note)、或滚动浏览"
+		return "可继续：搜索新关键词 (session_search)、打开其他笔记 (session_open_note)、或滚动浏览 feed"
 	case !s.opened && resultsCount == 0:
 		return "可搜索关键词 (session_search) 查找笔记"
 	default:
