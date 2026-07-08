@@ -157,12 +157,12 @@ func ExtractFeedDetailFromDOM(page *hrod.Page, feedID string) (*FeedDetailRespon
 			const content = clean(top.querySelector(".content, .note-text, [class*='content']")?.innerText || top.innerText);
 			const user = clean(top.querySelector(".author-wrapper .name, .name, .nickname, [class*='name']")?.innerText);
 			const likeText = clean(top.querySelector(".interactions .like, .like, [class*='like']")?.innerText);
-			const subComments = Array.from(parent.querySelectorAll(":scope > .children-comments > .comment-item-sub, :scope > .reply-container > .list-container > .comment-item")).map((sub) => {
+			const subComments = Array.from(parent.querySelectorAll(":scope > .reply-container > .list-container > .comment-item")).map((sub) => {
 				const subContent = clean(sub.querySelector(".content, .note-text, [class*='content']")?.innerText || sub.innerText);
 				const subUser = clean(sub.querySelector(".author-wrapper .name, .name, .nickname, [class*='name']")?.innerText);
 				const subLikeText = clean(sub.querySelector(".interactions .like, .like, [class*='like']")?.innerText);
 				return {
-					id: sub.dataset?.id || sub.getAttribute("data-comment-id") || "",
+					id: sub.getAttribute("id") || sub.dataset?.id || sub.getAttribute("data-comment-id") || "",
 					noteId: feedID,
 					content: subContent,
 					likeCount: (subLikeText.match(/([\d.万wWkK]+)/) || ["", ""])[1],
@@ -172,7 +172,7 @@ func ExtractFeedDetailFromDOM(page *hrod.Page, feedID string) (*FeedDetailRespon
 				};
 			}).filter((subComment) => subComment.content);
 			return {
-				id: parent.dataset?.id || parent.getAttribute("data-comment-id") || top.dataset?.id || top.getAttribute("data-comment-id") || "",
+				id: top.getAttribute("id") || parent.dataset?.id || parent.getAttribute("data-comment-id") || top.dataset?.id || top.getAttribute("data-comment-id") || "",
 				noteId: feedID,
 				content,
 				likeCount: (likeText.match(/([\d.万wWkK]+)/) || ["", ""])[1],
@@ -229,12 +229,12 @@ func ExtractCommentsFromDOM(page *hrod.Page, feedID string) ([]Comment, error) {
 			const content = clean(top.querySelector(".content, .note-text, [class*='content']")?.innerText || top.innerText);
 			const user = clean(top.querySelector(".author-wrapper .name, .name, .nickname, [class*='name']")?.innerText);
 			const likeText = clean(top.querySelector(".interactions .like, .like, [class*='like']")?.innerText);
-			const subComments = Array.from(parent.querySelectorAll(":scope > .children-comments > .comment-item-sub, :scope > .reply-container > .list-container > .comment-item")).map((sub) => {
+			const subComments = Array.from(parent.querySelectorAll(":scope > .reply-container > .list-container > .comment-item")).map((sub) => {
 				const subContent = clean(sub.querySelector(".content, .note-text, [class*='content']")?.innerText || sub.innerText);
 				const subUser = clean(sub.querySelector(".author-wrapper .name, .name, .nickname, [class*='name']")?.innerText);
 				const subLikeText = clean(sub.querySelector(".interactions .like, .like, [class*='like']")?.innerText);
 				return {
-					id: sub.dataset?.id || sub.getAttribute("data-comment-id") || "",
+					id: sub.getAttribute("id") || sub.dataset?.id || sub.getAttribute("data-comment-id") || "",
 					noteId: feedID,
 					content: subContent,
 					likeCount: (subLikeText.match(/([\d.万wWkK]+)/) || ["", ""])[1],
@@ -244,7 +244,7 @@ func ExtractCommentsFromDOM(page *hrod.Page, feedID string) ([]Comment, error) {
 				};
 			}).filter((subComment) => subComment.content);
 			return {
-				id: parent.dataset?.id || parent.getAttribute("data-comment-id") || top.dataset?.id || top.getAttribute("data-comment-id") || "",
+				id: top.getAttribute("id") || parent.dataset?.id || parent.getAttribute("data-comment-id") || top.dataset?.id || top.getAttribute("data-comment-id") || "",
 				noteId: feedID,
 				content,
 				likeCount: (likeText.match(/([\d.万wWkK]+)/) || ["", ""])[1],
