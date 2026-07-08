@@ -49,7 +49,7 @@ type AccountKey struct {
 
 // Config 速率限制配置。
 type Config struct {
-	// 旧配置字段保留给已有调用方；未提供动作配置时会按 MaxPerHour 走兼容模式。
+	// 旧配置字段保留给已有调用方；新限流逻辑按动作 Delay 控制节奏。
 	MaxPerHour    int
 	CooldownBase  time.Duration
 	WarnThreshold float64
@@ -107,48 +107,34 @@ func DefaultConfig() Config {
 		SlowThreshold: 0.9,
 		AutoWaitMax:   2 * time.Minute,
 		Limits:        DefaultActionLimits(),
-		Global: GlobalBudgetConfig{
-			All:         BudgetConfig{Per10Min: 60, PerHour: 250, PerDay: 1200},
-			Interaction: BudgetConfig{Per10Min: 10, PerHour: 40, PerDay: 160},
-			Write:       BudgetConfig{Per10Min: 3, PerHour: 12, PerDay: 45},
-			Publish:     BudgetConfig{Per10Min: 1, PerHour: 2, PerDay: 5},
-		},
 	}
 }
 
 func DefaultActionLimits() map[Action]ActionLimitConfig {
 	return map[Action]ActionLimitConfig{
 		ActionBrowse: {
-			Delay:  DelayConfig{Min: 6 * time.Second, P50: 12 * time.Second, P95: 25 * time.Second, Max: 45 * time.Second},
-			Budget: BudgetConfig{Per10Min: 35, PerHour: 150, PerDay: 800},
+			Delay: DelayConfig{Min: 6 * time.Second, P50: 12 * time.Second, P95: 25 * time.Second, Max: 45 * time.Second},
 		},
 		ActionSearch: {
-			Delay:  DelayConfig{Min: 12 * time.Second, P50: 22 * time.Second, P95: 45 * time.Second, Max: 90 * time.Second},
-			Budget: BudgetConfig{Per10Min: 6, PerHour: 20, PerDay: 80},
+			Delay: DelayConfig{Min: 12 * time.Second, P50: 22 * time.Second, P95: 45 * time.Second, Max: 90 * time.Second},
 		},
 		ActionOpenNote: {
-			Delay:  DelayConfig{Min: 10 * time.Second, P50: 25 * time.Second, P95: 70 * time.Second, Max: 150 * time.Second},
-			Budget: BudgetConfig{Per10Min: 18, PerHour: 80, PerDay: 400},
+			Delay: DelayConfig{Min: 10 * time.Second, P50: 25 * time.Second, P95: 70 * time.Second, Max: 150 * time.Second},
 		},
 		ActionLike: {
-			Delay:  DelayConfig{Min: 25 * time.Second, P50: 60 * time.Second, P95: 180 * time.Second, Max: 300 * time.Second},
-			Budget: BudgetConfig{Per10Min: 6, PerHour: 25, PerDay: 120},
+			Delay: DelayConfig{Min: 25 * time.Second, P50: 60 * time.Second, P95: 180 * time.Second, Max: 300 * time.Second},
 		},
 		ActionFavorite: {
-			Delay:  DelayConfig{Min: 35 * time.Second, P50: 90 * time.Second, P95: 240 * time.Second, Max: 480 * time.Second},
-			Budget: BudgetConfig{Per10Min: 4, PerHour: 15, PerDay: 60},
+			Delay: DelayConfig{Min: 35 * time.Second, P50: 90 * time.Second, P95: 240 * time.Second, Max: 480 * time.Second},
 		},
 		ActionComment: {
-			Delay:  DelayConfig{Min: 90 * time.Second, P50: 180 * time.Second, P95: 480 * time.Second, Max: 900 * time.Second},
-			Budget: BudgetConfig{Per10Min: 2, PerHour: 8, PerDay: 30},
+			Delay: DelayConfig{Min: 90 * time.Second, P50: 180 * time.Second, P95: 480 * time.Second, Max: 900 * time.Second},
 		},
 		ActionReply: {
-			Delay:  DelayConfig{Min: 120 * time.Second, P50: 240 * time.Second, P95: 600 * time.Second, Max: 1200 * time.Second},
-			Budget: BudgetConfig{Per10Min: 2, PerHour: 6, PerDay: 25},
+			Delay: DelayConfig{Min: 120 * time.Second, P50: 240 * time.Second, P95: 600 * time.Second, Max: 1200 * time.Second},
 		},
 		ActionPublish: {
-			Delay:  DelayConfig{Min: 180 * time.Second, P50: 480 * time.Second, P95: 1200 * time.Second, Max: 1800 * time.Second},
-			Budget: BudgetConfig{Per10Min: 1, PerHour: 2, PerDay: 5},
+			Delay: DelayConfig{Min: 180 * time.Second, P50: 480 * time.Second, P95: 1200 * time.Second, Max: 1800 * time.Second},
 		},
 	}
 }
@@ -194,7 +180,6 @@ func normalizeLegacyConfig(cfg Config) Config {
 				P95: cfg.CooldownBase * 2,
 				Max: cfg.CooldownBase * 3,
 			},
-			Budget: BudgetConfig{PerHour: cfg.MaxPerHour},
 		},
 	}
 	return cfg
@@ -474,107 +459,12 @@ func (l *Limiter) evaluate(state *State, action Action, now time.Time) (Info, bo
 		}, false
 	}
 
-	checks := []limitCheck{
-		l.checkBudget("action", state.Actions[action], l.actionConfig(action).Budget, now),
-		l.checkBudget("all", state.All, l.cfg.Global.All, now),
-	}
-	if isInteraction(action) {
-		checks = append(checks, l.checkBudget("interaction", state.Interaction, l.cfg.Global.Interaction, now))
-	}
-	if isWrite(action) {
-		checks = append(checks, l.checkBudget("write", state.Write, l.cfg.Global.Write, now))
-	}
-	if action == ActionPublish {
-		checks = append(checks, l.checkBudget("publish", state.Publish, l.cfg.Global.Publish, now))
-	}
-
-	info := checks[0].info
-	canProceed := true
-	for _, check := range checks {
-		if check.info.Limit > 0 && (info.Limit <= 0 || check.ratio() > float64(info.Used)/float64(info.Limit)) {
-			info = check.info
-		}
-		if !check.allowed {
-			info = check.info
-			canProceed = false
-			break
-		}
-	}
-	info.Action = string(action)
-	return info, canProceed
-}
-
-type limitCheck struct {
-	info    Info
-	allowed bool
-}
-
-func (c limitCheck) ratio() float64 {
-	if c.info.Limit <= 0 {
-		return 0
-	}
-	return float64(c.info.Used) / float64(c.info.Limit)
-}
-
-func (l *Limiter) checkBudget(scope string, events []int64, budget BudgetConfig, now time.Time) limitCheck {
-	windows := []struct {
-		name     string
-		seconds  int
-		duration time.Duration
-		limit    int
-	}{
-		{name: "10min", seconds: 600, duration: 10 * time.Minute, limit: budget.Per10Min},
-		{name: "hour", seconds: 3600, duration: time.Hour, limit: budget.PerHour},
-		{name: "day", seconds: 86400, duration: 24 * time.Hour, limit: budget.PerDay},
-	}
-
-	var best Info
-	bestRatio := -1.0
-	for _, w := range windows {
-		if w.limit <= 0 {
-			continue
-		}
-		used := countSince(events, now.Add(-w.duration))
-		remaining := w.limit - used
-		if remaining < 0 {
-			remaining = 0
-		}
-		reset := resetUnix(events, now, w.duration)
-		info := Info{
-			Used:          used,
-			Limit:         w.limit,
-			Remaining:     remaining,
-			WindowSeconds: w.seconds,
-			ResetUnix:     reset,
-			Scope:         scope + ":" + w.name,
-		}
-
-		ratio := float64(used) / float64(w.limit)
-		if ratio >= 1 {
-			retryAfter := int(time.Unix(reset, 0).Sub(now).Seconds())
-			if retryAfter < 0 {
-				retryAfter = 0
-			}
-			info.RetryAfter = &retryAfter
-			info.Warning = fmt.Sprintf("已达%s窗口 %d 次上限（防封保护），建议 %d 秒后重试", info.Scope, w.limit, retryAfter)
-			return limitCheck{info: info, allowed: false}
-		}
-		if ratio > bestRatio {
-			best = info
-			bestRatio = ratio
-		}
-	}
-
-	if best.Limit <= 0 {
-		best = Info{Limit: 0, Remaining: math.MaxInt, Scope: scope}
-	}
-	ratio := float64(best.Used) / float64(best.Limit)
-	if best.Limit > 0 && ratio >= l.cfg.SlowThreshold {
-		best.Warning = fmt.Sprintf("已使用 %d/%d 次额度（%.0f%%），操作将自动减速", best.Used, best.Limit, ratio*100)
-	} else if best.Limit > 0 && ratio >= l.cfg.WarnThreshold {
-		best.Warning = fmt.Sprintf("已使用 %d/%d 次额度（%.0f%%），请注意操作频率", best.Used, best.Limit, ratio*100)
-	}
-	return limitCheck{info: best, allowed: true}
+	return Info{
+		Limit:     0,
+		Remaining: math.MaxInt,
+		Action:    string(action),
+		Scope:     "delay",
+	}, true
 }
 
 func (l *Limiter) recordLocked(state *State, action Action, now time.Time) {
@@ -613,31 +503,6 @@ func (l *Limiter) actionConfig(action Action) ActionLimitConfig {
 		return cfg
 	}
 	return l.cfg.Limits[ActionBrowse]
-}
-
-func countSince(events []int64, cutoff time.Time) int {
-	count := 0
-	cutoffUnix := cutoff.Unix()
-	for _, ts := range events {
-		if ts > cutoffUnix {
-			count++
-		}
-	}
-	return count
-}
-
-func resetUnix(events []int64, now time.Time, window time.Duration) int64 {
-	cutoff := now.Add(-window).Unix()
-	var oldest int64
-	for _, ts := range events {
-		if ts > cutoff && (oldest == 0 || ts < oldest) {
-			oldest = ts
-		}
-	}
-	if oldest == 0 {
-		return now.Add(window).Unix()
-	}
-	return time.Unix(oldest, 0).Add(window).Unix()
 }
 
 func sampleDelay(cfg DelayConfig) time.Duration {
