@@ -444,7 +444,7 @@ func TestBackUsesOverlayCloseStrategy(t *testing.T) {
 	source := string(data)
 	for _, want := range []string{
 		`const noteCloseProbeDelay = 500 * time.Millisecond`,
-		`page.Keyboard.Press("Escape")`,
+		`page.Keyboard.Press(input.Escape)`,
 		`document.querySelector('.note-container')`,
 		`page.Eval`,
 		`page.Navigate(sourceURL)`,

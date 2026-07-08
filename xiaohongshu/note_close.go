@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/go-rod/rod/lib/input"
 	"github.com/sirupsen/logrus"
 	hrod "github.com/xpzouying/xiaohongshu-mcp/pkg/humanize/rod"
 )
@@ -15,7 +16,7 @@ func closeNoteOverlay(page *hrod.Page, sourceURL string) (closeMethod string, er
 		return "", fmt.Errorf("页面不存在")
 	}
 
-	if err := page.Keyboard.Press("Escape"); err != nil {
+	if err := page.Keyboard.Press(input.Escape); err != nil {
 		logrus.Debugf("Escape 关闭笔记面板失败: %v", err)
 	}
 	if closed, err := noteOverlayClosedAfterAttempt(page); err != nil {
