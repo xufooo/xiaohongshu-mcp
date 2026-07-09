@@ -786,6 +786,14 @@ func (s *XiaohongshuService) ReplyCommentToFeed(ctx context.Context, feedID, xse
 }
 
 func (s *XiaohongshuService) CreateBrowseSession(ctx context.Context) (*xiaohongshu.BrowseSessionInfo, error) {
+	if info, ok := s.browseSessions.ActiveInfo(); ok {
+		if session, err := s.browseSessions.Get(info.ID); err == nil {
+			info = session.Renew()
+			return &info, nil
+		}
+	}
+
+	s.browseSessions.CloseAll()
 	page, err := s.acquirePageFor(ctx, "session")
 	if err != nil {
 		return nil, err

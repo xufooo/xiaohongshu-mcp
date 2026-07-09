@@ -1174,9 +1174,6 @@ func (s *AppServer) handleReplyComment(ctx context.Context, args map[string]inte
 
 func (s *AppServer) handleCreateBrowseSession(ctx context.Context) *MCPToolResult {
 	logrus.Info("MCP: 创建浏览会话")
-	if blocked := s.requireBrowserAvailableForMCP("创建浏览会话"); blocked != nil {
-		return blocked
-	}
 	if blocked := s.rateLimitMCP(ctx, "创建浏览会话", ratelimit.ActionBrowse); blocked != nil {
 		return blocked
 	}

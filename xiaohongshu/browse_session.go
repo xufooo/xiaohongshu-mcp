@@ -101,14 +101,14 @@ type BrowseSessionPageCounts struct {
 }
 
 type BrowseSession struct {
-	mu      sync.Mutex
-	opMu    sync.Mutex
-	id      string
-	page    *hrod.Page
-	state   *ActionStateStore
-	timeout time.Duration
-	timer   *time.Timer
-	onClose func(*hrod.Page)
+	mu       sync.Mutex
+	opMu     sync.Mutex
+	id       string
+	page     *hrod.Page
+	state    *ActionStateStore
+	timeout  time.Duration
+	timer    *time.Timer
+	onClose  func(*hrod.Page)
 	onRemove func(*BrowseSession)
 
 	currentURL       string
@@ -177,20 +177,21 @@ func (m *BrowseSessionManager) Get(id string) (*BrowseSession, error) {
 
 func (m *BrowseSessionManager) ActiveInfo() (BrowseSessionInfo, bool) {
 	m.mu.Lock()
-	sessions := make([]*BrowseSession, 0, len(m.sessions))
-	for _, session := range m.sessions {
-		sessions = append(sessions, session)
+	var session *BrowseSession
+	for _, current := range m.sessions {
+		session = current
+		break
 	}
 	m.mu.Unlock()
 
-	for _, session := range sessions {
-		if session.isExpired() {
-			_ = m.Close(session.ID())
-			continue
-		}
-		return session.Info(), true
+	if session == nil {
+		return BrowseSessionInfo{}, false
 	}
-	return BrowseSessionInfo{}, false
+	if session.isExpired() {
+		_ = m.Close(session.ID())
+		return BrowseSessionInfo{}, false
+	}
+	return session.Info(), true
 }
 
 func (m *BrowseSessionManager) Close(id string) error {
@@ -236,6 +237,15 @@ func (s *BrowseSession) ID() string {
 func (s *BrowseSession) Info() BrowseSessionInfo {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.infoLocked()
+}
+
+func (s *BrowseSession) Renew() BrowseSessionInfo {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.closed && !time.Now().After(s.expiresAt) {
+		s.touchLocked()
+	}
 	return s.infoLocked()
 }
 
@@ -370,11 +380,7 @@ func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, xsecToken strin
 	opener := NewNoteOpenActionWithState(s.page.Context(ctx), s.state)
 	err = opener.OpenFromCards(ctx, feed.ID, feed.XsecToken, OpenSourceSearch)
 	if err != nil {
-		// DOM 中找不到卡片时降级到 URL 直接打开（SPA 重渲染后卡片 ID 可能不在当前 DOM 中）
-		logrus.Debugf("从卡片打开笔记失败，降级到 URL 打开: %v", err)
-		if fbErr := opener.OpenByURLFallback(ctx, feed.ID, feed.XsecToken); fbErr != nil {
-			return fmt.Errorf("卡片打开失败(%w)，URL 降级也失败: %w", err, fbErr)
-		}
+		return fmt.Errorf("从卡片打开笔记失败，请重新搜索或滚动后重试: %w", err)
 	}
 
 	s.mu.Lock()

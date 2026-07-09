@@ -58,23 +58,6 @@ func (a *NoteOpenAction) OpenFromCards(ctx context.Context, feedID, xsecToken, s
 	return nil
 }
 
-func (a *NoteOpenAction) OpenByURLFallback(ctx context.Context, feedID, xsecToken string) error {
-	page := a.page.Context(ctx).Timeout(60 * time.Second)
-	if err := page.Navigate(makeFeedDetailURL(feedID, xsecToken)); err != nil {
-		return fmt.Errorf("导航笔记详情页失败: %w", err)
-	}
-	if err := WaitForXHSReady(page, XHSReadyOptions{Kind: XHSReadyDetail, FeedID: feedID}); err != nil {
-		return err
-	}
-	if err := waitFeedDetailVisible(page, feedID); err != nil {
-		return err
-	}
-	if a.state != nil {
-		_ = a.state.RecordOpen(feedID, OpenSourceDetailURLFallback)
-	}
-	return nil
-}
-
 func markFeedCard(page *hrod.Page, feedID string) error {
 	result, err := page.Eval(`(selector, feedID) => {
 		document.querySelectorAll('[data-xhs-open-target="1"]').forEach((el) => el.removeAttribute("data-xhs-open-target"));
