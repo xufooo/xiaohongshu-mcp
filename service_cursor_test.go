@@ -57,3 +57,35 @@ func TestFeedDetailCommentsBatchDelegatesToActiveBrowseSession(t *testing.T) {
 		}
 	}
 }
+
+func TestCreateBrowseSessionReusesActiveSessionBeforeCreating(t *testing.T) {
+	source, err := os.ReadFile("service.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(source)
+
+	reuseChecks := []string{
+		`if info, ok := s.browseSessions.ActiveInfo(); ok {`,
+		`if session, err := s.browseSessions.Get(info.ID); err == nil {`,
+		`info = session.Renew()`,
+		`return &info, nil`,
+	}
+	for _, want := range reuseChecks {
+		if !strings.Contains(script, want) {
+			t.Fatalf("CreateBrowseSession active-session reuse missing %s", want)
+		}
+	}
+
+	reuseIndex := strings.Index(script, `if info, ok := s.browseSessions.ActiveInfo(); ok {`)
+	closeIndex := strings.Index(script, `s.browseSessions.CloseAll()`)
+	acquireIndex := strings.Index(script, `page, err := s.acquirePageFor(ctx, "session")`)
+	createIndex := strings.Index(script, `session := s.browseSessions.Create(page, s.actionState, s.browserManager.Release)`)
+	if reuseIndex == -1 || closeIndex == -1 || acquireIndex == -1 || createIndex == -1 {
+		t.Fatal("CreateBrowseSession expected flow markers missing")
+	}
+	if !(reuseIndex < closeIndex && closeIndex < acquireIndex && acquireIndex < createIndex) {
+		t.Fatalf("CreateBrowseSession flow order invalid: reuse=%d close=%d acquire=%d create=%d",
+			reuseIndex, closeIndex, acquireIndex, createIndex)
+	}
+}

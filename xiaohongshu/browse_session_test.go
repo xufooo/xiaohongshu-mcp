@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	hrod "github.com/xpzouying/xiaohongshu-mcp/pkg/humanize/rod"
 )
 
 func TestInferXHSReadyKindFromSessionStateUsesDetailWhenNoteOpened(t *testing.T) {
@@ -53,6 +55,40 @@ func TestInferXHSReadyKindFromSessionStateRequiresFeedIDForOpenedDetail(t *testi
 	got := inferXHSReadyKindFromSessionState("https://www.xiaohongshu.com/search_result_ai?keyword=test", true, "")
 	if got != XHSReadySearch {
 		t.Fatalf("opened session without feed ID should fall back to URL, got %s", got)
+	}
+}
+
+func TestBrowseSessionManagerCreateDoesNotClosePreviousSession(t *testing.T) {
+	manager := NewBrowseSessionManager(time.Minute)
+	t.Cleanup(manager.CloseAll)
+	closeCount := 0
+	first := manager.Create(nil, nil, func(*hrod.Page) {
+		closeCount++
+	})
+	manager.Create(nil, nil, nil)
+
+	if closeCount != 0 {
+		t.Fatalf("previous session close count = %d, want 0", closeCount)
+	}
+	if _, err := manager.Get(first.ID()); err != nil {
+		t.Fatalf("previous session should remain registered: %v", err)
+	}
+}
+
+func TestBrowseSessionRenewExtendsExpiry(t *testing.T) {
+	manager := NewBrowseSessionManager(50 * time.Millisecond)
+	t.Cleanup(manager.CloseAll)
+	session := manager.Create(nil, nil, nil)
+	before := session.Info().ExpiresAt
+	time.Sleep(10 * time.Millisecond)
+
+	info := session.Renew()
+
+	if !info.ExpiresAt.After(before) {
+		t.Fatalf("Renew() expires_at = %s, want after %s", info.ExpiresAt, before)
+	}
+	if info.ID != session.ID() {
+		t.Fatalf("Renew() ID = %s, want %s", info.ID, session.ID())
 	}
 }
 

@@ -13,10 +13,9 @@ import (
 )
 
 const (
-	OpenSourceHome              = "home"
-	OpenSourceSearch            = "search"
-	OpenSourceRecommend         = "recommend"
-	OpenSourceDetailURLFallback = "detail_url_fallback"
+	OpenSourceHome      = "home"
+	OpenSourceSearch    = "search"
+	OpenSourceRecommend = "recommend"
 )
 
 type ActionState struct {
@@ -206,9 +205,6 @@ func (s *ActionStateStore) ValidateInteraction(feedID, action string) error {
 	}
 	if now.Sub(state.LastOpenAt) > 30*time.Minute {
 		return fmt.Errorf("最近打开笔记已超过 30 分钟，需要重新打开并阅读")
-	}
-	if state.LastOpenSource == OpenSourceDetailURLFallback && (state.ReadDuration < 45*time.Second || state.FeedScrollCount < 1) {
-		return fmt.Errorf("直接 URL 兜底打开的笔记需要补充阅读和滚动后才能互动")
 	}
 	if state.InteractionsOnFeed > 0 && state.LastActionAt.After(state.LastReadAt) {
 		return fmt.Errorf("同一篇笔记连续互动前必须再次阅读或滚动")

@@ -86,33 +86,14 @@ func (f *FeedDetailAction) GetFeedDetailWithConfig(ctx context.Context, feedID, 
 
 	config = normalizeCommentLoadConfig(config)
 	page := f.page.Context(ctx).Timeout(feedDetailPageTimeout)
-	url := makeFeedDetailURL(feedID, xsecToken)
 
-	logrus.Infof("打开 feed 详情页: %s", url)
+	logrus.Infof("从卡片打开 feed 详情页: %s", feedID)
 	logrus.Infof("配置: 点击更多=%v, 回复阈值=%d, 最大评论数=%d, 滚动速度=%s",
 		config.ClickMoreReplies, config.MaxRepliesThreshold, config.MaxCommentItems, config.ScrollSpeed)
 
 	opener := NewNoteOpenActionWithState(page, f.state)
 	if err := opener.OpenFromCards(ctx, feedID, xsecToken, ""); err != nil {
-		logrus.Warnf("从卡片打开笔记失败，使用详情 URL 兜底: %v", err)
-		// XHS continuously mutates the document after navigation. Waiting for DOM
-		// stability can therefore consume the full request deadline even though the
-		// note state is already available.
-		err := retry.Do(
-			func() error {
-				return opener.OpenByURLFallback(ctx, feedID, xsecToken)
-			},
-			retry.Attempts(3),
-			retry.Delay(500*time.Millisecond),
-			retry.MaxJitter(1000*time.Millisecond),
-			retry.OnRetry(func(n uint, err error) {
-				logrus.Debugf("页面导航重试 #%d: %v", n, err)
-			}),
-		)
-		if err != nil {
-			logrus.Errorf("页面导航失败: %v", err)
-			return nil, err
-		}
+		return nil, fmt.Errorf("从卡片打开笔记失败，请重新搜索或滚动后重试: %w", err)
 	}
 	if err := sleepRandom(page, 1000, 1000); err != nil {
 		return nil, err
@@ -181,26 +162,11 @@ func (f *FeedDetailAction) GetFeedDetailCommentsBatch(ctx context.Context, feedI
 
 	config = normalizeCommentLoadConfig(config)
 	page := f.page.Context(ctx).Timeout(feedDetailPageTimeout)
-	url := makeFeedDetailURL(feedID, xsecToken)
 
-	logrus.Infof("打开 feed 详情页(评论分批): %s", url)
+	logrus.Infof("从卡片打开 feed 详情页(评论分批): %s", feedID)
 	opener := NewNoteOpenActionWithState(page, f.state)
 	if err := opener.OpenFromCards(ctx, feedID, xsecToken, ""); err != nil {
-		logrus.Warnf("从卡片打开笔记失败，使用详情 URL 兜底: %v", err)
-		err := retry.Do(
-			func() error {
-				return opener.OpenByURLFallback(ctx, feedID, xsecToken)
-			},
-			retry.Attempts(3),
-			retry.Delay(500*time.Millisecond),
-			retry.MaxJitter(1000*time.Millisecond),
-			retry.OnRetry(func(n uint, err error) {
-				logrus.Debugf("页面导航重试 #%d: %v", n, err)
-			}),
-		)
-		if err != nil {
-			return nil, nil, false, err
-		}
+		return nil, nil, false, fmt.Errorf("从卡片打开笔记失败，请重新搜索或滚动后重试: %w", err)
 	}
 	if err := sleepRandom(page, 1000, 1000); err != nil {
 		return nil, nil, false, err
