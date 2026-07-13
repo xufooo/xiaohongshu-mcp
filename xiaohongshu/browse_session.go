@@ -4,19 +4,22 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/go-rod/rod/lib/proto"
 	"github.com/sirupsen/logrus"
 	hrod "github.com/xpzouying/xiaohongshu-mcp/pkg/humanize/rod"
 )
 
 const (
-	DefaultBrowseSessionTimeout     = 10 * time.Minute
-	maxBrowseSessionTimelineEntries = 10
+	DefaultBrowseSessionTimeout       = 10 * time.Minute
+	browseSessionRefreshTimeout       = 2 * time.Second
+	maxBrowseSessionTimelineEntries   = 10
 )
 
 type BrowseSessionInfo struct {
@@ -102,7 +105,11 @@ type BrowseSessionPageCounts struct {
 
 type BrowseSession struct {
 	mu       sync.Mutex
-	opMu     sync.Mutex
+	opToken  chan struct{}
+	closedCh chan struct{}
+	opCtx    context.Context
+	activeOp context.CancelFunc
+	evalJS   func(ctx context.Context, page *hrod.Page, script string) (*proto.RuntimeRemoteObject, error)
 	id       string
 	page     *hrod.Page
 	state    *ActionStateStore
@@ -110,6 +117,8 @@ type BrowseSession struct {
 	timer    *time.Timer
 	onClose  func(*hrod.Page)
 	onRemove func(*BrowseSession)
+
+	touchOnFinish  bool
 
 	currentURL       string
 	sourceURL        string
@@ -142,8 +151,18 @@ func NewBrowseSessionManager(timeout time.Duration) *BrowseSessionManager {
 }
 
 func (m *BrowseSessionManager) Create(page *hrod.Page, state *ActionStateStore, onClose func(*hrod.Page)) *BrowseSession {
+	return m.create(page, state, onClose, func(session *BrowseSession) {
+		session.evalJS = func(ctx context.Context, p *hrod.Page, script string) (*proto.RuntimeRemoteObject, error) {
+			return p.Context(ctx).Eval(script)
+		}
+	})
+}
+
+func (m *BrowseSessionManager) create(page *hrod.Page, state *ActionStateStore, onClose func(*hrod.Page), configure func(*BrowseSession)) *BrowseSession {
 	session := &BrowseSession{
 		id:        newBrowseSessionID(),
+		opToken:   make(chan struct{}, 1),
+		closedCh:  make(chan struct{}),
 		page:      page,
 		state:     state,
 		timeout:   m.timeout,
@@ -152,12 +171,24 @@ func (m *BrowseSessionManager) Create(page *hrod.Page, state *ActionStateStore, 
 		seenNotes: make(map[string]bool),
 		results:   make(map[string]Feed),
 	}
-	session.touchLocked()
-	session.refreshPageState()
+	session.opToken <- struct{}{}
+
+	if configure != nil {
+		configure(session)
+	}
 
 	m.mu.Lock()
 	m.sessions[session.id] = session
+	session.mu.Lock()
+	session.touchLocked()
+	session.mu.Unlock()
 	m.mu.Unlock()
+
+	opCtx, err := session.beginLockedOperation(context.Background(), false)
+	if err == nil {
+		session.refreshPageState(opCtx)
+		session.releaseOperation()
+	}
 	return session
 }
 
@@ -250,10 +281,11 @@ func (s *BrowseSession) Renew() BrowseSessionInfo {
 }
 
 func (s *BrowseSession) PageState(ctx context.Context) (*BrowseSessionPageState, error) {
-	if err := s.beginLockedOperation(); err != nil {
+	opCtx, err := s.beginLockedOperation(ctx, true)
+	if err != nil {
 		return nil, err
 	}
-	defer s.finishPageStateOperation()
+	defer s.finishOperation()
 
 	s.mu.Lock()
 	page := s.page
@@ -264,7 +296,7 @@ func (s *BrowseSession) PageState(ctx context.Context) (*BrowseSessionPageState,
 		return nil, fmt.Errorf("browse session 页面不存在: %s", s.id)
 	}
 
-	page = page.Context(ctx)
+	page = page.Context(opCtx)
 	probe, err := probeXHSReady(page, feedID)
 	if err != nil {
 		return nil, err
@@ -325,13 +357,14 @@ func (s *BrowseSession) PageState(ctx context.Context) (*BrowseSessionPageState,
 }
 
 func (s *BrowseSession) Search(ctx context.Context, keyword string, filters ...FilterOption) ([]Feed, error) {
-	if err := s.beginLockedOperation(); err != nil {
+	opCtx, err := s.beginLockedOperation(ctx, true)
+	if err != nil {
 		return nil, err
 	}
 	defer s.finishOperation()
 
-	action := NewSearchActionWithState(s.page.Context(ctx), s.state)
-	feeds, err := action.Search(ctx, keyword, filters...)
+	action := NewSearchActionWithState(s.page.Context(opCtx), s.state)
+	feeds, err := action.Search(opCtx, keyword, filters...)
 	if err != nil {
 		return nil, err
 	}
@@ -352,12 +385,13 @@ func (s *BrowseSession) Search(ctx context.Context, keyword string, filters ...F
 	}
 	s.recordTimelineLocked("search", keyword, "ok", time.Now(), fmt.Sprintf("results=%d", len(feeds)))
 	s.mu.Unlock()
-	s.probeWatchdogSelectorsForKind(ctx, XHSReadySearch, "")
+	s.probeWatchdogSelectorsForKind(opCtx, XHSReadySearch, "")
 	return feeds, nil
 }
 
 func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, xsecToken string) error {
-	if err := s.beginLockedOperation(); err != nil {
+	opCtx, err := s.beginLockedOperation(ctx, true)
+	if err != nil {
 		return err
 	}
 	defer s.finishOperation()
@@ -373,12 +407,12 @@ func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, xsecToken strin
 		return fmt.Errorf("搜索结果参数无效: %w", err)
 	}
 
-	sourceURL, err := s.currentPageURL()
+	sourceURL, err := s.currentPageURL(opCtx)
 	if err != nil {
 		return fmt.Errorf("读取当前页面 URL: %w", err)
 	}
-	opener := NewNoteOpenActionWithState(s.page.Context(ctx), s.state)
-	err = opener.OpenFromCards(ctx, feed.ID, feed.XsecToken, OpenSourceSearch)
+	opener := NewNoteOpenActionWithState(s.page.Context(opCtx), s.state)
+	err = opener.OpenFromCards(opCtx, feed.ID, feed.XsecToken, OpenSourceSearch)
 	if err != nil {
 		return fmt.Errorf("从卡片打开笔记失败，请重新搜索或滚动后重试: %w", err)
 	}
@@ -392,12 +426,13 @@ func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, xsecToken strin
 	s.seenNotes[feed.ID] = true
 	s.recordTimelineLocked("open_note", feed.ID, "ok", time.Now(), "opened from search result "+resultRef)
 	s.mu.Unlock()
-	s.probeWatchdogSelectorsForKind(ctx, XHSReadyDetail, feed.ID)
+	s.probeWatchdogSelectorsForKind(opCtx, XHSReadyDetail, feed.ID)
 	return nil
 }
 
 func (s *BrowseSession) Read(ctx context.Context, minDuration time.Duration) error {
-	if err := s.beginLockedOperation(); err != nil {
+	opCtx, err := s.beginLockedOperation(ctx, true)
+	if err != nil {
 		return err
 	}
 	defer s.finishOperation()
@@ -409,8 +444,8 @@ func (s *BrowseSession) Read(ctx context.Context, minDuration time.Duration) err
 	if minDuration <= 0 {
 		minDuration = 20 * time.Second
 	}
-	reader := NewReadStageAction(s.page.Context(ctx), s.state)
-	if err := reader.Read(ctx, feedID, minDuration); err != nil {
+	reader := NewReadStageAction(s.page.Context(opCtx), s.state)
+	if err := reader.Read(opCtx, feedID, minDuration); err != nil {
 		return err
 	}
 
@@ -419,7 +454,7 @@ func (s *BrowseSession) Read(ctx context.Context, minDuration time.Duration) err
 	s.seenNotes[feedID] = true
 	s.recordTimelineLocked("read", feedID, "ok", time.Now(), fmt.Sprintf("duration=%s", minDuration))
 	s.mu.Unlock()
-	s.probeWatchdogSelectorsForKind(ctx, XHSReadyDetail, feedID)
+	s.probeWatchdogSelectorsForKind(opCtx, XHSReadyDetail, feedID)
 	return nil
 }
 
@@ -432,7 +467,8 @@ func (s *BrowseSession) DetailForFeed(ctx context.Context, expectedFeedID string
 }
 
 func (s *BrowseSession) DetailCommentsBatch(ctx context.Context, expectedFeedID string, cursor *CommentCursor, maxItems int, config CommentLoadConfig) (*FeedDetailResponse, *CommentCursor, bool, error) {
-	if err := s.beginLockedOperation(); err != nil {
+	opCtx, err := s.beginLockedOperation(ctx, true)
+	if err != nil {
 		return nil, nil, false, err
 	}
 	defer s.finishOperation()
@@ -447,16 +483,16 @@ func (s *BrowseSession) DetailCommentsBatch(ctx context.Context, expectedFeedID 
 	if page == nil {
 		return nil, nil, false, fmt.Errorf("browse session 页面不存在: %s", s.id)
 	}
-	if err := WaitForXHSReady(page.Context(ctx), XHSReadyOptions{Kind: XHSReadyDetail, FeedID: feedID}); err != nil {
+	if err := WaitForXHSReady(page.Context(opCtx), XHSReadyOptions{Kind: XHSReadyDetail, FeedID: feedID}); err != nil {
 		return nil, nil, false, err
 	}
 
-	detail, err := ExtractFeedDetailFromDOM(page.Context(ctx), feedID)
+	detail, err := ExtractFeedDetailFromDOM(page.Context(opCtx), feedID)
 	if err != nil {
 		return nil, nil, false, err
 	}
 
-	commentPage := page.Context(ctx).Timeout(commentLoadTimeout)
+	commentPage := page.Context(opCtx).Timeout(commentLoadTimeout)
 	comments, nextCursor, hasMore, err := LoadCommentsBatch(commentPage, config, cursor, maxItems)
 	if err != nil {
 		return nil, nil, false, err
@@ -476,12 +512,13 @@ func (s *BrowseSession) DetailCommentsBatch(ctx context.Context, expectedFeedID 
 	s.mu.Lock()
 	s.recordTimelineLocked("detail_comments_batch", feedID, "ok", time.Now(), fmt.Sprintf("maxItems=%d hasMore=%v", maxItems, hasMore))
 	s.mu.Unlock()
-	s.probeWatchdogSelectorsForKind(ctx, XHSReadyDetail, feedID)
+	s.probeWatchdogSelectorsForKind(opCtx, XHSReadyDetail, feedID)
 	return detail, nextCursor, hasMore, nil
 }
 
 func (s *BrowseSession) detail(ctx context.Context, expectedFeedID string, loadComments bool, pages int, config CommentLoadConfig, useConfig bool) (*FeedDetailResponse, error) {
-	if err := s.beginLockedOperation(); err != nil {
+	opCtx, err := s.beginLockedOperation(ctx, true)
+	if err != nil {
 		return nil, err
 	}
 	defer s.finishOperation()
@@ -496,11 +533,11 @@ func (s *BrowseSession) detail(ctx context.Context, expectedFeedID string, loadC
 	if page == nil {
 		return nil, fmt.Errorf("browse session 页面不存在: %s", s.id)
 	}
-	if err := WaitForXHSReady(page.Context(ctx), XHSReadyOptions{Kind: XHSReadyDetail, FeedID: feedID}); err != nil {
+	if err := WaitForXHSReady(page.Context(opCtx), XHSReadyOptions{Kind: XHSReadyDetail, FeedID: feedID}); err != nil {
 		return nil, err
 	}
 	if loadComments {
-		commentPage := page.Context(ctx).Timeout(commentLoadTimeout)
+		commentPage := page.Context(opCtx).Timeout(commentLoadTimeout)
 		ops := sessionCommentLoadOps{
 			getProgress: func() (commentProgress, error) {
 				return getCommentProgress(commentPage)
@@ -509,13 +546,20 @@ func (s *BrowseSession) detail(ctx context.Context, expectedFeedID string, loadC
 				return loadCommentsByJS(commentPage, config)
 			},
 		}
+		var loadErr error
 		if useConfig {
-			loadSessionCommentsForDetailWithConfig(config, ops)
+			loadErr = loadSessionCommentsForDetailWithConfig(config, ops)
 		} else {
-			loadSessionCommentsForDetail(pages, ops)
+			loadErr = loadSessionCommentsForDetail(pages, ops)
+		}
+		if loadErr != nil {
+			if errors.Is(loadErr, context.Canceled) || errors.Is(loadErr, context.DeadlineExceeded) {
+				return nil, loadErr
+			}
+			logrus.Warnf("session detail load comments failed: %v", loadErr)
 		}
 	}
-	detail, err := ExtractFeedDetailFromDOM(page.Context(ctx), feedID)
+	detail, err := ExtractFeedDetailFromDOM(page.Context(opCtx), feedID)
 	if err != nil {
 		return nil, err
 	}
@@ -523,7 +567,7 @@ func (s *BrowseSession) detail(ctx context.Context, expectedFeedID string, loadC
 	s.mu.Lock()
 	s.recordTimelineLocked("detail", feedID, "ok", time.Now(), "")
 	s.mu.Unlock()
-	s.probeWatchdogSelectorsForKind(ctx, XHSReadyDetail, feedID)
+	s.probeWatchdogSelectorsForKind(opCtx, XHSReadyDetail, feedID)
 	return detail, nil
 }
 
@@ -532,8 +576,13 @@ type sessionCommentLoadOps struct {
 	load        func(CommentLoadConfig) error
 }
 
-func loadSessionCommentsForDetail(pages int, ops sessionCommentLoadOps) {
+func loadSessionCommentsForDetail(pages int, ops sessionCommentLoadOps) error {
 	progress, err := ops.getProgress()
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
+	}
 	config := sessionCommentPageLoadConfig(progress, err)
 	if pages > 0 {
 		config.MaxCommentItems = progress.Count + pages*20
@@ -541,15 +590,23 @@ func loadSessionCommentsForDetail(pages int, ops sessionCommentLoadOps) {
 		config.MaxCommentItems = 0
 	}
 	if err := ops.load(config); err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
 		logrus.Warnf("session detail load comments failed: %v", err)
 	}
+	return nil
 }
 
-func loadSessionCommentsForDetailWithConfig(config CommentLoadConfig, ops sessionCommentLoadOps) {
+func loadSessionCommentsForDetailWithConfig(config CommentLoadConfig, ops sessionCommentLoadOps) error {
 	config = normalizeCommentLoadConfig(config)
 	if err := ops.load(config); err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
 		logrus.Warnf("session detail load comments failed: %v", err)
 	}
+	return nil
 }
 
 func shouldStopSessionCommentPaging(progress commentProgress) bool {
@@ -571,7 +628,8 @@ func (s *BrowseSession) LikeForFeed(ctx context.Context, expectedFeedID string, 
 }
 
 func (s *BrowseSession) like(ctx context.Context, expectedFeedID string, unlike bool) error {
-	if err := s.beginLockedOperation(); err != nil {
+	opCtx, err := s.beginLockedOperation(ctx, true)
+	if err != nil {
 		return err
 	}
 	defer s.finishOperation()
@@ -580,13 +638,13 @@ func (s *BrowseSession) like(ctx context.Context, expectedFeedID string, unlike 
 	if err != nil {
 		return err
 	}
-	action := NewLikeActionWithState(s.page.Context(ctx), s.state)
+	action := NewLikeActionWithState(s.page.Context(opCtx), s.state)
 	if unlike {
-		if err := action.Unlike(ctx, feedID, xsecToken); err != nil {
+		if err := action.Unlike(opCtx, feedID, xsecToken); err != nil {
 			return err
 		}
 	} else {
-		if err := action.Like(ctx, feedID, xsecToken); err != nil {
+		if err := action.Like(opCtx, feedID, xsecToken); err != nil {
 			return err
 		}
 	}
@@ -598,7 +656,7 @@ func (s *BrowseSession) like(ctx context.Context, expectedFeedID string, unlike 
 		s.recordTimelineLocked("like", feedID, "ok", time.Now(), "")
 	}
 	s.mu.Unlock()
-	s.probeWatchdogSelectorsForKind(ctx, XHSReadyDetail, feedID)
+	s.probeWatchdogSelectorsForKind(opCtx, XHSReadyDetail, feedID)
 	return nil
 }
 
@@ -611,7 +669,8 @@ func (s *BrowseSession) FavoriteForFeed(ctx context.Context, expectedFeedID stri
 }
 
 func (s *BrowseSession) favorite(ctx context.Context, expectedFeedID string, unfavorite bool) error {
-	if err := s.beginLockedOperation(); err != nil {
+	opCtx, err := s.beginLockedOperation(ctx, true)
+	if err != nil {
 		return err
 	}
 	defer s.finishOperation()
@@ -620,13 +679,13 @@ func (s *BrowseSession) favorite(ctx context.Context, expectedFeedID string, unf
 	if err != nil {
 		return err
 	}
-	action := NewFavoriteActionWithState(s.page.Context(ctx), s.state)
+	action := NewFavoriteActionWithState(s.page.Context(opCtx), s.state)
 	if unfavorite {
-		if err := action.Unfavorite(ctx, feedID, xsecToken); err != nil {
+		if err := action.Unfavorite(opCtx, feedID, xsecToken); err != nil {
 			return err
 		}
 	} else {
-		if err := action.Favorite(ctx, feedID, xsecToken); err != nil {
+		if err := action.Favorite(opCtx, feedID, xsecToken); err != nil {
 			return err
 		}
 	}
@@ -638,7 +697,7 @@ func (s *BrowseSession) favorite(ctx context.Context, expectedFeedID string, unf
 		s.recordTimelineLocked("favorite", feedID, "ok", time.Now(), "")
 	}
 	s.mu.Unlock()
-	s.probeWatchdogSelectorsForKind(ctx, XHSReadyDetail, feedID)
+	s.probeWatchdogSelectorsForKind(opCtx, XHSReadyDetail, feedID)
 	return nil
 }
 
@@ -654,7 +713,8 @@ func (s *BrowseSession) comment(ctx context.Context, expectedFeedID, content str
 	if strings.TrimSpace(content) == "" {
 		return fmt.Errorf("评论内容不能为空")
 	}
-	if err := s.beginLockedOperation(); err != nil {
+	opCtx, err := s.beginLockedOperation(ctx, true)
+	if err != nil {
 		return err
 	}
 	defer s.finishOperation()
@@ -663,15 +723,15 @@ func (s *BrowseSession) comment(ctx context.Context, expectedFeedID, content str
 	if err != nil {
 		return err
 	}
-	action := NewCommentFeedActionWithState(s.page.Context(ctx), s.state)
-	if err := action.PostComment(ctx, feedID, xsecToken, content); err != nil {
+	action := NewCommentFeedActionWithState(s.page.Context(opCtx), s.state)
+	if err := action.PostComment(opCtx, feedID, xsecToken, content); err != nil {
 		return err
 	}
 	s.mu.Lock()
 	s.read = true
 	s.recordTimelineLocked("comment", feedID, "ok", time.Now(), compactTimelineNote(content))
 	s.mu.Unlock()
-	s.probeWatchdogSelectorsForKind(ctx, XHSReadyDetail, feedID)
+	s.probeWatchdogSelectorsForKind(opCtx, XHSReadyDetail, feedID)
 	return nil
 }
 
@@ -684,7 +744,8 @@ func (s *BrowseSession) ReplyForFeed(ctx context.Context, expectedFeedID, commen
 }
 
 func (s *BrowseSession) reply(ctx context.Context, expectedFeedID, commentID, userID, content string) error {
-	if err := s.beginLockedOperation(); err != nil {
+	opCtx, err := s.beginLockedOperation(ctx, true)
+	if err != nil {
 		return err
 	}
 	defer s.finishOperation()
@@ -693,20 +754,21 @@ func (s *BrowseSession) reply(ctx context.Context, expectedFeedID, commentID, us
 	if err != nil {
 		return err
 	}
-	action := NewCommentFeedActionWithState(s.page.Context(ctx), s.state)
-	if err := action.ReplyToComment(ctx, feedID, xsecToken, commentID, userID, content); err != nil {
+	action := NewCommentFeedActionWithState(s.page.Context(opCtx), s.state)
+	if err := action.ReplyToComment(opCtx, feedID, xsecToken, commentID, userID, content); err != nil {
 		return err
 	}
 	s.mu.Lock()
 	s.read = true
 	s.recordTimelineLocked("reply", feedID, "ok", time.Now(), compactTimelineNote(content))
 	s.mu.Unlock()
-	s.probeWatchdogSelectorsForKind(ctx, XHSReadyDetail, feedID)
+	s.probeWatchdogSelectorsForKind(opCtx, XHSReadyDetail, feedID)
 	return nil
 }
 
 func (s *BrowseSession) Back(ctx context.Context) error {
-	if err := s.beginLockedOperation(); err != nil {
+	opCtx, err := s.beginLockedOperation(ctx, true)
+	if err != nil {
 		return err
 	}
 	defer s.finishOperation()
@@ -721,7 +783,7 @@ func (s *BrowseSession) Back(ctx context.Context) error {
 		return fmt.Errorf("browse session 页面不存在: %s", s.id)
 	}
 
-	method, err := closeNoteOverlay(page.Context(ctx), sourceURL)
+	method, err := closeNoteOverlay(page.Context(opCtx), sourceURL)
 	if err != nil {
 		return fmt.Errorf("关闭笔记面板失败: %w", err)
 	}
@@ -734,7 +796,7 @@ func (s *BrowseSession) Back(ctx context.Context) error {
 	s.read = false
 	s.recordTimelineLocked("back", feedID, "ok", time.Now(), "closed note panel")
 	s.mu.Unlock()
-	s.refreshPageState()
+	s.refreshPageState(opCtx)
 	return nil
 }
 
@@ -743,8 +805,6 @@ func (s *BrowseSession) CloseNote(ctx context.Context) error {
 }
 
 func (s *BrowseSession) Close() {
-	s.opMu.Lock()
-	defer s.opMu.Unlock()
 	s.close()
 }
 
@@ -753,17 +813,19 @@ func (s *BrowseSession) ClassifyRisk() (RiskSignal, error) {
 }
 
 func (s *BrowseSession) ClassifyRiskContext(ctx context.Context) (RiskSignal, error) {
-	s.opMu.Lock()
-	defer s.opMu.Unlock()
+	opCtx, err := s.beginLockedOperation(ctx, false)
+	if err != nil {
+		return RiskSignal{Kind: RiskNone, DetectedAt: time.Now()}, err
+	}
+	defer s.finishOperation()
 
 	s.mu.Lock()
-	closed := s.closed
 	page := s.page
 	s.mu.Unlock()
-	if closed || page == nil {
+	if page == nil {
 		return RiskSignal{Kind: RiskNone, DetectedAt: time.Now()}, nil
 	}
-	return ClassifyRisk(page.Context(ctx))
+	return ClassifyRisk(page.Context(opCtx))
 }
 
 func (s *BrowseSession) close() {
@@ -773,65 +835,121 @@ func (s *BrowseSession) close() {
 		return
 	}
 	s.closed = true
+	close(s.closedCh)
 	if s.timer != nil {
 		s.timer.Stop()
 	}
+	cancel := s.activeOp
+	hasActiveOp := s.activeOp != nil
 	page := s.page
 	onClose := s.onClose
+	if !hasActiveOp {
+		s.page = nil
+		s.onClose = nil
+	}
 	onRemove := s.onRemove
 	s.mu.Unlock()
 
 	if onRemove != nil {
 		onRemove(s)
 	}
-	if onClose != nil {
+	if cancel != nil {
+		cancel()
+	}
+	if !hasActiveOp && onClose != nil {
 		onClose(page)
 	}
 }
 
-func (s *BrowseSession) beginLockedOperation() error {
-	s.opMu.Lock()
-	if err := s.beginOperation(); err != nil {
-		s.opMu.Unlock()
-		return err
+func (s *BrowseSession) beginLockedOperation(ctx context.Context, touchTTL bool) (context.Context, error) {
+	select {
+	case <-s.opToken:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-s.closedCh:
+		return nil, fmt.Errorf("browse session 已关闭: %s", s.id)
 	}
-	return nil
+
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		s.opToken <- struct{}{}
+		return nil, fmt.Errorf("browse session 已关闭: %s", s.id)
+	}
+	if time.Now().After(s.expiresAt) {
+		s.mu.Unlock()
+		s.opToken <- struct{}{}
+		return nil, fmt.Errorf("browse session 已过期: %s", s.id)
+	}
+	// token 就绪后、续 TTL 前，再次检查 ctx 取消或 session 关闭
+	if err := ctx.Err(); err != nil {
+		s.mu.Unlock()
+		s.opToken <- struct{}{}
+		return nil, err
+	}
+	s.touchOnFinish = touchTTL
+	if touchTTL {
+		s.touchLocked()
+	}
+	s.opCtx, s.activeOp = context.WithCancel(ctx)
+	s.mu.Unlock()
+	return s.opCtx, nil
 }
 
 func (s *BrowseSession) finishOperation() {
 	s.endOperation()
-	s.opMu.Unlock()
-}
-
-func (s *BrowseSession) finishPageStateOperation() {
-	s.mu.Lock()
-	if !s.closed {
-		s.touchLocked()
-	}
-	s.mu.Unlock()
-	s.opMu.Unlock()
-}
-
-func (s *BrowseSession) beginOperation() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return fmt.Errorf("browse session 已关闭: %s", s.id)
-	}
-	if time.Now().After(s.expiresAt) {
-		return fmt.Errorf("browse session 已过期: %s", s.id)
-	}
-	s.touchLocked()
-	return nil
+	s.releaseOperation()
 }
 
 func (s *BrowseSession) endOperation() {
-	s.refreshPageState()
+	s.mu.Lock()
+	closed := s.closed
+	opCtx := s.opCtx
+	expired := !closed && time.Now().After(s.expiresAt)
+	s.mu.Unlock()
+
+	if expired {
+		s.close()
+		return
+	}
+
+	if !closed && opCtx != nil && opCtx.Err() == nil {
+		s.refreshPageState(opCtx)
+	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !s.closed {
+	if !s.closed && s.touchOnFinish && opCtx != nil && opCtx.Err() == nil {
+		if time.Now().After(s.expiresAt) {
+			s.mu.Unlock()
+			s.close()
+			return
+		}
 		s.touchLocked()
+	}
+	s.mu.Unlock()
+}
+
+func (s *BrowseSession) releaseOperation() {
+	s.mu.Lock()
+	cancel := s.activeOp
+	shouldRelease := s.closed
+	page := s.page
+	onClose := s.onClose
+	if cancel != nil {
+		cancel()
+	}
+	s.opCtx = nil
+	s.activeOp = nil
+	if shouldRelease {
+		s.page = nil
+		s.onClose = nil
+	}
+	s.mu.Unlock()
+
+	s.opToken <- struct{}{}
+
+	if shouldRelease && onClose != nil {
+		onClose(page)
 	}
 }
 
@@ -908,9 +1026,6 @@ func (s *BrowseSession) touchLocked() {
 }
 
 func (s *BrowseSession) closeExpired(expiresAt time.Time) {
-	s.opMu.Lock()
-	defer s.opMu.Unlock()
-
 	s.mu.Lock()
 	expired := !s.closed && s.expiresAt.Equal(expiresAt) && !time.Now().Before(s.expiresAt)
 	s.mu.Unlock()
@@ -920,7 +1035,7 @@ func (s *BrowseSession) closeExpired(expiresAt time.Time) {
 	s.close()
 }
 
-func (s *BrowseSession) refreshPageState() {
+func (s *BrowseSession) refreshPageState(ctx context.Context) {
 	s.mu.Lock()
 	page := s.page
 	closed := s.closed
@@ -929,16 +1044,21 @@ func (s *BrowseSession) refreshPageState() {
 		return
 	}
 
+	evalCtx, cancel := context.WithTimeout(ctx, browseSessionRefreshTimeout)
+	defer cancel()
+
 	var currentURL string
 	var scrollY int
 	var hasURL, hasScrollY bool
-	if url, err := page.Eval(`() => location.href`); err == nil && url != nil {
-		currentURL = url.Value.Str()
-		hasURL = true
-	}
-	if y, err := page.Eval(`() => Math.round(window.scrollY || document.scrollingElement?.scrollTop || 0)`); err == nil && y != nil {
-		scrollY = y.Value.Int()
-		hasScrollY = true
+	if s.evalJS != nil {
+		if url, err := s.evalJS(evalCtx, page, `() => location.href`); err == nil && url != nil {
+			currentURL = url.Value.Str()
+			hasURL = true
+		}
+		if y, err := s.evalJS(evalCtx, page, `() => Math.round(window.scrollY || document.scrollingElement?.scrollTop || 0)`); err == nil && y != nil {
+			scrollY = y.Value.Int()
+			hasScrollY = true
+		}
 	}
 
 	s.mu.Lock()
@@ -955,6 +1075,9 @@ func (s *BrowseSession) refreshPageState() {
 }
 
 func (s *BrowseSession) probeWatchdogSelectorsForKind(ctx context.Context, kind XHSReadyKind, feedID string) {
+	if ctx == nil {
+		return
+	}
 	s.mu.Lock()
 	page := s.page
 	closed := s.closed
@@ -966,11 +1089,13 @@ func (s *BrowseSession) probeWatchdogSelectorsForKind(ctx context.Context, kind 
 	probeWatchdogSelectors(page.Context(ctx), XHSReadyOptions{Kind: kind, FeedID: feedID})
 }
 
-func (s *BrowseSession) currentPageURL() (string, error) {
+func (s *BrowseSession) currentPageURL(ctx context.Context) (string, error) {
 	if s.page == nil {
 		return "", nil
 	}
-	result, err := s.page.Eval(`() => location.href`)
+	evalCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	result, err := s.page.Context(evalCtx).Eval(`() => location.href`)
 	if err != nil || result == nil {
 		return "", err
 	}
