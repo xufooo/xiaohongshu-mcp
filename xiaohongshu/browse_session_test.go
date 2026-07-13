@@ -3,11 +3,14 @@ package xiaohongshu
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/go-rod/rod/lib/proto"
 	hrod "github.com/xpzouying/xiaohongshu-mcp/pkg/humanize/rod"
 )
 
@@ -76,16 +79,19 @@ func TestBrowseSessionManagerCreateDoesNotClosePreviousSession(t *testing.T) {
 }
 
 func TestBrowseSessionRenewExtendsExpiry(t *testing.T) {
-	manager := NewBrowseSessionManager(50 * time.Millisecond)
+	manager := NewBrowseSessionManager(time.Minute)
 	t.Cleanup(manager.CloseAll)
 	session := manager.Create(nil, nil, nil)
-	before := session.Info().ExpiresAt
-	time.Sleep(10 * time.Millisecond)
+
+	session.mu.Lock()
+	old := time.Now().Add(time.Second)
+	session.expiresAt = old
+	session.mu.Unlock()
 
 	info := session.Renew()
 
-	if !info.ExpiresAt.After(before) {
-		t.Fatalf("Renew() expires_at = %s, want after %s", info.ExpiresAt, before)
+	if !info.ExpiresAt.After(old) {
+		t.Fatalf("Renew() expires_at = %s, should be after old %s", info.ExpiresAt, old)
 	}
 	if info.ID != session.ID() {
 		t.Fatalf("Renew() ID = %s, want %s", info.ID, session.ID())
@@ -171,7 +177,12 @@ func TestBrowseSessionDetailRequiresOpenedNote(t *testing.T) {
 		opened:    false,
 		timeout:   time.Minute,
 		expiresAt: time.Now().Add(time.Minute),
+		opToken:   make(chan struct{}, 1),
+		closedCh:  make(chan struct{}),
+		seenNotes: make(map[string]bool),
+		results:   make(map[string]Feed),
 	}
+	session.opToken <- struct{}{}
 	t.Cleanup(session.Close)
 
 	_, err := session.Detail(context.Background(), false, 0)
@@ -201,7 +212,12 @@ func TestBrowseSessionDetailRequiresPage(t *testing.T) {
 		currentFeedID: "feed-1",
 		timeout:       time.Minute,
 		expiresAt:     time.Now().Add(time.Minute),
+		opToken:       make(chan struct{}, 1),
+		closedCh:      make(chan struct{}),
+		seenNotes:     make(map[string]bool),
+		results:       make(map[string]Feed),
 	}
+	session.opToken <- struct{}{}
 	t.Cleanup(session.Close)
 
 	_, err := session.Detail(context.Background(), false, 0)
@@ -543,4 +559,576 @@ func TestBrowseSessionTimelineKeepsRecentEntries(t *testing.T) {
 	if session.timeline[0].At.Unix() != 2 {
 		t.Fatalf("oldest retained timeline entry = %d, want 2", session.timeline[0].At.Unix())
 	}
+}
+
+func TestBrowseSessionTTLReturnsPromptlyAndCancelsActiveOperation(t *testing.T) {
+	session := &BrowseSession{
+		id:        "test-ttl",
+		opToken:   make(chan struct{}, 1),
+		closedCh:  make(chan struct{}),
+		timeout:   time.Minute,
+		expiresAt: time.Now().Add(time.Minute),
+		seenNotes: make(map[string]bool),
+		results:   make(map[string]Feed),
+	}
+	session.opToken <- struct{}{}
+	t.Cleanup(session.Close)
+
+	tokenHeld := make(chan struct{})
+	opCancelled := make(chan struct{})
+	opDone := make(chan struct{})
+
+	go func() {
+		defer close(opDone)
+		opCtx, err := session.beginLockedOperation(context.Background(), true)
+		if err != nil {
+			t.Errorf("beginLockedOperation: %v", err)
+			close(tokenHeld)
+			return
+		}
+		close(tokenHeld)
+		<-opCtx.Done()
+		close(opCancelled)
+		session.finishOperation()
+	}()
+	select {
+	case <-tokenHeld:
+	case <-time.After(time.Second):
+		t.Fatal("等待 tokenHeld 超时")
+	}
+
+	// 手动触发过期，而非依赖 timer 时序
+	session.mu.Lock()
+	if session.timer != nil {
+		session.timer.Stop()
+	}
+	session.expiresAt = time.Now().Add(-time.Second)
+	expiresAt := session.expiresAt
+	session.mu.Unlock()
+	session.closeExpired(expiresAt)
+
+	select {
+	case <-opCancelled:
+	case <-time.After(time.Second):
+		t.Fatal("过期应取消活跃操作")
+	}
+	if !session.closed {
+		t.Fatal("过期后 session 应已关闭")
+	}
+
+	select {
+	case <-opDone:
+	case <-time.After(time.Second):
+		t.Fatal("goroutine 未退出")
+	}
+}
+
+func TestBrowseSessionDoesNotClosePageConcurrentlyWithOperation(t *testing.T) {
+	pageClosed := make(chan struct{})
+	session := &BrowseSession{
+		id:        "test-page-close",
+		opToken:   make(chan struct{}, 1),
+		closedCh:  make(chan struct{}),
+		timeout:   time.Minute,
+		expiresAt: time.Now().Add(time.Minute),
+		seenNotes: make(map[string]bool),
+		results:   make(map[string]Feed),
+		onClose:   func(p *hrod.Page) { close(pageClosed) },
+	}
+	session.opToken <- struct{}{}
+	t.Cleanup(session.Close)
+
+	tokenHeld := make(chan struct{})
+	allowFinish := make(chan struct{})
+	var allowOnce sync.Once
+	cleanupAllow := func() { allowOnce.Do(func() { close(allowFinish) }) }
+	t.Cleanup(cleanupAllow)
+
+	opDone := make(chan struct{})
+	go func() {
+		defer close(opDone)
+		if _, err := session.beginLockedOperation(context.Background(), true); err != nil {
+			t.Errorf("beginLockedOperation: %v", err)
+			close(tokenHeld)
+			cleanupAllow()
+			return
+		}
+		close(tokenHeld)
+		<-allowFinish
+		session.finishOperation()
+	}()
+	select {
+	case <-tokenHeld:
+	case <-time.After(time.Second):
+		t.Fatal("等待 tokenHeld 超时")
+	}
+
+	session.Close()
+
+	select {
+	case <-pageClosed:
+		t.Fatal("操作持 token 时不应释放 page")
+	default:
+	}
+
+	cleanupAllow()
+
+	select {
+	case <-pageClosed:
+	case <-time.After(time.Second):
+		t.Fatal("操作结束后应释放 page")
+	}
+
+	select {
+	case <-opDone:
+	case <-time.After(time.Second):
+		t.Fatal("goroutine 未退出")
+	}
+}
+
+func TestCreateInitialRefreshCancelledByClose(t *testing.T) {
+	manager := NewBrowseSessionManager(time.Minute)
+	t.Cleanup(manager.CloseAll)
+
+	evalBlocked := make(chan struct{})
+	pageClosed := make(chan struct{})
+
+	var once sync.Once
+	evalJS := func(ctx context.Context, p *hrod.Page, script string) (*proto.RuntimeRemoteObject, error) {
+		once.Do(func() { close(evalBlocked) })
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+
+	sessionCh := make(chan *BrowseSession, 1)
+	done := make(chan struct{})
+	go func() {
+		s := manager.create(&hrod.Page{}, nil, func(p *hrod.Page) { close(pageClosed) }, func(session *BrowseSession) {
+			session.evalJS = evalJS
+		})
+		sessionCh <- s
+		close(done)
+	}()
+
+	select {
+	case <-evalBlocked:
+	case <-done:
+		t.Fatal("Create 不应在 eval 返回前完成")
+	case <-time.After(time.Second):
+		t.Fatal("等待 initial Eval 启动超时")
+	}
+
+	manager.CloseAll()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("initial refresh 应在 Close 后退出")
+	}
+
+	select {
+	case <-pageClosed:
+	case <-time.After(time.Second):
+		t.Fatal("onClose 应被调用")
+	}
+
+	s := <-sessionCh
+	if _, err := manager.Get(s.ID()); err == nil {
+		t.Fatal("已关闭的 session 不应在 manager map 中")
+	}
+}
+
+func TestExpiredLongOperationCannotRenewSessionOnFinish(t *testing.T) {
+	onCloseCount := 0
+	manager := NewBrowseSessionManager(time.Minute)
+	t.Cleanup(manager.CloseAll)
+	session := manager.Create(nil, nil, func(*hrod.Page) {
+		onCloseCount++
+	})
+
+	if _, err := session.beginLockedOperation(context.Background(), true); err != nil {
+		t.Fatalf("beginLockedOperation: %v", err)
+	}
+	session.mu.Lock()
+	session.expiresAt = time.Now().Add(-time.Second)
+	if session.timer != nil {
+		session.timer.Stop()
+	}
+	session.mu.Unlock()
+
+	session.finishOperation()
+	if !session.closed {
+		t.Fatal("过期操作完成后 session 应已关闭")
+	}
+	if _, err := manager.Get(session.ID()); err == nil {
+		t.Fatal("过期 session 应从 manager map 中移除")
+	}
+	if onCloseCount != 1 {
+		t.Fatalf("onClose 调用次数 = %d，期望 1", onCloseCount)
+	}
+}
+
+func TestCanceledQueuedOperationCannotRenewSession(t *testing.T) {
+	session := &BrowseSession{
+		id:        "test-cancel-queue",
+		opToken:   make(chan struct{}, 1),
+		closedCh:  make(chan struct{}),
+		timeout:   time.Minute,
+		expiresAt: time.Now().Add(time.Minute),
+		seenNotes: make(map[string]bool),
+		results:   make(map[string]Feed),
+	}
+	session.opToken <- struct{}{}
+	t.Cleanup(session.Close)
+
+	tokenHeld := make(chan struct{})
+	releaseToken := make(chan struct{})
+	var releaseOnce sync.Once
+	cleanupRelease := func() { releaseOnce.Do(func() { close(releaseToken) }) }
+	t.Cleanup(cleanupRelease)
+
+	opDone := make(chan struct{})
+	go func() {
+		defer close(opDone)
+		if _, err := session.beginLockedOperation(context.Background(), true); err != nil {
+			t.Errorf("beginLockedOperation: %v", err)
+			close(tokenHeld)
+			return
+		}
+		close(tokenHeld)
+		select {
+		case <-releaseToken:
+		case <-time.After(time.Second):
+			t.Errorf("等待 releaseToken 超时")
+			session.finishOperation()
+			return
+		}
+		session.finishOperation()
+	}()
+	select {
+	case <-tokenHeld:
+	case <-time.After(time.Second):
+		t.Fatal("等待 tokenHeld 超时")
+	}
+
+	savedExpiresAt := session.expiresAt
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := session.beginLockedOperation(ctx, true)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("取消排队操作应返回 context.Canceled，得到 %v", err)
+	}
+	if !session.expiresAt.Equal(savedExpiresAt) {
+		t.Fatalf("取消排队操作不应修改 expiresAt，原 %v 现 %v", savedExpiresAt, session.expiresAt)
+	}
+	if session.closed {
+		t.Fatal("取消的排队操作不应关闭 session")
+	}
+	cleanupRelease()
+
+	select {
+	case <-opDone:
+	case <-time.After(time.Second):
+		t.Fatal("第一个操作 goroutine 未退出")
+	}
+}
+
+func TestFinishOperationSkipsRefreshAfterCancellation(t *testing.T) {
+	evalCount := 0
+	session := newTestSession()
+	session.evalJS = func(ctx context.Context, p *hrod.Page, script string) (*proto.RuntimeRemoteObject, error) {
+		evalCount++
+		return nil, nil
+	}
+	session.page = &hrod.Page{}
+	t.Cleanup(session.Close)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	if _, err := session.beginLockedOperation(ctx, true); err != nil {
+		t.Fatalf("beginLockedOperation: %v", err)
+	}
+	cancel()
+	session.finishOperation()
+
+	if evalCount != 0 {
+		t.Fatalf("取消后不应有 eval，得到 %d 次调用", evalCount)
+	}
+}
+
+// P1 测试: finishOperation 正常关闭 opCtx.Done
+
+func TestFinishOperationCancelsOperationContext(t *testing.T) {
+	session := newTestSession()
+	t.Cleanup(session.Close)
+
+	opCtx, err := session.beginLockedOperation(context.Background(), true)
+	if err != nil {
+		t.Fatalf("beginLockedOperation: %v", err)
+	}
+
+	session.finishOperation()
+
+	select {
+	case <-opCtx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("finishOperation 后 opCtx.Done 应关闭")
+	}
+
+	// token 可再次获取
+	if _, err := session.beginLockedOperation(context.Background(), true); err != nil {
+		t.Fatalf("finishOperation 后 token 可再次获取: %v", err)
+	}
+	session.finishOperation()
+}
+
+// P1 测试: 结束阶段无界 CDP 调用
+
+func TestRefreshPageStateHasBoundedContext(t *testing.T) {
+	var mu sync.Mutex
+	evalCount := 0
+	deadlineOK := 0
+	evalsDone := make(chan struct{})
+
+	s := &BrowseSession{
+		closed:    false,
+		seenNotes: make(map[string]bool),
+		results:   make(map[string]Feed),
+		page:      &hrod.Page{},
+		evalJS: func(ctx context.Context, p *hrod.Page, script string) (*proto.RuntimeRemoteObject, error) {
+			mu.Lock()
+			evalCount++
+			deadline, hasDeadline := ctx.Deadline()
+			if hasDeadline && deadline.Sub(time.Now()) <= browseSessionRefreshTimeout+100*time.Millisecond {
+				deadlineOK++
+			}
+			if evalCount == 2 {
+				close(evalsDone)
+			}
+			mu.Unlock()
+			return nil, context.DeadlineExceeded
+		},
+	}
+
+	done := make(chan struct{})
+	go func() {
+		s.refreshPageState(context.Background())
+		close(done)
+	}()
+
+	select {
+	case <-evalsDone:
+	case <-time.After(time.Second):
+		t.Fatal("两次 eval 未被全部调用")
+	}
+
+	mu.Lock()
+	if evalCount != 2 {
+		mu.Unlock()
+		t.Fatalf("eval 调用次数 = %d，期望 2", evalCount)
+	}
+	if deadlineOK != 2 {
+		mu.Unlock()
+		t.Fatalf("带有效 deadline 的 eval 次数 = %d，期望 2", deadlineOK)
+	}
+	mu.Unlock()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("refreshPageState 应在 bounded timeout 后返回")
+	}
+}
+
+// P2 测试: 取消错误传播
+
+func TestSessionCommentLoadPropagatesParentCancellation(t *testing.T) {
+	t.Run("context.Canceled 传播", func(t *testing.T) {
+		err := loadSessionCommentsForDetail(5, sessionCommentLoadOps{
+			getProgress: func() (commentProgress, error) {
+				return commentProgress{}, nil
+			},
+			load: func(config CommentLoadConfig) error {
+				return context.Canceled
+			},
+		})
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("应传播 context.Canceled，得到 %v", err)
+		}
+	})
+	t.Run("context.DeadlineExceeded 传播", func(t *testing.T) {
+		err := loadSessionCommentsForDetail(5, sessionCommentLoadOps{
+			getProgress: func() (commentProgress, error) {
+				return commentProgress{}, nil
+			},
+			load: func(config CommentLoadConfig) error {
+				return context.DeadlineExceeded
+			},
+		})
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("应传播 context.DeadlineExceeded，得到 %v", err)
+		}
+	})
+	t.Run("普通 DOM 错误仍被吞掉", func(t *testing.T) {
+		err := loadSessionCommentsForDetail(5, sessionCommentLoadOps{
+			getProgress: func() (commentProgress, error) {
+				return commentProgress{}, nil
+			},
+			load: func(config CommentLoadConfig) error {
+				return fmt.Errorf("普通 DOM 错误")
+			},
+		})
+		if err != nil {
+			t.Fatalf("普通 DOM 错误应被吞掉，得到 %v", err)
+		}
+	})
+	t.Run("getProgress Canceled 立即返回", func(t *testing.T) {
+		err := loadSessionCommentsForDetail(5, sessionCommentLoadOps{
+			getProgress: func() (commentProgress, error) {
+				return commentProgress{}, context.Canceled
+			},
+			load: func(config CommentLoadConfig) error {
+				t.Fatal("getProgress 返回 Canceled 后不应调用 load")
+				return nil
+			},
+		})
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("应返回 context.Canceled，得到 %v", err)
+		}
+	})
+	t.Run("getProgress DeadlineExceeded 立即返回", func(t *testing.T) {
+		err := loadSessionCommentsForDetail(5, sessionCommentLoadOps{
+			getProgress: func() (commentProgress, error) {
+				return commentProgress{}, context.DeadlineExceeded
+			},
+			load: func(config CommentLoadConfig) error {
+				t.Fatal("getProgress 返回 DeadlineExceeded 后不应调用 load")
+				return nil
+			},
+		})
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("应返回 context.DeadlineExceeded，得到 %v", err)
+		}
+	})
+}
+
+func TestManagerCloseRemovesSessionWithoutBlockingOnActiveOperation(t *testing.T) {
+	manager := NewBrowseSessionManager(time.Minute)
+	session := manager.Create(nil, nil, nil)
+	t.Cleanup(manager.CloseAll)
+
+	tokenHeld := make(chan struct{})
+	opDone := make(chan struct{})
+	go func() {
+		defer close(opDone)
+		opCtx, err := session.beginLockedOperation(context.Background(), true)
+		if err != nil {
+			t.Errorf("beginLockedOperation: %v", err)
+			close(tokenHeld)
+			return
+		}
+		close(tokenHeld)
+		<-opCtx.Done()
+		session.finishOperation()
+	}()
+	select {
+	case <-tokenHeld:
+	case <-time.After(time.Second):
+		t.Fatal("等待 tokenHeld 超时")
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- manager.Close(session.ID())
+	}()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("Close 不应阻塞且应成功: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Manager.Close 不应在活跃操作上阻塞")
+	}
+
+	select {
+	case <-opDone:
+	case <-time.After(time.Second):
+		t.Fatal("goroutine 未退出")
+	}
+}
+
+// P2 测试: ClassifyRiskContext 不续 TTL
+
+func TestClassifyRiskContextDoesNotRenewTTL(t *testing.T) {
+	expiresAt := time.Now().Add(time.Minute)
+	session := &BrowseSession{
+		id:        "test-classify-ttl",
+		opToken:   make(chan struct{}, 1),
+		closedCh:  make(chan struct{}),
+		timeout:   time.Minute,
+		expiresAt: expiresAt,
+		seenNotes: make(map[string]bool),
+		results:   make(map[string]Feed),
+	}
+	session.opToken <- struct{}{}
+	t.Cleanup(session.Close)
+
+	sig, err := session.ClassifyRiskContext(context.Background())
+	if err != nil {
+		t.Fatalf("ClassifyRiskContext: %v", err)
+	}
+	if sig.Kind != RiskNone {
+		t.Fatalf("期望 RiskNone，得到 %v", sig.Kind)
+	}
+	if !session.expiresAt.Equal(expiresAt) {
+		t.Fatal("ClassifyRiskContext 不应续 TTL")
+	}
+}
+
+// P2 测试: token 就绪 + ctx 取消不丢失 token
+
+func TestBeginLockedOperationTokenReadyAndCtxCancelled(t *testing.T) {
+	expiresAt := time.Now().Add(time.Minute)
+	session := &BrowseSession{
+		id:        "test-token-ready-cancelled",
+		opToken:   make(chan struct{}, 1),
+		closedCh:  make(chan struct{}),
+		timeout:   time.Minute,
+		expiresAt: expiresAt,
+		seenNotes: make(map[string]bool),
+		results:   make(map[string]Feed),
+	}
+	session.opToken <- struct{}{}
+	t.Cleanup(session.Close)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := session.beginLockedOperation(ctx, true)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("beginLockedOperation 应返回 context.Canceled，得到 %v", err)
+	}
+	if !session.expiresAt.Equal(expiresAt) {
+		t.Fatal("失败后不应续 TTL")
+	}
+
+	// token 未被丢失，可再次获取
+	if _, err := session.beginLockedOperation(context.Background(), true); err != nil {
+		t.Fatalf("token 丢失: %v", err)
+	}
+	session.finishOperation()
+}
+
+func newTestSession() *BrowseSession {
+	s := &BrowseSession{
+		id:        "test-session",
+		opToken:   make(chan struct{}, 1),
+		closedCh:  make(chan struct{}),
+		timeout:   time.Minute,
+		expiresAt: time.Now().Add(time.Minute),
+		seenNotes: make(map[string]bool),
+		results:   make(map[string]Feed),
+	}
+	s.opToken <- struct{}{}
+	return s
 }
