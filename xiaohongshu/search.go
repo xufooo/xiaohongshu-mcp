@@ -614,7 +614,7 @@ func waitForSearchInput(page *hrod.Page, timeout time.Duration) (*hrod.Element, 
 }
 
 func probeSearchInput(page *hrod.Page) (searchInputProbe, error) {
-	obj, err := page.Eval(`(selector) => {
+	obj, err := page.Eval(`(exploreSelector) => {
 		const visible = (el) => {
 			if (!el || !el.isConnected) return false;
 			const style = window.getComputedStyle(el);
@@ -643,9 +643,7 @@ func probeSearchInput(page *hrod.Page) (searchInputProbe, error) {
 		document.querySelectorAll('[data-xhs-mcp-search-input="1"]').forEach((el) => {
 			el.removeAttribute("data-xhs-mcp-search-input");
 		});
-		const candidates = Array.from(document.querySelectorAll(selector));
-		const searchInput = candidates.find((el) => visible(el) && /搜索|search/i.test(label(el))) ||
-			candidates.find((el) => visible(el));
+		const searchInput = Array.from(document.querySelectorAll(exploreSelector)).find(visible);
 		if (searchInput) {
 			searchInput.setAttribute("data-xhs-mcp-search-input", "1");
 		}
@@ -662,7 +660,7 @@ func probeSearchInput(page *hrod.Page) (searchInputProbe, error) {
 			inputSummary: inputs,
 			bodyText: (document.body?.innerText || "").replace(/\s+/g, " ").slice(0, 180),
 		});
-	}`, SelectorSearchInput)
+	}`, SelectorSearchInputInFeeds)
 	if err != nil {
 		return searchInputProbe{}, err
 	}

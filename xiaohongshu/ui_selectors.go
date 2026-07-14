@@ -8,13 +8,15 @@ import (
 )
 
 const (
-	SelectorSearchInput       = `input.search-input, input[type="search"], input[role="searchbox"], input[placeholder*="搜索"], input[placeholder*="Search"], input[placeholder*="search"], input[aria-label*="搜索"], input[aria-label*="Search"], input[aria-label*="search"], textarea[role="searchbox"], textarea[placeholder*="搜索"], [contenteditable="true"][role="searchbox"], [contenteditable="true"][data-placeholder*="搜索"], [contenteditable="true"][aria-label*="搜索"]`
-	SelectorMarkedSearchInput = `[data-xhs-mcp-search-input="1"]`
-	SelectorSearchButton      = `.search-icon, .search-btn, button[type="submit"]`
-	SelectorSearchResult      = `.feeds-container, .note-list, .search-layout, div[data-v-]`
-	SelectorFeedCard          = `section.note-item, .note-item, .feeds-container section, .note-list section`
-	SelectorFeedDetailReady   = `.note-detail-mask, .note-container, .interact-container, .comments-container`
-	SelectorCommentBox        = `div.input-box div.content-edit span, div.input-box div.content-edit p.content-input`
+	SelectorSearchInputInFeeds        = `#search-input-in-feeds`
+	SelectorSearchInputInSearchResult = `#search-input`
+	SelectorSearchInput               = SelectorSearchInputInFeeds + `, ` + SelectorSearchInputInSearchResult
+	SelectorMarkedSearchInput         = `[data-xhs-mcp-search-input="1"]`
+	SelectorSearchButton              = `.search-icon, .search-btn, button[type="submit"]`
+	SelectorSearchResult              = `.feeds-container, .note-list, .search-layout, div[data-v-]`
+	SelectorFeedCard                  = `section.note-item, .note-item, .feeds-container section, .note-list section`
+	SelectorFeedDetailReady           = `.note-detail-mask, .note-container, .interact-container, .comments-container`
+	SelectorCommentBox                = `div.input-box div.content-edit span, div.input-box div.content-edit p.content-input`
 )
 
 type SelectorSpec struct {
