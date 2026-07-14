@@ -1272,7 +1272,17 @@ func (s *AppServer) handleSessionDetail(ctx context.Context, args SessionDetailA
 	if args.SessionID == "" {
 		return sessionMCPErrorResult("session详情获取失败: 缺少session_id参数", sessionNextStepCreateSession())
 	}
-	detail, err := s.xiaohongshuService.SessionDetail(ctx, args.SessionID, args.LoadComments, args.Pages)
+	if args.LoadComments {
+		return sessionMCPErrorResult(
+			"session_detail 已不支持 load_comments。大量评论读取请使用 get_feed_detail，并传 max_items（推荐20），后续调用传入上次返回的 comments.cursor 继续读取。",
+			mcpSessionNextStep{
+				Tool:   "get_feed_detail",
+				Reason: "session_detail 不再支持 load_comments，请使用 get_feed_detail 读取评论",
+				Hint:   "保持当前 session 的笔记已打开，调用 get_feed_detail 并传 max_items（推荐20），后续传回返回的 comments.cursor 继续分页",
+			},
+		)
+	}
+	detail, err := s.xiaohongshuService.SessionDetail(ctx, args.SessionID, false, args.Pages)
 	if err != nil {
 		return sessionMCPErrorFromErr("session详情获取失败", err, sessionNextStepOpenNote())
 	}

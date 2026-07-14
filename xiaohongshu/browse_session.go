@@ -1137,9 +1137,9 @@ func (s *BrowseSession) currentStateLocked(kind XHSReadyKind, resultsCount int, 
 func (s *BrowseSession) nextHintLocked(resultsCount int) string {
 	switch {
 	case s.opened && !s.read:
-		return "可调用 session_detail 提取当前笔记；load_comments=true 可加载评论和展开子评论；点赞或评论前先调用 session_read"
+		return "可调用 session_detail 提取当前笔记可见DOM；大量评论读取请使用 get_feed_detail（传 max_items、cursor）；点赞或评论前先调用 session_read"
 	case s.opened && s.read:
-		return "可调用 session_detail 提取当前笔记，或设置 load_comments=true 加载更多评论（含自动展开子评论）"
+		return "可调用 session_detail 提取当前笔记可见DOM；大量评论读取请使用 get_feed_detail（传 max_items、cursor）"
 	case resultsCount > 0:
 		return "可继续：搜索新关键词 (session_search)、打开其他笔记 (session_open_note)、或滚动浏览 feed"
 	case !s.opened && resultsCount == 0:

@@ -58,6 +58,44 @@ func TestFeedDetailCommentsBatchDelegatesToActiveBrowseSession(t *testing.T) {
 	}
 }
 
+func TestSessionDetailForFeedPassesLoadCommentsToDetailForFeed(t *testing.T) {
+	serviceSource, err := os.ReadFile("service.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	serviceScript := string(serviceSource)
+
+	if !strings.Contains(serviceScript, `session.DetailForFeed(ctx, feedID, loadComments, config)`) {
+		t.Fatal("SessionDetailForFeed must pass loadComments directly to session.DetailForFeed")
+	}
+
+	if !strings.Contains(serviceScript, `detail, err := s.SessionDetailForFeed(ctx, sid, feedID, loadAllComments, config)`) {
+		t.Fatal("GetFeedDetailWithConfig must pass loadAllComments to SessionDetailForFeed")
+	}
+
+	browseSource, err := os.ReadFile("xiaohongshu/browse_session.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	browseScript := string(browseSource)
+
+	if !strings.Contains(browseScript, `return s.detail(ctx, expectedFeedID, loadComments, 0, config, true)`) {
+		t.Fatal("DetailForFeed must forward to detail() with useConfig=true")
+	}
+
+	if !strings.Contains(browseScript, "if loadComments {") {
+		t.Fatal("detail() missing the if loadComments branch")
+	}
+
+	if !strings.Contains(browseScript, "if useConfig {\n\t\t\tloadErr = loadSessionCommentsForDetailWithConfig") {
+		t.Fatal("detail() useConfig path must call loadSessionCommentsForDetailWithConfig")
+	}
+
+	if !strings.Contains(browseScript, `loadSessionCommentsForDetail(pages, ops)`) {
+		t.Fatal("detail() non-useConfig path must call loadSessionCommentsForDetail")
+	}
+}
+
 func TestCreateBrowseSessionReusesActiveSessionBeforeCreating(t *testing.T) {
 	source, err := os.ReadFile("service.go")
 	if err != nil {

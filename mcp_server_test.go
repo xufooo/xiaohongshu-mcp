@@ -63,3 +63,18 @@ func TestFeedDetailInputSchemaIncludesCommentCursorBatchFields(t *testing.T) {
 		t.Fatalf("max_items property missing from schema: %+v", schema.Properties)
 	}
 }
+
+func TestSessionDetailInputSchemaKeepsLoadCommentsCompatible(t *testing.T) {
+	schema, err := jsonschema.For[SessionDetailArgs](nil)
+	if err != nil {
+		t.Fatalf("jsonschema.For[SessionDetailArgs]() error = %v", err)
+	}
+	if _, ok := schema.Properties["load_comments"]; !ok {
+		t.Fatalf("load_comments property missing from schema: %+v", schema.Properties)
+	}
+	for _, required := range schema.Required {
+		if required == "load_comments" {
+			t.Fatalf("load_comments should not be required: %+v", schema.Required)
+		}
+	}
+}
