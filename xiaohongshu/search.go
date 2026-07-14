@@ -200,12 +200,23 @@ func (s *SearchAction) SearchByURLFallback(ctx context.Context, keyword string, 
 }
 
 func (s *SearchAction) searchByUI(page *hrod.Page, keyword string) error {
-	if err := page.Navigate("https://www.xiaohongshu.com/explore"); err != nil {
-		return fmt.Errorf("导航探索页失败: %w", err)
+	// 使用 Info() 读取 URL（非阻塞），避免在冷启动/blank 页面上执行 DOM Eval。
+	searchSelector, err := prepareSearchPage(
+		func() string {
+			info, infoErr := page.Rod.Info()
+			if infoErr != nil || info == nil {
+				return ""
+			}
+			return info.URL
+		},
+		page.Navigate,
+	)
+	if err != nil {
+		return err
 	}
 
 	// 等搜索框出现，不使用WaitLoad因为小红书是SPA。
-	input, err := waitForSearchInput(page, searchInputWaitTimeout)
+	input, err := waitForSearchInput(page, searchInputWaitTimeout, searchSelector)
 	if err != nil {
 		logrus.Warnf("未找到搜索框，使用搜索URL兜底: %v", err)
 		if navErr := page.Navigate(makeSearchURL(keyword)); navErr != nil {
@@ -578,7 +589,7 @@ type searchInputProbe struct {
 	BodyText           string   `json:"bodyText"`
 }
 
-func waitForSearchInput(page *hrod.Page, timeout time.Duration) (*hrod.Element, error) {
+func waitForSearchInput(page *hrod.Page, timeout time.Duration, searchSelector string) (*hrod.Element, error) {
 	deadline := time.Now().Add(timeout)
 	var last searchInputProbe
 	var lastErr error
@@ -588,7 +599,7 @@ func waitForSearchInput(page *hrod.Page, timeout time.Duration) (*hrod.Element, 
 			return nil, err
 		}
 
-		probe, err := probeSearchInput(page)
+		probe, err := probeSearchInput(page, searchSelector)
 		if err != nil {
 			lastErr = err
 		} else {
@@ -613,8 +624,8 @@ func waitForSearchInput(page *hrod.Page, timeout time.Duration) (*hrod.Element, 
 	return nil, fmt.Errorf("等待搜索框超时(%s): %s", timeout, formatSearchInputProbe(last))
 }
 
-func probeSearchInput(page *hrod.Page) (searchInputProbe, error) {
-	obj, err := page.Eval(`(exploreSelector) => {
+func probeSearchInput(page *hrod.Page, searchSelector string) (searchInputProbe, error) {
+	obj, err := page.Eval(`(searchSelector) => {
 		const visible = (el) => {
 			if (!el || !el.isConnected) return false;
 			const style = window.getComputedStyle(el);
@@ -643,7 +654,7 @@ func probeSearchInput(page *hrod.Page) (searchInputProbe, error) {
 		document.querySelectorAll('[data-xhs-mcp-search-input="1"]').forEach((el) => {
 			el.removeAttribute("data-xhs-mcp-search-input");
 		});
-		const searchInput = Array.from(document.querySelectorAll(exploreSelector)).find(visible);
+		const searchInput = Array.from(document.querySelectorAll(searchSelector)).find(visible);
 		if (searchInput) {
 			searchInput.setAttribute("data-xhs-mcp-search-input", "1");
 		}
@@ -660,7 +671,7 @@ func probeSearchInput(page *hrod.Page) (searchInputProbe, error) {
 			inputSummary: inputs,
 			bodyText: (document.body?.innerText || "").replace(/\s+/g, " ").slice(0, 180),
 		});
-	}`, SelectorSearchInputInFeeds)
+	}`, searchSelector)
 	if err != nil {
 		return searchInputProbe{}, err
 	}
@@ -863,6 +874,44 @@ func mergeSearchFeedXsecTokens(feeds, stateFeeds []Feed) {
 			feeds[i].XsecToken = token
 		}
 	}
+}
+
+type searchPageDecision struct {
+	NavigateExplore bool
+	SearchSelector  string
+}
+
+func decideSearchPage(pageURL string) searchPageDecision {
+	if isSearchResultPage(pageURL) {
+		return searchPageDecision{
+			NavigateExplore: false,
+			SearchSelector:  SelectorSearchInputInSearchResult,
+		}
+	}
+	return searchPageDecision{
+		NavigateExplore: true,
+		SearchSelector:  SelectorSearchInputInFeeds,
+	}
+}
+
+func isSearchResultPage(rawURL string) bool {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	return parsed.Scheme == "https" && parsed.Host == "www.xiaohongshu.com" && parsed.Path == "/search_result" && parsed.Fragment == ""
+}
+
+// prepareSearchPage 供 searchByUI 和测试同时使用
+func prepareSearchPage(infoFn func() string, navigateFn func(string) error) (string, error) {
+	pageURL := infoFn()
+	decision := decideSearchPage(pageURL)
+	if decision.NavigateExplore {
+		if err := navigateFn("https://www.xiaohongshu.com/explore"); err != nil {
+			return "", fmt.Errorf("导航探索页失败: %w", err)
+		}
+	}
+	return decision.SearchSelector, nil
 }
 
 func makeSearchURL(keyword string) string {
