@@ -384,7 +384,7 @@ func TestSearchInputSelectorPriorityStructure(t *testing.T) {
 	require.Greater(t, end, start, "probeSearchInput source boundary missing")
 	probeSource := script[start:end]
 
-	require.Contains(t, probeSource, "exploreSelector")
+	require.Contains(t, probeSource, "searchSelector")
 	require.NotContains(t, probeSource, "fallbackSelector")
 	require.NotContains(t, probeSource, "compatibleSelector")
 	require.NotContains(t, probeSource, "candidates.find(")
@@ -392,5 +392,209 @@ func TestSearchInputSelectorPriorityStructure(t *testing.T) {
 	require.Contains(t, probeSource, "rect.width > 1")
 	require.Contains(t, probeSource, "rect.height > 1")
 
-	require.Contains(t, probeSource, "`, SelectorSearchInputInFeeds)")
+	require.Contains(t, probeSource, "`, searchSelector)")
+}
+
+func TestDecideSearchPage(t *testing.T) {
+	tests := []struct {
+		name   string
+		url    string
+		want   searchPageDecision
+	}{
+		{
+			name: "blank page / info error",
+			url:  "",
+			want: searchPageDecision{
+				NavigateExplore: true,
+				SearchSelector:  SelectorSearchInputInFeeds,
+			},
+		},
+		{
+			name: "explore page",
+			url:  "https://www.xiaohongshu.com/explore",
+			want: searchPageDecision{
+				NavigateExplore: true,
+				SearchSelector:  SelectorSearchInputInFeeds,
+			},
+		},
+		{
+			name: "search result page with query",
+			url:  "https://www.xiaohongshu.com/search_result?keyword=test",
+			want: searchPageDecision{
+				NavigateExplore: false,
+				SearchSelector:  SelectorSearchInputInSearchResult,
+			},
+		},
+		{
+			name: "search result page no query",
+			url:  "https://www.xiaohongshu.com/search_result",
+			want: searchPageDecision{
+				NavigateExplore: false,
+				SearchSelector:  SelectorSearchInputInSearchResult,
+			},
+		},
+		{
+			name: "search_result_ai (similar but not exact)",
+			url:  "https://www.xiaohongshu.com/search_result_ai?keyword=test",
+			want: searchPageDecision{
+				NavigateExplore: true,
+				SearchSelector:  SelectorSearchInputInFeeds,
+			},
+		},
+		{
+			name: "path contains search but not exact path",
+			url:  "https://www.xiaohongshu.com/search-something",
+			want: searchPageDecision{
+				NavigateExplore: true,
+				SearchSelector:  SelectorSearchInputInFeeds,
+			},
+		},
+		{
+			name: "unrelated page",
+			url:  "https://www.xiaohongshu.com/discovery/item/123",
+			want: searchPageDecision{
+				NavigateExplore: true,
+				SearchSelector:  SelectorSearchInputInFeeds,
+			},
+		},
+		{
+			name: "non-xhs host",
+			url:  "https://example.com/search_result",
+			want: searchPageDecision{
+				NavigateExplore: true,
+				SearchSelector:  SelectorSearchInputInFeeds,
+			},
+		},
+		{
+			name: "http scheme not treated as search result",
+			url:  "http://www.xiaohongshu.com/search_result",
+			want: searchPageDecision{
+				NavigateExplore: true,
+				SearchSelector:  SelectorSearchInputInFeeds,
+			},
+		},
+		{
+			name: "protocol-relative url not treated as search result",
+			url:  "//www.xiaohongshu.com/search_result",
+			want: searchPageDecision{
+				NavigateExplore: true,
+				SearchSelector:  SelectorSearchInputInFeeds,
+			},
+		},
+		{
+			name: "malformed url",
+			url:  "://invalid",
+			want: searchPageDecision{
+				NavigateExplore: true,
+				SearchSelector:  SelectorSearchInputInFeeds,
+			},
+		},
+		{
+			name: "search result page with fragment not treated as search result",
+			url:  "https://www.xiaohongshu.com/search_result#foo",
+			want: searchPageDecision{
+				NavigateExplore: true,
+				SearchSelector:  SelectorSearchInputInFeeds,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := decideSearchPage(tt.url)
+			require.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestSearchByUIUsesInfoNotEval(t *testing.T) {
+	searchSource, err := os.ReadFile("search.go")
+	require.NoError(t, err)
+	script := string(searchSource)
+
+	funcStart := strings.Index(script, "func (s *SearchAction) searchByUI(")
+	require.NotEqual(t, -1, funcStart, "searchByUI source marker missing")
+
+	funcBody := script[funcStart:]
+	nextFunc := strings.Index(funcBody[1:], "\nfunc ")
+	require.Greater(t, nextFunc, 0, "searchByUI boundary missing")
+	funcBody = funcBody[:nextFunc+1]
+
+	require.NotContains(t, funcBody, `.pathname`, "searchByUI 不得用 DOM Eval 判断搜索结果页")
+	require.Contains(t, funcBody, `page.Rod.Info()`, "searchByUI 应使用非阻塞 Info() 获取页面 URL")
+	require.Contains(t, funcBody, `prepareSearchPage(`, "searchByUI 应通过 prepareSearchPage 决策")
+}
+
+func TestPrepareSearchPageBehavior(t *testing.T) {
+	tests := []struct {
+		name         string
+		pageURL      string
+		wantSelector string
+		wantCallLog  []string
+	}{
+		{
+			name:         "search result page",
+			pageURL:      "https://www.xiaohongshu.com/search_result?keyword=test",
+			wantSelector: SelectorSearchInputInSearchResult,
+			wantCallLog:  []string{"Info"},
+		},
+		{
+			name:         "blank page / info error",
+			pageURL:      "",
+			wantSelector: SelectorSearchInputInFeeds,
+			wantCallLog:  []string{"Info", "Navigate"},
+		},
+		{
+			name:         "explore page",
+			pageURL:      "https://www.xiaohongshu.com/explore",
+			wantSelector: SelectorSearchInputInFeeds,
+			wantCallLog:  []string{"Info", "Navigate"},
+		},
+		{
+			name:         "non-xhs host not treated as search result",
+			pageURL:      "https://example.com/search_result",
+			wantSelector: SelectorSearchInputInFeeds,
+			wantCallLog:  []string{"Info", "Navigate"},
+		},
+		{
+			name:         "search_result_ai (similar but not exact)",
+			pageURL:      "https://www.xiaohongshu.com/search_result_ai?keyword=test",
+			wantSelector: SelectorSearchInputInFeeds,
+			wantCallLog:  []string{"Info", "Navigate"},
+		},
+		{
+			name:         "search result page with fragment not treated as search result",
+			pageURL:      "https://www.xiaohongshu.com/search_result#foo",
+			wantSelector: SelectorSearchInputInFeeds,
+			wantCallLog:  []string{"Info", "Navigate"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var callLog []string
+			var navURL string
+
+			infoFn := func() string {
+				callLog = append(callLog, "Info")
+				return tt.pageURL
+			}
+			navigateFn := func(url string) error {
+				callLog = append(callLog, "Navigate")
+				navURL = url
+				return nil
+			}
+
+			selector, err := prepareSearchPage(infoFn, navigateFn)
+			require.NoError(t, err)
+			require.Equal(t, tt.wantSelector, selector)
+			require.Equal(t, tt.wantCallLog, callLog, "调用顺序必须为 Info → (可选 Navigate) → 等待探测")
+
+			if len(tt.wantCallLog) > 1 && tt.wantCallLog[1] == "Navigate" {
+				require.Equal(t, "https://www.xiaohongshu.com/explore", navURL)
+			} else {
+				require.Empty(t, navURL, "不应导航")
+			}
+		})
+	}
 }
