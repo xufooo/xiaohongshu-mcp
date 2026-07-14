@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -357,4 +359,38 @@ func TestWaitForSearchResultsWithURLFallbackReportsFallbackWaitFailure(t *testin
 func TestSearchResultWatchdogUsesFeedCards(t *testing.T) {
 	require.Equal(t, SelectorFeedCard, SearchResultSpec.Selector)
 	require.True(t, SearchResultSpec.VisibleOnly)
+}
+
+func TestSearchInputSelectorPriorityStructure(t *testing.T) {
+	require.Equal(t, `#search-input-in-feeds`, SelectorSearchInputInFeeds)
+	require.Equal(t, `#search-input`, SelectorSearchInputInSearchResult)
+	require.Equal(t,
+		SelectorSearchInputInFeeds+`, `+SelectorSearchInputInSearchResult,
+		SelectorSearchInput,
+	)
+	require.NotContains(t, SelectorSearchInput, `input.search-input`)
+
+	uiSource, err := os.ReadFile("ui_selectors.go")
+	require.NoError(t, err)
+	require.NotContains(t, string(uiSource), "SelectorCompatibleSearchInput")
+	require.NotContains(t, string(uiSource), "SelectorSearchInputFallback")
+
+	searchSource, err := os.ReadFile("search.go")
+	require.NoError(t, err)
+	script := string(searchSource)
+	start := strings.Index(script, "func probeSearchInput(")
+	end := strings.Index(script, "func formatSearchInputProbe(")
+	require.NotEqual(t, -1, start, "probeSearchInput source marker missing")
+	require.Greater(t, end, start, "probeSearchInput source boundary missing")
+	probeSource := script[start:end]
+
+	require.Contains(t, probeSource, "exploreSelector")
+	require.NotContains(t, probeSource, "fallbackSelector")
+	require.NotContains(t, probeSource, "compatibleSelector")
+	require.NotContains(t, probeSource, "candidates.find(")
+
+	require.Contains(t, probeSource, "rect.width > 1")
+	require.Contains(t, probeSource, "rect.height > 1")
+
+	require.Contains(t, probeSource, "`, SelectorSearchInputInFeeds)")
 }
