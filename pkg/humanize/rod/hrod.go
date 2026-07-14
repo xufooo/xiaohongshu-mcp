@@ -16,6 +16,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/go-rod/rod"
@@ -497,6 +499,25 @@ type interactableSnapshot struct {
 	Width     float64 `json:"width"`
 	Height    float64 `json:"height"`
 	Reason    string  `json:"reason"`
+
+	// 现场证据（obscured 时填充，单次 Eval 收集）
+	TargetTag         string  `json:"targetTag,omitempty"`
+	TargetID          string  `json:"targetId,omitempty"`
+	TargetClass       string  `json:"targetClass,omitempty"`
+	TargetPlaceholder string  `json:"targetPlaceholder,omitempty"`
+	TargetCX          float64 `json:"targetCx,omitempty"`
+	TargetCY          float64 `json:"targetCy,omitempty"`
+	HitTag            string  `json:"hitTag,omitempty"`
+	HitID             string  `json:"hitId,omitempty"`
+	HitClass          string  `json:"hitClass,omitempty"`
+	HitText           string  `json:"hitText,omitempty"`
+	HitLeft           float64 `json:"hitLeft,omitempty"`
+	HitTop            float64 `json:"hitTop,omitempty"`
+	HitWidth          float64 `json:"hitWidth,omitempty"`
+	HitHeight         float64 `json:"hitHeight,omitempty"`
+	TargetContainsHit bool    `json:"targetContainsHit"`
+	URL               string  `json:"url,omitempty"`
+	Title             string  `json:"title,omitempty"`
 }
 
 // WaitInteractable 等待元素进入可点击状态。页面频繁重排时会重新测量，避免点到旧位置。
@@ -529,7 +550,7 @@ func (el *Element) waitInteractable(timeout time.Duration, scroll bool) error {
 		}
 		last = first
 		if !first.Connected || !first.Visible || !first.Clickable {
-			lastErr = fmt.Errorf("元素不可点击: %s", first.Reason)
+			lastErr = fmt.Errorf("元素不可点击: %s%s", first.Reason, first.evidenceString())
 			_ = el.actor.Sleep(120 * time.Millisecond)
 			continue
 		}
@@ -547,7 +568,7 @@ func (el *Element) waitInteractable(timeout time.Duration, scroll bool) error {
 		if second.Connected && second.Visible && second.Clickable && snapshotStable(first, second) {
 			return nil
 		}
-		lastErr = fmt.Errorf("元素尚未稳定: %s", second.Reason)
+		lastErr = fmt.Errorf("元素尚未稳定: %s%s", second.Reason, second.evidenceString())
 
 		if attempt%2 == 1 {
 			_ = el.actor.Sleep(220 * time.Millisecond)
@@ -557,7 +578,7 @@ func (el *Element) waitInteractable(timeout time.Duration, scroll bool) error {
 	if lastErr != nil {
 		return lastErr
 	}
-	return fmt.Errorf("等待元素可点击超时: visible=%v clickable=%v stable=false reason=%s", last.Visible, last.Clickable, last.Reason)
+	return fmt.Errorf("等待元素可点击超时: visible=%v clickable=%v stable=false reason=%s%s", last.Visible, last.Clickable, last.Reason, last.evidenceString())
 }
 
 func (el *Element) interactableSnapshot() (interactableSnapshot, error) {
@@ -574,22 +595,43 @@ func (el *Element) interactableSnapshot() (interactableSnapshot, error) {
 			rect.top < window.innerHeight && rect.left < window.innerWidth;
 		const x = Math.min(Math.max(rect.left + rect.width / 2, 1), window.innerWidth - 1);
 		const y = Math.min(Math.max(rect.top + rect.height / 2, 1), window.innerHeight - 1);
-		const target = visible ? document.elementFromPoint(x, y) : null;
-		const clickable = visible && target && (target === this || this.contains(target));
+		const hit = visible ? document.elementFromPoint(x, y) : null;
+		const clickable = visible && hit && (hit === this || this.contains(hit));
 		let reason = "";
 		if (!connected) reason = "detached";
 		else if (!visible) reason = "not_visible";
 		else if (!clickable) reason = "obscured";
-		return JSON.stringify({
-			connected,
-			visible,
-			clickable,
-			left: rect.left,
-			top: rect.top,
-			width: rect.width,
-			height: rect.height,
-			reason
-		});
+		const r = { connected, visible, clickable, left: rect.left, top: rect.top, width: rect.width, height: rect.height, reason };
+		if (reason === "obscured") {
+			const hitRect = hit ? hit.getBoundingClientRect() : null;
+			const sanitize = (s, n) => {
+				s = String(s || "");
+				s = s.replace(/[\x00-\x1F\x7F\u0080-\u009F\u061C\u200B-\u200F\u2028-\u202F\u2066-\u2069\uFEFF]/g, "");
+				return s.slice(0, n);
+			};
+			const cls = (s) => {
+				if (s && typeof s === "object" && "baseVal" in s) s = s.baseVal;
+				return sanitize(String(s || "").replace(/\s+/g, " ").trim(), 80);
+			};
+			r.targetTag = this.tagName || "";
+			r.targetId = sanitize(this.id, 40);
+			r.targetClass = cls(this.className);
+			r.targetPlaceholder = sanitize(this.getAttribute("placeholder"), 40);
+			r.targetCx = x;
+			r.targetCy = y;
+			r.hitTag = hit ? hit.tagName || "" : "";
+			r.hitId = hit ? sanitize(hit.id, 40) : "";
+			r.hitClass = hit ? cls(hit.className) : "";
+			r.hitText = hit ? sanitize((hit.innerText || hit.textContent || "").replace(/\s+/g, " ").trim(), 60) : "";
+			r.hitLeft = hitRect ? hitRect.left : 0;
+			r.hitTop = hitRect ? hitRect.top : 0;
+			r.hitWidth = hitRect ? hitRect.width : 0;
+			r.hitHeight = hitRect ? hitRect.height : 0;
+			r.targetContainsHit = hit ? (hit === this || this.contains(hit)) : false;
+			r.url = location.origin + location.pathname;
+			r.title = sanitize(document.title || "", 120);
+		}
+		return JSON.stringify(r);
 	}`)
 	if err != nil {
 		return interactableSnapshot{}, err
@@ -617,6 +659,107 @@ func absFloat(v float64) float64 {
 		return -v
 	}
 	return v
+}
+
+const maxErrorBytes = 2048
+const prefixReserve = 120
+const maxEvidenceBytes = maxErrorBytes - prefixReserve
+
+func truncate(s string, n int) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if !isDiscardRune(r) {
+			b.WriteRune(r)
+		}
+	}
+	s = b.String()
+	if len(s) > n {
+		s = s[:n]
+	}
+	return s
+}
+
+func isDiscardRune(r rune) bool {
+	return r < 32 || r == 127 ||
+		(r >= 0x80 && r <= 0x9F) ||
+		r == 0x061C ||
+		(r >= 0x200B && r <= 0x200F) ||
+		(r >= 0x2028 && r <= 0x202F) ||
+		(r >= 0x2066 && r <= 0x2069) ||
+		r == 0xFEFF
+}
+
+func sanitizeURL(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	u.RawQuery = ""
+	u.Fragment = ""
+	u.User = nil
+	return u.Scheme + "://" + u.Host + u.EscapedPath()
+}
+
+// evidenceString 返回 obscured 时紧凑 JSON 现场证据，非 obscured 返回空串。
+// 输出严格 <= maxEvidenceBytes 字节，清理全部控制字符，URL 剥离 query/fragment/userinfo。
+func (s interactableSnapshot) evidenceString() string {
+	if s.Reason != "obscured" {
+		return ""
+	}
+	ev := map[string]interface{}{
+		"placeholder":  truncate(s.TargetPlaceholder, 40),
+		"targetTag":    truncate(s.TargetTag, 20),
+		"targetId":     truncate(s.TargetID, 40),
+		"targetClass":  truncate(s.TargetClass, 80),
+		"targetCx":     s.TargetCX,
+		"targetCy":     s.TargetCY,
+		"targetLeft":   s.Left,
+		"targetTop":    s.Top,
+		"targetWidth":  s.Width,
+		"targetHeight": s.Height,
+		"hitTag":       truncate(s.HitTag, 20),
+		"hitId":        truncate(s.HitID, 40),
+		"hitClass":     truncate(s.HitClass, 80),
+		"hitText":      truncate(s.HitText, 60),
+		"hitLeft":      s.HitLeft,
+		"hitTop":       s.HitTop,
+		"hitWidth":     s.HitWidth,
+		"hitHeight":    s.HitHeight,
+		"contains":     s.TargetContainsHit,
+		"url":          truncate(sanitizeURL(s.URL), 200),
+		"title":        truncate(s.Title, 120),
+	}
+	b, err := json.Marshal(ev)
+	if err != nil {
+		return ""
+	}
+	if len(b) <= maxEvidenceBytes {
+		return string(b)
+	}
+	// 超出 2048 时使用最小 fallback，仍包含 target/hit/contains/center 与双方 rect
+	fallback := map[string]interface{}{
+		"targetTag":    truncate(s.TargetTag, 10),
+		"hitTag":       truncate(s.HitTag, 10),
+		"url":          truncate(sanitizeURL(s.URL), 100),
+		"title":        truncate(s.Title, 50),
+		"contains":     s.TargetContainsHit,
+		"targetCx":     s.TargetCX,
+		"targetCy":     s.TargetCY,
+		"targetLeft":   s.Left,
+		"targetTop":    s.Top,
+		"targetWidth":  s.Width,
+		"targetHeight": s.Height,
+		"hitLeft":      s.HitLeft,
+		"hitTop":       s.HitTop,
+		"hitWidth":     s.HitWidth,
+		"hitHeight":    s.HitHeight,
+	}
+	b, _ = json.Marshal(fallback)
+	return string(b)
 }
 
 // Element finds a child element and returns a humanized wrapper.
