@@ -114,8 +114,8 @@ type BrowseSessionIDArgs struct {
 
 type SessionDetailArgs struct {
 	SessionID     string `json:"session_id" jsonschema:"浏览会话ID，由create_browse_session返回"`
-	LoadComments bool   `json:"load_comments,omitempty" jsonschema:"是否先加载更多评论再提取，默认false只提取当前可见DOM"`
-	Pages        int    `json:"pages,omitzero" jsonschema:"加载评论页数；不传默认1页，正数指定页数，-1表示加载到尽头"`
+	LoadComments bool   `json:"load_comments,omitempty" jsonschema:"已废弃，传true会立即返回迁移错误；大量评论读取请改用get_feed_detail（传max_items、cursor）"`
+	Pages        int    `json:"pages,omitzero" jsonschema:"已废弃，不再生效；此参数将被忽略"`
 }
 
 type SessionSearchArgs struct {
@@ -583,7 +583,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 	mcp.AddTool(server,
 		&mcp.Tool{
 			Name:        "session_detail",
-			Description: "在浏览会话当前已打开的笔记页面上直接从可见DOM提取笔记正文、作者、互动状态和评论列表；load_comments=true 时会先加载更多评论，pages不传默认1页，pages>0加载指定页数，pages<0加载到尽头；默认false只提取当前可见DOM",
+			Description: "在浏览会话当前已打开的笔记页面上提取当前可见DOM（笔记正文、作者、互动状态和当前可见评论）。仅提取当前可见内容，不进行滚动加载。如需加载大量评论，请使用 get_feed_detail 并传 max_items（推荐20），再将返回的 cursor 传入后续调用。",
 			Annotations: &mcp.ToolAnnotations{
 				Title:        "Session Detail",
 				ReadOnlyHint: true,

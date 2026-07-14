@@ -93,6 +93,58 @@ func TestSessionDetailMissingSessionIDSuggestsCreateSession(t *testing.T) {
 	}
 }
 
+func TestSessionDetailRejectsLoadCommentsWithMigrationError(t *testing.T) {
+	result := (&AppServer{}).handleSessionDetail(context.Background(), SessionDetailArgs{
+		SessionID:    "session-1",
+		LoadComments: true,
+	})
+	if result == nil || !result.IsError {
+		t.Fatalf("session detail with load_comments=true should return an error result: %+v", result)
+	}
+	text := result.Content[0].Text
+	if !strings.Contains(text, "session_detail 已不支持 load_comments") {
+		t.Fatalf("error text missing deprecation message: %q", text)
+	}
+	if !strings.Contains(text, `"tool": "get_feed_detail"`) {
+		t.Fatalf("expected get_feed_detail next step, got %q", text)
+	}
+	if !strings.Contains(text, "max_items") {
+		t.Fatalf("expected max_items recommendation, got %q", text)
+	}
+	if !strings.Contains(text, "cursor") {
+		t.Fatalf("expected cursor mention, got %q", text)
+	}
+}
+
+func TestSessionDetailDelegatesToServiceWhenLoadCommentsFalse(t *testing.T) {
+	app := &AppServer{
+		xiaohongshuService: &XiaohongshuService{
+			browseSessions: xiaohongshu.NewBrowseSessionManager(time.Minute),
+		},
+	}
+	result := app.handleSessionDetail(context.Background(), SessionDetailArgs{
+		SessionID:    "session-not-exist",
+		LoadComments: false,
+		Pages:        3,
+	})
+	if result == nil || !result.IsError {
+		t.Fatalf("session detail for non-existent session should return error: %+v", result)
+	}
+	text := result.Content[0].Text
+	if strings.Contains(text, "session_detail 已不支持 load_comments") {
+		t.Fatalf("should NOT return load_comments migration error when LoadComments=false: %q", text)
+	}
+	if !strings.Contains(text, "session详情获取失败") {
+		t.Fatalf("error should prefix session detail failure: %q", text)
+	}
+	if !strings.Contains(text, "browse session 不存在或已过期") {
+		t.Fatalf("error should come from browseSessions.Get (via SessionDetail): %q", text)
+	}
+	if !strings.Contains(text, `"tool": "create_browse_session"`) {
+		t.Fatalf("expected create_browse_session next step, got %q", text)
+	}
+}
+
 func TestSessionOpenNoteAllowsMissingXsecTokenThroughValidation(t *testing.T) {
 	app := &AppServer{
 		xiaohongshuService: &XiaohongshuService{
