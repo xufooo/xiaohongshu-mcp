@@ -217,13 +217,14 @@ func (s *SearchAction) searchByUI(page *hrod.Page, keyword string) error {
 	if _, err := waitForSearchInput(page, searchInputWaitTimeout, searchSelector); err != nil {
 		return fmt.Errorf("未找到搜索框: %w", err)
 	}
-	baseline, err := captureSearchResultsBaseline(page)
-	if err != nil {
-		return fmt.Errorf("获取搜索结果基线失败: %w", err)
-	}
-	if _, err := page.Eval(`(keyword) => {
-		const ta = document.querySelector('[data-xhs-mcp-search-input="1"]');
-		if (!ta) throw new Error('marked search input not found');
+	if _, err := page.Eval(`(keyword, selector) => {
+		const visible = (el) => {
+			const style = window.getComputedStyle(el);
+			const rect = el.getBoundingClientRect();
+			return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 1 && rect.height > 1;
+		};
+		const ta = Array.from(document.querySelectorAll(selector)).find(visible);
+		if (!ta) throw new Error('visible search input not found');
 		ta.focus();
 		ta.select();
 		document.execCommand('delete', false);
@@ -232,11 +233,11 @@ func (s *SearchAction) searchByUI(page *hrod.Page, keyword string) error {
 		ta.dispatchEvent(new Event('input', {bubbles: true}));
 		['keydown','keyup'].forEach(type => ta.dispatchEvent(
 			new KeyboardEvent(type, {key:'Enter', keyCode:13, bubbles: true})));
-	}`, keyword); err != nil {
+	}`, keyword, searchSelector); err != nil {
 		return fmt.Errorf("搜索关键词失败: %w", err)
 	}
 
-	if err := waitForSearchResults(page, keyword, baseline); err != nil {
+	if err := waitForSearchResults(page, keyword, searchResultsBaseline{}); err != nil {
 		return err
 	}
 	return nil
