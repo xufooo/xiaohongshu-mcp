@@ -217,24 +217,37 @@ func (s *SearchAction) searchByUI(page *hrod.Page, keyword string) error {
 	if _, err := waitForSearchInput(page, searchInputWaitTimeout, searchSelector); err != nil {
 		return fmt.Errorf("未找到搜索框: %w", err)
 	}
-	if _, err := page.Eval(`(keyword, selector) => {
-		const visible = (el) => {
-			const style = window.getComputedStyle(el);
-			const rect = el.getBoundingClientRect();
-			return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 1 && rect.height > 1;
-		};
-		const ta = Array.from(document.querySelectorAll(selector)).find(visible);
-		if (!ta) throw new Error('visible search input not found');
-		ta.focus();
-		ta.select();
-		document.execCommand('delete', false);
-		const s = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
-		s.call(ta, keyword);
-		ta.dispatchEvent(new Event('input', {bubbles: true}));
-		['keydown','keyup'].forEach(type => ta.dispatchEvent(
-			new KeyboardEvent(type, {key:'Enter', keyCode:13, bubbles: true})));
-	}`, keyword, searchSelector); err != nil {
-		return fmt.Errorf("搜索关键词失败: %w", err)
+	if searchSelector == SelectorSearchInputInSearchResult {
+		// Search AI：严格复用真人报告已验证的输入脚本。
+		if _, err := page.Eval(`(kw) => {
+			const input = document.querySelector('textarea[name="aiSearchTextarea"]');
+			if (!input) throw new Error('search input not found');
+			input.focus();
+			const s = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+			s.call(input, kw);
+			input.dispatchEvent(new Event('input', {bubbles: true}));
+			['keydown','keyup'].forEach(type => input.dispatchEvent(
+				new KeyboardEvent(type, {key:'Enter', keyCode:13, bubbles: true})));
+		}`, keyword); err != nil {
+			return fmt.Errorf("搜索关键词失败: %w", err)
+		}
+	} else {
+		// Explore：保留 b263 已验证的首搜行为。
+		if _, err := page.Eval(`(keyword) => {
+			const ta = document.querySelector('textarea[name="aiSearchTextarea"]') ||
+			           document.querySelector('#search-input-in-feeds');
+			if (!ta) throw new Error('search input not found');
+			ta.focus();
+			ta.select();
+			document.execCommand('delete', false);
+			const s = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+			s.call(ta, keyword);
+			ta.dispatchEvent(new Event('input', {bubbles: true}));
+			['keydown','keyup'].forEach(type => ta.dispatchEvent(
+				new KeyboardEvent(type, {key:'Enter', keyCode:13, bubbles: true})));
+		}`, keyword); err != nil {
+			return fmt.Errorf("搜索关键词失败: %w", err)
+		}
 	}
 
 	if err := waitForSearchResults(page, keyword, searchResultsBaseline{}); err != nil {
