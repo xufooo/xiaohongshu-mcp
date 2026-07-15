@@ -899,7 +899,7 @@ func isSearchResultPage(rawURL string) bool {
 	if err != nil {
 		return false
 	}
-	return parsed.Scheme == "https" && parsed.Host == "www.xiaohongshu.com" && parsed.Path == "/search_result" && parsed.Fragment == ""
+	return parsed.Scheme == "https" && parsed.Host == "www.xiaohongshu.com" && (parsed.Path == "/search_result" || parsed.Path == "/search_result_ai") && parsed.Fragment == ""
 }
 
 // prepareSearchPage 供 searchByUI 和测试同时使用
