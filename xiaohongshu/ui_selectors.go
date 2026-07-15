@@ -9,7 +9,7 @@ import (
 
 const (
 	SelectorSearchInputInFeeds        = `#search-input-in-feeds`
-	SelectorSearchInputInSearchResult = `#search-input`
+	SelectorSearchInputInSearchResult = `textarea[name="aiSearchTextarea"]`
 	SelectorSearchInput               = SelectorSearchInputInFeeds + `, ` + SelectorSearchInputInSearchResult
 	SelectorMarkedSearchInput         = `[data-xhs-mcp-search-input="1"]`
 	SelectorSearchButton              = `.search-icon, .search-btn, button[type="submit"]`

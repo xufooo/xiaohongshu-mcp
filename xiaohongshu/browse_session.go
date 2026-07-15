@@ -789,6 +789,13 @@ func (s *BrowseSession) Back(ctx context.Context) error {
 	}
 	logrus.Debugf("关闭笔记面板方式: %s", method)
 
+	s.refreshPageState(opCtx)
+	s.mu.Lock()
+	currentURL := s.currentURL
+	s.mu.Unlock()
+	if !isSearchResultPage(currentURL) {
+		return fmt.Errorf("未回到搜索结果页: %s", currentURL)
+	}
 	s.mu.Lock()
 	s.currentFeedID = ""
 	s.currentXsecToken = ""
@@ -796,7 +803,6 @@ func (s *BrowseSession) Back(ctx context.Context) error {
 	s.read = false
 	s.recordTimelineLocked("back", feedID, "ok", time.Now(), "closed note panel")
 	s.mu.Unlock()
-	s.refreshPageState(opCtx)
 	return nil
 }
 

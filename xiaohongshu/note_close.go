@@ -2,6 +2,7 @@ package xiaohongshu
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/go-rod/rod/lib/input"
@@ -16,6 +17,33 @@ func closeNoteOverlay(page *hrod.Page, sourceURL string) (closeMethod string, er
 		return "", fmt.Errorf("页面不存在")
 	}
 
+	urlResult, err := page.Eval(`() => location.href`)
+	if err != nil {
+		return "", fmt.Errorf("读取 URL 失败: %w", err)
+	}
+	if strings.Contains(urlResult.Value.Str(), "/explore/") {
+		if _, err := page.Eval(`() => history.back()`); err != nil {
+			return "", fmt.Errorf("history.back 失败: %w", err)
+		}
+		deadline := time.Now().Add(browseSessionRefreshTimeout)
+		for time.Now().Before(deadline) {
+			if err := page.Err(); err != nil {
+				return "", err
+			}
+			currentResult, err := page.Eval(`() => location.href`)
+			if err != nil {
+				return "", fmt.Errorf("读取 URL 失败: %w", err)
+			}
+			if isSearchResultPage(currentResult.Value.Str()) {
+				return "history_back", nil
+			}
+			if err := page.Sleep(noteCloseProbeDelay); err != nil {
+				return "", err
+			}
+		}
+		return "", fmt.Errorf("history.back 后超时")
+	}
+
 	if err := page.Keyboard.Press(input.Escape); err != nil {
 		logrus.Debugf("Escape 关闭笔记面板失败: %v", err)
 	}
@@ -25,34 +53,15 @@ func closeNoteOverlay(page *hrod.Page, sourceURL string) (closeMethod string, er
 		return "escape", nil
 	}
 
-	if _, err := page.Eval(`() => {
-  const note = document.querySelector('.note-container');
-  if (!note || !note.isConnected) return;
-  const target = document.elementFromPoint(8, 8) || document.body;
-  target.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, clientX: 8, clientY: 8 }));
-}`); err != nil {
-		logrus.Debugf("点击笔记面板外部区域失败: %v", err)
+	if _, err := page.Eval(`() => document.body.click()`); err != nil {
+		logrus.Debugf("点击 body 关闭面板失败: %v", err)
 	} else if closed, err := noteOverlayClosedAfterAttempt(page); err != nil {
 		return "", err
 	} else if closed {
-		return "outside_click", nil
+		return "body_click", nil
 	}
 
-	if sourceURL == "" {
-		return "", fmt.Errorf("面板关闭失败，所有非导航方案已尝试")
-	}
-	if err := page.Navigate(sourceURL); err != nil {
-		return "", fmt.Errorf("降级导航回来源页失败: %w", err)
-	}
-	if err := WaitForXHSReady(page, XHSReadyOptions{Kind: inferXHSReadyKindFromURL(sourceURL)}); err != nil {
-		return "", err
-	}
-	if closed, err := noteOverlayClosedAfterAttempt(page); err != nil {
-		return "", err
-	} else if !closed {
-		return "", fmt.Errorf("笔记面板仍未关闭")
-	}
-	return "navigate", nil
+	return "", fmt.Errorf("笔记面板关闭失败")
 }
 
 func noteOverlayClosedAfterAttempt(page *hrod.Page) (bool, error) {
