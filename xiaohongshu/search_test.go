@@ -434,11 +434,11 @@ func TestDecideSearchPage(t *testing.T) {
 			},
 		},
 		{
-			name: "search_result_ai (similar but not exact)",
+			name: "search_result_ai",
 			url:  "https://www.xiaohongshu.com/search_result_ai?keyword=test",
 			want: searchPageDecision{
-				NavigateExplore: true,
-				SearchSelector:  SelectorSearchInputInFeeds,
+				NavigateExplore: false,
+				SearchSelector:  SelectorSearchInputInSearchResult,
 			},
 		},
 		{
@@ -557,10 +557,10 @@ func TestPrepareSearchPageBehavior(t *testing.T) {
 			wantCallLog:  []string{"Info", "Navigate"},
 		},
 		{
-			name:         "search_result_ai (similar but not exact)",
+			name:         "search_result_ai",
 			pageURL:      "https://www.xiaohongshu.com/search_result_ai?keyword=test",
-			wantSelector: SelectorSearchInputInFeeds,
-			wantCallLog:  []string{"Info", "Navigate"},
+			wantSelector: SelectorSearchInputInSearchResult,
+			wantCallLog:  []string{"Info"},
 		},
 		{
 			name:         "search result page with fragment not treated as search result",
