@@ -217,10 +217,13 @@ func (s *SearchAction) searchByUI(page *hrod.Page, keyword string) error {
 	if _, err := waitForSearchInput(page, searchInputWaitTimeout, searchSelector); err != nil {
 		return fmt.Errorf("未找到搜索框: %w", err)
 	}
+	baseline, err := captureSearchResultsBaseline(page)
+	if err != nil {
+		return fmt.Errorf("获取搜索结果基线失败: %w", err)
+	}
 	if _, err := page.Eval(`(keyword) => {
-		const ta = document.querySelector('textarea[name="aiSearchTextarea"]') ||
-		           document.querySelector('#search-input-in-feeds');
-		if (!ta) throw new Error('search input not found');
+		const ta = document.querySelector('[data-xhs-mcp-search-input="1"]');
+		if (!ta) throw new Error('marked search input not found');
 		ta.focus();
 		ta.select();
 		document.execCommand('delete', false);
@@ -233,7 +236,7 @@ func (s *SearchAction) searchByUI(page *hrod.Page, keyword string) error {
 		return fmt.Errorf("搜索关键词失败: %w", err)
 	}
 
-	if err := waitForSearchResults(page, keyword, searchResultsBaseline{}); err != nil {
+	if err := waitForSearchResults(page, keyword, baseline); err != nil {
 		return err
 	}
 	return nil
