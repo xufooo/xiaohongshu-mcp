@@ -8,8 +8,6 @@ import (
 	"time"
 
 	"github.com/go-rod/rod"
-	rodinput "github.com/go-rod/rod/lib/input"
-	"github.com/go-rod/rod/lib/proto"
 	"github.com/sirupsen/logrus"
 	"github.com/xpzouying/xiaohongshu-mcp/errors"
 	hrod "github.com/xpzouying/xiaohongshu-mcp/pkg/humanize/rod"
@@ -216,57 +214,26 @@ func (s *SearchAction) searchByUI(page *hrod.Page, keyword string) error {
 	}
 
 	// 等搜索框出现，不使用WaitLoad因为小红书是SPA。
-	input, err := waitForSearchInput(page, searchInputWaitTimeout, searchSelector)
-	if err != nil {
-		logrus.Warnf("未找到搜索框，使用搜索URL兜底: %v", err)
-		if navErr := page.Navigate(makeSearchURL(keyword)); navErr != nil {
-			return fmt.Errorf("未找到搜索框: %w; URL兜底导航失败: %v", err, navErr)
-		}
-		if waitErr := waitForSearchResults(page, keyword, searchResultsBaseline{}); waitErr != nil {
-			return fmt.Errorf("URL兜底等待搜索结果失败: %w", waitErr)
-		}
-		return nil
+	if _, err := waitForSearchInput(page, searchInputWaitTimeout, searchSelector); err != nil {
+		return fmt.Errorf("未找到搜索框: %w", err)
 	}
-	if err := input.Click(proto.InputMouseButtonLeft, 1); err != nil {
-		return fmt.Errorf("点击搜索框失败: %w", err)
-	}
-	if _, err := page.Eval(`(selector) => {
-		const el = document.querySelector(selector);
-		if (!el) return;
-		el.focus();
-		if ("value" in el) {
-			el.value = "";
-		} else {
-			el.textContent = "";
-		}
-		el.dispatchEvent(new Event("input", { bubbles: true }));
-	}`, SelectorMarkedSearchInput); err != nil {
-		return fmt.Errorf("清空搜索框失败: %w", err)
-	}
-	if err := page.SleepRandom(300*time.Millisecond, 1200*time.Millisecond); err != nil {
-		return err
-	}
-	if err := input.Input(keyword); err != nil {
-		return fmt.Errorf("输入关键词失败: %w", err)
-	}
-	if err := page.SleepRandom(500*time.Millisecond, 2*time.Second); err != nil {
-		return err
-	}
-	baseline, err := captureSearchResultsBaseline(page)
-	if err != nil {
-		logrus.Warnf("读取搜索前结果签名失败，跳过旧结果防护: %v", err)
-	}
-	if err := page.Actor().Keyboard.Press(rodinput.Enter); err != nil {
-		return fmt.Errorf("提交搜索失败: %w", err)
+	if _, err := page.Eval(`(keyword) => {
+		const ta = document.querySelector('textarea[name="aiSearchTextarea"]') ||
+		           document.querySelector('#search-input-in-feeds');
+		if (!ta) throw new Error('search input not found');
+		ta.focus();
+		ta.select();
+		document.execCommand('delete', false);
+		const s = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+		s.call(ta, keyword);
+		ta.dispatchEvent(new Event('input', {bubbles: true}));
+		['keydown','keyup'].forEach(type => ta.dispatchEvent(
+			new KeyboardEvent(type, {key:'Enter', keyCode:13, bubbles: true})));
+	}`, keyword); err != nil {
+		return fmt.Errorf("搜索关键词失败: %w", err)
 	}
 
-	if err := waitForSearchResultsWithURLFallback(keyword, baseline, searchResultsFallbackHooks{
-		wait: func(baseline searchResultsBaseline) error {
-			return waitForSearchResults(page, keyword, baseline)
-		},
-		pageErr:  page.Err,
-		navigate: page.Navigate,
-	}); err != nil {
+	if err := waitForSearchResults(page, keyword, searchResultsBaseline{}); err != nil {
 		return err
 	}
 	return nil
@@ -718,54 +685,30 @@ func (s *SearchAction) collectResults(page *hrod.Page, filters ...FilterOption) 
 		}
 
 		if len(allInternalFilters) > 0 {
-			// 悬停在筛选按钮上
-			filterButton, err := page.Element(`div.filter`)
-			if err != nil {
-				return nil, fmt.Errorf("查找筛选按钮失败: %w", err)
+			// 点击筛选按钮打开面板
+			if _, err := page.Eval(`() => {
+				const btn = document.querySelector('.filter.ai-chat-filter');
+				if (!btn) throw new Error('filter button not found');
+				btn.click();
+			}`); err != nil {
+				return nil, fmt.Errorf("打开筛选面板失败: %w", err)
 			}
-			if err := filterButton.Hover(); err != nil {
-				return nil, fmt.Errorf("悬停筛选按钮失败: %w", err)
-			}
-
-			// 等待筛选面板出现
-			if err := page.Wait(rod.Eval(`() => document.querySelector('div.filter-panel') !== null`)); err != nil {
+			if err := page.Wait(rod.Eval(`() => document.querySelector('.filter-panel') !== null`)); err != nil {
 				return nil, fmt.Errorf("等待筛选面板失败: %w", err)
 			}
 
-			// 使用 JavaScript 注入方式筛选（比 Go-rod 跨进程 DOM 遍历更稳定）
 			for _, filter := range allInternalFilters {
-				result, err := page.Eval(`(filtersIndex, text) => {
-				const panel = document.querySelector('div.filter-panel');
-				if (!panel) {
-					return '筛选面板不存在';
-				}
-				const groups = Array.from(panel.querySelectorAll('div.filters'));
-				const group = groups[filtersIndex - 1];
-				if (!group) {
-					return '筛选组不存在';
-				}
-				const tags = Array.from(group.querySelectorAll('div.tags'));
-				const option = tags.find((tag) => {
-					if (tag.getAttribute('aria-hidden') === 'true') {
-						return false;
-					}
-					return tag.innerText.trim() === text;
-				});
-				if (!option) {
-					return '筛选标签不存在';
-				}
-				option.click();
-				return '';
-			}`, filter.FiltersIndex, filter.Text)
-				if err != nil {
-					return nil, fmt.Errorf("应用筛选失败: %w", err)
-				}
-				if result != nil && result.Value.Str() != "" {
-					return nil, fmt.Errorf("应用筛选失败: %s: %s", result.Value.Str(), filter.Text)
+				if _, err := page.Eval(`(text) => {
+					const tags = [...document.querySelectorAll('.filter-panel .tags')];
+					const tag = tags.find(t => t.textContent.trim() === text);
+					if (!tag) throw new Error('tag not found');
+					tag.click();
+				}`, filter.Text); err != nil {
+					return nil, fmt.Errorf("筛选标签 %q 点击失败: %w", filter.Text, err)
 				}
 			}
 
-			// 记录关闭筛选面板前的 feeds 数据长度，避免直接返回旧的搜索结果。
+			// 记录关闭筛选面板前的 feeds 数据长度
 			previousFeedsJSONLengthResult, err := page.Eval(`() => {
 			const feeds = window.__INITIAL_STATE__?.search?.feeds;
 			const data = feeds?.value !== undefined ? feeds.value : (feeds?._value !== undefined ? feeds._value : feeds?._rawValue);
@@ -779,15 +722,15 @@ func (s *SearchAction) collectResults(page *hrod.Page, filters ...FilterOption) 
 			}
 			previousFeedsJSONLength := previousFeedsJSONLengthResult.Value.Int()
 
-			// 关闭筛选面板触发新的搜索请求
-			if _, err := page.Eval(`() => {
-			document.querySelector('div.filter')?.dispatchEvent(new MouseEvent('mouseleave', {bubbles: true}));
-		}`); err != nil {
+			// 点击页面空白关闭面板
+			if _, err := page.Eval(`() => document.body.click()`); err != nil {
 				return nil, fmt.Errorf("关闭筛选面板失败: %w", err)
 			}
+			if err := page.Sleep(2 * time.Second); err != nil {
+				return nil, err
+			}
 
-			// 等应用状态刷新；搜索页后台请求不断，不能依赖页面稳定。
-			// 超过 5 秒则返回当前可用结果。
+			// 等应用状态刷新
 			if err := page.Wait(rod.Eval(`(previousFeedsJSONLength, deadline) => {
 			const feeds = window.__INITIAL_STATE__?.search?.feeds;
 			const data = feeds?.value !== undefined ? feeds.value : (feeds?._value !== undefined ? feeds._value : feeds?._rawValue);
