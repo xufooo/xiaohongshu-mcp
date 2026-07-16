@@ -38,7 +38,7 @@ func (a *NoteOpenAction) OpenFromCards(ctx context.Context, feedID, xsecToken, s
 	if err != nil {
 		return err
 	}
-	if err := anchor.ScrollIntoView(); err != nil {
+	if err := anchor.Rod.ScrollIntoView(); err != nil {
 		return fmt.Errorf("滚动到目标 anchor 失败: %w", err)
 	}
 	if err := page.SleepRandom(600*time.Millisecond, 1800*time.Millisecond); err != nil {
