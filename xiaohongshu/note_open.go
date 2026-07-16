@@ -2,6 +2,7 @@ package xiaohongshu
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -33,9 +34,12 @@ func (a *NoteOpenAction) OpenFromCards(ctx context.Context, feedID, xsecToken, s
 		source = inferred
 	}
 
-	anchor, err := findFeedCardAnchor(page, feedID)
-	if err != nil {
+	if err := markFeedCard(page, feedID); err != nil {
 		return err
+	}
+	anchor, err := page.Element(`[data-xhs-open-target="1"]`)
+	if err != nil {
+		return fmt.Errorf("未找到目标笔记 anchor: %w", err)
 	}
 	if err := anchor.ScrollIntoView(); err != nil {
 		return fmt.Errorf("滚动到目标 anchor 失败: %w", err)
@@ -43,7 +47,11 @@ func (a *NoteOpenAction) OpenFromCards(ctx context.Context, feedID, xsecToken, s
 	if err := page.SleepRandom(600*time.Millisecond, 1800*time.Millisecond); err != nil {
 		return err
 	}
-	if err := anchor.Click(proto.InputMouseButtonLeft, 1); err != nil {
+	point, err := feedCardClickPoint(page)
+	if err != nil {
+		return err
+	}
+	if err := page.ClickPoint(point); err != nil {
 		return fmt.Errorf("点击目标 anchor 失败: %w", err)
 	}
 	if err := waitFeedDetailVisible(page, feedID); err != nil {
@@ -55,27 +63,64 @@ func (a *NoteOpenAction) OpenFromCards(ctx context.Context, feedID, xsecToken, s
 	return nil
 }
 
-func findFeedCardAnchor(page *hrod.Page, feedID string) (*hrod.Element, error) {
-	anchors, err := page.Elements("section.note-item a.cover.mask.ld")
+func markFeedCard(page *hrod.Page, feedID string) error {
+	result, err := page.Eval(`(anchorSel, feedID) => {
+		document.querySelectorAll('[data-xhs-open-target="1"]').forEach((el) => el.removeAttribute("data-xhs-open-target"));
+		for (const a of document.querySelectorAll(anchorSel)) {
+			if (typeof a.checkVisibility === 'function' ? !a.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) : a.offsetParent === null) continue;
+			const href = a.getAttribute('href') || '';
+			if (href.includes(feedID) || (a.dataset && a.dataset.feedId && a.dataset.feedId.includes(feedID)) || a.outerHTML.includes(feedID)) {
+				a.setAttribute("data-xhs-open-target", "1");
+				return "ok";
+			}
+		}
+		return "";
+	}`, "section.note-item a.cover.mask.ld", feedID)
 	if err != nil {
-		return nil, fmt.Errorf("读取搜索结果 anchor 失败: %w", err)
+		return err
+	}
+	if result == nil || result.Value.Str() != "ok" {
+		return fmt.Errorf("当前列表中没有 feed_id=%s 的可见 anchor", feedID)
+	}
+	return nil
+}
+
+type feedCardPoint struct {
+	X float64 `json:"x"`
+	Y float64 `json:"y"`
+}
+
+func feedCardClickPoint(page *hrod.Page) (proto.Point, error) {
+	result, err := page.Eval(`() => {
+		const anchor = document.querySelector('[data-xhs-open-target="1"]');
+		if (!anchor) return "";
+		const rect = anchor.getBoundingClientRect();
+		const visible = anchor.isConnected &&
+			getComputedStyle(anchor).display !== "none" &&
+			getComputedStyle(anchor).visibility !== "hidden" &&
+			Number(getComputedStyle(anchor).opacity || "1") > 0 &&
+			rect.width > 1 && rect.height > 1 &&
+			rect.bottom > 0 && rect.right > 0 &&
+			rect.top < window.innerHeight && rect.left < window.innerWidth;
+		if (!visible) return "";
+		const x = Math.min(Math.max(rect.left + rect.width / 2, 1), window.innerWidth - 1);
+		const y = Math.min(Math.max(rect.top + rect.height / 2, 1), window.innerHeight - 1);
+		const hit = document.elementFromPoint(x, y);
+		if (!hit || (hit !== anchor && !anchor.contains(hit))) return "";
+		return JSON.stringify({x, y});
+	}`)
+	if err != nil {
+		return proto.Point{}, fmt.Errorf("读取目标 anchor 点击坐标失败: %w", err)
+	}
+	if result == nil || result.Value.Str() == "" {
+		return proto.Point{}, fmt.Errorf("目标 anchor 当前不可原生点击")
 	}
 
-	for _, anchor := range anchors {
-		matched, err := anchor.Eval(`(feedID) => {
-			const href = this.getAttribute('href') || '';
-			const dataFeedID = this.dataset?.feedId || '';
-			return href.includes(feedID) || dataFeedID.includes(feedID) || this.outerHTML.includes(feedID);
-		}`, feedID)
-		if err != nil {
-			continue
-		}
-		if matched != nil && matched.Value.Bool() {
-			return anchor, nil
-		}
+	var point feedCardPoint
+	if err := json.Unmarshal([]byte(result.Value.Str()), &point); err != nil {
+		return proto.Point{}, fmt.Errorf("解析目标 anchor 点击坐标失败: %w", err)
 	}
-
-	return nil, fmt.Errorf("当前列表中没有 feed_id=%s 的搜索结果 anchor", feedID)
+	return proto.Point{X: point.X, Y: point.Y}, nil
 }
 
 func waitFeedDetailVisible(page *hrod.Page, feedID string) error {
