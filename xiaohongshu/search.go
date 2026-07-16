@@ -591,7 +591,11 @@ func waitForSearchInput(page *hrod.Page, timeout time.Duration, searchSelector s
 		} else {
 			last = probe
 			if probe.HasSearchInput && probe.SearchInputVisible {
-				input, err := page.Element(SelectorMarkedSearchInput)
+				inputSelector := SelectorMarkedSearchInput
+				if searchSelector == SelectorSearchInputInFeeds {
+					inputSelector = SelectorSearchInputInFeeds
+				}
+				input, err := page.Element(inputSelector)
 				if err == nil {
 					return input, nil
 				}
