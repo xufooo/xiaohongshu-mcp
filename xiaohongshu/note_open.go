@@ -34,12 +34,9 @@ func (a *NoteOpenAction) OpenFromCards(ctx context.Context, feedID, xsecToken, s
 		source = inferred
 	}
 
-	if err := markFeedCard(page, feedID); err != nil {
-		return err
-	}
-	anchor, err := page.Element(`[data-xhs-open-target="1"]`)
+	anchor, err := findFeedCardAnchor(page, feedID)
 	if err != nil {
-		return fmt.Errorf("未找到目标笔记 anchor: %w", err)
+		return err
 	}
 	if err := anchor.ScrollIntoView(); err != nil {
 		return fmt.Errorf("滚动到目标 anchor 失败: %w", err)
@@ -47,7 +44,7 @@ func (a *NoteOpenAction) OpenFromCards(ctx context.Context, feedID, xsecToken, s
 	if err := page.SleepRandom(600*time.Millisecond, 1800*time.Millisecond); err != nil {
 		return err
 	}
-	point, err := feedCardClickPoint(page)
+	point, err := feedCardClickPoint(anchor)
 	if err != nil {
 		return err
 	}
@@ -63,26 +60,27 @@ func (a *NoteOpenAction) OpenFromCards(ctx context.Context, feedID, xsecToken, s
 	return nil
 }
 
-func markFeedCard(page *hrod.Page, feedID string) error {
-	result, err := page.Eval(`(anchorSel, feedID) => {
-		document.querySelectorAll('[data-xhs-open-target="1"]').forEach((el) => el.removeAttribute("data-xhs-open-target"));
-		for (const a of document.querySelectorAll(anchorSel)) {
-			if (typeof a.checkVisibility === 'function' ? !a.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) : a.offsetParent === null) continue;
-			const href = a.getAttribute('href') || '';
-			if (href.includes(feedID) || (a.dataset && a.dataset.feedId && a.dataset.feedId.includes(feedID)) || a.outerHTML.includes(feedID)) {
-				a.setAttribute("data-xhs-open-target", "1");
-				return "ok";
-			}
-		}
-		return "";
-	}`, "section.note-item a.cover.mask.ld", feedID)
+func findFeedCardAnchor(page *hrod.Page, feedID string) (*hrod.Element, error) {
+	anchors, err := page.Elements("section.note-item a.cover.mask.ld")
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("读取搜索结果 anchor 失败: %w", err)
 	}
-	if result == nil || result.Value.Str() != "ok" {
-		return fmt.Errorf("当前列表中没有 feed_id=%s 的可见 anchor", feedID)
+
+	for _, anchor := range anchors {
+		matched, err := anchor.Eval(`(feedID) => {
+			const href = this.getAttribute('href') || '';
+			const dataFeedID = this.dataset?.feedId || '';
+			return href.includes(feedID) || dataFeedID.includes(feedID) || this.outerHTML.includes(feedID);
+		}`, feedID)
+		if err != nil {
+			continue
+		}
+		if matched != nil && matched.Value.Bool() {
+			return anchor, nil
+		}
 	}
-	return nil
+
+	return nil, fmt.Errorf("当前列表中没有 feed_id=%s 的搜索结果 anchor", feedID)
 }
 
 type feedCardPoint struct {
@@ -90,10 +88,9 @@ type feedCardPoint struct {
 	Y float64 `json:"y"`
 }
 
-func feedCardClickPoint(page *hrod.Page) (proto.Point, error) {
-	result, err := page.Eval(`() => {
-		const anchor = document.querySelector('[data-xhs-open-target="1"]');
-		if (!anchor) return "";
+func feedCardClickPoint(anchor *hrod.Element) (proto.Point, error) {
+	result, err := anchor.Eval(`() => {
+		const anchor = this;
 		const rect = anchor.getBoundingClientRect();
 		const visible = anchor.isConnected &&
 			getComputedStyle(anchor).display !== "none" &&
