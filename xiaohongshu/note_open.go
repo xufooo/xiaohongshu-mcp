@@ -90,20 +90,24 @@ type feedCardPoint struct {
 
 func feedCardClickPoint(anchor *hrod.Element) (proto.Point, error) {
 	result, err := anchor.Eval(`() => {
-		const anchor = this;
-		const rect = anchor.getBoundingClientRect();
-		const visible = anchor.isConnected &&
-			getComputedStyle(anchor).display !== "none" &&
-			getComputedStyle(anchor).visibility !== "hidden" &&
-			Number(getComputedStyle(anchor).opacity || "1") > 0 &&
-			rect.width > 1 && rect.height > 1 &&
-			rect.bottom > 0 && rect.right > 0 &&
-			rect.top < window.innerHeight && rect.left < window.innerWidth;
-		if (!visible) return "";
-		const x = Math.min(Math.max(rect.left + rect.width / 2, 1), window.innerWidth - 1);
-		const y = Math.min(Math.max(rect.top + rect.height / 2, 1), window.innerHeight - 1);
+		const a = this, r = a.getBoundingClientRect(), s = getComputedStyle(a);
+		const c = a.isConnected;
+		const v = c && s.display !== "none" && s.visibility !== "hidden" && +s.opacity > 0 && r.width > 1 && r.height > 1 && r.bottom > 0 && r.right > 0 && r.top < window.innerHeight && r.left < window.innerWidth;
+		const x = Math.min(Math.max(r.left + r.width / 2, 1), window.innerWidth - 1);
+		const y = Math.min(Math.max(r.top + r.height / 2, 1), window.innerHeight - 1);
+		const d = (fr, hit) => JSON.stringify({
+			target_connected: c, visible: v,
+			rect: {left: r.left, top: r.top, width: r.width, height: r.height, bottom: r.bottom, right: r.right},
+			viewport: {width: window.innerWidth, height: window.innerHeight},
+			center_x: x, center_y: y,
+			hit_tag: hit ? (hit.tagName || "").toLowerCase() : "",
+			target_contains_hit: hit ? a.contains(hit) : false,
+			failure_reason: fr
+		});
+		if (!v) return d("not_visible", null);
 		const hit = document.elementFromPoint(x, y);
-		if (!hit || (hit !== anchor && !anchor.contains(hit))) return "";
+		if (!hit) return d("no_hit_element", null);
+		if (!a.contains(hit)) return d("center_miss", hit);
 		return JSON.stringify({x, y});
 	}`)
 	if err != nil {
@@ -113,10 +117,18 @@ func feedCardClickPoint(anchor *hrod.Element) (proto.Point, error) {
 		return proto.Point{}, fmt.Errorf("目标 anchor 当前不可原生点击")
 	}
 
+	var diag struct {
+		FailureReason string `json:"failure_reason"`
+	}
+	if err := json.Unmarshal([]byte(result.Value.Str()), &diag); err == nil && diag.FailureReason != "" {
+		return proto.Point{}, fmt.Errorf("目标 anchor 当前不可原生点击: %s", result.Value.Str())
+	}
+
 	var point feedCardPoint
 	if err := json.Unmarshal([]byte(result.Value.Str()), &point); err != nil {
 		return proto.Point{}, fmt.Errorf("解析目标 anchor 点击坐标失败: %w", err)
 	}
+
 	return proto.Point{X: point.X, Y: point.Y}, nil
 }
 
