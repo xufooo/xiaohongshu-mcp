@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-rod/rod/lib/proto"
 	hrod "github.com/xpzouying/xiaohongshu-mcp/pkg/humanize/rod"
 )
 
@@ -45,11 +46,7 @@ func (a *NoteOpenAction) OpenFromCards(ctx context.Context, feedID, xsecToken, s
 	if err := page.SleepRandom(600*time.Millisecond, 1800*time.Millisecond); err != nil {
 		return err
 	}
-	if _, err := page.Eval(`() => {
-		const link = document.querySelector('[data-xhs-open-target="1"]');
-		if (!link) return;
-		link.click();
-	}`); err != nil {
+	if err := anchor.Click(proto.InputMouseButtonLeft, 1); err != nil {
 		return fmt.Errorf("点击目标 anchor 失败: %w", err)
 	}
 	if err := waitFeedDetailVisible(page, feedID); err != nil {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/go-rod/rod"
@@ -704,11 +705,11 @@ func (s *SearchAction) collectResults(page *hrod.Page, filters ...FilterOption) 
 
 		if len(allInternalFilters) > 0 {
 			// 点击筛选按钮打开面板
-			if _, err := page.Eval(`() => {
-				const btn = document.querySelector('.filter.ai-chat-filter');
-				if (!btn) throw new Error('filter button not found');
-				btn.click();
-			}`); err != nil {
+			filterButton, err := page.Element(".filter.ai-chat-filter")
+			if err != nil {
+				return nil, fmt.Errorf("未找到筛选按钮: %w", err)
+			}
+			if err := filterButton.Click(proto.InputMouseButtonLeft, 1); err != nil {
 				return nil, fmt.Errorf("打开筛选面板失败: %w", err)
 			}
 			if err := page.Wait(rod.Eval(`() => document.querySelector('.filter-panel') !== null`)); err != nil {
@@ -716,12 +717,22 @@ func (s *SearchAction) collectResults(page *hrod.Page, filters ...FilterOption) 
 			}
 
 			for _, filter := range allInternalFilters {
-				if _, err := page.Eval(`(text) => {
-					const tags = [...document.querySelectorAll('.filter-panel .tags')];
-					const tag = tags.find(t => t.textContent.trim() === text);
-					if (!tag) throw new Error('tag not found');
-					tag.click();
-				}`, filter.Text); err != nil {
+				tags, err := page.Elements(".filter-panel .tags")
+				if err != nil {
+					return nil, fmt.Errorf("读取筛选标签失败: %w", err)
+				}
+				var tag *hrod.Element
+				for _, candidate := range tags {
+					text, textErr := candidate.Text()
+					if textErr == nil && strings.TrimSpace(text) == filter.Text {
+						tag = candidate
+						break
+					}
+				}
+				if tag == nil {
+					return nil, fmt.Errorf("未找到筛选标签 %q", filter.Text)
+				}
+				if err := tag.Click(proto.InputMouseButtonLeft, 1); err != nil {
 					return nil, fmt.Errorf("筛选标签 %q 点击失败: %w", filter.Text, err)
 				}
 			}
@@ -740,7 +751,7 @@ func (s *SearchAction) collectResults(page *hrod.Page, filters ...FilterOption) 
 			}
 			previousFeedsJSONLength := previousFeedsJSONLengthResult.Value.Int()
 
-			// 点击页面空白关闭面板
+			// 点击页面空白关闭面板。
 			if _, err := page.Eval(`() => document.body.click()`); err != nil {
 				return nil, fmt.Errorf("关闭筛选面板失败: %w", err)
 			}
