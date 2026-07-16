@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/go-rod/rod"
+	rodinput "github.com/go-rod/rod/lib/input"
+	"github.com/go-rod/rod/lib/proto"
 	"github.com/sirupsen/logrus"
 	"github.com/xpzouying/xiaohongshu-mcp/errors"
 	hrod "github.com/xpzouying/xiaohongshu-mcp/pkg/humanize/rod"
@@ -214,7 +216,8 @@ func (s *SearchAction) searchByUI(page *hrod.Page, keyword string) error {
 	}
 
 	// 等搜索框出现，不使用WaitLoad因为小红书是SPA。
-	if _, err := waitForSearchInput(page, searchInputWaitTimeout, searchSelector); err != nil {
+	input, err := waitForSearchInput(page, searchInputWaitTimeout, searchSelector)
+	if err != nil {
 		return fmt.Errorf("未找到搜索框: %w", err)
 	}
 	if searchSelector == SelectorSearchInputInSearchResult {
@@ -236,21 +239,15 @@ func (s *SearchAction) searchByUI(page *hrod.Page, keyword string) error {
 			return fmt.Errorf("搜索关键词失败: %w", err)
 		}
 	} else {
-		// Explore：保留 b263 已验证的首搜 selector 顺序。
-		if _, err := page.Eval(`(keyword) => {
-			const ta = document.querySelector('textarea[name="aiSearchTextarea"]') ||
-			           document.querySelector('#search-input-in-feeds');
-			if (!ta) throw new Error('search input not found');
-			ta.focus();
-			ta.select();
-			document.execCommand('delete', false);
-			const s = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
-			s.call(ta, keyword);
-			ta.dispatchEvent(new Event('input', {bubbles: true}));
-			['keydown','keyup'].forEach(type => ta.dispatchEvent(
-				new KeyboardEvent(type, {key:'Enter', keyCode:13, bubbles: true})));
-		}`, keyword); err != nil {
-			return fmt.Errorf("搜索关键词失败: %w", err)
+		// Explore：对测试确认的输入框执行真实点击、输入和回车。
+		if err := input.Click(proto.InputMouseButtonLeft, 1); err != nil {
+			return fmt.Errorf("点击搜索框失败: %w", err)
+		}
+		if err := input.Input(keyword); err != nil {
+			return fmt.Errorf("输入关键词失败: %w", err)
+		}
+		if err := page.Actor().Keyboard.Press(rodinput.Enter); err != nil {
+			return fmt.Errorf("提交搜索失败: %w", err)
 		}
 	}
 
