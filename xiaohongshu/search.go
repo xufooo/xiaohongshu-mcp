@@ -640,7 +640,15 @@ func probeSearchInput(page *hrod.Page, searchSelector string) (searchInputProbe,
 		document.querySelectorAll('[data-xhs-mcp-search-input="1"]').forEach((el) => {
 			el.removeAttribute("data-xhs-mcp-search-input");
 		});
-		const searchInput = Array.from(document.querySelectorAll(searchSelector)).find(visible);
+		const candidates = Array.from(document.querySelectorAll(searchSelector));
+		const clickHit = (el) => {
+			const rect = el.getBoundingClientRect();
+			const x = Math.min(Math.max(rect.left + rect.width / 2, 1), window.innerWidth - 1);
+			const y = Math.min(Math.max(rect.top + rect.height / 2, 1), window.innerHeight - 1);
+			const hit = document.elementFromPoint(x, y);
+			return !!hit && (hit === el || el.contains(hit));
+		};
+		const searchInput = candidates.find((el) => visible(el) && clickHit(el));
 		if (searchInput) {
 			searchInput.setAttribute("data-xhs-mcp-search-input", "1");
 		}
