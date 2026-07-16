@@ -225,6 +225,8 @@ func (s *SearchAction) searchByUI(page *hrod.Page, keyword string) error {
 			              document.querySelector('textarea[name="aiSearchTextarea"]');
 			if (!input) throw new Error('search input not found');
 			input.focus();
+			input.select();
+			document.execCommand('delete', false);
 			const s = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
 			s.call(input, kw);
 			input.dispatchEvent(new Event('input', {bubbles: true}));
