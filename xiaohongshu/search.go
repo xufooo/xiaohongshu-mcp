@@ -218,9 +218,11 @@ func (s *SearchAction) searchByUI(page *hrod.Page, keyword string) error {
 		return fmt.Errorf("未找到搜索框: %w", err)
 	}
 	if searchSelector == SelectorSearchInputInSearchResult {
-		// Search AI：严格复用真人报告已验证的输入脚本。
+		// Search AI：优先使用 probeSearchInput 已标记的可见输入（data-xhs-mcp-search-input="1"），
+		// 避免 history.back() 后 bfcache 存在多个同名 textarea 导致裸查命中错误元素。
 		if _, err := page.Eval(`(kw) => {
-			const input = document.querySelector('textarea[name="aiSearchTextarea"]');
+			const input = document.querySelector('[data-xhs-mcp-search-input="1"]') ||
+			              document.querySelector('textarea[name="aiSearchTextarea"]');
 			if (!input) throw new Error('search input not found');
 			input.focus();
 			const s = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
