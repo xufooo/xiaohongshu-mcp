@@ -236,10 +236,11 @@ func (s *SearchAction) searchByUI(page *hrod.Page, keyword string) error {
 			return fmt.Errorf("搜索关键词失败: %w", err)
 		}
 	} else {
-		// Explore：保留 b263 已验证的首搜行为。
+		// Explore：优先使用 probeSearchInput 已标记的可见输入。
 		if _, err := page.Eval(`(keyword) => {
-			const ta = document.querySelector('textarea[name="aiSearchTextarea"]') ||
-			           document.querySelector('#search-input-in-feeds');
+			const ta = document.querySelector('[data-xhs-mcp-search-input="1"]') ||
+			           document.querySelector('#search-input-in-feeds') ||
+			           document.querySelector('textarea[name="aiSearchTextarea"]');
 			if (!ta) throw new Error('search input not found');
 			ta.focus();
 			ta.select();
