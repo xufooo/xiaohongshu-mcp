@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/go-rod/rod/lib/proto"
 	hrod "github.com/xpzouying/xiaohongshu-mcp/pkg/humanize/rod"
 )
 
@@ -17,6 +18,11 @@ type contentMetrics struct {
 	HasVideo bool `json:"hasVideo"`
 }
 
+type carouselReadState struct {
+	contentMetrics
+	ActiveIndex int `json:"activeIndex"`
+}
+
 type ReadStageAction struct {
 	page  *hrod.Page
 	state *ActionStateStore
@@ -26,125 +32,188 @@ func NewReadStageAction(page *hrod.Page, state *ActionStateStore) *ReadStageActi
 	return &ReadStageAction{page: page, state: state}
 }
 
-// CalculateDynamicDuration 从 DOM 提取内容指标，计算推荐阅读时长。
-// 基础：标题 3s + 正文每字 0.3s + 每张图片 3s + 视频 12s + 每评论 4s
+// CalculateDynamicDuration uses the visible title/body and real (de-duplicated)
+// swiper image count. It deliberately excludes comments: comments are loaded by
+// the detail API only when requested.
 func (a *ReadStageAction) CalculateDynamicDuration(ctx context.Context) (time.Duration, error) {
-	page := a.page.Context(ctx)
-	result, err := page.Eval(`() => {
-		const clean = (v) => (v || "").trim();
-		const title = clean(document.querySelector("#detail-title")?.innerText || document.querySelector(".title")?.innerText || "");
-		const desc = clean(document.querySelector("#detail-desc")?.innerText || document.querySelector(".note-text")?.innerText || document.querySelector(".desc")?.innerText || "");
-		const images = document.querySelectorAll(".swiper img, .note-content img, .media-container img, .carousel img").length;
-		const comments = document.querySelectorAll(".parent-comment").length;
-		const hasVideo = !!document.querySelector("video");
-		return JSON.stringify({ titleLen: title.length, descLen: desc.length, images, comments, hasVideo });
-	}`)
+	metrics, err := readContentMetrics(a.page.Context(ctx))
 	if err != nil {
 		return 0, err
-	}
-	if result == nil || result.Value.Str() == "" {
-		return 0, fmt.Errorf("计算阅读时长时 JS 返回空")
-	}
-
-	var metrics contentMetrics
-	if err := json.Unmarshal([]byte(result.Value.Str()), &metrics); err != nil {
-		return 0, fmt.Errorf("解析内容指标失败: %w", err)
 	}
 	return dynamicReadDuration(metrics), nil
 }
 
 func dynamicReadDuration(m contentMetrics) time.Duration {
-	d := 3 * time.Second
-	chars := m.TitleLen + m.DescLen
-	d += time.Duration(float64(time.Second) * 0.3 * float64(chars))
-	d += time.Duration(m.Images) * 3 * time.Second
-	if m.HasVideo {
-		d += 12 * time.Second
+	if m.Images <= 1 {
+		return 5 * time.Second
 	}
-	d += time.Duration(m.Comments) * 4 * time.Second
-	if d < 20*time.Second {
-		d = 20 * time.Second
+	if m.Images >= 3 {
+		return 10 * time.Second
 	}
-	if d > 180*time.Second {
-		d = 180 * time.Second
-	}
-	return d
+	// About two seconds for title/body, then about 2.5 seconds for each of the
+	// first real image pages. We do not turn through an unbounded album.
+	return 2*time.Second + time.Duration(m.Images)*2500*time.Millisecond
 }
 
-// Read 模拟自然阅读流程：看标题 → 正文停顿 → 看图/视频 → 小幅滚动 → 浏览评论 → 思考停顿。
-// 当 minDuration <= 0 时自动从 DOM 内容动态计算时长。
+// Read reads title/body and, for a multi-image note, physically advances at
+// most two pages using the report-verified .swiper-slide interaction. It never
+// scrolls comments. A positive minDuration is an explicit caller lower bound;
+// an unset duration uses the content-aware default above.
 func (a *ReadStageAction) Read(ctx context.Context, feedID string, minDuration time.Duration) error {
 	if a.state == nil {
 		return nil
 	}
 	page := a.page.Context(ctx)
-
+	metrics, err := readContentMetrics(page)
+	if err != nil {
+		return err
+	}
 	if minDuration <= 0 {
-		dyn, err := a.CalculateDynamicDuration(ctx)
-		if err == nil && dyn > 0 {
-			minDuration = dyn
-		} else {
-			minDuration = 30 * time.Second
-		}
+		minDuration = dynamicReadDuration(metrics)
 	}
 
 	start := time.Now()
-
-	// 阶段1：看标题（停留 1~3s）
-	if err := page.SleepRandom(1*time.Second, 3*time.Second); err != nil {
+	if err := page.SleepRandom(1*time.Second, 2*time.Second); err != nil {
 		return err
 	}
-
-	// 阶段2：正文区域分次小幅滚动，每2~5秒滚动一次
-	scrollStep := 160
-	if minDuration > 60*time.Second {
-		scrollStep = 280
+	if err := scrollNoteScroller(page, 160); err != nil {
+		return err
 	}
-	for time.Since(start) < minDuration*2/3 {
-		if err := scrollNoteScroller(page, float64(scrollStep)); err != nil {
-			return err
-		}
-		_ = a.state.RecordFeedScroll(feedID, 1)
-		if err := page.SleepRandom(2*time.Second, 5*time.Second); err != nil {
-			return err
-		}
-		if time.Since(start) >= minDuration*2/3 {
+	_ = a.state.RecordFeedScroll(feedID, 1)
+
+	// The Phase 2 browser report verified a right-side click on .swiper-slide
+	// advances 0 -> 1 -> 2. Confirm the active data-swiper-slide-index changes
+	// after every click before accounting for a viewed page.
+	for turn := 0; turn < minInt(metrics.Images-1, 2); turn++ {
+		before, err := carouselReadProbe(page)
+		if err != nil || before.ActiveIndex < 0 {
 			break
 		}
-		// 偶尔回看（10%概率）
-		if time.Since(start) > minDuration/3 && time.Duration(time.Now().UnixNano())%10 == 0 {
-			_ = scrollNoteScroller(page, float64(-scrollStep/2))
+		if _, err := advanceCarouselRight(page, before.ActiveIndex); err != nil {
+			break
 		}
-	}
-
-	// 阶段3：浏览评论区域（留出 1/3 时长）
-	commentBudget := minDuration/3 + 5*time.Second
-	commentDeadline := time.Now().Add(commentBudget)
-	commentStart := time.Now()
-	commentScrolled := false
-	for time.Now().Before(commentDeadline) {
-		if err := scrollNoteScroller(page, 100); err != nil {
-			return err
-		}
-		commentScrolled = true
-		_ = a.state.RecordFeedScroll(feedID, 1)
-		if err := page.SleepRandom(2*time.Second, 4*time.Second); err != nil {
+		if err := page.SleepRandom(2*time.Second, 3*time.Second); err != nil {
 			return err
 		}
 	}
-	_ = a.state.RecordCommentDwell(feedID, time.Since(commentStart), commentScrolled)
 
-	// 阶段4：最终停顿思考（1~5s）
-	if err := page.SleepRandom(1*time.Second, 5*time.Second); err != nil {
-		return err
+	for time.Since(start) < minDuration {
+		remaining := minDuration - time.Since(start)
+		pause := 500 * time.Millisecond
+		if remaining < pause {
+			pause = remaining
+		}
+		if err := page.SleepRandom(pause, pause); err != nil {
+			return err
+		}
 	}
-
-	readDuration := time.Since(start)
-	return a.state.RecordRead(feedID, readDuration)
+	return a.state.RecordRead(feedID, time.Since(start))
 }
 
-// ReadMin 保证至少阅读 minDuration 时长，不动态计算。
-// 适用于调用方已确定最短时间的场景（如 session 场景）。
+func readContentMetrics(page *hrod.Page) (contentMetrics, error) {
+	probe, err := carouselReadProbe(page)
+	if err != nil {
+		return contentMetrics{}, err
+	}
+	return probe.contentMetrics, nil
+}
+
+func carouselReadProbe(page *hrod.Page) (carouselReadState, error) {
+	result, err := page.Eval(carouselReadProbeScript())
+	if err != nil {
+		return carouselReadState{}, err
+	}
+	if result == nil || result.Value.Str() == "" {
+		return carouselReadState{}, fmt.Errorf("读取笔记内容指标时 JS 返回空")
+	}
+	var probe carouselReadState
+	if err := json.Unmarshal([]byte(result.Value.Str()), &probe); err != nil {
+		return carouselReadState{}, fmt.Errorf("解析笔记内容指标失败: %w", err)
+	}
+	return probe, nil
+}
+
+func carouselReadProbeScript() string {
+	return `() => {
+		const clean = (v) => (v || "").trim();
+		const title = clean(document.querySelector("#detail-title")?.innerText || document.querySelector(".title")?.innerText || "");
+		const desc = clean(document.querySelector("#detail-desc")?.innerText || document.querySelector(".note-text")?.innerText || document.querySelector(".desc")?.innerText || "");
+		const indices = new Set();
+		document.querySelectorAll(".swiper-slide").forEach((slide) => {
+			const index = slide.getAttribute("data-swiper-slide-index");
+			if (index !== null && index !== "") indices.add(index);
+		});
+		const active = document.querySelector(".swiper-slide-active");
+		const activeIndex = Number.parseInt(active?.getAttribute("data-swiper-slide-index") || "-1", 10);
+		const fallbackImages = document.querySelectorAll(".note-content img, .media-container img, .carousel img").length;
+		return JSON.stringify({
+			titleLen: title.length,
+			descLen: desc.length,
+			images: indices.size || (fallbackImages > 0 ? 1 : 0),
+			comments: 0,
+			hasVideo: !!document.querySelector("video"),
+			activeIndex,
+		});
+	}`
+}
+
+func advanceCarouselRight(page *hrod.Page, previousIndex int) (int, error) {
+	slide, err := page.Element(".swiper-slide-active")
+	if err != nil {
+		return previousIndex, fmt.Errorf("当前笔记图片轮播页不可用: %w", err)
+	}
+	point, err := carouselRightClickPoint(slide)
+	if err != nil {
+		return previousIndex, err
+	}
+	if err := page.ClickPoint(point); err != nil {
+		return previousIndex, fmt.Errorf("点击图片轮播右侧失败: %w", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		probe, err := carouselReadProbe(page)
+		if err == nil && probe.ActiveIndex >= 0 && probe.ActiveIndex != previousIndex {
+			return probe.ActiveIndex, nil
+		}
+		if err := page.SleepRandom(100*time.Millisecond, 150*time.Millisecond); err != nil {
+			return previousIndex, err
+		}
+	}
+	return previousIndex, fmt.Errorf("图片轮播页未从 index=%d 切换", previousIndex)
+}
+
+func carouselRightClickPoint(slide *hrod.Element) (proto.Point, error) {
+	result, err := slide.Eval(`() => {
+		const r = this.getBoundingClientRect();
+		const x = Math.min(Math.max(r.left + r.width * 0.8, 1), window.innerWidth - 1);
+		const y = Math.min(Math.max(r.top + r.height / 2, 1), window.innerHeight - 1);
+		const hit = document.elementFromPoint(x, y);
+		if (!this.isConnected || r.width <= 1 || r.height <= 1 || !hit || !this.contains(hit)) return "";
+		return JSON.stringify({x, y});
+	}`)
+	if err != nil || result == nil || result.Value.Str() == "" {
+		return proto.Point{}, fmt.Errorf("当前图片轮播页不可原生点击")
+	}
+	var point struct {
+		X float64 `json:"x"`
+		Y float64 `json:"y"`
+	}
+	if err := json.Unmarshal([]byte(result.Value.Str()), &point); err != nil {
+		return proto.Point{}, fmt.Errorf("解析图片轮播点击坐标失败: %w", err)
+	}
+	return proto.Point{X: point.X, Y: point.Y}, nil
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// ReadMin guarantees at least minDuration. It is for explicit caller requests;
+// BrowseSession.Read intentionally calls Read with zero for the fast default.
 func (a *ReadStageAction) ReadMin(ctx context.Context, feedID string, minDuration time.Duration) error {
 	if a.state == nil || minDuration <= 0 {
 		return nil
@@ -152,7 +221,8 @@ func (a *ReadStageAction) ReadMin(ctx context.Context, feedID string, minDuratio
 	return a.Read(ctx, feedID, minDuration)
 }
 
-// DwellInComments 在评论区实际停留至少 minDuration，并记录评论区停留状态。
+// DwellInComments remains an explicit, separate operation for callers that
+// genuinely need comment-area dwell. Read must not call it.
 func (a *ReadStageAction) DwellInComments(ctx context.Context, feedID string, minDuration time.Duration) error {
 	if a.state == nil || minDuration <= 0 {
 		return nil
@@ -175,7 +245,6 @@ func (a *ReadStageAction) DwellInComments(ctx context.Context, feedID string, mi
 	return a.state.RecordCommentDwell(feedID, time.Since(start), scrolled)
 }
 
-// RecordCommentDwell 记录评论区停留时长。scrolled 表示是否在评论区发生过滚动。
 func (a *ReadStageAction) RecordCommentDwell(feedID string, duration time.Duration, scrolled bool) {
 	if a.state != nil {
 		_ = a.state.RecordCommentDwell(feedID, duration, scrolled)

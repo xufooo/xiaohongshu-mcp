@@ -132,7 +132,7 @@ type SessionOpenNoteArgs struct {
 
 type SessionReadArgs struct {
 	SessionID  string `json:"session_id" jsonschema:"浏览会话ID，由create_browse_session返回"`
-	MinSeconds int    `json:"min_seconds,omitempty" jsonschema:"最短阅读秒数，默认20秒"`
+	MinSeconds int    `json:"min_seconds" jsonschema:"最短有效阅读秒数；不传或0时，单图/纯文字约5秒，多图实际翻页约10秒"`
 }
 
 type SessionLikeArgs struct {
@@ -627,11 +627,27 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 		}),
 	)
 
-	// 工具 22: session 返回
+	// 工具 22: session 关闭笔记
+	mcp.AddTool(server,
+		&mcp.Tool{
+			Name:        "session_close_note",
+			Description: "在浏览会话内关闭当前笔记，并返回打开该笔记前的来源页",
+			Annotations: &mcp.ToolAnnotations{
+				Title:        "Session Close Note",
+				ReadOnlyHint: true,
+			},
+		},
+		withPanicRecovery("session_close_note", func(ctx context.Context, req *mcp.CallToolRequest, args BrowseSessionIDArgs) (*mcp.CallToolResult, any, error) {
+			result := appServer.handleSessionBack(ctx, args)
+			return convertToMCPResult(result), nil, nil
+		}),
+	)
+
+	// 工具 23: 兼容旧客户端的 session 返回别名
 	mcp.AddTool(server,
 		&mcp.Tool{
 			Name:        "session_back",
-			Description: "在浏览会话内从笔记详情返回来源页",
+			Description: "已废弃的兼容别名；请改用 session_close_note 关闭当前笔记并返回来源页",
 			Annotations: &mcp.ToolAnnotations{
 				Title:        "Session Back",
 				ReadOnlyHint: true,
