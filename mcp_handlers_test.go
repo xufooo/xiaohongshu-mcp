@@ -93,39 +93,14 @@ func TestSessionDetailMissingSessionIDSuggestsCreateSession(t *testing.T) {
 	}
 }
 
-func TestSessionDetailRejectsLoadCommentsWithMigrationError(t *testing.T) {
-	result := (&AppServer{}).handleSessionDetail(context.Background(), SessionDetailArgs{
-		SessionID:    "session-1",
-		LoadComments: true,
-	})
-	if result == nil || !result.IsError {
-		t.Fatalf("session detail with load_comments=true should return an error result: %+v", result)
-	}
-	text := result.Content[0].Text
-	if !strings.Contains(text, "session_detail 已不支持 load_comments") {
-		t.Fatalf("error text missing deprecation message: %q", text)
-	}
-	if !strings.Contains(text, `"tool": "get_feed_detail"`) {
-		t.Fatalf("expected get_feed_detail next step, got %q", text)
-	}
-	if !strings.Contains(text, "max_items") {
-		t.Fatalf("expected max_items recommendation, got %q", text)
-	}
-	if !strings.Contains(text, "cursor") {
-		t.Fatalf("expected cursor mention, got %q", text)
-	}
-}
-
-func TestSessionDetailDelegatesToServiceWhenLoadCommentsFalse(t *testing.T) {
+func TestSessionDetailDelegatesToService(t *testing.T) {
 	app := &AppServer{
 		xiaohongshuService: &XiaohongshuService{
 			browseSessions: xiaohongshu.NewBrowseSessionManager(time.Minute),
 		},
 	}
 	result := app.handleSessionDetail(context.Background(), SessionDetailArgs{
-		SessionID:    "session-not-exist",
-		LoadComments: false,
-		Pages:        3,
+		SessionID: "session-not-exist",
 	})
 	if result == nil || !result.IsError {
 		t.Fatalf("session detail for non-existent session should return error: %+v", result)
