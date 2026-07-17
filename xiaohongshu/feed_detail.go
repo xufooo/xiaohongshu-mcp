@@ -579,9 +579,9 @@ func currentFeedIDFromPage(page *hrod.Page) (string, error) {
 }
 
 func commentScrollSettings(speed string) (time.Duration, float64) {
-	await := map[string]time.Duration{"slow": 1200 * time.Millisecond, "normal": time.Second, "fast": time.Second}[speed]
-	scrollDelta := map[string]float64{"slow": 100, "normal": 150, "fast": 150}[speed]
-	if await < time.Second {
+	await := map[string]time.Duration{"slow": 1200 * time.Millisecond, "normal": time.Second, "fast": 800 * time.Millisecond}[speed]
+	scrollDelta := map[string]float64{"slow": 100, "normal": 150, "fast": 200}[speed]
+	if await < 500*time.Millisecond {
 		await = time.Second
 	}
 	if scrollDelta == 0 {

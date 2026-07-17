@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 
@@ -15,68 +14,6 @@ import (
 )
 
 // MCP 工具处理函数
-
-const mcpFeedDetailOperationTimeout = 11 * time.Minute
-
-// newMCPFeedDetailContext 为加载全部评论设置上限，同时保留调用方更短的超时。
-func newMCPFeedDetailContext(parent context.Context) (context.Context, context.CancelFunc) {
-	if parent == nil {
-		parent = context.Background()
-	}
-	if deadline, ok := parent.Deadline(); ok && time.Until(deadline) < mcpFeedDetailOperationTimeout {
-		return context.WithCancel(parent)
-	}
-	return context.WithTimeout(parent, mcpFeedDetailOperationTimeout)
-}
-
-func parseMCPMaxItems(args map[string]any) int {
-	maxItems := 20
-	for _, key := range []string{"max_items", "limit"} {
-		raw, ok := args[key]
-		if !ok {
-			continue
-		}
-		switch v := raw.(type) {
-		case float64:
-			maxItems = int(v)
-		case string:
-			if parsed, err := strconv.Atoi(v); err == nil {
-				maxItems = parsed
-			}
-		case int:
-			maxItems = v
-		}
-		break
-	}
-	if maxItems <= 0 {
-		maxItems = 20
-	}
-	if maxItems > 50 {
-		maxItems = 50
-	}
-	return maxItems
-}
-
-func hasMCPBatchRequest(args map[string]any, cursorID string) bool {
-	if strings.TrimSpace(cursorID) != "" {
-		return true
-	}
-	raw, ok := args["max_items"]
-	if !ok {
-		return false
-	}
-	switch v := raw.(type) {
-	case float64:
-		return v > 0
-	case string:
-		parsed, err := strconv.Atoi(strings.TrimSpace(v))
-		return err == nil && parsed > 0
-	case int:
-		return v > 0
-	default:
-		return false
-	}
-}
 
 // parseVisibility 从 MCP 参数中解析可见范围
 func parseVisibility(args map[string]interface{}) string {
@@ -662,182 +599,6 @@ func (s *AppServer) handleSearchFeeds(ctx context.Context, args SearchFeedsArgs)
 	}
 }
 
-// handleGetFeedDetail 处理获取Feed详情
-func (s *AppServer) handleGetFeedDetail(ctx context.Context, args map[string]any) *MCPToolResult {
-	// 解析参数
-	feedID, ok := args["feed_id"].(string)
-	if !ok || strings.TrimSpace(feedID) == "" {
-		return &MCPToolResult{
-			Content: []MCPContent{{
-				Type: "text",
-				Text: "获取Feed详情失败: 缺少feed_id参数",
-			}},
-			IsError: true,
-		}
-	}
-	feedID = strings.TrimSpace(feedID)
-
-	xsecToken, ok := args["xsec_token"].(string)
-	if !ok || strings.TrimSpace(xsecToken) == "" {
-		return &MCPToolResult{
-			Content: []MCPContent{{
-				Type: "text",
-				Text: "获取Feed详情失败: 缺少xsec_token参数",
-			}},
-			IsError: true,
-		}
-	}
-	xsecToken = strings.TrimSpace(xsecToken)
-
-	if blocked := s.requireBrowserForMCPWithFeed("获取Feed详情", feedID); blocked != nil {
-		return blocked
-	}
-	if blocked := s.rateLimitMCP(ctx, "获取Feed详情", ratelimit.ActionOpenNote); blocked != nil {
-		return blocked
-	}
-	logrus.Info("MCP: 获取Feed详情")
-
-	loadAll := false
-	if raw, ok := args["load_all_comments"]; ok {
-		switch v := raw.(type) {
-		case bool:
-			loadAll = v
-		case string:
-			if parsed, err := strconv.ParseBool(v); err == nil {
-				loadAll = parsed
-			}
-		case float64:
-			loadAll = v != 0
-		}
-	}
-
-	// 解析评论配置参数，如果未提供则使用默认值
-	config := xiaohongshu.DefaultCommentLoadConfig()
-
-	if raw, ok := args["click_more_replies"]; ok {
-		switch v := raw.(type) {
-		case bool:
-			config.ClickMoreReplies = v
-		case string:
-			if parsed, err := strconv.ParseBool(v); err == nil {
-				config.ClickMoreReplies = parsed
-			}
-		}
-	}
-
-	if raw, ok := args["reply_limit"]; ok {
-		switch v := raw.(type) {
-		case float64:
-			config.MaxRepliesThreshold = int(v)
-		case string:
-			if parsed, err := strconv.Atoi(v); err == nil {
-				config.MaxRepliesThreshold = parsed
-			}
-		case int:
-			config.MaxRepliesThreshold = v
-		}
-	} else if raw, ok := args["max_replies_threshold"]; ok {
-		switch v := raw.(type) {
-		case float64:
-			config.MaxRepliesThreshold = int(v)
-		case string:
-			if parsed, err := strconv.Atoi(v); err == nil {
-				config.MaxRepliesThreshold = parsed
-			}
-		case int:
-			config.MaxRepliesThreshold = v
-		}
-	}
-
-	if raw, ok := args["limit"]; ok {
-		switch v := raw.(type) {
-		case float64:
-			config.MaxCommentItems = int(v)
-		case string:
-			if parsed, err := strconv.Atoi(v); err == nil {
-				config.MaxCommentItems = parsed
-			}
-		case int:
-			config.MaxCommentItems = v
-		}
-	} else if raw, ok := args["max_comment_items"]; ok {
-		switch v := raw.(type) {
-		case float64:
-			config.MaxCommentItems = int(v)
-		case string:
-			if parsed, err := strconv.Atoi(v); err == nil {
-				config.MaxCommentItems = parsed
-			}
-		case int:
-			config.MaxCommentItems = v
-		}
-	}
-
-	if raw, ok := args["scroll_speed"].(string); ok && raw != "" {
-		config.ScrollSpeed = raw
-	}
-
-	cursorID := ""
-	if raw, ok := args["cursor"].(string); ok {
-		cursorID = strings.TrimSpace(raw)
-	}
-	batchRequested := hasMCPBatchRequest(args, cursorID)
-	maxItems := parseMCPMaxItems(args)
-
-	logrus.Infof("MCP: 获取Feed详情 - Feed ID: %s, loadAllComments=%v, batch=%v, maxItems=%d, config=%+v", feedID, loadAll, batchRequested, maxItems, config)
-
-	operationCtx := ctx
-	if loadAll || batchRequested {
-		if deadline, ok := ctx.Deadline(); ok {
-			logrus.Infof("MCP get_feed_detail 请求 deadline: %s；使用最长 %s 操作超时",
-				deadline.Format(time.RFC3339), mcpFeedDetailOperationTimeout)
-		} else {
-			logrus.Infof("MCP get_feed_detail 请求没有 deadline；使用最长 %s 操作超时",
-				mcpFeedDetailOperationTimeout)
-		}
-
-		var cancel context.CancelFunc
-		operationCtx, cancel = newMCPFeedDetailContext(ctx)
-		defer cancel()
-	}
-
-	var result *FeedDetailResponse
-	var err error
-	if batchRequested {
-		result, err = s.xiaohongshuService.GetFeedDetailCommentsBatch(operationCtx, feedID, xsecToken, cursorID, maxItems, config)
-	} else {
-		result, err = s.xiaohongshuService.GetFeedDetailWithConfig(operationCtx, feedID, xsecToken, loadAll, config)
-	}
-	if err != nil {
-		return &MCPToolResult{
-			Content: []MCPContent{{
-				Type: "text",
-				Text: "获取Feed详情失败: " + err.Error(),
-			}},
-			IsError: true,
-		}
-	}
-
-	// 格式化输出，转换为JSON字符串
-	jsonData, err := json.MarshalIndent(result, "", "  ")
-	if err != nil {
-		return &MCPToolResult{
-			Content: []MCPContent{{
-				Type: "text",
-				Text: fmt.Sprintf("获取Feed详情成功，但序列化失败: %v", err),
-			}},
-			IsError: true,
-		}
-	}
-
-	return &MCPToolResult{
-		Content: []MCPContent{{
-			Type: "text",
-			Text: string(jsonData),
-		}},
-	}
-}
-
 // handleUserProfile 获取用户主页
 func (s *AppServer) handleUserProfile(ctx context.Context, args map[string]any) *MCPToolResult {
 	if blocked := s.requireBrowserAvailableForMCP("获取用户主页"); blocked != nil {
@@ -1249,17 +1010,33 @@ func (s *AppServer) handleSessionDetail(ctx context.Context, args SessionDetailA
 	if args.SessionID == "" {
 		return sessionMCPErrorResult("session详情获取失败: 缺少session_id参数", sessionNextStepCreateSession())
 	}
-	if args.LoadComments {
-		return sessionMCPErrorResult(
-			"session_detail 已不支持 load_comments。大量评论读取请使用 get_feed_detail，并传 max_items（推荐20），后续调用传入上次返回的 comments.cursor 继续读取。",
-			mcpSessionNextStep{
-				Tool:   "get_feed_detail",
-				Reason: "session_detail 不再支持 load_comments，请使用 get_feed_detail 读取评论",
-				Hint:   "保持当前 session 的笔记已打开，调用 get_feed_detail 并传 max_items（推荐20），后续传回返回的 comments.cursor 继续分页",
-			},
-		)
+
+	if args.MaxItems > 0 || args.Cursor != "" {
+		maxItems := args.MaxItems
+		if maxItems <= 0 {
+			maxItems = 20
+		}
+		if maxItems > 50 {
+			maxItems = 50
+		}
+		config := xiaohongshu.DefaultCommentLoadConfig()
+		if args.ClickMoreReplies != nil {
+			config.ClickMoreReplies = *args.ClickMoreReplies
+		}
+		if args.ReplyLimit > 0 {
+			config.MaxRepliesThreshold = args.ReplyLimit
+		}
+		if args.ScrollSpeed != "" {
+			config.ScrollSpeed = args.ScrollSpeed
+		}
+		result, err := s.xiaohongshuService.SessionDetailBatch(ctx, args.SessionID, args.Cursor, maxItems, config)
+		if err != nil {
+			return sessionMCPErrorFromErr("session分批加载评论失败", err, sessionNextStepOpenNote())
+		}
+		return jsonMCPResult(result, "session分批加载评论成功")
 	}
-	detail, err := s.xiaohongshuService.SessionDetail(ctx, args.SessionID, false, args.Pages)
+
+	detail, err := s.xiaohongshuService.SessionDetail(ctx, args.SessionID, false, 0)
 	if err != nil {
 		return sessionMCPErrorFromErr("session详情获取失败", err, sessionNextStepOpenNote())
 	}

@@ -872,6 +872,41 @@ func (s *XiaohongshuService) SessionDetail(ctx context.Context, id string, loadC
 	return detail, nil
 }
 
+func (s *XiaohongshuService) SessionDetailBatch(ctx context.Context, id, cursorID string, maxItems int, config xiaohongshu.CommentLoadConfig) (*FeedDetailResponse, error) {
+	session, err := s.browseSessions.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	info := session.Info()
+
+	var cursor *xiaohongshu.CommentCursor
+	if cursorID != "" {
+		stored, ok := s.getCommentCursor(cursorID)
+		if !ok {
+			return nil, fmt.Errorf("cursor expired, please start a new batch from current visible comments")
+		}
+		cursor = stored
+	}
+
+	detail, nextCursor, hasMore, err := session.DetailCommentsBatch(ctx, info.CurrentFeedID, cursor, maxItems, config)
+	if err != nil {
+		s.recordRiskFromSession(session, err)
+		return nil, err
+	}
+
+	nextCursorID := ""
+	if hasMore && nextCursor != nil {
+		nextCursorID = fmt.Sprintf("cc_%s_%d", info.CurrentFeedID, time.Now().UnixMilli())
+		s.setCommentCursor(nextCursorID, nextCursor)
+	}
+	if cursorID != "" {
+		s.delCommentCursor(cursorID)
+	}
+	detail.Comments.Cursor = nextCursorID
+	detail.Comments.HasMore = hasMore
+	return &FeedDetailResponse{FeedID: info.CurrentFeedID, Data: detail}, nil
+}
+
 func (s *XiaohongshuService) SessionDetailForFeed(ctx context.Context, id, feedID string, loadComments bool, config xiaohongshu.CommentLoadConfig) (*xiaohongshu.FeedDetailResponse, error) {
 	session, err := s.browseSessions.Get(id)
 	if err != nil {

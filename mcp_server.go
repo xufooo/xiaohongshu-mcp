@@ -54,20 +54,6 @@ type FilterOption struct {
 	SearchScope string `json:"search_scope,omitempty" jsonschema:"搜索范围: 不限|已看过|未看过|已关注,默认为'不限'"`
 	Location    string `json:"location,omitempty" jsonschema:"位置距离: 不限|同城|附近,默认为'不限'"`
 }
-
-// FeedDetailArgs 获取Feed详情的参数
-type FeedDetailArgs struct {
-	FeedID           string `json:"feed_id" jsonschema:"小红书笔记ID，从Feed列表获取"`
-	XsecToken        string `json:"xsec_token" jsonschema:"访问令牌，从Feed列表的xsecToken字段获取"`
-	LoadAllComments  bool   `json:"load_all_comments,omitempty" jsonschema:"是否加载全部评论。false仅返回前10条一级评论（默认），true滚动加载更多评论"`
-	Cursor           string `json:"cursor,omitempty" jsonschema:"评论分批加载游标。首次分批加载不传，后续传上次返回的comments.cursor继续加载"`
-	MaxItems         int    `json:"max_items,omitempty" jsonschema:"评论分批加载每批最多返回数量，默认20，最大50"`
-	Limit            int    `json:"limit,omitempty" jsonschema:"【仅当load_all_comments为true时生效】限制加载的一级评论数量。例如20表示最多加载20条；不传或传0表示加载所有"`
-	ClickMoreReplies bool   `json:"click_more_replies,omitempty" jsonschema:"【仅当load_all_comments为true时生效】是否展开二级回复。true展开子评论，false不展开（默认）"`
-	ReplyLimit       int    `json:"reply_limit,omitempty" jsonschema:"【仅当click_more_replies为true时生效】跳过回复数过多的评论。例如10表示跳过超过10条回复的，默认10"`
-	ScrollSpeed      string `json:"scroll_speed,omitempty" jsonschema:"【仅当load_all_comments为true时生效】滚动速度slow慢速、normal正常、fast快速；默认fast"`
-}
-
 // UserProfileArgs 获取用户主页的参数
 type UserProfileArgs struct {
 	UserID    string `json:"user_id" jsonschema:"小红书用户ID，从Feed列表获取"`
@@ -113,9 +99,12 @@ type BrowseSessionIDArgs struct {
 }
 
 type SessionDetailArgs struct {
-	SessionID     string `json:"session_id" jsonschema:"浏览会话ID，由create_browse_session返回"`
-	LoadComments bool   `json:"load_comments,omitempty" jsonschema:"已废弃，传true会立即返回迁移错误；大量评论读取请改用get_feed_detail（传max_items、cursor）"`
-	Pages        int    `json:"pages,omitzero" jsonschema:"已废弃，不再生效；此参数将被忽略"`
+	SessionID       string `json:"session_id" jsonschema:"浏览会话ID，由create_browse_session返回"`
+	MaxItems        int    `json:"max_items,omitempty" jsonschema:"可选，分批加载每批最多返回数量，默认20，最大50；不传或传0则仅返回当前可见评论"`
+	Cursor          string `json:"cursor,omitempty" jsonschema:"可选，分批加载游标，由上次 session_detail 返回的 cursor 字段提供"`
+	ClickMoreReplies *bool  `json:"click_more_replies,omitempty" jsonschema:"可选，是否自动点击展开子评论（二级回复），默认true"`
+	ReplyLimit      int    `json:"reply_limit,omitempty" jsonschema:"可选，子评论展开阈值，回复数超过此值的评论不展开，默认10"`
+	ScrollSpeed     string `json:"scroll_speed,omitempty" jsonschema:"可选，滚动速度: slow|normal|fast，默认fast"`
 }
 
 type SessionSearchArgs struct {
@@ -299,54 +288,6 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 		},
 		withPanicRecovery("search_feeds", func(ctx context.Context, req *mcp.CallToolRequest, args SearchFeedsArgs) (*mcp.CallToolResult, any, error) {
 			result := appServer.handleSearchFeeds(ctx, args)
-			return convertToMCPResult(result), nil, nil
-		}),
-	)
-
-	// 工具 7: 获取Feed详情
-	mcp.AddTool(server,
-		&mcp.Tool{
-			Name:        "get_feed_detail",
-			Description: "获取小红书笔记详情，返回笔记内容、图片、作者信息、互动数据（点赞/收藏/分享数）及评论列表。默认返回前10条一级评论，如需更多评论请设置load_all_comments=true",
-			Annotations: &mcp.ToolAnnotations{
-				Title:        "Get Feed Detail",
-				ReadOnlyHint: true,
-			},
-		},
-		withPanicRecovery("get_feed_detail", func(ctx context.Context, req *mcp.CallToolRequest, args FeedDetailArgs) (*mcp.CallToolResult, any, error) {
-			argsMap := map[string]interface{}{
-				"feed_id":           args.FeedID,
-				"xsec_token":        args.XsecToken,
-				"load_all_comments": args.LoadAllComments,
-			}
-			if args.Cursor != "" {
-				argsMap["cursor"] = args.Cursor
-			}
-			if args.MaxItems > 0 {
-				argsMap["max_items"] = args.MaxItems
-			}
-
-			// 只有当加载全部评论或分批加载时，才处理其他评论参数
-			if args.LoadAllComments || args.Cursor != "" || args.MaxItems > 0 {
-				argsMap["click_more_replies"] = args.ClickMoreReplies
-
-				if args.Limit > 0 {
-					argsMap["max_comment_items"] = args.Limit
-				}
-
-				// 设置回复数量阈值，默认10
-				replyLimit := args.ReplyLimit
-				if replyLimit <= 0 {
-					replyLimit = 10
-				}
-				argsMap["max_replies_threshold"] = replyLimit
-
-				if args.ScrollSpeed != "" {
-					argsMap["scroll_speed"] = args.ScrollSpeed
-				}
-			}
-
-			result := appServer.handleGetFeedDetail(ctx, argsMap)
 			return convertToMCPResult(result), nil, nil
 		}),
 	)
@@ -562,7 +503,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 	mcp.AddTool(server,
 		&mcp.Tool{
 			Name:        "session_detail",
-			Description: "在浏览会话当前已打开的笔记页面上继续读取媒体或评论。笔记首屏标题和正文已由 session_open_note 返回；图片、视频读取暂未实现。大量评论读取请使用 get_feed_detail 并传 max_items（推荐20），再将返回的 cursor 传入后续调用。",
+			Description: "在浏览会话当前已打开的笔记页面上继续读取当前可见评论。传 max_items 和 cursor 可分批加载更多评论（去重、支持子评论展开）。笔记首屏标题和正文已由 session_open_note 返回；图片、视频读取暂未实现。",
 			Annotations: &mcp.ToolAnnotations{
 				Title:        "Session Detail",
 				ReadOnlyHint: true,

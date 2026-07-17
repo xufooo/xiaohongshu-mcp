@@ -1160,7 +1160,7 @@ func (s *BrowseSession) currentStateLocked(kind XHSReadyKind, resultsCount int, 
 func (s *BrowseSession) nextHintLocked(resultsCount int) string {
 	switch {
 	case s.opened:
-		return "笔记首屏标题和正文已在 session_open_note 返回；可调用 session_detail 继续读取媒体或当前评论。大量评论读取请使用 get_feed_detail（传 max_items、cursor）"
+		return "笔记首屏标题和正文已在 session_open_note 返回；可调用 session_detail 读取当前可见评论，或传 max_items 和 cursor 分批加载更多评论。图片和视频读取暂未实现"
 	case resultsCount > 0:
 		return "可继续：搜索新关键词 (session_search)、打开其他笔记 (session_open_note)、或滚动浏览 feed"
 	case !s.opened && resultsCount == 0:
