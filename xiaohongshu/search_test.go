@@ -523,6 +523,15 @@ func TestSearchByUIUsesInfoNotEval(t *testing.T) {
 	require.NotContains(t, funcBody, `.pathname`, "searchByUI 不得用 DOM Eval 判断搜索结果页")
 	require.Contains(t, funcBody, `page.Rod.Info()`, "searchByUI 应使用非阻塞 Info() 获取页面 URL")
 	require.Contains(t, funcBody, `prepareSearchPage(`, "searchByUI 应通过 prepareSearchPage 决策")
+
+	resultStart := strings.Index(funcBody, `if searchSelector == SelectorSearchInputInSearchResult {`)
+	require.NotEqual(t, -1, resultStart, "结果页二次搜索分支缺失")
+	resultBody := funcBody[resultStart:]
+	resultEnd := strings.Index(resultBody, "\n	} else {")
+	require.Greater(t, resultEnd, 0, "结果页二次搜索分支边界缺失")
+	resultBody = resultBody[:resultEnd]
+	require.Contains(t, resultBody, `page.Actor().Keyboard.Press(rodinput.Enter)`, "结果页二次搜索必须使用真实 Enter")
+	require.NotContains(t, resultBody, `new KeyboardEvent`, "结果页二次搜索不得伪造 Enter 键盘事件")
 }
 
 func TestPrepareSearchPageBehavior(t *testing.T) {

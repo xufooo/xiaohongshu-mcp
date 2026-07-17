@@ -234,11 +234,12 @@ func (s *SearchAction) searchByUI(page *hrod.Page, keyword string) error {
 			const s = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
 			s.call(input, kw);
 			input.dispatchEvent(new Event('input', {bubbles: true}));
-			['keydown','keyup'].forEach(type => input.dispatchEvent(
-				new KeyboardEvent(type, {key:'Enter', keyCode:13, bubbles: true})));
-		}`, keyword); err != nil {
+			}`, keyword); err != nil {
 			return fmt.Errorf("搜索关键词失败: %w", err)
-		}
+			}
+			if err := page.Actor().Keyboard.Press(rodinput.Enter); err != nil {
+			return fmt.Errorf("提交搜索失败: %w", err)
+			}
 	} else {
 		// Explore：对测试确认的输入框执行真实点击、输入和回车。
 		if err := input.Click(proto.InputMouseButtonLeft, 1); err != nil {
@@ -299,117 +300,43 @@ func captureSearchResultsBaseline(page *hrod.Page) (searchResultsBaseline, error
 }
 
 func waitForSearchResults(page *hrod.Page, keyword string, baseline searchResultsBaseline) error {
-	deadline := time.Now().Add(searchResultsWaitTimeout).UnixMilli()
-	err := page.Wait(rod.Eval(`(deadline, keyword, feedCardSelector, searchInputSelector, markedSearchInputSelector, baselineStateSignature, baselineDOMSignature) => {
-		const unwrap = (value) => {
-			if (value && typeof value === "object") {
-				if ("value" in value) return value.value;
-				if ("_value" in value) return value._value;
+	deadline := time.Now().Add(searchResultsWaitTimeout)
+	var last searchResultsKeywordProbe
+	var lastErr error
+
+	for time.Now().Before(deadline) {
+		if err := page.Err(); err != nil {
+			return err
+		}
+
+		probe, err := probeSearchResultsKeyword(page, keyword)
+		if err != nil {
+			lastErr = err
+		} else {
+			last = probe
+			lastErr = nil
+			if searchResultsReady(probe, baseline) {
+				return nil
 			}
-			return value;
-		};
-		const normalize = (value) => String(value ?? "").trim();
-		const noteIDFromHref = (href) => {
-			const match = String(href || "").match(/\/(?:explore|discovery\/item)\/([^/?#]+)/);
-			return match ? decodeURIComponent(match[1]) : "";
-		};
-		const visible = (el) => {
-			if (!el || !el.isConnected) return false;
-			const style = window.getComputedStyle(el);
-			const rect = el.getBoundingClientRect();
-			return style.display !== "none" &&
-				style.visibility !== "hidden" &&
-				Number(style.opacity || "1") > 0 &&
-				rect.width > 1 &&
-				rect.height > 1;
-		};
-		const inputValue = (el) => normalize("value" in el ? el.value : (el.innerText || el.textContent));
-		const stateSignature = (items) => {
-			if (!Array.isArray(items) || items.length === 0) return "";
-			return JSON.stringify(items.slice(0, 6).map((item) => {
-				item = unwrap(item) || {};
-				const noteCard = unwrap(item.noteCard) || {};
-				return [
-					item.id || item.noteId || item.note_id || noteCard.noteId || "",
-					noteCard.displayTitle || item.title || item.desc || "",
-				].join("|");
-			}));
-		};
-		const domSignature = () => {
-			const cards = Array.from(document.querySelectorAll(feedCardSelector)).filter(visible).slice(0, 6);
-			if (cards.length === 0) return "";
-			return JSON.stringify(cards.map((card) => {
-				const link = Array.from(card.querySelectorAll("a[href]"))
-					.find((a) => /\/(?:explore|discovery\/item)\//.test(a.href));
-				const href = link?.href || "";
-				const title = normalize(card.querySelector(".title, .note-title, [class*='title']")?.textContent || link?.textContent || "");
-				return [
-					card.dataset?.noteId || card.dataset?.id || noteIDFromHref(href),
-					title,
-					href,
-				].join("|");
-			}));
-		};
-		const changed = (current, baseline) => baseline === "" || (current !== "" && current !== baseline);
-		const changedAny = (stateSig, domSig) => {
-			if (baselineStateSignature === "" && baselineDOMSignature === "") return true;
-			return (baselineStateSignature !== "" && stateSig !== "" && stateSig !== baselineStateSignature) ||
-				(baselineDOMSignature !== "" && domSig !== "" && domSig !== baselineDOMSignature);
-		};
-		const urlKeyword = () => {
-			try {
-				const params = new URL(location.href).searchParams;
-				for (const name of ["keyword", "search_key", "query", "q"]) {
-					const raw = params.get(name);
-					if (raw) {
-						const decoded = raw.includes("%") ? (() => { try { return decodeURIComponent(raw); } catch (_) { return raw; } })() : raw;
-						return normalize(decoded);
-					}
-				}
-			} catch (_) {}
-			return "";
-		};
-		const search = window.__INITIAL_STATE__?.search;
-		const stateKeyword = unwrap(search?.searchKeyword);
-		const hasStateKeyword = normalize(stateKeyword) !== "";
-		const keywordMatched = !hasStateKeyword || normalize(stateKeyword) === normalize(keyword);
-		const feeds = search?.feeds;
-		const data = unwrap(feeds);
-		const hasStateFeeds = Array.isArray(data) && data.length > 0;
-		const stateSig = stateSignature(data);
-		const domSig = domSignature();
-		const hasVisibleCards = domSig !== "";
-		const urlKeywordText = urlKeyword();
-		const urlKeywordMatched = urlKeywordText !== "" && urlKeywordText === normalize(keyword);
-		const markedInput = document.querySelector(markedSearchInputSelector);
-		const searchInput = markedInput || Array.from(document.querySelectorAll(searchInputSelector)).find(visible);
-		const inputKeyword = searchInput ? inputValue(searchInput) : "";
-		const inputMatched = inputKeyword !== "" && inputKeyword === normalize(keyword) && /\/search/i.test(location.pathname);
-		return (hasStateKeyword && keywordMatched && hasStateFeeds && changed(stateSig, baselineStateSignature)) ||
-			(urlKeywordMatched && hasVisibleCards && changed(domSig, baselineDOMSignature)) ||
-			(inputMatched && hasVisibleCards && changedAny(stateSig, domSig)) ||
-			Date.now() >= deadline;
-	}`, deadline, keyword, SelectorFeedCard, SelectorSearchInput, SelectorMarkedSearchInput, baseline.StateSignature, baseline.DOMSignature))
-	if err != nil {
-		return err
+		}
+
+		if err := page.Sleep(300 * time.Millisecond); err != nil {
+			return err
+		}
 	}
 
-	probe, err := probeSearchResultsKeyword(page, keyword)
-	if err != nil {
-		return err
+	if lastErr != nil {
+		return fmt.Errorf("等待搜索结果超时(%s): %w", searchResultsWaitTimeout, lastErr)
 	}
-	if searchResultsReady(probe, baseline) {
-		return nil
-	}
-	if probe.HasStateKeyword && !probe.KeywordMatched {
+	if last.HasStateKeyword && !last.KeywordMatched {
 		return fmt.Errorf("搜索结果关键词不匹配: expected=%q state_keyword=%q url_keyword=%q input_keyword=%q visible_cards=%v",
-			keyword, probe.StateKeyword, probe.URLKeyword, probe.InputKeyword, probe.HasVisibleCards)
+			keyword, last.StateKeyword, last.URLKeyword, last.InputKeyword, last.HasVisibleCards)
 	}
-	if probe.HasStateKeyword && !probe.HasStateFeeds {
-		return fmt.Errorf("搜索状态结果未加载: keyword=%q state_keyword=%q", keyword, probe.StateKeyword)
+	if last.HasStateKeyword && !last.HasStateFeeds {
+		return fmt.Errorf("搜索状态结果未加载: keyword=%q state_keyword=%q", keyword, last.StateKeyword)
 	}
 	return fmt.Errorf("搜索结果未加载: keyword=%q state_keyword=%q url_keyword=%q input_keyword=%q visible_cards=%v",
-		keyword, probe.StateKeyword, probe.URLKeyword, probe.InputKeyword, probe.HasVisibleCards)
+		keyword, last.StateKeyword, last.URLKeyword, last.InputKeyword, last.HasVisibleCards)
 }
 
 type searchResultsKeywordProbe struct {
