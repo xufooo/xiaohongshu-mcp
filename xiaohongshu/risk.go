@@ -92,8 +92,9 @@ func ClassifyRisk(page *hrod.Page) (RiskSignal, error) {
 			{
 				kind: "slider_challenge",
 				reason: "滑块验证",
+				// 通用 slider class 也会出现在正常页面组件中，不能单独作为风控证据。
 				keywords: ["滑块"],
-				dom: [".slider", "[class*='slider']", "[class*='captcha'] [class*='slide']"]
+				dom: []
 			},
 			{
 				kind: "captcha",
