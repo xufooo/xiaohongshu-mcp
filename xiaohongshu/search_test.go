@@ -387,12 +387,19 @@ func TestSearchInputSelectorPriorityStructure(t *testing.T) {
 	require.Contains(t, probeSource, "searchSelector")
 	require.NotContains(t, probeSource, "fallbackSelector")
 	require.NotContains(t, probeSource, "compatibleSelector")
-	require.NotContains(t, probeSource, "candidates.find(")
-
+	require.Contains(t, probeSource, "candidates.find(")
 	require.Contains(t, probeSource, "rect.width > 1")
 	require.Contains(t, probeSource, "rect.height > 1")
-
 	require.Contains(t, probeSource, "`, searchSelector)")
+
+	waitStart := strings.Index(script, "func waitForSearchInput(")
+	waitEnd := strings.Index(script, "func probeSearchInput(")
+	require.NotEqual(t, -1, waitStart, "waitForSearchInput source marker missing")
+	require.Greater(t, waitEnd, waitStart, "waitForSearchInput source boundary missing")
+	waitSource := script[waitStart:waitEnd]
+	require.Contains(t, waitSource, "if searchSelector == SelectorSearchInputInFeeds")
+	require.Contains(t, waitSource, "selector = SelectorSearchInputInFeeds")
+	require.Contains(t, waitSource, "page.Element(selector)")
 }
 
 func TestDecideSearchPage(t *testing.T) {
