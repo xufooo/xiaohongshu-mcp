@@ -8,7 +8,10 @@ import (
 	hrod "github.com/xpzouying/xiaohongshu-mcp/pkg/humanize/rod"
 )
 
-const noteCloseProbeDelay = 500 * time.Millisecond
+const (
+	noteCloseProbeInterval = 100 * time.Millisecond
+	noteCloseProbeTimeout  = 1500 * time.Millisecond
+)
 
 func closeNoteOverlay(page *hrod.Page, sourceURL string) (closeMethod string, err error) {
 	if page == nil {
@@ -28,12 +31,20 @@ func closeNoteOverlay(page *hrod.Page, sourceURL string) (closeMethod string, er
 }
 
 func noteOverlayClosedAfterAttempt(page *hrod.Page) (bool, error) {
-	time.Sleep(noteCloseProbeDelay)
-	visibleCount, err := probePanelVisible(page)
-	if err != nil {
-		return false, err
+	deadline := time.Now().Add(noteCloseProbeTimeout)
+	for {
+		visibleCount, err := probePanelVisible(page)
+		if err != nil {
+			return false, err
+		}
+		if visibleCount == 0 {
+			return true, nil
+		}
+		if time.Now().After(deadline) {
+			return false, nil
+		}
+		time.Sleep(noteCloseProbeInterval)
 	}
-	return visibleCount == 0, nil
 }
 
 func probePanelVisible(page *hrod.Page) (visibleCount int, err error) {
