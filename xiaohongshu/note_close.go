@@ -10,7 +10,7 @@ import (
 
 const (
 	noteCloseProbeInterval = 100 * time.Millisecond
-	noteCloseProbeTimeout  = 1500 * time.Millisecond
+	noteCloseProbeTimeout  = 5 * time.Second
 )
 
 func closeNoteOverlay(page *hrod.Page, sourceURL string) (closeMethod string, err error) {
@@ -18,7 +18,7 @@ func closeNoteOverlay(page *hrod.Page, sourceURL string) (closeMethod string, er
 		return "", fmt.Errorf("页面不存在")
 	}
 
-	if err := page.Keyboard.Press(input.Escape); err != nil {
+	if err := page.Actor().Keyboard.Press(input.Escape); err != nil {
 		return "", fmt.Errorf("Escape 关闭笔记面板失败: %w", err)
 	}
 	if closed, err := noteOverlayClosedAfterAttempt(page); err != nil {

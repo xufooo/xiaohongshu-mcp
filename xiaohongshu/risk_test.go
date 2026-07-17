@@ -1,6 +1,8 @@
 package xiaohongshu
 
 import (
+	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -31,5 +33,19 @@ func TestApplyRiskPolicyUsesTieredCooldowns(t *testing.T) {
 				t.Fatalf("recoverable = %v, want %v", signal.Recoverable, test.recoverable)
 			}
 		})
+	}
+}
+
+func TestSliderRiskRequiresTextEvidence(t *testing.T) {
+	source, err := os.ReadFile("risk.go")
+	if err != nil {
+		t.Fatalf("读取 risk.go 失败: %v", err)
+	}
+	text := string(source)
+	if strings.Contains(text, `".slider"`) || strings.Contains(text, `[class*='slider']`) {
+		t.Fatal("slider class 不能单独触发滑块风控")
+	}
+	if !strings.Contains(text, `keywords: ["滑块"],`) || !strings.Contains(text, `dom: []`) {
+		t.Fatal("滑块风控必须保留文本证据且不使用通用 DOM class")
 	}
 }
