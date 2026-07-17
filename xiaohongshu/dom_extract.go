@@ -221,6 +221,43 @@ func ExtractFeedDetailFromDOM(page *hrod.Page, feedID string) (*FeedDetailRespon
 	return &response, nil
 }
 
+// ExtractOpenedNoteContentFromDOM 只读取打开笔记后的首屏标题和正文。
+// 图片、视频和评论的后续读取由 session_detail 负责。
+func ExtractOpenedNoteContentFromDOM(page *hrod.Page, feedID string) (*OpenedNoteContent, error) {
+	result, err := page.Eval(`(feedID) => {
+		const clean = (value) => (value || "").replace(/\s+/g, " ").trim();
+		const pickText = (selectors) => {
+			for (const selector of selectors) {
+				const el = document.querySelector(selector);
+				const text = clean(el?.innerText || el?.textContent);
+				if (text) return text;
+			}
+			return "";
+		};
+		const title = pickText(["#detail-title", ".note-content .title", ".title", "[class*='title']"]);
+		const desc = pickText(["#detail-desc", ".note-content .desc", ".note-text", ".desc", "[class*='desc']"]);
+		if (!title && !desc) return "";
+		return JSON.stringify({
+			note_id: feedID,
+			title,
+			desc,
+			type: document.querySelector("video") ? "video" : "normal",
+		});
+	}`, feedID)
+	if err != nil {
+		return nil, fmt.Errorf("提取打开笔记正文失败: %w", err)
+	}
+	if result == nil || strings.TrimSpace(result.Value.Str()) == "" {
+		return nil, errors.ErrNoFeedDetail
+	}
+
+	var content OpenedNoteContent
+	if err := json.Unmarshal([]byte(result.Value.Str()), &content); err != nil {
+		return nil, fmt.Errorf("解析打开笔记正文失败: %w", err)
+	}
+	return &content, nil
+}
+
 func ExtractCommentsFromDOM(page *hrod.Page, feedID string) ([]Comment, error) {
 	result, err := page.Timeout(2*time.Second).Eval(`(feedID) => {
 		const clean = (value) => (value || "").replace(/\s+/g, " ").trim();
@@ -254,7 +291,6 @@ func ExtractCommentsFromDOM(page *hrod.Page, feedID string) ([]Comment, error) {
 				showTags: []
 			};
 		}).filter((comment) => comment.content);
-		if (comments.length === 0) return "";
 		return JSON.stringify(comments);
 	}`, feedID)
 	if err != nil {

@@ -846,33 +846,20 @@ func (s *XiaohongshuService) SessionSearch(ctx context.Context, id, keyword stri
 	return &FeedsListResponse{Feeds: feeds, Count: len(feeds)}, nil
 }
 
-func (s *XiaohongshuService) SessionOpenNote(ctx context.Context, id, resultRef, xsecToken string) (*xiaohongshu.BrowseSessionInfo, error) {
+func (s *XiaohongshuService) SessionOpenNote(ctx context.Context, id, resultRef, xsecToken string) (*xiaohongshu.SessionOpenNoteResponse, error) {
 	session, err := s.browseSessions.Get(id)
 	if err != nil {
 		return nil, err
 	}
-	if err := session.OpenNote(ctx, resultRef, xsecToken); err != nil {
-		s.recordRiskFromSession(session, err)
-		return nil, err
-	}
-	info := session.Info()
-	return &info, nil
-}
-
-func (s *XiaohongshuService) SessionRead(ctx context.Context, id string, minDuration time.Duration) (*xiaohongshu.BrowseSessionInfo, error) {
-	session, err := s.browseSessions.Get(id)
+	result, err := session.OpenNote(ctx, resultRef, xsecToken)
 	if err != nil {
-		return nil, err
-	}
-	if err := session.Read(ctx, minDuration); err != nil {
 		s.recordRiskFromSession(session, err)
 		return nil, err
 	}
-	info := session.Info()
-	return &info, nil
+	return result, nil
 }
 
-func (s *XiaohongshuService) SessionDetail(ctx context.Context, id string, loadComments bool, pages int) (*xiaohongshu.FeedDetailResponse, error) {
+func (s *XiaohongshuService) SessionDetail(ctx context.Context, id string, loadComments bool, pages int) (*xiaohongshu.SessionDetailResponse, error) {
 	session, err := s.browseSessions.Get(id)
 	if err != nil {
 		return nil, err

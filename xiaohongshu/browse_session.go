@@ -34,6 +34,12 @@ type BrowseSessionInfo struct {
 	ExpiresAt     time.Time      `json:"expires_at"`
 }
 
+// SessionOpenNoteResponse 在打开笔记后直接返回首屏标题和正文。
+type SessionOpenNoteResponse struct {
+	BrowseSessionInfo
+	Note OpenedNoteContent `json:"note"`
+}
+
 type BrowseSessionPageState struct {
 	Session           BrowseSessionInfo        `json:"session"`
 	Summary           string                   `json:"summary,omitempty"`
@@ -389,32 +395,36 @@ func (s *BrowseSession) Search(ctx context.Context, keyword string, filters ...F
 	return feeds, nil
 }
 
-func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, xsecToken string) error {
+func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, xsecToken string) (*SessionOpenNoteResponse, error) {
 	opCtx, err := s.beginLockedOperation(ctx, true)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer s.finishOperation()
 
 	feed, ok := s.resolveResult(resultRef)
 	if !ok {
-		return fmt.Errorf("未找到搜索结果引用: %s", resultRef)
+		return nil, fmt.Errorf("未找到搜索结果引用: %s", resultRef)
 	}
 	if xsecToken != "" {
 		feed.XsecToken = xsecToken
 	}
 	if err := validateFeedAccessArgs(feed.ID, feed.XsecToken); err != nil {
-		return fmt.Errorf("搜索结果参数无效: %w", err)
+		return nil, fmt.Errorf("搜索结果参数无效: %w", err)
 	}
 
 	sourceURL, err := s.currentPageURL(opCtx)
 	if err != nil {
-		return fmt.Errorf("读取当前页面 URL: %w", err)
+		return nil, fmt.Errorf("读取当前页面 URL: %w", err)
 	}
 	opener := NewNoteOpenActionWithState(s.page.Context(opCtx), s.state)
-	err = opener.OpenFromCards(opCtx, feed.ID, feed.XsecToken, OpenSourceSearch)
+	if err := opener.OpenFromCards(opCtx, feed.ID, feed.XsecToken, OpenSourceSearch); err != nil {
+		return nil, fmt.Errorf("从卡片打开笔记失败，请重新搜索或滚动后重试: %w", err)
+	}
+
+	content, err := ExtractOpenedNoteContentFromDOM(s.page.Context(opCtx), feed.ID)
 	if err != nil {
-		return fmt.Errorf("从卡片打开笔记失败，请重新搜索或滚动后重试: %w", err)
+		return nil, err
 	}
 
 	s.mu.Lock()
@@ -422,42 +432,51 @@ func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, xsecToken strin
 	s.currentFeedID = feed.ID
 	s.currentXsecToken = feed.XsecToken
 	s.opened = true
-	s.read = false
+	s.read = true
 	s.seenNotes[feed.ID] = true
-	s.recordTimelineLocked("open_note", feed.ID, "ok", time.Now(), "opened from search result "+resultRef)
+	s.recordTimelineLocked("open_note", feed.ID, "ok", time.Now(), "opened and content read from search result "+resultRef)
+	info := s.infoLocked()
 	s.mu.Unlock()
 	s.probeWatchdogSelectorsForKind(opCtx, XHSReadyDetail, feed.ID)
-	return nil
+	return &SessionOpenNoteResponse{BrowseSessionInfo: info, Note: *content}, nil
 }
 
-func (s *BrowseSession) Read(ctx context.Context, minDuration time.Duration) error {
+func (s *BrowseSession) Detail(ctx context.Context, _ bool, _ int) (*SessionDetailResponse, error) {
 	opCtx, err := s.beginLockedOperation(ctx, true)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer s.finishOperation()
 
 	feedID, err := s.currentOpenedFeedID()
 	if err != nil {
-		return err
+		return nil, err
 	}
-	reader := NewReadStageAction(s.page.Context(opCtx), s.state)
-	readStartedAt := time.Now()
-	if err := reader.Read(opCtx, feedID, minDuration); err != nil {
-		return err
+	s.mu.Lock()
+	page := s.page
+	s.mu.Unlock()
+	if page == nil {
+		return nil, fmt.Errorf("browse session 页面不存在: %s", s.id)
+	}
+	if err := WaitForXHSReady(page.Context(opCtx), XHSReadyOptions{Kind: XHSReadyDetail, FeedID: feedID}); err != nil {
+		return nil, err
+	}
+	comments, err := ExtractCommentsFromDOM(page.Context(opCtx), feedID)
+	if err != nil {
+		return nil, err
 	}
 
 	s.mu.Lock()
-	s.read = true
-	s.seenNotes[feedID] = true
-	s.recordTimelineLocked("read", feedID, "ok", time.Now(), fmt.Sprintf("duration=%s", time.Since(readStartedAt)))
+	s.recordTimelineLocked("detail", feedID, "ok", time.Now(), fmt.Sprintf("visible_comments=%d", len(comments)))
 	s.mu.Unlock()
 	s.probeWatchdogSelectorsForKind(opCtx, XHSReadyDetail, feedID)
-	return nil
-}
-
-func (s *BrowseSession) Detail(ctx context.Context, loadComments bool, pages int) (*FeedDetailResponse, error) {
-	return s.detail(ctx, "", loadComments, pages, DefaultCommentLoadConfig(), false)
+	unimplemented := SessionMediaReadStatus{Implemented: false, Message: "暂未实现"}
+	return &SessionDetailResponse{
+		NoteID:   feedID,
+		Comments: comments,
+		Images:   unimplemented,
+		Video:    unimplemented,
+	}, nil
 }
 
 func (s *BrowseSession) DetailForFeed(ctx context.Context, expectedFeedID string, loadComments bool, config CommentLoadConfig) (*FeedDetailResponse, error) {
@@ -1140,10 +1159,8 @@ func (s *BrowseSession) currentStateLocked(kind XHSReadyKind, resultsCount int, 
 
 func (s *BrowseSession) nextHintLocked(resultsCount int) string {
 	switch {
-	case s.opened && !s.read:
-		return "可调用 session_detail 提取当前笔记可见DOM；大量评论读取请使用 get_feed_detail（传 max_items、cursor）；点赞或评论前先调用 session_read"
-	case s.opened && s.read:
-		return "可调用 session_detail 提取当前笔记可见DOM；大量评论读取请使用 get_feed_detail（传 max_items、cursor）"
+	case s.opened:
+		return "笔记首屏标题和正文已在 session_open_note 返回；可调用 session_detail 继续读取媒体或当前评论。大量评论读取请使用 get_feed_detail（传 max_items、cursor）"
 	case resultsCount > 0:
 		return "可继续：搜索新关键词 (session_search)、打开其他笔记 (session_open_note)、或滚动浏览 feed"
 	case !s.opened && resultsCount == 0:
@@ -1195,16 +1212,7 @@ func (s *BrowseSession) availableActionsLocked(resultsCount int) []string {
 		actions = append(actions, "session_open_note")
 	}
 	if s.opened {
-		actions = append(actions, "session_detail")
-	}
-	if s.opened && !s.read {
-		actions = append(actions, "session_read")
-	}
-	if s.opened && s.read {
-		actions = append(actions, "session_like", "session_comment")
-	}
-	if s.opened {
-		actions = append(actions, "session_close_note")
+		actions = append(actions, "session_detail", "session_like", "session_comment", "session_close_note")
 	}
 	return actions
 }
@@ -1230,30 +1238,12 @@ func (s *BrowseSession) semanticActionsLocked(resultsCount int) []BrowseSessionA
 			})
 		}
 	}
-	if s.opened && !s.read {
+	if s.opened {
 		actions = append(actions,
 			BrowseSessionAction{
 				Ref:      "detail_current",
 				Tool:     "session_detail",
-				Label:    "提取当前笔记详情",
-				FeedID:   s.currentFeedID,
-				Requires: "opened",
-			},
-			BrowseSessionAction{
-				Ref:      "read_current",
-				Tool:     "session_read",
-				Label:    "阅读当前笔记",
-				FeedID:   s.currentFeedID,
-				Requires: "opened",
-			},
-		)
-	}
-	if s.opened && s.read {
-		actions = append(actions,
-			BrowseSessionAction{
-				Ref:      "detail_current",
-				Tool:     "session_detail",
-				Label:    "提取当前笔记详情",
+				Label:    "继续读取当前笔记媒体或评论",
 				FeedID:   s.currentFeedID,
 				Requires: "opened",
 			},
@@ -1262,7 +1252,7 @@ func (s *BrowseSession) semanticActionsLocked(resultsCount int) []BrowseSessionA
 				Tool:     "session_like",
 				Label:    "点赞当前笔记",
 				FeedID:   s.currentFeedID,
-				Requires: "read",
+				Requires: "opened",
 				Confirm:  true,
 			},
 			BrowseSessionAction{
@@ -1270,7 +1260,7 @@ func (s *BrowseSession) semanticActionsLocked(resultsCount int) []BrowseSessionA
 				Tool:     "session_comment",
 				Label:    "评论当前笔记",
 				FeedID:   s.currentFeedID,
-				Requires: "read",
+				Requires: "opened",
 				Confirm:  true,
 			},
 		)
@@ -1295,16 +1285,7 @@ func (s *BrowseSession) recommendedActionLocked(ready bool, results []BrowseSess
 			Label: "重新读取 session 状态",
 		}
 	}
-	if s.opened && !s.read {
-		return &BrowseSessionAction{
-			Ref:      "read_current",
-			Tool:     "session_read",
-			Label:    "阅读当前笔记",
-			FeedID:   s.currentFeedID,
-			Requires: "opened",
-		}
-	}
-	if s.opened && s.read {
+	if s.opened {
 		return &BrowseSessionAction{
 			Ref:    "back_to_results",
 			Tool:   "session_close_note",

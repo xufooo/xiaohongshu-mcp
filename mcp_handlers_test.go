@@ -28,11 +28,11 @@ func TestSessionMCPErrorResultIncludesNextStepPayload(t *testing.T) {
 	}
 }
 
-func TestSessionMCPErrorFromErrSuggestsReadForUnreadInteraction(t *testing.T) {
+func TestSessionMCPErrorFromErrSuggestsOpenNoteForUnreadInteraction(t *testing.T) {
 	result := sessionMCPErrorFromErr("session点赞失败", errors.New("互动只能对已阅读的笔记执行"), sessionNextStepState())
 	text := result.Content[0].Text
-	if !strings.Contains(text, `"tool": "session_read"`) {
-		t.Fatalf("expected session_read next step, got %q", text)
+	if !strings.Contains(text, `"tool": "session_open_note"`) {
+		t.Fatalf("expected session_open_note next step, got %q", text)
 	}
 }
 

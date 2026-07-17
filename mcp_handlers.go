@@ -224,7 +224,7 @@ func sessionNextStepForError(errText string, fallback mcpSessionNextStep) mcpSes
 		strings.Contains(errText, "只能对已打开的笔记执行"):
 		return sessionNextStepOpenNote()
 	case strings.Contains(errText, "只能对已阅读的笔记执行"):
-		return sessionNextStepRead()
+		return sessionNextStepOpenNote()
 	case strings.Contains(errText, "读取当前页面 URL"),
 		strings.Contains(errText, "页面不存在"),
 		strings.Contains(errText, "ready"),
@@ -273,14 +273,6 @@ func sessionNextStepOpenNote() mcpSessionNextStep {
 		Tool:   "session_open_note",
 		Reason: "当前 session 还没有打开可操作的笔记",
 		Hint:   "先从 session_state.results 中选择 result_ref 打开笔记",
-	}
-}
-
-func sessionNextStepRead() mcpSessionNextStep {
-	return mcpSessionNextStep{
-		Tool:   "session_read",
-		Reason: "写操作前需要先完成当前笔记阅读",
-		Hint:   "先调用 session_read，再重新发起点赞或评论",
 	}
 }
 
@@ -1250,21 +1242,6 @@ func (s *AppServer) handleSessionOpenNote(ctx context.Context, args SessionOpenN
 		return sessionMCPErrorFromErr("session打开笔记失败", err, sessionNextStepState())
 	}
 	return jsonMCPResult(info, "session打开笔记成功")
-}
-
-func (s *AppServer) handleSessionRead(ctx context.Context, args SessionReadArgs) *MCPToolResult {
-	if args.SessionID == "" {
-		return sessionMCPErrorResult("session阅读失败: 缺少session_id参数", sessionNextStepCreateSession())
-	}
-	if blocked := s.rateLimitMCP(ctx, "session阅读", ratelimit.ActionOpenNote); blocked != nil {
-		return blocked
-	}
-	minDuration := time.Duration(args.MinSeconds) * time.Second
-	info, err := s.xiaohongshuService.SessionRead(ctx, args.SessionID, minDuration)
-	if err != nil {
-		return sessionMCPErrorFromErr("session阅读失败", err, sessionNextStepOpenNote())
-	}
-	return jsonMCPResult(info, "session阅读成功")
 }
 
 func (s *AppServer) handleSessionDetail(ctx context.Context, args SessionDetailArgs) *MCPToolResult {
