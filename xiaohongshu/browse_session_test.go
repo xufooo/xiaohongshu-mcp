@@ -448,11 +448,11 @@ func TestBrowseSessionRecommendedActionAvoidsWriteAfterRead(t *testing.T) {
 	if action == nil {
 		t.Fatal("recommended action is nil")
 	}
-	if action.Tool != "session_back" || action.Ref != "back_to_results" {
-		t.Fatalf("recommended action = %+v, want session_back", action)
+	if action.Tool != "session_close_note" || action.Ref != "back_to_results" {
+		t.Fatalf("recommended action = %+v, want session_close_note", action)
 	}
-	if action.Label != "关闭当前笔记面板" {
-		t.Fatalf("recommended label = %q, want 关闭当前笔记面板", action.Label)
+	if action.Label != "关闭当前笔记并返回来源页" {
+		t.Fatalf("recommended label = %q, want 关闭当前笔记并返回来源页", action.Label)
 	}
 }
 
@@ -466,25 +466,25 @@ func TestOpenedSessionBackActionDoesNotRequireSourceURL(t *testing.T) {
 	available := session.availableActionsLocked(0)
 	found := false
 	for _, action := range available {
-		if action == "session_back" {
+		if action == "session_close_note" {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Fatalf("session_back missing from available actions without sourceURL: %+v", available)
+		t.Fatalf("session_close_note missing from available actions without sourceURL: %+v", available)
 	}
 
 	semantic := session.semanticActionsLocked(0)
 	found = false
 	for _, action := range semantic {
-		if action.Tool == "session_back" && action.Label == "关闭当前笔记面板" {
+		if action.Tool == "session_close_note" && action.Label == "关闭当前笔记并返回来源页" {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Fatalf("session_back missing from semantic actions without sourceURL: %+v", semantic)
+		t.Fatalf("session_close_note missing from semantic actions without sourceURL: %+v", semantic)
 	}
 }
 

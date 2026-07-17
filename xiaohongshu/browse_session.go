@@ -441,10 +441,8 @@ func (s *BrowseSession) Read(ctx context.Context, minDuration time.Duration) err
 	if err != nil {
 		return err
 	}
-	if minDuration <= 0 {
-		minDuration = 20 * time.Second
-	}
 	reader := NewReadStageAction(s.page.Context(opCtx), s.state)
+	readStartedAt := time.Now()
 	if err := reader.Read(opCtx, feedID, minDuration); err != nil {
 		return err
 	}
@@ -452,7 +450,7 @@ func (s *BrowseSession) Read(ctx context.Context, minDuration time.Duration) err
 	s.mu.Lock()
 	s.read = true
 	s.seenNotes[feedID] = true
-	s.recordTimelineLocked("read", feedID, "ok", time.Now(), fmt.Sprintf("duration=%s", minDuration))
+	s.recordTimelineLocked("read", feedID, "ok", time.Now(), fmt.Sprintf("duration=%s", time.Since(readStartedAt)))
 	s.mu.Unlock()
 	s.probeWatchdogSelectorsForKind(opCtx, XHSReadyDetail, feedID)
 	return nil
@@ -1206,7 +1204,7 @@ func (s *BrowseSession) availableActionsLocked(resultsCount int) []string {
 		actions = append(actions, "session_like", "session_comment")
 	}
 	if s.opened {
-		actions = append(actions, "session_back")
+		actions = append(actions, "session_close_note")
 	}
 	return actions
 }
@@ -1280,8 +1278,8 @@ func (s *BrowseSession) semanticActionsLocked(resultsCount int) []BrowseSessionA
 	if s.opened {
 		actions = append(actions, BrowseSessionAction{
 			Ref:    "back_to_results",
-			Tool:   "session_back",
-			Label:  "关闭当前笔记面板",
+			Tool:   "session_close_note",
+			Label:  "关闭当前笔记并返回来源页",
 			FeedID: s.currentFeedID,
 		})
 	}
@@ -1309,8 +1307,8 @@ func (s *BrowseSession) recommendedActionLocked(ready bool, results []BrowseSess
 	if s.opened && s.read {
 		return &BrowseSessionAction{
 			Ref:    "back_to_results",
-			Tool:   "session_back",
-			Label:  "关闭当前笔记面板",
+			Tool:   "session_close_note",
+			Label:  "关闭当前笔记并返回来源页",
 			FeedID: s.currentFeedID,
 		}
 	}
