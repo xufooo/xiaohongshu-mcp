@@ -105,6 +105,28 @@ type FeedDetail struct {
 	ImageList    []DetailImageInfo `json:"imageList"`
 }
 
+// OpenedNoteContent 是打开笔记时读取的首屏正文，不包含媒体页或评论。
+type OpenedNoteContent struct {
+	NoteID string `json:"note_id"`
+	Title  string `json:"title"`
+	Desc   string `json:"desc"`
+	Type   string `json:"type"`
+}
+
+// SessionMediaReadStatus 明确说明按需媒体读取能力的当前状态。
+type SessionMediaReadStatus struct {
+	Implemented bool   `json:"implemented"`
+	Message     string `json:"message"`
+}
+
+// SessionDetailResponse 是打开后继续读取的结果；当前仅提供可见评论。
+type SessionDetailResponse struct {
+	NoteID   string                 `json:"note_id"`
+	Comments []Comment              `json:"comments"`
+	Images   SessionMediaReadStatus `json:"images"`
+	Video    SessionMediaReadStatus `json:"video"`
+}
+
 // DetailImageInfo 表示详情页的图片信息
 type DetailImageInfo struct {
 	Width      int    `json:"width"`

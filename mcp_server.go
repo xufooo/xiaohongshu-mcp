@@ -130,11 +130,6 @@ type SessionOpenNoteArgs struct {
 	XsecToken string `json:"xsec_token,omitempty" jsonschema:"访问令牌。通常可省略，session会使用搜索结果里的xsecToken"`
 }
 
-type SessionReadArgs struct {
-	SessionID  string `json:"session_id" jsonschema:"浏览会话ID，由create_browse_session返回"`
-	MinSeconds int    `json:"min_seconds" jsonschema:"最短有效阅读秒数；不传或0时，单图/纯文字约5秒，多图实际翻页约10秒"`
-}
-
 type SessionLikeArgs struct {
 	SessionID string `json:"session_id" jsonschema:"浏览会话ID，由create_browse_session返回"`
 	Unlike       bool   `json:"unlike,omitempty" jsonschema:"是否取消点赞，true为取消点赞，false或未设置则为点赞"`
@@ -551,7 +546,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 	mcp.AddTool(server,
 		&mcp.Tool{
 			Name:        "session_open_note",
-			Description: "在浏览会话内从搜索结果卡片点击打开笔记。result_ref可传搜索结果index或feed_id",
+			Description: "在浏览会话内从搜索结果卡片点击打开笔记，并直接返回首屏标题和正文。result_ref可传搜索结果index或feed_id",
 			Annotations: &mcp.ToolAnnotations{
 				Title:        "Session Open Note",
 				ReadOnlyHint: true,
@@ -563,27 +558,11 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 		}),
 	)
 
-	// 工具 18: session 阅读
-	mcp.AddTool(server,
-		&mcp.Tool{
-			Name:        "session_read",
-			Description: "在浏览会话内阅读当前已打开笔记，记录阅读和滚动状态",
-			Annotations: &mcp.ToolAnnotations{
-				Title:        "Session Read",
-				ReadOnlyHint: true,
-			},
-		},
-		withPanicRecovery("session_read", func(ctx context.Context, req *mcp.CallToolRequest, args SessionReadArgs) (*mcp.CallToolResult, any, error) {
-			result := appServer.handleSessionRead(ctx, args)
-			return convertToMCPResult(result), nil, nil
-		}),
-	)
-
-	// 工具 19: session 详情
+	// 工具 18: session 详情
 	mcp.AddTool(server,
 		&mcp.Tool{
 			Name:        "session_detail",
-			Description: "在浏览会话当前已打开的笔记页面上提取当前可见DOM（笔记正文、作者、互动状态和当前可见评论）。仅提取当前可见内容，不进行滚动加载。如需加载大量评论，请使用 get_feed_detail 并传 max_items（推荐20），再将返回的 cursor 传入后续调用。",
+			Description: "在浏览会话当前已打开的笔记页面上继续读取媒体或评论。笔记首屏标题和正文已由 session_open_note 返回；图片、视频读取暂未实现。大量评论读取请使用 get_feed_detail 并传 max_items（推荐20），再将返回的 cursor 传入后续调用。",
 			Annotations: &mcp.ToolAnnotations{
 				Title:        "Session Detail",
 				ReadOnlyHint: true,
