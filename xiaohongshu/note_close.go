@@ -18,7 +18,7 @@ func closeNoteOverlay(page *hrod.Page, sourceURL string) (closeMethod string, er
 		return "", fmt.Errorf("页面不存在")
 	}
 
-	if err := page.Actor().Keyboard.Press(input.Escape); err != nil {
+	if err := page.Rod.Keyboard.Type(input.Escape); err != nil {
 		return "", fmt.Errorf("Escape 关闭笔记面板失败: %w", err)
 	}
 	if closed, err := noteOverlayClosedAfterAttempt(page); err != nil {
