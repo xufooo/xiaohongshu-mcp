@@ -401,15 +401,17 @@ func LoadCommentsBatch(page *hrod.Page, config CommentLoadConfig, cursor *Commen
 		}
 	}
 
-	if err := scrollToCommentsArea(page); err != nil {
-		logrus.Warnf("定位评论区失败: %v", err)
-	}
-	// 初始温柔滚动触发懒加载(reader.Read 阶段原会做这个)
+	// 1. 初始温柔滚动触发评论懒加载(对应 d910ed6 中 reader.Read 的 scrollNoteScroller 160px)
 	if err := scrollNoteScroller(page, 160); err != nil {
 		logrus.Warnf("初始滚动触发评论懒加载失败: %v", err)
 	}
 	if err := page.Sleep(await); err != nil {
 		return batch, batchCursor, true, err
+	}
+
+	// 2. 定位到评论区
+	if err := scrollToCommentsArea(page); err != nil {
+		logrus.Warnf("定位评论区失败: %v", err)
 	}
 
 	if cursor != nil && cursor.Round > 0 {
