@@ -602,11 +602,26 @@ func scrollNoteScroller(page *hrod.Page, delta float64) error {
 		// 先试 .note-scroller (Search AI 抽屉)
 		const scroller = document.querySelector(".note-scroller");
 		if (scroller) {
-			scroller.scrollBy(0, delta);
+			// 第一次大幅滚到接近底部，触发懒加载
+			const maxScroll = scroller.scrollHeight - scroller.clientHeight;
+			if (scroller.scrollTop < maxScroll * 0.8) {
+				scroller.scrollTop = Math.min(scroller.scrollTop + delta * 3, maxScroll);
+			} else {
+				scroller.scrollTop = Math.min(scroller.scrollTop + delta, maxScroll);
+			}
 			return true;
 		}
 		// 再试 window (Explore 详情页)
-		window.scrollBy(0, delta);
+		const maxScroll = Math.max(
+			document.documentElement.scrollHeight - document.documentElement.clientHeight,
+			document.body.scrollHeight - document.body.clientHeight
+		);
+		const scrollY = window.scrollY || window.pageYOffset || 0;
+		if (scrollY < maxScroll * 0.8) {
+			window.scrollTo(0, Math.min(scrollY + delta * 3, maxScroll));
+		} else {
+			window.scrollTo(0, Math.min(scrollY + delta, maxScroll));
+		}
 		return true;
 	}`, delta)
 	if err != nil {
