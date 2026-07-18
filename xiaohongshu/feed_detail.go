@@ -469,7 +469,7 @@ func LoadCommentsBatch(page *hrod.Page, config CommentLoadConfig, cursor *Commen
 
 	lastCount := -1
 	staleChecks := 0
-	const maxStaleChecks = 5
+	const maxStaleChecks = 20
 
 	for i := 0; i < maxRounds && len(batch) < maxItems; i++ {
 		if remaining := remainingDeadline(); remaining < 30*time.Second {
@@ -586,9 +586,9 @@ func currentFeedIDFromPage(page *hrod.Page) (string, error) {
 }
 
 func commentScrollSettings(speed string) (time.Duration, float64) {
-	await := map[string]time.Duration{"slow": 1200 * time.Millisecond, "normal": time.Second, "fast": 800 * time.Millisecond}[speed]
-	scrollDelta := map[string]float64{"slow": 200, "normal": 300, "fast": 500}[speed]
-	if await < 500*time.Millisecond {
+	await := map[string]time.Duration{"slow": 1200 * time.Millisecond, "normal": time.Second, "fast": time.Second}[speed]
+	scrollDelta := map[string]float64{"slow": 100, "normal": 150, "fast": 150}[speed]
+	if await < time.Second {
 		await = time.Second
 	}
 	if scrollDelta == 0 {
@@ -598,8 +598,22 @@ func commentScrollSettings(speed string) (time.Duration, float64) {
 }
 
 func scrollNoteScroller(page *hrod.Page, delta float64) error {
-	// 直接 Rod 鼠标滚轮(isTrusted=true)，不用 humanize（太慢）
-	page.Mouse.Scroll(0, delta, 1)
+	result, err := page.Timeout(2*time.Second).Eval(`(delta) => {
+		const scroller = document.querySelector(".note-scroller");
+		if (!scroller) return false;
+		scroller.scrollBy(0, delta);
+		return true;
+	}`, delta)
+	if err != nil {
+		if isEvalTimeout(err) {
+			logrus.Warnf("评论容器滚动 Eval 超时: %v", err)
+			return nil
+		}
+		return err
+	}
+	if result == nil || !result.Value.Bool() {
+		return fmt.Errorf("评论容器不存在")
+	}
 	return nil
 }
 
