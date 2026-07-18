@@ -31,7 +31,7 @@ const (
 
 const (
 	feedDetailPageTimeout = 10 * time.Minute
-	commentLoadTimeout    = 9 * time.Minute
+	commentLoadTimeout    = 2 * time.Minute
 )
 
 // ========== 数据结构 ==========
@@ -369,7 +369,7 @@ func LoadCommentsBatch(page *hrod.Page, config CommentLoadConfig, cursor *Commen
 
 	logrus.Infof("开始分批加载评论(note-scroller JS scrollBy): maxItems=%d, cursor=%+v", maxItems, cursor)
 	await, scrollDelta := commentScrollSettings(config.ScrollSpeed)
-	maxRounds := 500
+	maxRounds := 30
 	commentDeadline := time.Now().Add(commentLoadTimeout)
 	remainingDeadline := func() time.Duration {
 		return time.Until(commentDeadline)
@@ -460,9 +460,16 @@ func LoadCommentsBatch(page *hrod.Page, config CommentLoadConfig, cursor *Commen
 		return batch, batchCursor, moreVisible || (!progress.AtEnd && !progress.NoComments), nil
 	}
 
+	// 首轮无新评论且到底，直接返回
+	if len(batch) == 0 {
+		if progress, err := getCommentProgress(page); err == nil && (progress.AtEnd || progress.NoComments) {
+			return batch, batchCursor, false, nil
+		}
+	}
+
 	lastCount := -1
 	staleChecks := 0
-	const maxStaleChecks = 20
+	const maxStaleChecks = 3
 
 	for i := 0; i < maxRounds && len(batch) < maxItems; i++ {
 		if remaining := remainingDeadline(); remaining < 30*time.Second {
