@@ -531,14 +531,12 @@ func TestSearchByUIUsesInfoNotEval(t *testing.T) {
 	require.Contains(t, funcBody, `page.Rod.Info()`, "searchByUI 应使用非阻塞 Info() 获取页面 URL")
 	require.Contains(t, funcBody, `prepareSearchPage(`, "searchByUI 应通过 prepareSearchPage 决策")
 
-	resultStart := strings.Index(funcBody, `if searchSelector == SelectorSearchInputInSearchResult {`)
-	require.NotEqual(t, -1, resultStart, "结果页二次搜索分支缺失")
-	resultBody := funcBody[resultStart:]
-	resultEnd := strings.Index(resultBody, "\n	} else {")
-	require.Greater(t, resultEnd, 0, "结果页二次搜索分支边界缺失")
-	resultBody = resultBody[:resultEnd]
-	require.Contains(t, resultBody, `page.Actor().Keyboard.Press(rodinput.Enter)`, "结果页二次搜索必须使用真实 Enter")
-	require.NotContains(t, resultBody, `new KeyboardEvent`, "结果页二次搜索不得伪造 Enter 键盘事件")
+	// 搜索框输入已统一为 Rod Click + Input + Enter，不再根据页面分支
+	require.NotContains(t, funcBody, `SelectorSearchInputInSearchResult {`, "已统一 Rod 输入途径，不应有搜索页/Explore 分支")
+	require.Contains(t, funcBody, `.Click(`, "searchByUI 应使用 Rod Click")
+	require.Contains(t, funcBody, `.Input(`, "searchByUI 应使用 Rod Input")
+	require.Contains(t, funcBody, `page.Actor().Keyboard.Press(rodinput.Enter)`, "搜索必须使用真实 Enter")
+	require.NotContains(t, funcBody, `new KeyboardEvent`, "不得伪造 Enter 键盘事件")
 }
 
 func TestPrepareSearchPageBehavior(t *testing.T) {
@@ -564,7 +562,7 @@ func TestPrepareSearchPageBehavior(t *testing.T) {
 			name:         "explore page",
 			pageURL:      "https://www.xiaohongshu.com/explore",
 			wantSelector: SelectorSearchInputInFeeds,
-			wantCallLog:  []string{"Info", "Navigate"},
+			wantCallLog:  []string{"Info"},
 		},
 		{
 			name:         "non-xhs host not treated as search result",

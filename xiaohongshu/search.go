@@ -221,36 +221,15 @@ func (s *SearchAction) searchByUI(page *hrod.Page, keyword string) error {
 	if err != nil {
 		return fmt.Errorf("未找到搜索框: %w", err)
 	}
-	if searchSelector == SelectorSearchInputInSearchResult {
-		// Search AI：优先使用 probeSearchInput 已标记的可见输入（data-xhs-mcp-search-input="1"），
-		// 避免 history.back() 后 bfcache 存在多个同名 textarea 导致裸查命中错误元素。
-		if _, err := page.Eval(`(kw) => {
-			const input = document.querySelector('[data-xhs-mcp-search-input="1"]') ||
-			              document.querySelector('textarea[name="aiSearchTextarea"]');
-			if (!input) throw new Error('search input not found');
-			input.focus();
-			input.select();
-			document.execCommand('delete', false);
-			const s = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
-			s.call(input, kw);
-			input.dispatchEvent(new Event('input', {bubbles: true}));
-			}`, keyword); err != nil {
-			return fmt.Errorf("搜索关键词失败: %w", err)
-			}
-			if err := page.Actor().Keyboard.Press(rodinput.Enter); err != nil {
-			return fmt.Errorf("提交搜索失败: %w", err)
-			}
-	} else {
-		// Explore：对测试确认的输入框执行真实点击、输入和回车。
-		if err := input.Click(proto.InputMouseButtonLeft, 1); err != nil {
-			return fmt.Errorf("点击搜索框失败: %w", err)
-		}
-		if err := input.Input(keyword); err != nil {
-			return fmt.Errorf("输入关键词失败: %w", err)
-		}
-		if err := page.Actor().Keyboard.Press(rodinput.Enter); err != nil {
-			return fmt.Errorf("提交搜索失败: %w", err)
-		}
+
+	if err := input.Click(proto.InputMouseButtonLeft, 1); err != nil {
+		return fmt.Errorf("点击搜索框失败: %w", err)
+	}
+	if err := input.Input(keyword); err != nil {
+		return fmt.Errorf("输入关键词失败: %w", err)
+	}
+	if err := page.Actor().Keyboard.Press(rodinput.Enter); err != nil {
+		return fmt.Errorf("提交搜索失败: %w", err)
 	}
 
 	if err := waitForSearchResults(page, keyword, searchResultsBaseline{}); err != nil {
