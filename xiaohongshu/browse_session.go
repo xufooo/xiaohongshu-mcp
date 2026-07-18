@@ -37,7 +37,9 @@ type BrowseSessionInfo struct {
 // SessionOpenNoteResponse 在打开笔记后直接返回首屏标题和正文。
 type SessionOpenNoteResponse struct {
 	BrowseSessionInfo
-	Note OpenedNoteContent `json:"note"`
+	Note     OpenedNoteContent              `json:"note"`
+	Comments []Comment                      `json:"comments"`
+	Media    SessionMediaReadStatus         `json:"media"`
 }
 
 type BrowseSessionPageState struct {
@@ -136,8 +138,9 @@ type BrowseSession struct {
 	opened           bool
 	read             bool
 	closed           bool
-	expiresAt        time.Time
-	timeline         []BrowseSessionEvent
+	expiresAt          time.Time
+	timeline           []BrowseSessionEvent
+	initialCommentIDs  []string
 }
 
 type BrowseSessionManager struct {
@@ -275,6 +278,12 @@ func (s *BrowseSession) Info() BrowseSessionInfo {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.infoLocked()
+}
+
+func (s *BrowseSession) GetInitialCommentIDs() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.initialCommentIDs
 }
 
 func (s *BrowseSession) Renew() BrowseSessionInfo {
@@ -427,6 +436,11 @@ func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, xsecToken strin
 		return nil, err
 	}
 
+	comments, commentErr := ExtractCommentsFromDOM(s.page.Context(opCtx), feed.ID)
+	if commentErr != nil {
+		comments = nil
+	}
+
 	s.mu.Lock()
 	s.sourceURL = sourceURL
 	s.currentFeedID = feed.ID
@@ -434,11 +448,28 @@ func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, xsecToken strin
 	s.opened = true
 	s.read = true
 	s.seenNotes[feed.ID] = true
+	// 储存首屏评论 ID 作为初始 cursor，让 session_detail 从后续评论开始加载
+	s.initialCommentIDs = s.initialCommentIDs[:0]
+	for i, c := range comments {
+		if key := commentBatchKey(i, c); key != "" {
+			s.initialCommentIDs = append(s.initialCommentIDs, key)
+		}
+		for j, sub := range c.SubComments {
+			if key := commentBatchKey(j, sub); key != "" {
+				s.initialCommentIDs = append(s.initialCommentIDs, key)
+			}
+		}
+	}
 	s.recordTimelineLocked("open_note", feed.ID, "ok", time.Now(), "opened and content read from search result "+resultRef)
 	info := s.infoLocked()
 	s.mu.Unlock()
 	s.probeWatchdogSelectorsForKind(opCtx, XHSReadyDetail, feed.ID)
-	return &SessionOpenNoteResponse{BrowseSessionInfo: info, Note: *content}, nil
+	return &SessionOpenNoteResponse{
+		BrowseSessionInfo: info,
+		Note:              *content,
+		Comments:          comments,
+		Media:             SessionMediaReadStatus{Implemented: false, Message: "图片和视频阅读功能尚未实现，后续由 session_detail 支持"},
+	}, nil
 }
 
 func (s *BrowseSession) Detail(ctx context.Context, _ bool, _ int) (*SessionDetailResponse, error) {
@@ -504,11 +535,6 @@ func (s *BrowseSession) DetailCommentsBatch(ctx context.Context, expectedFeedID 
 		return nil, nil, false, err
 	}
 
-	detail, err := ExtractFeedDetailFromDOM(page.Context(opCtx), feedID)
-	if err != nil {
-		return nil, nil, false, err
-	}
-
 	commentPage := page.Context(opCtx).Timeout(commentLoadTimeout)
 	comments, nextCursor, hasMore, err := LoadCommentsBatch(commentPage, config, cursor, maxItems)
 	if err != nil {
@@ -518,19 +544,21 @@ func (s *BrowseSession) DetailCommentsBatch(ctx context.Context, expectedFeedID 
 		nextCursor.FeedID = feedID
 	}
 
-	detail.Comments = CommentList{
-		List:    comments,
-		HasMore: hasMore,
+	resp := &FeedDetailResponse{
+		Comments: CommentList{
+			List:    comments,
+			HasMore: hasMore,
+		},
 	}
 	if totalItems := knownCommentTotal(commentPage); totalItems > 0 {
-		detail.Comments.TotalItems = totalItems
+		resp.Comments.TotalItems = totalItems
 	}
 
 	s.mu.Lock()
 	s.recordTimelineLocked("detail_comments_batch", feedID, "ok", time.Now(), fmt.Sprintf("maxItems=%d hasMore=%v", maxItems, hasMore))
 	s.mu.Unlock()
 	s.probeWatchdogSelectorsForKind(opCtx, XHSReadyDetail, feedID)
-	return detail, nextCursor, hasMore, nil
+	return resp, nextCursor, hasMore, nil
 }
 
 func (s *BrowseSession) detail(ctx context.Context, expectedFeedID string, loadComments bool, pages int, config CommentLoadConfig, useConfig bool) (*FeedDetailResponse, error) {
@@ -1160,7 +1188,7 @@ func (s *BrowseSession) currentStateLocked(kind XHSReadyKind, resultsCount int, 
 func (s *BrowseSession) nextHintLocked(resultsCount int) string {
 	switch {
 	case s.opened:
-		return "笔记首屏标题和正文已在 session_open_note 返回；可调用 session_detail 读取当前可见评论，或传 max_items 和 cursor 分批加载更多评论。图片和视频读取暂未实现"
+		return "笔记已打开：首屏标题/正文/首页评论/作者/互动数据/图片列表已在 session_open_note 返回。可继续操作：session_detail(分批加载更多评论)、session_like、session_comment、user_profile(看作者主页)。图片和视频浏览功能尚未实现"
 	case resultsCount > 0:
 		return "可继续：搜索新关键词 (session_search)、打开其他笔记 (session_open_note)、或滚动浏览 feed"
 	case !s.opened && resultsCount == 0:

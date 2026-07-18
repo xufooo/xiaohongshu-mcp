@@ -105,13 +105,10 @@ type FeedDetail struct {
 	ImageList    []DetailImageInfo `json:"imageList"`
 }
 
-// OpenedNoteContent 是打开笔记时读取的首屏正文，不包含媒体页或评论。
+// OpenedNoteContent 是打开笔记时读取的首屏正文，包含笔记完整信息。
+// 后续 session_detail 不再重复读取这些内容。
 type OpenedNoteContent struct {
-	NoteID string `json:"note_id"`
-	Title  string `json:"title"`
-	Desc   string `json:"desc"`
-	Type   string `json:"type"`
-}
+	NoteID       string     ...[truncated]
 
 // SessionMediaReadStatus 明确说明按需媒体读取能力的当前状态。
 type SessionMediaReadStatus struct {

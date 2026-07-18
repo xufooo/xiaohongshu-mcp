@@ -234,14 +234,63 @@ func ExtractOpenedNoteContentFromDOM(page *hrod.Page, feedID string) (*OpenedNot
 			}
 			return "";
 		};
+		const pickAttr = (selectors, attr) => {
+			for (const selector of selectors) {
+				const el = document.querySelector(selector);
+				const value = el?.getAttribute(attr) || "";
+				if (value) return value;
+			}
+			return "";
+		};
+		const isActive = (selectors) => selectors.some((selector) => {
+			const el = document.querySelector(selector);
+			if (!el) return false;
+			const value = [
+				el.getAttribute("aria-pressed"),
+				el.getAttribute("aria-checked"),
+				el.getAttribute("data-active"),
+				el.className,
+				el.getAttribute("class"),
+				el.getAttribute("style"),
+			].join(" ").toLowerCase();
+			return /\\btrue\\b|active|selected|liked|collected|--active|fill|color:\\s*rgb/.test(value);
+		});
+		const countNear = (selectors) => {
+			for (const selector of selectors) {
+				const el = document.querySelector(selector);
+				if (!el) continue;
+				const text = clean(el.innerText || el.textContent || el.parentElement?.innerText);
+				const match = text.match(/([\\d.万wWkK]+)/);
+				if (match) return match[1];
+			}
+			return "";
+		};
+
 		const title = pickText(["#detail-title", ".note-content .title", ".title", "[class*='title']"]);
 		const desc = pickText(["#detail-desc", ".note-content .desc", ".note-text", ".desc", "[class*='desc']"]);
+		const author = pickText([".author .name", ".author-wrapper .name", ".user .name", ".nickname", "[class*='author'] [class*='name']"]);
+		const avatar = pickAttr([".author img", ".user img", ".avatar img", "img.avatar"], "src");
+		const images = Array.from(document.querySelectorAll(".swiper img, .note-content img, .media-container img"))
+			.map((img) => ({ width: img.naturalWidth || 0, height: img.naturalHeight || 0, urlDefault: img.src || "", urlPre: img.src || "" }))
+			.filter((img) => img.urlDefault);
+		const liked = isActive([".interact-container .like-lottie", ".interact-container .like-wrapper", ".interact-container [class*='like']"]);
+		const collected = isActive([".interact-container .collect-icon", ".interact-container .collect-wrapper", ".interact-container [class*='collect']"]);
+
 		if (!title && !desc) return "";
 		return JSON.stringify({
 			note_id: feedID,
 			title,
 			desc,
 			type: document.querySelector("video") ? "video" : "normal",
+			user: { nickname: author, nickName: author, avatar },
+			interactInfo: {
+				liked,
+				collected,
+				likedCount: countNear([".interact-container .like-lottie", ".interact-container .like-wrapper", ".interact-container [class*='like']"]),
+				commentCount: countNear([".comments-container .total", ".comment-wrapper", "[class*='comment']"]),
+				collectedCount: countNear([".interact-container .collect-icon", ".interact-container .collect-wrapper", ".interact-container [class*='collect']"])
+			},
+			imageList: images
 		});
 	}`, feedID)
 	if err != nil {
