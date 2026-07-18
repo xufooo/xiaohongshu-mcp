@@ -75,8 +75,8 @@ func TestCommentScrollSettingsUseSlowEmbeddedDefaults(t *testing.T) {
 	if await < time.Second {
 		t.Fatalf("slow comment scroll interval = %s, want at least 1s", await)
 	}
-	if delta < 50 || delta > 150 {
-		t.Fatalf("slow comment scroll delta = %.0f, want 50-150", delta)
+	if delta < 150 || delta > 300 {
+		t.Fatalf("slow comment scroll delta = %.0f, want 150-300", delta)
 	}
 }
 
