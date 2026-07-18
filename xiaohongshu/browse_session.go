@@ -535,7 +535,8 @@ func (s *BrowseSession) DetailCommentsBatch(ctx context.Context, expectedFeedID 
 		return nil, nil, false, err
 	}
 
-	commentPage := page.Context(opCtx).Timeout(commentLoadTimeout)
+	// 使用独立 context，避免被 MCP 请求超时截断（RPi 上 DOM 提取慢）
+	commentPage := page.Context(context.Background()).Timeout(commentLoadTimeout)
 	comments, nextCursor, hasMore, err := LoadCommentsBatch(commentPage, config, cursor, maxItems)
 	if err != nil {
 		return nil, nil, false, err
