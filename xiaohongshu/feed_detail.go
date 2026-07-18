@@ -598,20 +598,12 @@ func commentScrollSettings(speed string) (time.Duration, float64) {
 }
 
 func scrollNoteScroller(page *hrod.Page, delta float64) error {
-	_, err := page.Timeout(3*time.Second).Eval(`(delta) => {
-		// 先试 .note-scroller (Search AI 抽屉)
-		const scroller = document.querySelector(".note-scroller");
-		if (scroller) {
-			scroller.scrollBy(0, delta);
-			return true;
-		}
-		// 再试 window (Explore 详情页)
-		window.scrollBy(0, delta);
-		return true;
-	}`, delta)
+	// 先定位鼠标到可滚动区域，再用真鼠标滚轮(isTrusted=true)触发懒加载
+	_ = page.Mouse.MoveTo(100, 200)
+	err := page.Mouse.Scroll(0, delta)
 	if err != nil {
 		if isEvalTimeout(err) {
-			logrus.Warnf("评论容器滚动 Eval 超时: %v", err)
+			logrus.Warnf("鼠标滚轮滚动超时: %v", err)
 			return nil
 		}
 		return err
