@@ -406,7 +406,7 @@ func LoadCommentsBatch(page *hrod.Page, config CommentLoadConfig, cursor *Commen
 		logrus.Warnf("初始滚动触发评论懒加载失败: %v", err)
 	}
 	if err := page.Sleep(await); err != nil {
-		return batch, batchCursor, true, err
+		return nil, batchCursor, true, err
 	}
 
 	// 2. 定位到评论区
