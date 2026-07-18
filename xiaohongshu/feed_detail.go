@@ -598,16 +598,8 @@ func commentScrollSettings(speed string) (time.Duration, float64) {
 }
 
 func scrollNoteScroller(page *hrod.Page, delta float64) error {
-	// 先定位鼠标到可滚动区域，再用真鼠标滚轮(isTrusted=true)触发懒加载
-	_ = page.Mouse.MoveTo(100, 200)
-	err := page.Mouse.Scroll(0, delta)
-	if err != nil {
-		if isEvalTimeout(err) {
-			logrus.Warnf("鼠标滚轮滚动超时: %v", err)
-			return nil
-		}
-		return err
-	}
+	// Rod 鼠标滚轮(isTrusted=true)触发懒加载
+	page.MustScroll(delta)
 	return nil
 }
 
