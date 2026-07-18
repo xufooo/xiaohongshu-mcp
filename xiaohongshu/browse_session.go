@@ -820,6 +820,39 @@ func (s *BrowseSession) Back(ctx context.Context) error {
 
 	s.mu.Lock()
 	page := s.page
+	feedID := s.currentFeedID
+	s.mu.Unlock()
+
+	if page == nil {
+		return fmt.Errorf("browse session 页面不存在: %s", s.id)
+	}
+
+	// 通用后退：从任意页面返回上一步
+	if _, err := page.Eval(`() => window.history.back()`); err != nil {
+		return fmt.Errorf("history.back 失败: %w", err)
+	}
+	page.Sleep(1000 * time.Millisecond) // 等待 SPA 渲染
+
+	s.refreshPageState(opCtx)
+	s.mu.Lock()
+	s.currentFeedID = ""
+	s.currentXsecToken = ""
+	s.opened = false
+	s.read = false
+	s.recordTimelineLocked("back", feedID, "ok", time.Now(), "history.back()")
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *BrowseSession) CloseNote(ctx context.Context) error {
+	opCtx, err := s.beginLockedOperation(ctx, true)
+	if err != nil {
+		return err
+	}
+	defer s.finishOperation()
+
+	s.mu.Lock()
+	page := s.page
 	sourceURL := s.sourceURL
 	feedID := s.currentFeedID
 	s.mu.Unlock()
@@ -836,23 +869,13 @@ func (s *BrowseSession) Back(ctx context.Context) error {
 
 	s.refreshPageState(opCtx)
 	s.mu.Lock()
-	currentURL := s.currentURL
-	s.mu.Unlock()
-	if !isSearchResultPage(currentURL) {
-		return fmt.Errorf("未回到搜索结果页: %s", currentURL)
-	}
-	s.mu.Lock()
 	s.currentFeedID = ""
 	s.currentXsecToken = ""
 	s.opened = false
 	s.read = false
-	s.recordTimelineLocked("back", feedID, "ok", time.Now(), "closed note panel")
+	s.recordTimelineLocked("close_note", feedID, "ok", time.Now(), method)
 	s.mu.Unlock()
 	return nil
-}
-
-func (s *BrowseSession) CloseNote(ctx context.Context) error {
-	return s.Back(ctx)
 }
 
 func (s *BrowseSession) Close() {
