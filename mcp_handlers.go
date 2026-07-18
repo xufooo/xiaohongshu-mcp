@@ -1040,6 +1040,10 @@ func (s *AppServer) handleSessionDetail(ctx context.Context, args SessionDetailA
 	if err != nil {
 		return sessionMCPErrorFromErr("session详情获取失败", err, sessionNextStepOpenNote())
 	}
+	// 确保 list 不为 null
+	if detail.Comments == nil {
+		detail.Comments = []xiaohongshu.Comment{}
+	}
 	return jsonMCPResult(detail, "session详情获取成功")
 }
 
