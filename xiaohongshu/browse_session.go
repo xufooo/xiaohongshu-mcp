@@ -1263,7 +1263,7 @@ func (s *BrowseSession) availableActionsLocked(resultsCount int) []string {
 		actions = append(actions, "session_open_note")
 	}
 	if s.opened {
-		actions = append(actions, "session_detail", "session_like", "session_comment", "session_close_note")
+		actions = append(actions, "session_detail", "session_like", "session_comment", "session_back")
 	}
 	return actions
 }
@@ -1318,9 +1318,9 @@ func (s *BrowseSession) semanticActionsLocked(resultsCount int) []BrowseSessionA
 	}
 	if s.opened {
 		actions = append(actions, BrowseSessionAction{
-			Ref:    "back_to_results",
-			Tool:   "session_close_note",
-			Label:  "关闭当前笔记并返回来源页",
+			Ref:    "back",
+			Tool:   "session_back",
+			Label:  "后退到上一页（关闭笔记/返回）",
 			FeedID: s.currentFeedID,
 		})
 	}
@@ -1338,9 +1338,9 @@ func (s *BrowseSession) recommendedActionLocked(ready bool, results []BrowseSess
 	}
 	if s.opened {
 		return &BrowseSessionAction{
-			Ref:    "back_to_results",
-			Tool:   "session_close_note",
-			Label:  "关闭当前笔记并返回来源页",
+			Ref:    "back",
+			Tool:   "session_back",
+			Label:  "后退到上一页",
 			FeedID: s.currentFeedID,
 		}
 	}

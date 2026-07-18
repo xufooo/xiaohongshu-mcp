@@ -547,27 +547,11 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 		}),
 	)
 
-	// 工具 22: session 关闭笔记
-	mcp.AddTool(server,
-		&mcp.Tool{
-			Name:        "session_close_note",
-			Description: "在浏览会话内关闭当前笔记，并返回打开该笔记前的来源页",
-			Annotations: &mcp.ToolAnnotations{
-				Title:        "Session Close Note",
-				ReadOnlyHint: true,
-			},
-		},
-		withPanicRecovery("session_close_note", func(ctx context.Context, req *mcp.CallToolRequest, args BrowseSessionIDArgs) (*mcp.CallToolResult, any, error) {
-			result := appServer.handleSessionBack(ctx, args)
-			return convertToMCPResult(result), nil, nil
-		}),
-	)
-
-	// 工具 23: 兼容旧客户端的 session 返回别名
+	// 工具 22: session 后退（通用）
 	mcp.AddTool(server,
 		&mcp.Tool{
 			Name:        "session_back",
-			Description: "已废弃的兼容别名；请改用 session_close_note 关闭当前笔记并返回来源页",
+			Description: "在浏览会话内后退到上一页（支持任意页面：笔记详情、作者主页等）",
 			Annotations: &mcp.ToolAnnotations{
 				Title:        "Session Back",
 				ReadOnlyHint: true,
