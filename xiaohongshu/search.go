@@ -225,6 +225,13 @@ func (s *SearchAction) searchByUI(page *hrod.Page, keyword string) error {
 	if err := input.Click(proto.InputMouseButtonLeft, 1); err != nil {
 		return fmt.Errorf("点击搜索框失败: %w", err)
 	}
+	// Vue 控制的输入框需要先 JS 清空再键入，否则旧词残留
+	if _, err := page.Eval(`() => {
+		const el = document.activeElement;
+		if (el) { el.select(); document.execCommand('delete', false); }
+	}`); err != nil {
+		return fmt.Errorf("清空搜索框失败: %w", err)
+	}
 	if err := input.Input(keyword); err != nil {
 		return fmt.Errorf("输入关键词失败: %w", err)
 	}
