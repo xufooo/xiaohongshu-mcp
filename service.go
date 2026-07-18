@@ -800,6 +800,12 @@ func (s *XiaohongshuService) CreateBrowseSession(ctx context.Context) (*xiaohong
 	}
 	session := s.browseSessions.Create(page, s.actionState, s.browserManager.Release)
 	s.browserManager.UpdateOwner("session:" + session.ID())
+	if err := page.Navigate("https://www.xiaohongshu.com/explore"); err != nil {
+		return nil, fmt.Errorf("导航探索页失败: %w", err)
+	}
+	if err := xiaohongshu.WaitForXHSReady(page, xiaohongshu.XHSReadyOptions{Kind: xiaohongshu.XHSReadyHome}); err != nil {
+		return nil, fmt.Errorf("等待探索页就绪失败: %w", err)
+	}
 	info := session.Info()
 	return &info, nil
 }
