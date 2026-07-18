@@ -448,11 +448,11 @@ func TestBrowseSessionRecommendedActionAvoidsWriteAfterRead(t *testing.T) {
 	if action == nil {
 		t.Fatal("recommended action is nil")
 	}
-	if action.Tool != "session_close_note" || action.Ref != "back_to_results" {
-		t.Fatalf("recommended action = %+v, want session_close_note", action)
+	if action.Tool != "session_back" || action.Ref != "back" {
+		t.Fatalf("recommended action = %+v, want session_back", action)
 	}
-	if action.Label != "关闭当前笔记并返回来源页" {
-		t.Fatalf("recommended label = %q, want 关闭当前笔记并返回来源页", action.Label)
+	if action.Label != "后退到上一页" {
+		t.Fatalf("recommended label = %q, want 后退到上一页", action.Label)
 	}
 }
 
@@ -466,63 +466,41 @@ func TestOpenedSessionBackActionDoesNotRequireSourceURL(t *testing.T) {
 	available := session.availableActionsLocked(0)
 	found := false
 	for _, action := range available {
-		if action == "session_close_note" {
+		if action == "session_back" {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Fatalf("session_close_note missing from available actions without sourceURL: %+v", available)
+		t.Fatalf("session_back missing from available actions without sourceURL: %+v", available)
 	}
 
 	semantic := session.semanticActionsLocked(0)
 	found = false
 	for _, action := range semantic {
-		if action.Tool == "session_close_note" && action.Label == "关闭当前笔记并返回来源页" {
+		if action.Tool == "session_back" && action.Label == "后退到上一页（关闭笔记/返回）" {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Fatalf("session_close_note missing from semantic actions without sourceURL: %+v", semantic)
+		t.Fatalf("session_back missing from semantic actions without sourceURL: %+v", semantic)
 	}
 }
 
-func TestBackUsesOverlayCloseStrategy(t *testing.T) {
-	data, err := os.ReadFile("note_close.go")
+func TestBackUsesHistoryBack(t *testing.T) {
+	data, err := os.ReadFile("browse_session.go")
 	if err != nil {
-		t.Fatalf("read note_close.go: %v", err)
+		t.Fatalf("read browse_session.go: %v", err)
 	}
 	source := string(data)
 	for _, want := range []string{
-		`noteCloseProbeInterval = 100 * time.Millisecond`,
-		`noteCloseProbeTimeout  = 5 * time.Second`,
-		`time.Now().Add(noteCloseProbeTimeout)`,
-		`page.Rod.Keyboard.Type(input.Escape)`,
-		`document.querySelector('.note-container')`,
-		`page.Eval`,
-		`page.Navigate(sourceURL)`,
-		`WaitForXHSReady(page, XHSReadyOptions{Kind: inferXHSReadyKindFromURL(sourceURL)})`,
+		`window.history.back()`,
+		`history.back`,
 	} {
 		if !strings.Contains(source, want) {
-			t.Fatalf("note_close.go missing %q", want)
+			t.Fatalf("browse_session.go missing %q", want)
 		}
-	}
-	for _, forbidden := range []string{
-		`type noteCloseProbe struct`,
-		`isOnXHSDomain`,
-		`page.Mouse.MoveTo`,
-		`proto.Point`,
-		`history.back()`,
-		`.note-detail-mask`,
-		`mask.Click`,
-	} {
-		if strings.Contains(source, forbidden) {
-			t.Fatalf("note_close.go must not contain %q", forbidden)
-		}
-	}
-	if lines := strings.Count(strings.TrimRight(source, "\n"), "\n") + 1; lines > 80 {
-		t.Fatalf("note_close.go has %d lines, want <= 80", lines)
 	}
 }
 
