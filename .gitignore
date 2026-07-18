@@ -44,3 +44,4 @@ test_*.sh
 cookies.json
 docker/data/
 docker/images/
+.deploy/
