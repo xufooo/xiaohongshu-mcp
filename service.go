@@ -886,6 +886,11 @@ func (s *XiaohongshuService) SessionDetailBatch(ctx context.Context, id, cursorI
 			return nil, fmt.Errorf("cursor expired, please start a new batch from current visible comments")
 		}
 		cursor = stored
+	} else if ids := session.GetInitialCommentIDs(); len(ids) > 0 {
+		cursor = &xiaohongshu.CommentCursor{
+			FeedID:      info.CurrentFeedID,
+			ReturnedIDs: ids,
+		}
 	}
 
 	detail, nextCursor, hasMore, err := session.DetailCommentsBatch(ctx, info.CurrentFeedID, cursor, maxItems, config)
