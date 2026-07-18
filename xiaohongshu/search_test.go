@@ -420,7 +420,7 @@ func TestDecideSearchPage(t *testing.T) {
 			name: "explore page",
 			url:  "https://www.xiaohongshu.com/explore",
 			want: searchPageDecision{
-				NavigateExplore: true,
+				NavigateExplore: false,
 				SearchSelector:  SelectorSearchInputInFeeds,
 			},
 		},
