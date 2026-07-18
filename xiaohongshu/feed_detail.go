@@ -598,10 +598,15 @@ func commentScrollSettings(speed string) (time.Duration, float64) {
 }
 
 func scrollNoteScroller(page *hrod.Page, delta float64) error {
-	result, err := page.Timeout(2*time.Second).Eval(`(delta) => {
+	_, err := page.Timeout(3*time.Second).Eval(`(delta) => {
+		// 先试 .note-scroller (Search AI 抽屉)
 		const scroller = document.querySelector(".note-scroller");
-		if (!scroller) return false;
-		scroller.scrollBy(0, delta);
+		if (scroller) {
+			scroller.scrollBy(0, delta);
+			return true;
+		}
+		// 再试 window (Explore 详情页)
+		window.scrollBy(0, delta);
 		return true;
 	}`, delta)
 	if err != nil {
@@ -610,9 +615,6 @@ func scrollNoteScroller(page *hrod.Page, delta float64) error {
 			return nil
 		}
 		return err
-	}
-	if result == nil || !result.Value.Bool() {
-		return fmt.Errorf("评论容器不存在")
 	}
 	return nil
 }
