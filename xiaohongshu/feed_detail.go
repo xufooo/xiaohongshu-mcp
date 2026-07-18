@@ -598,8 +598,8 @@ func commentScrollSettings(speed string) (time.Duration, float64) {
 }
 
 func scrollNoteScroller(page *hrod.Page, delta float64) error {
-	// Rod 鼠标滚轮(isTrusted=true)触发懒加载
-	page.MustScroll(delta)
+	// 直接 Rod 鼠标滚轮(isTrusted=true)，不用 humanize（太慢）
+	page.Mouse.Scroll(0, delta, 1)
 	return nil
 }
 
