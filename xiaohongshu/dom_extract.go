@@ -308,7 +308,7 @@ func ExtractOpenedNoteContentFromDOM(page *hrod.Page, feedID string) (*OpenedNot
 }
 
 func ExtractCommentsFromDOM(page *hrod.Page, feedID string) ([]Comment, error) {
-	result, err := page.Timeout(2*time.Second).Eval(`(feedID) => {
+	result, err := page.Timeout(5*time.Second).Eval(`(feedID) => {
 		const clean = (value) => (value || "").replace(/\s+/g, " ").trim();
 		const comments = Array.from(document.querySelectorAll(".parent-comment")).map((parent) => {
 			const top = parent.querySelector(":scope > .comment-item") || parent;
