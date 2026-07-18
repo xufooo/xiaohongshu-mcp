@@ -917,6 +917,14 @@ func (s *XiaohongshuService) SessionDetailBatch(ctx context.Context, id, cursorI
 	}
 	detail.Comments.Cursor = nextCursorID
 	detail.Comments.HasMore = hasMore
+	detail.Comments.SeenCount = len(session.GetInitialCommentIDs())
+	if cursor != nil {
+		detail.Comments.SeenCount = len(cursor.ReturnedIDs)
+	}
+	// 确保 list 不为 null，避免前端困惑
+	if detail.Comments.List == nil {
+		detail.Comments.List = []xiaohongshu.Comment{}
+	}
 	return &FeedDetailResponse{FeedID: info.CurrentFeedID, Data: detail}, nil
 }
 

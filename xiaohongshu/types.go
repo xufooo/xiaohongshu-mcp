@@ -146,6 +146,7 @@ type CommentList struct {
 	Cursor     string    `json:"cursor"`
 	HasMore    bool      `json:"hasMore"`
 	TotalItems int       `json:"totalItems,omitempty"`
+	SeenCount  int       `json:"seenCount"`
 }
 
 // Comment 表示单条评论
