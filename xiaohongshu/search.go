@@ -801,10 +801,24 @@ func decideSearchPage(pageURL string) searchPageDecision {
 			SearchSelector:  SelectorSearchInputInSearchResult,
 		}
 	}
+	if isExplorePage(pageURL) {
+		return searchPageDecision{
+			NavigateExplore: false,
+			SearchSelector:  SelectorSearchInputInFeeds,
+		}
+	}
 	return searchPageDecision{
 		NavigateExplore: true,
 		SearchSelector:  SelectorSearchInputInFeeds,
 	}
+}
+
+func isExplorePage(rawURL string) bool {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	return parsed.Scheme == "https" && parsed.Host == "www.xiaohongshu.com" && parsed.Path == "/explore"
 }
 
 func isSearchResultPage(rawURL string) bool {
