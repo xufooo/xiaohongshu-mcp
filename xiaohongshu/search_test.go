@@ -362,9 +362,12 @@ func TestSearchResultWatchdogUsesFeedCards(t *testing.T) {
 }
 
 func TestSearchInputSelectorPriorityStructure(t *testing.T) {
-	require.Equal(t, `#search-input`, SelectorSearchInputInFeeds)
+	require.Equal(t, `#search-input-in-feeds`, SelectorSearchInputInFeeds)
 	require.Equal(t, `#search-input`, SelectorSearchInputInSearchResult)
-	require.Equal(t, `#search-input`, SelectorSearchInput)
+	require.Equal(t,
+		SelectorSearchInputInFeeds+`, `+SelectorSearchInputInSearchResult,
+		SelectorSearchInput,
+	)
 	require.NotContains(t, SelectorSearchInput, `input.search-input`)
 
 	uiSource, err := os.ReadFile("ui_selectors.go")
