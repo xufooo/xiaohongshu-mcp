@@ -401,6 +401,11 @@ func LoadCommentsBatch(page *hrod.Page, config CommentLoadConfig, cursor *Commen
 		}
 	}
 
+	// 0. 先将当前页面定位到评论区
+	if err := scrollToCommentsArea(page); err != nil {
+		logrus.Warnf("定位评论区失败: %v", err)
+	}
+
 	// 1. 在初始 160px scroll 之前读取 baseline
 	var baselineCount int
 	baselineKnown := false
