@@ -31,7 +31,7 @@ const (
 
 const (
 	feedDetailPageTimeout = 10 * time.Minute
-	commentLoadTimeout    = 2 * time.Minute
+	commentLoadTimeout    = 9 * time.Minute
 )
 
 // ========== 数据结构 ==========
