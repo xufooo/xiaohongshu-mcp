@@ -14,6 +14,7 @@ type XHSReadyKind string
 
 const (
 	XHSReadyHome       XHSReadyKind = "home"
+	XHSReadyHomeSearch XHSReadyKind = "home_search"
 	XHSReadySearch     XHSReadyKind = "search"
 	XHSReadyDetail     XHSReadyKind = "detail"
 	XHSReadyProfile    XHSReadyKind = "profile"
@@ -46,9 +47,10 @@ type xhsReadyProbe struct {
 	DetailState        bool   `json:"detail_state"`
 	DetailFeedMatched  bool   `json:"detail_feed_matched"`
 	DetailURLMatched   bool   `json:"detail_url_matched"`
-	PublishSignalCount int    `json:"publish_signal_count"`
-	StateFragment      string `json:"state_fragment,omitempty"`
-	RiskText           string `json:"risk_text,omitempty"`
+	PublishSignalCount    int    `json:"publish_signal_count"`
+	SearchInputInFeedsReady bool  `json:"search_input_in_feeds_ready"`
+	StateFragment          string `json:"state_fragment,omitempty"`
+	RiskText               string `json:"risk_text,omitempty"`
 }
 
 // WaitForXHSReady 等待页面就绪，按 kind 判断条件。
@@ -120,7 +122,7 @@ func probeWatchdogSelectors(page *hrod.Page, opts XHSReadyOptions) {
 }
 
 func probeXHSReady(page *hrod.Page, feedID string) (xhsReadyProbe, error) {
-	probeJS := `(feedID, searchInputSelector, searchResultSelector, feedCardSelector, detailSelector, commentBoxSelector, likeButtonSelector) => {` + xhsProbeVisibleJS + xhsProbeFeedMatchJS + `
+	probeJS := `(feedID, searchInputSelector, searchResultSelector, feedCardSelector, detailSelector, commentBoxSelector, likeButtonSelector, searchInputInFeedsSelector) => {` + xhsProbeVisibleJS + xhsProbeFeedMatchJS + `
 			const count = (selector) => {
 				try { return document.querySelectorAll(selector).length; } catch (_) { return 0; }
 			};
@@ -167,6 +169,19 @@ func probeXHSReady(page *hrod.Page, feedID string) (xhsReadyProbe, error) {
 		const riskText = risk
 			? text.slice(Math.max(0, riskIndex - 40), Math.min(text.length, riskIndex + 100))
 			: "";
+		const searchInputInFeedsReady = (() => {
+			const el = document.querySelector(searchInputInFeedsSelector);
+			if (!el || !el.isConnected) return false;
+			if (!visible(el)) return false;
+			if (el.disabled || el.readOnly) return false;
+			const r = el.getBoundingClientRect();
+			if (r.top >= window.innerHeight || r.bottom <= 0 ||
+				r.left >= window.innerWidth || r.right <= 0) return false;
+			const cx = r.left + r.width / 2;
+			const cy = r.top + r.height / 2;
+			const hit = document.elementFromPoint(cx, cy);
+			return hit && (el === hit || el.contains(hit));
+		})();
 		const homeFeedCount = sizeOf(homeFeeds);
 		const searchFeedCount = sizeOf(searchFeeds);
 		const stateFragment = JSON.stringify({
@@ -195,11 +210,12 @@ func probeXHSReady(page *hrod.Page, feedID string) (xhsReadyProbe, error) {
 			detail_feed_matched: feedID ? ((detailURLMatched && visibleDetails.length > 0) || visibleDetailMatched) : detailCount > 0,
 			detail_url_matched: detailURLMatched,
 			publish_signal_count: count("input[type='file'], .upload-input, .publish-container, .creator-container"),
+			search_input_in_feeds_ready: searchInputInFeedsReady,
 			state_fragment: stateFragment.slice(0, 220),
 			risk_text: riskText.slice(0, 180),
 		});
 	}`
-	obj, err := page.Eval(probeJS, feedID, SelectorSearchInput, SelectorSearchResult, SelectorFeedCard, SelectorFeedDetailReady, SelectorCommentBox, SelectorLikeButton)
+	obj, err := page.Eval(probeJS, feedID, SelectorSearchInput, SelectorSearchResult, SelectorFeedCard, SelectorFeedDetailReady, SelectorCommentBox, SelectorLikeButton, SelectorSearchInputInFeeds)
 	if err != nil {
 		return xhsReadyProbe{}, err
 	}
@@ -224,6 +240,10 @@ func isXHSReady(probe xhsReadyProbe, kind XHSReadyKind, feedID string, allowURLF
 			probe.AppCount > 0 &&
 			isHomeURL(probe.URL) &&
 			probe.DetailCount == 0
+	case XHSReadyHomeSearch:
+		return isHomeURL(probe.URL) &&
+			(probe.HomeFeedCount > 0 || probe.FeedCardCount > 0) &&
+			probe.SearchInputInFeedsReady
 	case XHSReadySearch:
 		if probe.SearchFeedCount > 0 {
 			return true
