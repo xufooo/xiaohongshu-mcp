@@ -401,7 +401,17 @@ func LoadCommentsBatch(page *hrod.Page, config CommentLoadConfig, cursor *Commen
 		}
 	}
 
-	// 1. 初始温柔滚动触发评论懒加载(对应 d910ed6 中 reader.Read 的 scrollNoteScroller 160px)
+	// 1. 在初始 160px scroll 之前读取 baseline
+	var baselineCount int
+	baselineKnown := false
+	if p, err := getCommentProgress(page); err == nil {
+		baselineCount = p.Count
+		baselineKnown = true
+	} else {
+		logrus.Warnf("获取评论 baseline 失败: %v", err)
+	}
+
+	// 2. 初始温柔滚动触发评论懒加载
 	if err := scrollNoteScrollerObserved(page, 160, batchCursor.Round); err != nil {
 		logrus.Warnf("初始滚动触发评论懒加载失败: %v", err)
 	}
@@ -409,19 +419,6 @@ func LoadCommentsBatch(page *hrod.Page, config CommentLoadConfig, cursor *Commen
 		return nil, batchCursor, true, err
 	}
 
-	if cursor != nil && cursor.Round > 0 {
-		for i := 0; i < cursor.Round; i++ {
-			if remaining := remainingDeadline(); remaining < 30*time.Second {
-				break
-			}
-			if err := scrollNoteScrollerObserved(page, scrollDelta, i); err != nil {
-				logrus.Warnf("恢复评论滚动位置失败: %v", err)
-			}
-			if err := page.Sleep(await); err != nil {
-				return nil, batchCursor, true, err
-			}
-		}
-	}
 	if err := page.Sleep(time.Second); err != nil {
 		return nil, batchCursor, true, err
 	}
@@ -465,25 +462,37 @@ func LoadCommentsBatch(page *hrod.Page, config CommentLoadConfig, cursor *Commen
 		return batch, false, nil
 	}
 
-	batch, moreVisible, err := collect(maxItems)
-	if err != nil {
-		return nil, batchCursor, true, err
-	}
-	if len(batch) >= maxItems {
-		progress, _ := getCommentProgress(page)
-		return batch, batchCursor, moreVisible || (!progress.AtEnd && !progress.NoComments), nil
+	var batch []Comment
+
+	// 初始 scroll 后根据进度决策（不无条件 collect）
+	progress, progressErr := getCommentProgress(page)
+	if progressErr == nil && progress.NoComments {
+		return batch, batchCursor, false, nil
 	}
 
-	// 首轮无新评论且到底，直接返回
-	if len(batch) == 0 {
-		if progress, err := getCommentProgress(page); err == nil && (progress.AtEnd || progress.NoComments) {
-			return batch, batchCursor, false, nil
+	if progressErr == nil && progress.AtEnd {
+		more, moreVisible, collectErr := collect(maxItems)
+		if collectErr != nil {
+			return batch, batchCursor, false, collectErr
 		}
+		batch = append(batch, more...)
+		return batch, batchCursor, moreVisible, nil
 	}
 
-	lastCount := -1
-	staleChecks := 0
-	const maxStaleChecks = 20
+	if baselineKnown && progressErr == nil && progress.Count > baselineCount {
+		baselineCount = progress.Count
+		more, _, collectErr := collect(maxItems)
+		if collectErr != nil {
+			return batch, batchCursor, true, collectErr
+		}
+		batch = append(batch, more...)
+		if len(batch) >= maxItems {
+			return batch, batchCursor, true, nil
+		}
+	} else if !baselineKnown && progressErr == nil {
+		baselineCount = progress.Count
+		baselineKnown = true
+	}
 
 	for i := 0; i < maxRounds && len(batch) < maxItems; i++ {
 		if remaining := remainingDeadline(); remaining < 30*time.Second {
@@ -524,42 +533,44 @@ func LoadCommentsBatch(page *hrod.Page, config CommentLoadConfig, cursor *Commen
 		progress, progressErr := getCommentProgress(page)
 		if progressErr != nil {
 			logrus.Warnf("评论进度检查失败: %v", progressErr)
-		} else {
-			if progress.NoComments {
-				return batch, batchCursor, false, nil
-			}
-			if progress.Count > lastCount {
-				lastCount = progress.Count
-				staleChecks = 0
-			} else {
-				staleChecks++
-				if staleChecks >= maxStaleChecks {
-					logrus.Infof("评论数连续%d轮无增长(%d)，停止分批加载", staleChecks, progress.Count)
-					return batch, batchCursor, !progress.AtEnd, nil
-				}
-			}
-			if progress.AtEnd {
-				more, moreVisible, collectErr := collect(maxItems - len(batch))
-				if collectErr != nil {
-					return batch, batchCursor, false, collectErr
-				}
-				batch = append(batch, more...)
-				return batch, batchCursor, moreVisible, nil
-			}
+			continue
 		}
+		if progress.NoComments {
+			return batch, batchCursor, false, nil
+		}
+		if progress.AtEnd {
+			more, moreVisible, collectErr := collect(maxItems - len(batch))
+			if collectErr != nil {
+				return batch, batchCursor, false, collectErr
+			}
+			batch = append(batch, more...)
+			return batch, batchCursor, moreVisible, nil
+		}
+		if !baselineKnown {
+			baselineCount = progress.Count
+			baselineKnown = true
+			continue
+		}
+		if progress.Count > baselineCount {
+			baselineCount = progress.Count
+			more, _, collectErr := collect(maxItems - len(batch))
+			if collectErr != nil {
+				return batch, batchCursor, true, collectErr
+			}
+			batch = append(batch, more...)
+		}
+	}
 
-		more, _, collectErr := collect(maxItems - len(batch))
+	finalProgress, finalErr := getCommentProgress(page)
+	if finalErr == nil && finalProgress.AtEnd {
+		more, moreVisible, collectErr := collect(maxItems - len(batch))
 		if collectErr != nil {
 			return batch, batchCursor, true, collectErr
 		}
 		batch = append(batch, more...)
+		return batch, batchCursor, moreVisible, nil
 	}
-
-	progress, progressErr := getCommentProgress(page)
 	hasMore := true
-	if progressErr == nil {
-		hasMore = !progress.AtEnd && !progress.NoComments
-	}
 	return batch, batchCursor, hasMore, nil
 }
 
