@@ -146,21 +146,34 @@ func TestCommentBatchKeyUsesIDOrIndexedContentPrefix(t *testing.T) {
 	}
 }
 
-func TestLoadCommentsBatchRestoresCursorWithMainLoopSleepCadence(t *testing.T) {
+func TestLoadCommentsBatchCallsScrollToCommentsAreaBeforeBaseline(t *testing.T) {
 	source, err := os.ReadFile("feed_detail.go")
 	if err != nil {
 		t.Fatal(err)
 	}
 	script := string(source)
+	start := strings.Index(script, `func LoadCommentsBatch(`)
+	end := strings.Index(script, `func commentBatchKey(`)
+	if start < 0 || end < 0 || end <= start {
+		t.Fatal("cannot isolate LoadCommentsBatch source")
+	}
+	batchSource := script[start:end]
 
-	for _, want := range []string{
-		`if cursor != nil && cursor.Round > 0 {`,
-		`for i := 0; i < cursor.Round; i++ {`,
-		`if err := page.Sleep(await); err != nil {`,
-	} {
-		if !strings.Contains(script, want) {
-			t.Fatalf("cursor restore cadence missing %s", want)
-		}
+	anchor := strings.Index(batchSource, `scrollToCommentsArea(page)`)
+	baseline := strings.Index(batchSource, `var baselineCount int`)
+	if anchor < 0 {
+		t.Fatal("LoadCommentsBatch must call scrollToCommentsArea(page)")
+	}
+	if baseline < 0 || anchor >= baseline {
+		t.Fatal("scrollToCommentsArea must appear before baseline read")
+	}
+
+	// 生产 LoadCommentsBatch 不得包含 cursor.Round restore/replay。
+	if strings.Contains(batchSource, `if cursor != nil && cursor.Round > 0 {`) {
+		t.Fatal("LoadCommentsBatch must not contain cursor.Round restore")
+	}
+	if strings.Contains(batchSource, `for i := 0; i < cursor.Round; i++ {`) {
+		t.Fatal("LoadCommentsBatch must not contain cursor.Round replay loop")
 	}
 }
 
