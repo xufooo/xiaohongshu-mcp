@@ -369,7 +369,7 @@ func LoadCommentsBatch(page *hrod.Page, config CommentLoadConfig, cursor *Commen
 
 	logrus.Infof("开始分批加载评论(note-scroller JS scrollBy): maxItems=%d, cursor=%+v", maxItems, cursor)
 	await, scrollDelta := commentScrollSettings(config.ScrollSpeed)
-	maxRounds := 30
+	maxRounds := 500
 	commentDeadline := time.Now().Add(commentLoadTimeout)
 	remainingDeadline := func() time.Duration {
 		return time.Until(commentDeadline)
@@ -401,9 +401,11 @@ func LoadCommentsBatch(page *hrod.Page, config CommentLoadConfig, cursor *Commen
 		}
 	}
 
-	// 0. 先将当前页面定位到评论区
-	if err := scrollToCommentsArea(page); err != nil {
-		logrus.Warnf("定位评论区失败: %v", err)
+	// 0. 先将当前页面定位到评论区（仅首次进入时执行）
+	if batchCursor.Round == 0 {
+		if err := scrollToCommentsArea(page); err != nil {
+			logrus.Warnf("定位评论区失败: %v", err)
+		}
 	}
 
 	// 1. 在初始 160px scroll 之前读取 baseline
@@ -417,9 +419,10 @@ func LoadCommentsBatch(page *hrod.Page, config CommentLoadConfig, cursor *Commen
 	}
 
 	// 2. 初始温柔滚动触发评论懒加载
-	if err := scrollNoteScrollerObserved(page, 160, batchCursor.Round); err != nil {
+	if err := scrollNoteScroller(page, 160); err != nil {
 		logrus.Warnf("初始滚动触发评论懒加载失败: %v", err)
 	}
+	batchCursor.Round++
 	if err := page.Sleep(await); err != nil {
 		return nil, batchCursor, true, err
 	}
@@ -504,7 +507,7 @@ func LoadCommentsBatch(page *hrod.Page, config CommentLoadConfig, cursor *Commen
 			logrus.Warnf("评论分批加载剩余时间不足(%s)，停止新滚动", remaining.Round(time.Second))
 			break
 		}
-		if err := scrollNoteScrollerObserved(page, scrollDelta, batchCursor.Round); err != nil {
+		if err := scrollNoteScroller(page, scrollDelta); err != nil {
 			logrus.Warnf("评论容器滚动失败: %v", err)
 		}
 		batchCursor.Round++
@@ -644,53 +647,6 @@ func scrollNoteScroller(page *hrod.Page, delta float64) error {
 	if result == nil || !result.Value.Bool() {
 		return fmt.Errorf("评论容器不存在")
 	}
-	return nil
-}
-
-// scrollNoteScrollerObserved performs the same one-shot scroll Eval while
-// recording only numeric DOM state for LoadCommentsBatch diagnosis.
-func scrollNoteScrollerObserved(page *hrod.Page, delta float64, round int) error {
-	result, err := page.Timeout(2*time.Second).Eval(`(delta) => {
-		const scroller = document.querySelector(".note-scroller");
-		if (!scroller) return JSON.stringify({ok:false});
-		const before = [scroller.scrollTop, scroller.scrollHeight, scroller.clientHeight];
-		scroller.scrollBy(0, delta);
-		const after = [scroller.scrollTop, scroller.scrollHeight, scroller.clientHeight];
-		return JSON.stringify({
-			ok:true, before, after,
-			parents:document.querySelectorAll(".parent-comment").length,
-			subitems:document.querySelectorAll(".parent-comment > .children-comments > .comment-item-sub, .parent-comment > .reply-container > .list-container > .comment-item").length,
-		});
-	}`, delta)
-	if err != nil {
-		if isEvalTimeout(err) {
-			logrus.Info("scroll_observed_timeout")
-			return nil
-		}
-		return err
-	}
-	if result == nil {
-		return fmt.Errorf("评论容器不存在")
-	}
-	var observation struct {
-		OK      bool      `json:"ok"`
-		Before  []float64 `json:"before"`
-		After   []float64 `json:"after"`
-		Parents  int       `json:"parents"`
-		Subitems int       `json:"subitems"`
-	}
-	if err := json.Unmarshal([]byte(result.Value.Str()), &observation); err != nil {
-		logrus.Info("scroll_observed_decode_error")
-		return nil
-	}
-	if !observation.OK {
-		return fmt.Errorf("评论容器不存在")
-	}
-	if len(observation.Before) != 3 || len(observation.After) != 3 {
-		logrus.Info("scroll_observed_invalid_shape")
-		return nil
-	}
-	logrus.Infof("scroll_observed round=%d st_before=%.0f sh_before=%.0f ch_before=%.0f st_after=%.0f sh_after=%.0f ch_after=%.0f actual_delta=%.0f parents=%d subitems=%d", round, observation.Before[0], observation.Before[1], observation.Before[2], observation.After[0], observation.After[1], observation.After[2], observation.After[0]-observation.Before[0], observation.Parents, observation.Subitems)
 	return nil
 }
 

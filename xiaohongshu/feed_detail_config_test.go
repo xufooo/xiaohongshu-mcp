@@ -159,21 +159,54 @@ func TestLoadCommentsBatchCallsScrollToCommentsAreaBeforeBaseline(t *testing.T) 
 	}
 	batchSource := script[start:end]
 
-	anchor := strings.Index(batchSource, `scrollToCommentsArea(page)`)
-	baseline := strings.Index(batchSource, `var baselineCount int`)
-	if anchor < 0 {
+	// A. scrollToCommentsArea 必须在 Round==0 守卫内
+	anchorGuard := strings.Index(batchSource, `if batchCursor.Round == 0 {`)
+	scrollArea := strings.Index(batchSource, `scrollToCommentsArea(page)`)
+	if anchorGuard < 0 {
+		t.Fatal("LoadCommentsBatch must guard scrollToCommentsArea with batchCursor.Round == 0")
+	}
+	if scrollArea < 0 {
 		t.Fatal("LoadCommentsBatch must call scrollToCommentsArea(page)")
 	}
-	if baseline < 0 || anchor >= baseline {
-		t.Fatal("scrollToCommentsArea must appear before baseline read")
+	if anchorGuard >= scrollArea {
+		t.Fatal("scrollToCommentsArea must be inside batchCursor.Round == 0 block")
 	}
 
-	// 生产 LoadCommentsBatch 不得包含 cursor.Round restore/replay。
+	// B. 初始滚动使用 scrollNoteScroller(page, 160)
+	if !strings.Contains(batchSource, `scrollNoteScroller(page, 160)`) {
+		t.Fatal("initial scroll must use scrollNoteScroller(page, 160)")
+	}
+
+	// C. batchCursor.Round++ 在初始滚动之后、第一次 collect 之前
+	initScroll := strings.Index(batchSource, `scrollNoteScroller(page, 160)`)
+	roundPP := strings.Index(batchSource, `batchCursor.Round++`)
+	collectFunc := strings.Index(batchSource, `collect := func(limit int)`)
+	if roundPP < 0 {
+		t.Fatal("LoadCommentsBatch must increment Round after initial scroll")
+	}
+	if initScroll < 0 || roundPP < initScroll {
+		t.Fatal("batchCursor.Round++ must appear after initial scroll")
+	}
+	if collectFunc < 0 || roundPP >= collectFunc {
+		t.Fatal("batchCursor.Round++ must appear before first collect")
+	}
+
+	// D. maxRounds = 500
+	if !strings.Contains(batchSource, `maxRounds := 500`) {
+		t.Fatal("LoadCommentsBatch must use maxRounds = 500")
+	}
+
+	// E. 没有 cursor replay
 	if strings.Contains(batchSource, `if cursor != nil && cursor.Round > 0 {`) {
 		t.Fatal("LoadCommentsBatch must not contain cursor.Round restore")
 	}
 	if strings.Contains(batchSource, `for i := 0; i < cursor.Round; i++ {`) {
 		t.Fatal("LoadCommentsBatch must not contain cursor.Round replay loop")
+	}
+
+	// F. 全文件没有 scrollNoteScrollerObserved
+	if strings.Contains(script, `scrollNoteScrollerObserved`) {
+		t.Fatal("feed_detail.go must not contain scrollNoteScrollerObserved")
 	}
 }
 
