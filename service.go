@@ -921,6 +921,9 @@ func (s *XiaohongshuService) SessionDetailBatch(ctx context.Context, id, cursorI
 	if cursor != nil {
 		detail.Comments.SeenCount = len(cursor.ReturnedIDs)
 	}
+	if nextCursor != nil && len(nextCursor.ReturnedIDs) > 0 {
+		detail.Comments.SeenCount = len(nextCursor.ReturnedIDs)
+	}
 	// 确保 list 不为 null，避免前端困惑
 	if detail.Comments.List == nil {
 		detail.Comments.List = []xiaohongshu.Comment{}
