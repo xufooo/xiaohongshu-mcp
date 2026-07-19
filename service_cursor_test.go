@@ -127,3 +127,19 @@ func TestCreateBrowseSessionReusesActiveSessionBeforeCreating(t *testing.T) {
 			reuseIndex, closeIndex, acquireIndex, createIndex)
 	}
 }
+
+func TestCreateBrowseSessionUsesHomeSearchReady(t *testing.T) {
+	source, err := os.ReadFile("service.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(source)
+	start := strings.Index(script, "func (s *XiaohongshuService) CreateBrowseSession(")
+	end := strings.Index(script, "\nfunc (s *XiaohongshuService) CloseBrowseSession")
+	if start == -1 || end == -1 || end <= start {
+		t.Fatal("CreateBrowseSession function boundaries missing")
+	}
+	if !strings.Contains(script[start:end], "xiaohongshu.XHSReadyOptions{Kind: xiaohongshu.XHSReadyHomeSearch}") {
+		t.Fatal("CreateBrowseSession must wait for XHSReadyHomeSearch")
+	}
+}

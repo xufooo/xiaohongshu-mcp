@@ -804,7 +804,7 @@ func (s *XiaohongshuService) CreateBrowseSession(ctx context.Context) (*xiaohong
 		s.browseSessions.Close(session.ID())
 		return nil, fmt.Errorf("导航探索页失败: %w", err)
 	}
-	if err := xiaohongshu.WaitForXHSReady(page, xiaohongshu.XHSReadyOptions{Kind: xiaohongshu.XHSReadyHome}); err != nil {
+	if err := xiaohongshu.WaitForXHSReady(page, xiaohongshu.XHSReadyOptions{Kind: xiaohongshu.XHSReadyHomeSearch}); err != nil {
 		s.browseSessions.Close(session.ID())
 		return nil, fmt.Errorf("等待探索页就绪失败: %w", err)
 	}
