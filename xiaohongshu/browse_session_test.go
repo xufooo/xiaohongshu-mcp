@@ -1112,3 +1112,146 @@ func newTestSession() *BrowseSession {
 	s.opToken <- struct{}{}
 	return s
 }
+
+// ====== 第一刀：session_detail 请求生命周期 ======
+
+func TestRunDetailCommentsBatchContextCancel(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	loaderBlocked := make(chan struct{})
+	done := make(chan struct{})
+	var callErr error
+
+	go func() {
+		_, _, _, callErr = runDetailCommentsBatch(ctx, func(loadCtx context.Context) ([]Comment, *CommentCursor, bool, error) {
+			close(loaderBlocked)
+			<-loadCtx.Done()
+			return nil, nil, false, errors.New("loader error after cancel")
+		})
+		close(done)
+	}()
+
+	select {
+	case <-loaderBlocked:
+	case <-time.After(time.Second):
+		t.Fatal("loader 未启动")
+	}
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("runDetailCommentsBatch 未在 caller cancel 后返回")
+	}
+
+	if !errors.Is(callErr, context.Canceled) {
+		t.Fatalf("应返回 context.Canceled，得到 %v", callErr)
+	}
+}
+
+func TestRunDetailCommentsBatchContextDeadline(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	done := make(chan struct{})
+	var deadlineErr error
+
+	go func() {
+		_, _, _, deadlineErr = runDetailCommentsBatch(ctx, func(loadCtx context.Context) ([]Comment, *CommentCursor, bool, error) {
+			<-loadCtx.Done()
+			return nil, nil, false, errors.New("loader error after deadline")
+		})
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("runDetailCommentsBatch 未在 deadline 到达后返回")
+	}
+
+	if !errors.Is(deadlineErr, context.DeadlineExceeded) {
+		t.Fatalf("应返回 context.DeadlineExceeded，得到 %v", deadlineErr)
+	}
+}
+
+func TestDetailCommentsBatchCanceledInLifecycle(t *testing.T) {
+	session := newTestSession()
+	session.opened = true
+	session.currentFeedID = "feed-1"
+	session.page = &hrod.Page{}
+	t.Cleanup(session.Close)
+
+	callerCtx, cancel := context.WithCancel(context.Background())
+	loaderStarted := make(chan struct{})
+
+	done := make(chan struct{})
+	var callErr error
+	go func() {
+		_, _, _, callErr = session.detailCommentsBatchLifecycle(
+			callerCtx, "feed-1", 5,
+			nil, // 无 pretask，绕过 WaitForXHSReady
+			func(loadCtx context.Context, _ *hrod.Page) ([]Comment, *CommentCursor, bool, error) {
+				close(loaderStarted)
+				<-loadCtx.Done()
+				return nil, nil, false, nil
+			},
+		)
+		close(done)
+	}()
+
+	select {
+	case <-loaderStarted:
+	case <-time.After(time.Second):
+		t.Fatal("loader 未启动")
+	}
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("detailCommentsBatchLifecycle 未在 cancel 后返回")
+	}
+
+	if !errors.Is(callErr, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled", callErr)
+	}
+
+	// timeline 中不应有 detail_comments_batch=ok
+	session.mu.Lock()
+	timeline := session.timelineLocked()
+	session.mu.Unlock()
+	for _, e := range timeline {
+		if e.Action == "detail_comments_batch" {
+			t.Fatal("取消时不应记录 detail_comments_batch=ok")
+		}
+	}
+
+	// token 通过 deferred finishOperation 释放，可在 deadline 内重新获取
+	acquireCtx, acquireCancel := context.WithTimeout(context.Background(), time.Second)
+	defer acquireCancel()
+	if _, err := session.beginLockedOperation(acquireCtx, true); err != nil {
+		t.Fatalf("token 未释放: %v", err)
+	}
+	session.finishOperation()
+}
+
+func TestDetailCommentsBatchLoadDeadline(t *testing.T) {
+	// caller 短 deadline → batch deadline 不晚于 caller deadline
+	shortCtx, shortCancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer shortCancel()
+	dl := commentLoadDeadline(shortCtx)
+	if time.Until(dl) > time.Second {
+		t.Fatal("caller 短 deadline 应被采用，不晚于 1s")
+	}
+
+	// 无 caller deadline → commentLoadTimeout 上限
+	dl = commentLoadDeadline(context.Background())
+	remaining := time.Until(dl)
+	if remaining < commentLoadTimeout-time.Second || remaining > commentLoadTimeout+time.Second {
+		t.Fatalf("无 deadline 时应使用 commentLoadTimeout(%s)，得到 %s", commentLoadTimeout, remaining)
+	}
+}

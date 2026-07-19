@@ -187,7 +187,7 @@ func (f *FeedDetailAction) GetFeedDetailCommentsBatch(ctx context.Context, feedI
 
 	commentPage := page.Timeout(commentLoadTimeout)
 	commentStart := time.Now()
-	comments, nextCursor, hasMore, err := LoadCommentsBatch(commentPage, config, cursor, maxItems)
+	comments, nextCursor, hasMore, err := LoadCommentsBatch(ctx, commentPage, config, cursor, maxItems)
 	reader.RecordCommentDwell(feedID, time.Since(commentStart), true)
 	if err != nil {
 		return nil, nil, false, err
@@ -361,7 +361,7 @@ func loadCommentsByJS(page *hrod.Page, config CommentLoadConfig) error {
 	return nil
 }
 
-func LoadCommentsBatch(page *hrod.Page, config CommentLoadConfig, cursor *CommentCursor, maxItems int) ([]Comment, *CommentCursor, bool, error) {
+func LoadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadConfig, cursor *CommentCursor, maxItems int) ([]Comment, *CommentCursor, bool, error) {
 	config = normalizeCommentLoadConfig(config)
 	if maxItems <= 0 {
 		maxItems = 20
@@ -370,7 +370,7 @@ func LoadCommentsBatch(page *hrod.Page, config CommentLoadConfig, cursor *Commen
 	logrus.Infof("开始分批加载评论(note-scroller JS scrollBy): maxItems=%d, cursor=%+v", maxItems, cursor)
 	await, scrollDelta := commentScrollSettings(config.ScrollSpeed)
 	maxRounds := 500
-	commentDeadline := time.Now().Add(commentLoadTimeout)
+	commentDeadline := commentLoadDeadline(ctx)
 	remainingDeadline := func() time.Duration {
 		return time.Until(commentDeadline)
 	}
@@ -569,6 +569,9 @@ func LoadCommentsBatch(page *hrod.Page, config CommentLoadConfig, cursor *Commen
 		}
 	}
 
+	if ctx.Err() != nil {
+		return batch, batchCursor, false, ctx.Err()
+	}
 	finalProgress, finalErr := getCommentProgress(page)
 	if finalErr == nil && finalProgress.AtEnd {
 		more, moreVisible, collectErr := collect(maxItems - len(batch))
