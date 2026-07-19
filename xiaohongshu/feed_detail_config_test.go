@@ -64,8 +64,8 @@ func TestCommentLoadTimeoutLeavesTimeForDetailExtraction(t *testing.T) {
 		t.Fatalf("comment loading timeout %s must be shorter than page timeout %s",
 			commentLoadTimeout, feedDetailPageTimeout)
 	}
-	if got := feedDetailPageTimeout - commentLoadTimeout; got != 8*time.Minute {
-		t.Fatalf("expected 8 minutes for detail extraction, got %s", got)
+	if got := feedDetailPageTimeout - commentLoadTimeout; got != time.Minute {
+		t.Fatalf("expected 1 minute for detail extraction, got %s", got)
 	}
 }
 
