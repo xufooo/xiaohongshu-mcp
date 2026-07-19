@@ -515,6 +515,24 @@ func (s *BrowseSession) DetailForFeed(ctx context.Context, expectedFeedID string
 }
 
 func (s *BrowseSession) DetailCommentsBatch(ctx context.Context, expectedFeedID string, cursor *CommentCursor, maxItems int, config CommentLoadConfig) (*FeedDetailResponse, *CommentCursor, bool, error) {
+	return s.detailCommentsBatchLifecycle(
+		ctx, expectedFeedID, maxItems,
+		func(opCtx context.Context, page *hrod.Page, feedID string) error {
+			return WaitForXHSReady(page.Context(opCtx), XHSReadyOptions{Kind: XHSReadyDetail, FeedID: feedID})
+		},
+		func(loadCtx context.Context, page *hrod.Page) ([]Comment, *CommentCursor, bool, error) {
+			return LoadCommentsBatch(loadCtx, page.Context(loadCtx), config, cursor, maxItems)
+		},
+	)
+}
+
+func (s *BrowseSession) detailCommentsBatchLifecycle(
+	ctx context.Context,
+	expectedFeedID string,
+	maxItems int,
+	pretask func(context.Context, *hrod.Page, string) error,
+	loader func(context.Context, *hrod.Page) ([]Comment, *CommentCursor, bool, error),
+) (*FeedDetailResponse, *CommentCursor, bool, error) {
 	opCtx, err := s.beginLockedOperation(ctx, true)
 	if err != nil {
 		return nil, nil, false, err
@@ -531,34 +549,66 @@ func (s *BrowseSession) DetailCommentsBatch(ctx context.Context, expectedFeedID 
 	if page == nil {
 		return nil, nil, false, fmt.Errorf("browse session 页面不存在: %s", s.id)
 	}
-	if err := WaitForXHSReady(page.Context(opCtx), XHSReadyOptions{Kind: XHSReadyDetail, FeedID: feedID}); err != nil {
-		return nil, nil, false, err
+
+	if pretask != nil {
+		if err := pretask(opCtx, page, feedID); err != nil {
+			return nil, nil, false, err
+		}
 	}
 
-	// 使用独立 context，避免被 MCP 请求超时截断（RPi 上 DOM 提取慢）
-	commentPage := page.Context(context.Background()).Timeout(commentLoadTimeout)
-	comments, nextCursor, hasMore, err := LoadCommentsBatch(commentPage, config, cursor, maxItems)
+	comments, nextCursor, hasMore, err := runDetailCommentsBatch(opCtx, func(loadCtx context.Context) ([]Comment, *CommentCursor, bool, error) {
+		return loader(loadCtx, page)
+	})
 	if err != nil {
 		return nil, nil, false, err
+	}
+	return s.completeDetailCommentsBatch(opCtx, page, feedID, maxItems, comments, nextCursor, hasMore)
+}
+
+func commentLoadDeadline(ctx context.Context) time.Time {
+	deadline := time.Now().Add(commentLoadTimeout)
+	if dl, ok := ctx.Deadline(); ok && dl.Before(deadline) {
+		deadline = dl
+	}
+	return deadline
+}
+
+func runDetailCommentsBatch(opCtx context.Context, loader func(context.Context) ([]Comment, *CommentCursor, bool, error)) ([]Comment, *CommentCursor, bool, error) {
+	loadCtx, cancel := context.WithTimeout(opCtx, commentLoadTimeout)
+	defer cancel()
+	comments, nextCursor, hasMore, err := loader(loadCtx)
+	if loadCtx.Err() != nil {
+		return nil, nil, false, loadCtx.Err()
+	}
+	if err != nil {
+		return nil, nil, false, err
+	}
+	return comments, nextCursor, hasMore, nil
+}
+
+func (s *BrowseSession) completeDetailCommentsBatch(opCtx context.Context, page *hrod.Page, feedID string, maxItems int, comments []Comment, nextCursor *CommentCursor, hasMore bool) (*FeedDetailResponse, *CommentCursor, bool, error) {
+	if opCtx.Err() != nil {
+		return nil, nil, false, opCtx.Err()
 	}
 	if nextCursor != nil && nextCursor.FeedID == "" {
 		nextCursor.FeedID = feedID
 	}
-
 	resp := &FeedDetailResponse{
 		Comments: CommentList{
 			List:    comments,
 			HasMore: hasMore,
 		},
 	}
-	if totalItems := knownCommentTotal(commentPage); totalItems > 0 {
+	if totalItems := knownCommentTotal(page.Context(opCtx)); totalItems > 0 {
 		resp.Comments.TotalItems = totalItems
 	}
-
-	s.mu.Lock()
-	s.recordTimelineLocked("detail_comments_batch", feedID, "ok", time.Now(), fmt.Sprintf("maxItems=%d hasMore=%v", maxItems, hasMore))
-	s.mu.Unlock()
+	if opCtx.Err() != nil {
+		return nil, nil, false, opCtx.Err()
+	}
 	s.probeWatchdogSelectorsForKind(opCtx, XHSReadyDetail, feedID)
+	if opCtx.Err() != nil {
+		return nil, nil, false, opCtx.Err()
+	}
 	return resp, nextCursor, hasMore, nil
 }
 

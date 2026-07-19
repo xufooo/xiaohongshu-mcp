@@ -115,7 +115,7 @@ func TestLoadCommentsBatchAndExtractCommentsAPIsExist(t *testing.T) {
 	script := string(source)
 
 	for _, want := range []string{
-		`func LoadCommentsBatch(page *hrod.Page, config CommentLoadConfig, cursor *CommentCursor, maxItems int) ([]Comment, *CommentCursor, bool, error)`,
+		`func LoadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadConfig, cursor *CommentCursor, maxItems int) ([]Comment, *CommentCursor, bool, error)`,
 		`scrollNoteScroller(page, scrollDelta)`,
 		`nextVisibleShowMoreButton(page, config.MaxRepliesThreshold)`,
 		`dispatchMouseClick(page, button.X, button.Y)`,
