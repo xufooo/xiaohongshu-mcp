@@ -61,7 +61,7 @@ func WaitForXHSReady(page *hrod.Page, opts XHSReadyOptions) error {
 		opts.Kind = XHSReadyHome
 	}
 	if opts.Timeout <= 0 {
-		opts.Timeout = 30 * time.Second
+		opts.Timeout = 60 * time.Second
 	}
 
 	deadline := time.Now().Add(opts.Timeout)
