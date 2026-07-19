@@ -409,11 +409,6 @@ func LoadCommentsBatch(page *hrod.Page, config CommentLoadConfig, cursor *Commen
 		return nil, batchCursor, true, err
 	}
 
-	// 2. 定位到评论区
-	if err := scrollToCommentsArea(page); err != nil {
-		logrus.Warnf("定位评论区失败: %v", err)
-	}
-
 	if cursor != nil && cursor.Round > 0 {
 		for i := 0; i < cursor.Round; i++ {
 			if remaining := remainingDeadline(); remaining < 30*time.Second {
