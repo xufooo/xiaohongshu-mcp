@@ -116,7 +116,7 @@ func TestLoadCommentsBatchAndExtractCommentsAPIsExist(t *testing.T) {
 
 	for _, want := range []string{
 		`func LoadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadConfig, cursor *CommentCursor, maxItems int) ([]Comment, *CommentCursor, bool, error)`,
-		`scrollNoteScroller(page, scrollDelta)`,
+		`scrollNoteScrollerMoved(page, scrollDelta)`,
 		`nextVisibleShowMoreButton(page, config.MaxRepliesThreshold)`,
 		`dispatchMouseClick(page, button.X, button.Y)`,
 		`page.Timeout(2*time.Second).Eval(`,
@@ -132,6 +132,24 @@ func TestLoadCommentsBatchAndExtractCommentsAPIsExist(t *testing.T) {
 	}
 	if !strings.Contains(string(domSource), `func ExtractCommentsFromDOM(page *hrod.Page, feedID string) ([]Comment, error)`) {
 		t.Fatal("ExtractCommentsFromDOM API missing")
+	}
+}
+
+func TestCommentBatchRequiresObservedScrollerMovement(t *testing.T) {
+	source, err := os.ReadFile("feed_detail.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(source)
+
+	for _, want := range []string{
+		`func scrollNoteScrollerMoved(page *hrod.Page, delta float64) (bool, error)`,
+		`moved: scroller.scrollTop > before`,
+		`评论容器未推进且尚未出现 end 标识`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("comment scroll movement contract missing %q", want)
+		}
 	}
 }
 
@@ -172,13 +190,13 @@ func TestLoadCommentsBatchCallsScrollToCommentsAreaBeforeBaseline(t *testing.T) 
 		t.Fatal("scrollToCommentsArea must be inside batchCursor.Round == 0 block")
 	}
 
-	// B. 初始滚动使用 scrollNoteScroller(page, 160)
-	if !strings.Contains(batchSource, `scrollNoteScroller(page, 160)`) {
-		t.Fatal("initial scroll must use scrollNoteScroller(page, 160)")
+	// B. 初始滚动使用 scrollNoteScrollerMoved(page, 160)
+	if !strings.Contains(batchSource, `scrollNoteScrollerMoved(page, 160)`) {
+		t.Fatal("initial scroll must use scrollNoteScrollerMoved(page, 160)")
 	}
 
 	// C. batchCursor.Round++ 在初始滚动之后、第一次 collect 之前
-	initScroll := strings.Index(batchSource, `scrollNoteScroller(page, 160)`)
+	initScroll := strings.Index(batchSource, `scrollNoteScrollerMoved(page, 160)`)
 	roundPP := strings.Index(batchSource, `batchCursor.Round++`)
 	collectFunc := strings.Index(batchSource, `collect := func(limit int)`)
 	if roundPP < 0 {

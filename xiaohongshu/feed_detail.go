@@ -296,11 +296,20 @@ func loadCommentsByJS(page *hrod.Page, config CommentLoadConfig) error {
 			logrus.Warnf("评论加载剩余时间不足(%s)，停止新滚动", remaining.Round(time.Second))
 			break
 		}
-		if err := scrollNoteScroller(page, scrollDelta); err != nil {
-			logrus.Warnf("评论容器滚动失败: %v", err)
+		moved, scrollErr := scrollNoteScrollerMoved(page, scrollDelta)
+		if scrollErr != nil {
+			return fmt.Errorf("评论容器滚动失败: %w", scrollErr)
 		}
 		if err := page.Sleep(await); err != nil {
 			return err
+		}
+		if !moved {
+			count, atEnd, noComments := progressFunc()
+			if noComments || atEnd {
+				logrus.Infof("评论容器到达末尾: count=%d", count)
+				break
+			}
+			return fmt.Errorf("评论容器未推进且尚未出现 end 标识")
 		}
 
 		// 每5轮检查一次进度（非致命，超时继续）
@@ -407,8 +416,10 @@ func LoadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 			logrus.Warnf("定位评论区失败: %v", err)
 		}
 		// 首次进入时，温柔滚动触发评论懒加载
-		if err := scrollNoteScroller(page, 160); err != nil {
+		if moved, err := scrollNoteScrollerMoved(page, 160); err != nil {
 			logrus.Warnf("初始滚动触发评论懒加载失败: %v", err)
+		} else if !moved {
+			logrus.Infof("初始评论滚动未推进，等待页面 end 状态确认")
 		}
 		batchCursor.Round++
 		if err := page.Sleep(await); err != nil {
@@ -505,8 +516,9 @@ func LoadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 			logrus.Warnf("评论分批加载剩余时间不足(%s)，停止新滚动", remaining.Round(time.Second))
 			break
 		}
-		if err := scrollNoteScroller(page, scrollDelta); err != nil {
-			logrus.Warnf("评论容器滚动失败: %v", err)
+		moved, scrollErr := scrollNoteScrollerMoved(page, scrollDelta)
+		if scrollErr != nil {
+			return batch, batchCursor, true, fmt.Errorf("评论容器滚动失败: %w", scrollErr)
 		}
 		batchCursor.Round++
 		if err := page.Sleep(await); err != nil {
@@ -551,6 +563,9 @@ func LoadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 			}
 			batch = append(batch, more...)
 			return batch, batchCursor, moreVisible, nil
+		}
+		if !moved {
+			return batch, batchCursor, true, fmt.Errorf("评论容器未推进且尚未出现 end 标识")
 		}
 		if !baselineKnown {
 			baselineCount = progress.Count
@@ -632,23 +647,35 @@ func commentScrollSettings(speed string) (time.Duration, float64) {
 }
 
 func scrollNoteScroller(page *hrod.Page, delta float64) error {
+	_, err := scrollNoteScrollerMoved(page, delta)
+	return err
+}
+
+func scrollNoteScrollerMoved(page *hrod.Page, delta float64) (bool, error) {
 	result, err := page.Timeout(2*time.Second).Eval(`(delta) => {
 		const scroller = document.querySelector(".note-scroller");
-		if (!scroller) return false;
+		if (!scroller) return JSON.stringify({found: false, moved: false});
+		const before = scroller.scrollTop;
 		scroller.scrollBy(0, delta);
-		return true;
+		return JSON.stringify({found: true, moved: scroller.scrollTop > before});
 	}`, delta)
 	if err != nil {
-		if isEvalTimeout(err) {
-			logrus.Warnf("评论容器滚动 Eval 超时: %v", err)
-			return nil
-		}
-		return err
+		return false, err
 	}
-	if result == nil || !result.Value.Bool() {
-		return fmt.Errorf("评论容器不存在")
+	if result == nil {
+		return false, fmt.Errorf("评论容器滚动未返回结果")
 	}
-	return nil
+	var state struct {
+		Found bool `json:"found"`
+		Moved bool `json:"moved"`
+	}
+	if err := json.Unmarshal([]byte(result.Value.Str()), &state); err != nil {
+		return false, fmt.Errorf("解析评论容器滚动状态: %w", err)
+	}
+	if !state.Found {
+		return false, fmt.Errorf("评论容器不存在")
+	}
+	return state.Moved, nil
 }
 
 func commentProgressScript() string {
