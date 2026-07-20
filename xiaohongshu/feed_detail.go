@@ -406,9 +406,20 @@ func LoadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 		if err := scrollToCommentsArea(page); err != nil {
 			logrus.Warnf("定位评论区失败: %v", err)
 		}
+		// 首次进入时，温柔滚动触发评论懒加载
+		if err := scrollNoteScroller(page, 160); err != nil {
+			logrus.Warnf("初始滚动触发评论懒加载失败: %v", err)
+		}
+		batchCursor.Round++
+		if err := page.Sleep(await); err != nil {
+			return nil, batchCursor, true, err
+		}
+		if err := page.Sleep(time.Second); err != nil {
+			return nil, batchCursor, true, err
+		}
 	}
 
-	// 1. 在初始 160px scroll 之前读取 baseline
+	// 读取当前 DOM 评论基线（续批时从当前位置开始）
 	var baselineCount int
 	baselineKnown := false
 	if p, err := getCommentProgress(page); err == nil {
@@ -416,19 +427,6 @@ func LoadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 		baselineKnown = true
 	} else {
 		logrus.Warnf("获取评论 baseline 失败: %v", err)
-	}
-
-	// 2. 初始温柔滚动触发评论懒加载
-	if err := scrollNoteScroller(page, 160); err != nil {
-		logrus.Warnf("初始滚动触发评论懒加载失败: %v", err)
-	}
-	batchCursor.Round++
-	if err := page.Sleep(await); err != nil {
-		return nil, batchCursor, true, err
-	}
-
-	if err := page.Sleep(time.Second); err != nil {
-		return nil, batchCursor, true, err
 	}
 
 	collect := func(limit int) ([]Comment, bool, error) {
