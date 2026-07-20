@@ -653,7 +653,15 @@ func scrollNoteScroller(page *hrod.Page, delta float64) error {
 
 func scrollNoteScrollerMoved(page *hrod.Page, delta float64) (bool, error) {
 	result, err := page.Timeout(2*time.Second).Eval(`(delta) => {
-		const scroller = document.querySelector(".note-scroller");
+		const content = document.querySelector(".note-scroller");
+		let scroller = content;
+		while (scroller) {
+			const style = getComputedStyle(scroller);
+			const canScroll = scroller.scrollHeight > scroller.clientHeight &&
+				(style.overflowY === "auto" || style.overflowY === "scroll");
+			if (canScroll) break;
+			scroller = scroller.parentElement;
+		}
 		if (!scroller) return JSON.stringify({found: false, moved: false});
 		const before = scroller.scrollTop;
 		scroller.scrollBy(0, delta);
@@ -894,10 +902,18 @@ func sleepRandom(page *hrod.Page, minMs, maxMs int) error {
 // scrollToCommentsArea 使用JS定位到评论区（comment_feed.go 引用）
 func scrollToCommentsArea(page *hrod.Page) error {
 	_, err := page.Timeout(2*time.Second).Eval(`() => {
-		const cc = document.querySelector('.comments-container');
-		const scroller = document.querySelector('.note-scroller');
+		const cc = document.querySelector('.comments-container, .comments-el');
+		let scroller = cc;
+		while (scroller) {
+			const style = getComputedStyle(scroller);
+			const canScroll = scroller.scrollHeight > scroller.clientHeight &&
+				(style.overflowY === 'auto' || style.overflowY === 'scroll');
+			if (canScroll) break;
+			scroller = scroller.parentElement;
+		}
 		if (cc && scroller) {
-			scroller.scrollTo(0, Math.max(0, cc.offsetTop - 80));
+			const top = cc.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop;
+			scroller.scrollTo(0, Math.max(0, top - 80));
 			return;
 		}
 		if (cc) { cc.scrollIntoView({block:'center'}); }
