@@ -144,6 +144,9 @@ func TestCommentBatchRequiresObservedScrollerMovement(t *testing.T) {
 
 	for _, want := range []string{
 		`func scrollNoteScrollerMoved(page *hrod.Page, delta float64) (bool, error)`,
+		`const content = document.querySelector(".note-scroller")`,
+		`scroller = scroller.parentElement`,
+		`scroller.scrollHeight > scroller.clientHeight`,
 		`moved: scroller.scrollTop > before`,
 		`评论容器未推进且尚未出现 end 标识`,
 	} {
