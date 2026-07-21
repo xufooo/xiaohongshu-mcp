@@ -402,7 +402,7 @@ func clickPublishButton(page *hrod.Page) error {
 func waitPublishSuccess(page *hrod.Page, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for {
-		if info, err := page.Page.Info(); err == nil && !strings.Contains(info.URL, "/publish/publish") {
+		if info, err := page.Rod.Info(); err == nil && !strings.Contains(info.URL, "/publish/publish") {
 			slog.Info("发布成功，已跳转离开发布页", "url", info.URL)
 			return nil
 		}
