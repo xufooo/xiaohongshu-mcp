@@ -408,7 +408,7 @@ func waitPublishSuccess(page *hrod.Page, timeout time.Duration) error {
 		if time.Now().After(deadline) {
 			return errors.New("发布未确认成功：点击发布后未跳转离开发布页（可能校验未过或被拦截）")
 		}
-		time.Sleep(500 * time.Millisecond)
+		page.SleepRandom(400*time.Millisecond, 600*time.Millisecond)
 	}
 }
 
