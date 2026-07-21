@@ -456,6 +456,67 @@ func TestShouldWaitForInitialComments(t *testing.T) {
 	}
 }
 
+func TestHandleScrollErrorReturnsPartialResultOrFatal(t *testing.T) {
+	sentinel := errors.New("scroll deadline exceeded")
+
+	tests := []struct {
+		name       string
+		batch      []Comment
+		wantErrNil bool
+	}{
+		{
+			name:       "non-empty batch returns partial result with nil error",
+			batch:      []Comment{{ID: "c1"}},
+			wantErrNil: true,
+		},
+		{
+			name:       "empty batch returns fatal error",
+			batch:      nil,
+			wantErrNil: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cursor := &CommentCursor{FeedID: "f1", Round: 3}
+			result, resultCursor, hasMore, err := handleScrollError(tt.batch, cursor, sentinel)
+
+			if len(tt.batch) > 0 {
+				if len(result) != 1 || result[0].ID != "c1" {
+					t.Fatal("partial result must preserve batch content")
+				}
+			} else {
+				if len(result) != 0 {
+					t.Fatal("empty batch must return empty result")
+				}
+			}
+
+			if resultCursor != cursor {
+				t.Fatal("must return the original cursor pointer")
+			}
+			if !hasMore {
+				t.Fatal("hasMore must be true")
+			}
+
+			if tt.wantErrNil {
+				if err != nil {
+					t.Fatalf("expected nil error, got: %v", err)
+				}
+			} else {
+				if err == nil {
+					t.Fatal("expected non-nil error for empty batch")
+				}
+				if !errors.Is(err, sentinel) {
+					t.Fatalf("expected error to wrap sentinel, got: %v", err)
+				}
+				if !strings.Contains(err.Error(), "评论容器滚动失败") {
+					t.Fatalf("error must contain '评论容器滚动失败', got: %v", err)
+				}
+			}
+		})
+	}
+}
+
 func TestShouldUseInitialCommentSnapshot(t *testing.T) {
 	withComment := &FeedDetailResponse{Comments: CommentList{List: []Comment{{ID: "comment-1"}}}}
 	empty := &FeedDetailResponse{Comments: CommentList{List: []Comment{}}}
