@@ -148,8 +148,5 @@ func submitPublishVideo(page *hrod.Page, title, content string, tags []string, s
 		return err
 	}
 
-	if err := page.Sleep(3 * time.Second); err != nil {
-		return err
-	}
-	return nil
+	return waitPublishSuccess(page, 15*time.Second)
 }

@@ -373,10 +373,7 @@ func submitPublish(page *hrod.Page, title, content string, tags []string, schedu
 		return err
 	}
 
-	if err := page.Sleep(3 * time.Second); err != nil {
-		return err
-	}
-	return nil
+	return waitPublishSuccess(page, 15*time.Second)
 }
 
 type publishButton struct {
@@ -398,6 +395,22 @@ func clickPublishButton(page *hrod.Page) error {
 		return errors.Wrap(err, "点击发布按钮失败")
 	}
 	return nil
+}
+
+// waitPublishSuccess 轮询等待发布成功：小红书发布成功后会跳转离开发布表单页
+// （URL 不再含 /publish/publish）。超时仍未跳转 → 判定发布失败。
+func waitPublishSuccess(page *hrod.Page, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		if info, err := page.Page.Info(); err == nil && !strings.Contains(info.URL, "/publish/publish") {
+			slog.Info("发布成功，已跳转离开发布页", "url", info.URL)
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return errors.New("发布未确认成功：点击发布后未跳转离开发布页（可能校验未过或被拦截）")
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
 }
 
 // waitForPublishButtonClickable 等待新版 xhs-publish-btn 或旧版 button.bg-red 可点击。
