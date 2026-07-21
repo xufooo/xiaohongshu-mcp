@@ -631,19 +631,14 @@ func (s *SearchAction) collectResults(page *hrod.Page, filters ...FilterOption) 
 		}
 
 		if len(allInternalFilters) > 0 {
-			// 悬停在筛选按钮上（点击会关闭面板，hover 才能保持浮层）
+			// 点击筛选按钮打开面板
 			filterButton, err := page.Element(".filter.ai-chat-filter")
 			if err != nil {
 				return nil, fmt.Errorf("未找到筛选按钮: %w", err)
 			}
-			if err := filterButton.Rod.Hover(); err != nil {
-				return nil, fmt.Errorf("悬停筛选按钮失败: %w", err)
+			if err := filterButton.Click(proto.InputMouseButtonLeft, 1); err != nil {
+				return nil, fmt.Errorf("打开筛选面板失败: %w", err)
 			}
-			if err := page.SleepRandom(500*time.Millisecond, 1000*time.Millisecond); err != nil {
-				return nil, err
-			}
-
-			// 等待筛选面板出现
 			if err := page.Wait(rod.Eval(`() => document.querySelector('.filter-panel') !== null`)); err != nil {
 				return nil, fmt.Errorf("等待筛选面板失败: %w", err)
 			}
@@ -664,8 +659,7 @@ func (s *SearchAction) collectResults(page *hrod.Page, filters ...FilterOption) 
 				if tag == nil {
 					return nil, fmt.Errorf("未找到筛选标签 %q", filter.Text)
 				}
-				// 用 ClickNoWait：筛选面板是 hover 浮层，rod 的 WaitInteractable 会误判被遮挡而死等
-				if err := tag.ClickNoWait(); err != nil {
+				if err := tag.Click(proto.InputMouseButtonLeft, 1); err != nil {
 					return nil, fmt.Errorf("筛选标签 %q 点击失败: %w", filter.Text, err)
 				}
 			}
