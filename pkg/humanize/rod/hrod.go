@@ -428,6 +428,28 @@ func (el *Element) ClickNoScroll() error {
 	return el.actor.Mouse.ClickNoScroll(el.Rod)
 }
 
+// ClickNoWait clicks the element by its shape center, skipping WaitInteractable.
+// Use for floating/hover menus where WaitInteractable may wrongly report
+// "obscured" (e.g. filter panels, dropdown options). The caller must ensure
+// the element is already visible before calling.
+func (el *Element) ClickNoWait() error {
+	shape, err := el.Rod.Shape()
+	if err != nil {
+		return fmt.Errorf("获取元素形状失败: %w", err)
+	}
+	if len(shape.Quads) == 0 {
+		return fmt.Errorf("元素无可点击区域")
+	}
+
+	q := shape.Quads[0]
+	center := proto.Point{
+		X: (q[0] + q[4]) / 2,
+		Y: (q[1] + q[5]) / 2,
+	}
+
+	return el.actor.Mouse.ClickPoint(center)
+}
+
 // ClickPoint moves to a viewport-relative point and clicks there.
 func (p *Page) ClickPoint(point proto.Point) error {
 	return p.actor.Mouse.ClickPoint(point)
