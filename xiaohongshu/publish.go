@@ -358,10 +358,9 @@ func submitPublish(page *hrod.Page, title, content string, tags []string, schedu
 	// 处理原创声明
 	if isOriginal {
 		if err := setOriginal(page); err != nil {
-			slog.Warn("设置原创声明失败，继续发布", "error", err)
-		} else {
-			slog.Info("已声明原创")
+			return errors.Wrap(err, "设置原创声明失败（已请求原创，中止发布）")
 		}
+		slog.Info("已声明原创")
 	}
 
 	// 绑定商品
