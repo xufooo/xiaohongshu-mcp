@@ -518,7 +518,12 @@ func LoadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 		}
 		moved, scrollErr := scrollNoteScrollerMoved(page, scrollDelta)
 		if scrollErr != nil {
-			return handleScrollError(batch, batchCursor, scrollErr)
+			if len(batch) > 0 {
+				logrus.Warnf("评论容器滚动失败，返回已有部分结果: %v", scrollErr)
+				return batch, batchCursor, true, nil
+			}
+			logrus.Warnf("评论容器滚动失败，继续下一轮: %v", scrollErr)
+			continue
 		}
 		batchCursor.Round++
 		if err := page.Sleep(await); err != nil {
