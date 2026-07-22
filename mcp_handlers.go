@@ -15,11 +15,11 @@ import (
 
 // session 基础工具
 var sessionBaseTools = []string{"close_browse_session"}
-var sessionCreateTools = []string{"create_browse_session"}
+var sessionCreateTools = []string{"create_browse_session", "list_feeds", "check_login_status", "search_feeds"}
 
 // session 不同状态下的可用工具
 var (
-	afterCreateTools = append([]string{"session_search"}, sessionBaseTools...)
+	afterCreateTools = append([]string{"session_search", "list_feeds"}, sessionBaseTools...)
 	afterSearchTools = append([]string{"session_open_note", "session_search"}, sessionBaseTools...)
 	afterOpenTools   = append([]string{"session_like", "session_comment", "session_detail", "session_back"}, sessionBaseTools...)
 	afterBackTools   = append([]string{"session_search", "session_open_note"}, sessionBaseTools...)
