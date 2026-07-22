@@ -978,40 +978,6 @@ func (s *BrowseSession) Back(ctx context.Context) error {
 	return nil
 }
 
-func (s *BrowseSession) CloseNote(ctx context.Context) error {
-	opCtx, err := s.beginLockedOperation(ctx, true)
-	if err != nil {
-		return err
-	}
-	defer s.finishOperation()
-
-	s.mu.Lock()
-	page := s.page
-	sourceURL := s.sourceURL
-	feedID := s.currentFeedID
-	s.mu.Unlock()
-
-	if page == nil {
-		return fmt.Errorf("browse session 页面不存在: %s", s.id)
-	}
-
-	method, err := closeNoteOverlay(page.Context(opCtx), sourceURL)
-	if err != nil {
-		return fmt.Errorf("关闭笔记面板失败: %w", err)
-	}
-	logrus.Debugf("关闭笔记面板方式: %s", method)
-
-	s.refreshPageState(opCtx)
-	s.mu.Lock()
-	s.currentFeedID = ""
-	s.currentXsecToken = ""
-	s.opened = false
-	s.read = false
-	s.recordTimelineLocked("close_note", feedID, "ok", time.Now(), method)
-	s.mu.Unlock()
-	return nil
-}
-
 func (s *BrowseSession) Close() {
 	s.close()
 }

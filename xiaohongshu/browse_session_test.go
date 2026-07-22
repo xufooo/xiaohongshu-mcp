@@ -517,6 +517,19 @@ func TestOpenedSessionBackActionDoesNotRequireSourceURL(t *testing.T) {
 	}
 }
 
+func TestCloseNoteImplementationIsRemoved(t *testing.T) {
+	if _, err := os.Stat("note_close.go"); !os.IsNotExist(err) {
+		t.Fatalf("note_close.go must be removed, stat err=%v", err)
+	}
+	source, err := os.ReadFile("browse_session.go")
+	if err != nil {
+		t.Fatalf("read browse_session.go: %v", err)
+	}
+	if strings.Contains(string(source), "func (s *BrowseSession) CloseNote(") {
+		t.Fatal("BrowseSession.CloseNote must be removed; use Back")
+	}
+}
+
 func TestHistoryTargetReadyRequiresURLChangeAndTargetReadiness(t *testing.T) {
 	from := "https://www.xiaohongshu.com/explore/feed-1"
 	search := xhsReadyProbe{
