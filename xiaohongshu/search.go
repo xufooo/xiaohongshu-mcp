@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
-	"strings"
 	"time"
 
 	"github.com/go-rod/rod"
@@ -13,6 +12,7 @@ import (
 	"github.com/go-rod/rod/lib/proto"
 	"github.com/sirupsen/logrus"
 	"github.com/xpzouying/xiaohongshu-mcp/errors"
+	"github.com/xpzouying/xiaohongshu-mcp/pkg/humanize"
 	hrod "github.com/xpzouying/xiaohongshu-mcp/pkg/humanize/rod"
 )
 
@@ -636,32 +636,32 @@ func (s *SearchAction) collectResults(page *hrod.Page, filters ...FilterOption) 
 			if err != nil {
 				return nil, fmt.Errorf("未找到筛选按钮: %w", err)
 			}
-			if err := filterButton.Click(proto.InputMouseButtonLeft, 1); err != nil {
+			// 用 mouse.Click 绕过 waitInteractable，避免浮层遮挡误判
+			if err := page.Actor().Mouse.Click(filterButton.Rod); err != nil {
 				return nil, fmt.Errorf("打开筛选面板失败: %w", err)
 			}
+			humanize.SleepContext(page.Actor().Ctx(), 300*time.Millisecond, 800*time.Millisecond)
 			if err := page.Wait(rod.Eval(`() => document.querySelector('.filter-panel') !== null`)); err != nil {
 				return nil, fmt.Errorf("等待筛选面板失败: %w", err)
 			}
 
 			for _, filter := range allInternalFilters {
-				tags, err := page.Elements(".filter-panel .tags")
+				// 用索引精确定位：.filter-panel div.filters:nth-child(N) div.tags:nth-child(N)
+				selector := fmt.Sprintf(".filter-panel div.filters:nth-child(%d) div.tags:nth-child(%d)",
+					filter.FiltersIndex, filter.TagsIndex)
+				option, err := page.Element(selector)
 				if err != nil {
-					return nil, fmt.Errorf("读取筛选标签失败: %w", err)
+					return nil, fmt.Errorf("未找到筛选选项 %s: %w", filter.Text, err)
 				}
-				var tag *hrod.Element
-				for _, candidate := range tags {
-					text, textErr := candidate.Text()
-					if textErr == nil && strings.TrimSpace(text) == filter.Text {
-						tag = candidate
-						break
-					}
-				}
-				if tag == nil {
-					return nil, fmt.Errorf("未找到筛选标签 %q", filter.Text)
-				}
-				if err := tag.Click(proto.InputMouseButtonLeft, 1); err != nil {
+				// 用 mouse.Click 绕过 waitInteractable，维持浮层面板不关
+				if err := page.Actor().Mouse.Click(option.Rod); err != nil {
 					return nil, fmt.Errorf("筛选标签 %q 点击失败: %w", filter.Text, err)
 				}
+				humanize.SleepContext(page.Actor().Ctx(), 200*time.Millisecond, 500*time.Millisecond)
+			}
+			// 等待页面稳定
+			if err := page.WaitStable(5 * time.Second); err != nil {
+				return nil, fmt.Errorf("筛选后页面稳定失败: %w", err)
 			}
 
 			// 记录关闭筛选面板前的 feeds 数据长度
