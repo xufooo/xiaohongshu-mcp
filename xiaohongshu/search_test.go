@@ -12,6 +12,45 @@ import (
 	"github.com/xpzouying/xiaohongshu-mcp/browser"
 )
 
+func TestMergeFeedsByIDFillsEveryNoteCardField(t *testing.T) {
+	dom := []Feed{{
+		ID: "feed-1", XsecToken: "dom-token",
+		NoteCard: NoteCard{
+			DisplayTitle: "DOM title",
+			User:         User{Nickname: "DOM author"},
+			Cover:        Cover{URLDefault: "https://img/dom.jpg"},
+		},
+	}}
+	state := []Feed{
+		{
+			ID: "feed-1", XsecToken: "state-token", ModelType: "note",
+			NoteCard: NoteCard{
+				Type: "video",
+				DisplayTitle: "state title",
+				User: User{UserID: "user-1", Nickname: "state author", Avatar: "https://avatar"},
+				InteractInfo: InteractInfo{Liked: true, LikedCount: "12", CommentCount: "3", CollectedCount: "4"},
+				Cover: Cover{Width: 1080, Height: 1440, URL: "https://img/state.jpg", FileID: "file-1"},
+				Video: &Video{Capa: VideoCapability{Duration: 42}},
+			},
+		},
+		{ID: "feed-2", NoteCard: NoteCard{DisplayTitle: "state only"}},
+	}
+
+	got := mergeFeedsByID(dom, state)
+	require.Len(t, got, 2)
+	require.Equal(t, "DOM title", got[0].NoteCard.DisplayTitle)
+	require.Equal(t, "dom-token", got[0].XsecToken)
+	require.Equal(t, "note", got[0].ModelType)
+	require.Equal(t, "user-1", got[0].NoteCard.User.UserID)
+	require.Equal(t, "DOM author", got[0].NoteCard.User.Nickname)
+	require.Equal(t, "12", got[0].NoteCard.InteractInfo.LikedCount)
+	require.True(t, got[0].NoteCard.InteractInfo.Liked)
+	require.Equal(t, "https://img/dom.jpg", got[0].NoteCard.Cover.URLDefault)
+	require.Equal(t, 1080, got[0].NoteCard.Cover.Width)
+	require.Equal(t, 42, got[0].NoteCard.Video.Capa.Duration)
+	require.Equal(t, "feed-2", got[1].ID)
+}
+
 func TestSearch(t *testing.T) {
 
 	t.Skip("SKIP: 测试发布")
