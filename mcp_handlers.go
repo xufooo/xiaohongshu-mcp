@@ -20,6 +20,7 @@ var sessionCreateTools = []string{"create_browse_session", "list_feeds", "check_
 // session 不同状态下的可用工具
 var (
 	afterCreateTools = append([]string{"session_search", "list_feeds"}, sessionBaseTools...)
+	afterFeedsTools  = append([]string{"get_feed_detail", "like_feed", "favorite_feed", "post_comment_to_feed", "reply_comment_in_feed", "search_feeds", "create_browse_session"}, sessionBaseTools...)
 	afterSearchTools = append([]string{"session_open_note", "session_search"}, sessionBaseTools...)
 	afterOpenTools   = append([]string{"session_like", "session_comment", "session_detail", "session_back"}, sessionBaseTools...)
 	afterBackTools   = append([]string{"session_search", "session_open_note"}, sessionBaseTools...)
@@ -547,12 +548,17 @@ func (s *AppServer) handleListFeeds(ctx context.Context) *MCPToolResult {
 		}
 	}
 
-	return &MCPToolResult{
-		Content: []MCPContent{{
-			Type: "text",
-			Text: string(jsonData),
-		}},
+	// 序列化一次以获取结构化的 data；再包上 available_tools
+	var raw any
+	if err := json.Unmarshal(jsonData, &raw); err != nil {
+		return &MCPToolResult{
+			Content: []MCPContent{{
+				Type: "text",
+				Text: string(jsonData),
+			}},
+		}
 	}
+	return jsonMCPResultWithTools(raw, afterFeedsTools)
 }
 
 // handleSearchFeeds 处理搜索Feeds
