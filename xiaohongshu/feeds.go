@@ -28,17 +28,7 @@ func NewFeedsListAction(page *hrod.Page) (*FeedsListAction, error) {
 	return &FeedsListAction{page: pp}, nil
 }
 
-// GetFeedsList 获取页面的 Feed 列表数据
-func (f *FeedsListAction) GetFeedsList(ctx context.Context) ([]Feed, error) {
-	page := f.page.Context(ctx).Timeout(60 * time.Second)
-	if err := page.Wait(rod.Eval(`() => {
-		const feed = window.__INITIAL_STATE__?.feed;
-		const feeds = feed?.feeds;
-		return Array.isArray(feeds?.value) || Array.isArray(feeds?._value);
-	}`)); err != nil {
-		return nil, fmt.Errorf("wait for feeds failed: %w", err)
-	}
-
+func readHomeFeedsFromState(page *hrod.Page) ([]Feed, error) {
 	resultObj, err := page.Eval(`() => {
 		if (window.__INITIAL_STATE__ &&
 		    window.__INITIAL_STATE__.feed &&
@@ -52,21 +42,46 @@ func (f *FeedsListAction) GetFeedsList(ctx context.Context) ([]Feed, error) {
 		return "";
 	}`)
 	if err != nil {
-		return nil, fmt.Errorf("extract feeds failed: %w", err)
+		return nil, fmt.Errorf("extract home feeds failed: %w", err)
 	}
 	result := ""
 	if resultObj != nil {
 		result = resultObj.Value.Str()
 	}
-
 	if result == "" {
 		return nil, errors.ErrNoFeeds
 	}
-
 	var feeds []Feed
 	if err := json.Unmarshal([]byte(result), &feeds); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal feeds: %w", err)
+		return nil, fmt.Errorf("failed to unmarshal home feeds: %w", err)
 	}
-
 	return feeds, nil
+}
+
+func collectHomeFeeds(page *hrod.Page) ([]Feed, error) {
+	domFeeds, domErr := ExtractSearchFeedsFromDOM(page)
+	stateFeeds, stateErr := readHomeFeedsFromState(page)
+	if domErr == nil && len(domFeeds) > 0 {
+		return mergeFeedsByID(domFeeds, stateFeeds), nil
+	}
+	if stateErr == nil && len(stateFeeds) > 0 {
+		return stateFeeds, nil
+	}
+	if domErr != nil {
+		return nil, domErr
+	}
+	return nil, stateErr
+}
+
+// GetFeedsList 获取页面的 Feed 列表数据
+func (f *FeedsListAction) GetFeedsList(ctx context.Context) ([]Feed, error) {
+	page := f.page.Context(ctx).Timeout(60 * time.Second)
+	if err := page.Wait(rod.Eval(`() => {
+		const feed = window.__INITIAL_STATE__?.feed;
+		const feeds = feed?.feeds;
+		return Array.isArray(feeds?.value) || Array.isArray(feeds?._value);
+	}`)); err != nil {
+		return nil, fmt.Errorf("wait for feeds failed: %w", err)
+	}
+	return collectHomeFeeds(page)
 }
