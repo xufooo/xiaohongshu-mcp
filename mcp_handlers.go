@@ -520,9 +520,6 @@ func (s *AppServer) handleListFeeds(ctx context.Context, args BrowseSessionIDArg
 	if args.SessionID == "" {
 		return sessionMCPErrorResult("获取Feeds列表失败: 缺少session_id参数", sessionNextStepCreateSession())
 	}
-	if blocked := s.requireBrowserAvailableForMCP("获取Feeds列表"); blocked != nil {
-		return blocked
-	}
 	if blocked := s.rateLimitMCP(ctx, "获取Feeds列表", ratelimit.ActionBrowse); blocked != nil {
 		return blocked
 	}
