@@ -390,14 +390,7 @@ func (s *BrowseSession) Search(ctx context.Context, keyword string, filters ...F
 	s.currentXsecToken = ""
 	s.opened = false
 	s.read = false
-	s.results = make(map[string]Feed, len(feeds)*2)
-	for i, feed := range feeds {
-		feed.Index = i
-		s.results[strconv.Itoa(i)] = feed
-		if feed.ID != "" {
-			s.results[feed.ID] = feed
-		}
-	}
+	s.results = replaceSessionResults(feeds)
 	s.recordTimelineLocked("search", keyword, "ok", time.Now(), fmt.Sprintf("results=%d", len(feeds)))
 	s.mu.Unlock()
 	s.probeWatchdogSelectorsForKind(opCtx, XHSReadySearch, "")
@@ -437,14 +430,7 @@ func (s *BrowseSession) ListFeeds(ctx context.Context) ([]Feed, error) {
 	s.opened = false
 	s.read = false
 	s.initialCommentIDs = nil
-	s.results = make(map[string]Feed, len(feeds)*2)
-	for i := range feeds {
-		feeds[i].Index = i
-		s.results[strconv.Itoa(i)] = feeds[i]
-		if feeds[i].ID != "" {
-			s.results[feeds[i].ID] = feeds[i]
-		}
-	}
+	s.results = replaceSessionResults(feeds)
 	s.recordTimelineLocked("list_feeds", "", "ok", time.Now(), fmt.Sprintf("results=%d", len(feeds)))
 	s.mu.Unlock()
 	return feeds, nil
@@ -1526,6 +1512,18 @@ func compactTimelineNote(value string) string {
 		return value
 	}
 	return string(runes[:40]) + "..."
+}
+
+func replaceSessionResults(feeds []Feed) map[string]Feed {
+	results := make(map[string]Feed, len(feeds)*2)
+	for i := range feeds {
+		feeds[i].Index = i
+		results[strconv.Itoa(i)] = feeds[i]
+		if feeds[i].ID != "" {
+			results[feeds[i].ID] = feeds[i]
+		}
+	}
+	return results
 }
 
 func inferXHSReadyKindFromSessionURL(rawURL string) XHSReadyKind {

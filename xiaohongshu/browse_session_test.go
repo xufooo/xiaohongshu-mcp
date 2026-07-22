@@ -14,6 +14,21 @@ import (
 	hrod "github.com/xpzouying/xiaohongshu-mcp/pkg/humanize/rod"
 )
 
+func TestReplaceSessionResultsAssignsIndexesToReturnedSlice(t *testing.T) {
+	feeds := []Feed{{ID: "feed-a", Index: 99}, {ID: "feed-b", Index: 99}}
+	results := replaceSessionResults(feeds)
+
+	if feeds[0].Index != 0 || feeds[1].Index != 1 {
+		t.Fatalf("returned indexes = [%d %d], want [0 1]", feeds[0].Index, feeds[1].Index)
+	}
+	if results["0"].Index != 0 || results["1"].Index != 1 {
+		t.Fatalf("numeric refs did not retain stable indexes: %+v", results)
+	}
+	if results["feed-b"].Index != 1 {
+		t.Fatalf("feed-id ref index = %d, want 1", results["feed-b"].Index)
+	}
+}
+
 func TestInferXHSReadyKindFromSessionStateUsesDetailWhenNoteOpened(t *testing.T) {
 	got := inferXHSReadyKindFromSessionState("https://www.xiaohongshu.com/search_result_ai?keyword=test", true, "feed-1")
 	if got != XHSReadyDetail {
