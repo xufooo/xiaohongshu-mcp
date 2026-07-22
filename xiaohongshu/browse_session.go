@@ -20,6 +20,7 @@ const (
 	DefaultBrowseSessionTimeout       = 10 * time.Minute
 	browseSessionRefreshTimeout       = 2 * time.Second
 	maxBrowseSessionTimelineEntries   = 10
+	browseSessionBackTimeout          = 15 * time.Second
 )
 
 type BrowseSessionInfo struct {
@@ -894,6 +895,45 @@ func (s *BrowseSession) reply(ctx context.Context, expectedFeedID, commentID, us
 	return nil
 }
 
+func historyTargetReady(probe xhsReadyProbe, fromURL string, kind XHSReadyKind) bool {
+	return probe.URL != "" && probe.URL != fromURL && isXHSReady(probe, kind, "", false)
+}
+
+func waitForHistoryTargetReady(ctx context.Context, page *hrod.Page, fromURL, sourceURL string) (xhsReadyProbe, error) {
+	deadline := time.Now().Add(browseSessionBackTimeout)
+	var last xhsReadyProbe
+	var lastErr error
+	for time.Now().Before(deadline) {
+		if err := ctx.Err(); err != nil {
+			return last, err
+		}
+		probe, err := probeXHSReady(page.Context(ctx), "")
+		if err != nil {
+			lastErr = err
+		} else {
+			last = probe
+			kindURL := probe.URL
+			if sourceURL != "" {
+				kindURL = sourceURL
+			}
+			kind := inferXHSReadyKindFromURL(kindURL)
+			if probe.RiskText != "" {
+				return last, fmt.Errorf("返回页出现风险信号: %s", probe.RiskText)
+			}
+			if historyTargetReady(probe, fromURL, kind) {
+				return probe, nil
+			}
+		}
+		if err := page.Context(ctx).SleepRandom(300*time.Millisecond, 500*time.Millisecond); err != nil {
+			return last, err
+		}
+	}
+	if lastErr != nil {
+		return last, fmt.Errorf("等待 history.back 目标页超时: %w; %s", lastErr, formatXHSReadyProbe(last))
+	}
+	return last, fmt.Errorf("等待 history.back 目标页超时: %s", formatXHSReadyProbe(last))
+}
+
 func (s *BrowseSession) Back(ctx context.Context) error {
 	opCtx, err := s.beginLockedOperation(ctx, true)
 	if err != nil {
@@ -904,20 +944,31 @@ func (s *BrowseSession) Back(ctx context.Context) error {
 	s.mu.Lock()
 	page := s.page
 	feedID := s.currentFeedID
+	sourceURL := s.sourceURL
 	s.mu.Unlock()
 
 	if page == nil {
 		return fmt.Errorf("browse session 页面不存在: %s", s.id)
 	}
 
+	fromURL, err := s.currentPageURL(opCtx)
+	if err != nil {
+		return fmt.Errorf("读取后退前 URL: %w", err)
+	}
+
 	// 通用后退：从任意页面返回上一步
-	if _, err := page.Eval(`() => window.history.back()`); err != nil {
+	if _, err := page.Context(opCtx).Eval(`() => window.history.back()`); err != nil {
 		return fmt.Errorf("history.back 失败: %w", err)
 	}
-	page.Sleep(1000 * time.Millisecond) // 等待 SPA 渲染
 
-	s.refreshPageState(opCtx)
+	probe, err := waitForHistoryTargetReady(opCtx, page, fromURL, sourceURL)
+	if err != nil {
+		return err
+	}
 	s.mu.Lock()
+	s.currentURL = probe.URL
+	s.scrollY = probe.ScrollY
+	s.sourceURL = ""
 	s.currentFeedID = ""
 	s.currentXsecToken = ""
 	s.opened = false
