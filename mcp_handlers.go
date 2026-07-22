@@ -21,9 +21,9 @@ var sessionCreateTools = []string{"create_browse_session", "list_feeds", "check_
 var (
 	afterCreateTools = append([]string{"session_search", "list_feeds"}, sessionBaseTools...)
 	afterFeedsTools  = append([]string{"session_open_note", "session_search", "list_feeds"}, sessionBaseTools...)
-	afterSearchTools = append([]string{"session_open_note", "session_search"}, sessionBaseTools...)
+	afterSearchTools = append([]string{"session_open_note", "session_search", "list_feeds"}, sessionBaseTools...)
 	afterOpenTools   = append([]string{"session_like", "session_comment", "session_detail", "session_back"}, sessionBaseTools...)
-	afterBackTools   = append([]string{"session_search", "session_open_note"}, sessionBaseTools...)
+	afterBackTools   = append([]string{"session_search", "session_open_note", "list_feeds"}, sessionBaseTools...)
 	afterCloseTools  = sessionCreateTools
 )
 
