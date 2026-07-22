@@ -29,6 +29,20 @@ func TestReplaceSessionResultsAssignsIndexesToReturnedSlice(t *testing.T) {
 	}
 }
 
+func functionSource(t *testing.T, source, marker string) string {
+	t.Helper()
+	start := strings.Index(source, marker)
+	if start < 0 {
+		t.Fatalf("function marker missing: %s", marker)
+	}
+	rest := source[start:]
+	next := strings.Index(rest[1:], "\nfunc ")
+	if next < 0 {
+		return rest
+	}
+	return rest[:next+1]
+}
+
 func TestInferXHSReadyKindFromSessionStateUsesDetailWhenNoteOpened(t *testing.T) {
 	got := inferXHSReadyKindFromSessionState("https://www.xiaohongshu.com/search_result_ai?keyword=test", true, "feed-1")
 	if got != XHSReadyDetail {
@@ -503,6 +517,30 @@ func TestOpenedSessionBackActionDoesNotRequireSourceURL(t *testing.T) {
 	}
 }
 
+func TestHistoryTargetReadyRequiresURLChangeAndTargetReadiness(t *testing.T) {
+	from := "https://www.xiaohongshu.com/explore/feed-1"
+	search := xhsReadyProbe{
+		URL:               "https://www.xiaohongshu.com/search_result?keyword=go",
+		ReadyState:        "complete",
+		AppCount:          1,
+		SearchResultCount: 3,
+		SearchFeedCount:   3,
+	}
+	if historyTargetReady(search, from, XHSReadySearch) != true {
+		t.Fatal("changed ready search page should be accepted")
+	}
+	search.URL = from
+	if historyTargetReady(search, from, XHSReadySearch) {
+		t.Fatal("same URL must not be accepted as completed history.back")
+	}
+	search.URL = "https://www.xiaohongshu.com/search_result?keyword=go"
+	search.SearchResultCount = 0
+	search.SearchFeedCount = 0
+	if historyTargetReady(search, from, XHSReadySearch) {
+		t.Fatal("changed but unready target must not be accepted")
+	}
+}
+
 func TestBackUsesHistoryBack(t *testing.T) {
 	data, err := os.ReadFile("browse_session.go")
 	if err != nil {
@@ -516,6 +554,13 @@ func TestBackUsesHistoryBack(t *testing.T) {
 		if !strings.Contains(source, want) {
 			t.Fatalf("browse_session.go missing %q", want)
 		}
+	}
+	body := functionSource(t, source, "func (s *BrowseSession) Back(")
+	if !strings.Contains(body, "waitForHistoryTargetReady") {
+		t.Fatal("Back must wait for the history target to become ready")
+	}
+	if strings.Contains(body, "Sleep(1000 * time.Millisecond)") {
+		t.Fatal("Back must not use a fixed one-second success wait")
 	}
 }
 
