@@ -189,6 +189,50 @@ func TestAvailableToolListsHaveNoDuplicates(t *testing.T) {
 	}
 }
 
+func TestHandleListFeedsPassesCursorAndMaxItemsToService(t *testing.T) {
+	app := &AppServer{
+		xiaohongshuService: &XiaohongshuService{
+			browseSessions: xiaohongshu.NewBrowseSessionManager(time.Minute),
+			feedCursorTTL:  time.Minute,
+		},
+	}
+
+	t.Run("non-existent cursor returns cursor error", func(t *testing.T) {
+		result := app.handleListFeeds(context.Background(), ListFeedsArgs{
+			SessionID: "session-not-exist",
+			MaxItems:  35,
+			Cursor:    "nonexistent-cursor",
+		})
+		if !result.IsError {
+			t.Fatal("should return error for non-existent cursor")
+		}
+		text := result.Content[0].Text
+		if !strings.Contains(text, "feed cursor 不存在或已过期") {
+			t.Fatalf("expected cursor-not-found error, got: %q", text)
+		}
+	})
+
+	t.Run("expired cursor returns cursor error", func(t *testing.T) {
+		_ = app.xiaohongshuService.setFeedCursor("expired-cursor", feedCursorEntry{
+			SessionID: "session-1",
+			QueryKey:  "home::",
+		})
+		result := app.handleListFeeds(context.Background(), ListFeedsArgs{
+			SessionID: "session-1",
+			MaxItems:  35,
+			Cursor:    "expired-cursor",
+		})
+		if !result.IsError {
+			t.Fatal("should return error when session doesn't exist despite cursor existing")
+		}
+		// cursor matches but session-1 doesn't exist -> error from browseSessions.Get
+		text := result.Content[0].Text
+		if !strings.Contains(text, "browse session 不存在或已过期") {
+			t.Fatalf("expected session-not-found after cursor validation, got: %q", text)
+		}
+	})
+}
+
 func TestHandleListFeedsDoesNotUseGlobalBrowserBusyGuard(t *testing.T) {
 	source, err := os.ReadFile("mcp_handlers.go")
 	if err != nil {

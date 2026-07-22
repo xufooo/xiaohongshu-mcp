@@ -29,6 +29,8 @@ type XiaohongshuService struct {
 
 	commentCursors   sync.Map
 	commentCursorTTL time.Duration
+	feedCursors      sync.Map
+	feedCursorTTL    time.Duration
 }
 
 // NewXiaohongshuService 创建小红书服务实例
@@ -45,6 +47,7 @@ func NewXiaohongshuService() *XiaohongshuService {
 		),
 		browseSessions: xiaohongshu.NewBrowseSessionManager(xiaohongshu.DefaultBrowseSessionTimeout),
 		commentCursorTTL: 5 * time.Minute,
+		feedCursorTTL:   5 * time.Minute,
 	}
 }
 
@@ -79,6 +82,37 @@ func (s *XiaohongshuService) getCommentCursor(id string) (*xiaohongshu.CommentCu
 
 func (s *XiaohongshuService) delCommentCursor(id string) {
 	s.commentCursors.Delete(strings.TrimSpace(id))
+}
+
+func (s *XiaohongshuService) setFeedCursor(id string, entry feedCursorEntry) {
+	if strings.TrimSpace(id) == "" {
+		return
+	}
+	ttl := s.feedCursorTTL
+	if ttl <= 0 {
+		ttl = 5 * time.Minute
+	}
+	s.feedCursors.Store(id, entry)
+	time.AfterFunc(ttl, func() {
+		if value, ok := s.feedCursors.Load(id); ok {
+			if e, ok := value.(feedCursorEntry); ok && e.SessionID == entry.SessionID {
+				s.feedCursors.Delete(id)
+			}
+		}
+	})
+}
+
+func (s *XiaohongshuService) getFeedCursor(id string) (feedCursorEntry, bool) {
+	value, ok := s.feedCursors.Load(strings.TrimSpace(id))
+	if !ok {
+		return feedCursorEntry{}, false
+	}
+	entry, ok := value.(feedCursorEntry)
+	return entry, ok
+}
+
+func (s *XiaohongshuService) delFeedCursor(id string) {
+	s.feedCursors.Delete(strings.TrimSpace(id))
 }
 
 func (s *XiaohongshuService) startReadNetworkCapture(page *hrod.Page) *xiaohongshu.NetworkCapture {
@@ -153,9 +187,33 @@ type PublishVideoResponse struct {
 
 // FeedsListResponse Feeds列表响应
 type FeedsListResponse struct {
-	Feeds   []xiaohongshu.Feed                `json:"feeds"`
-	Count   int                               `json:"count"`
-	Network []xiaohongshu.NetworkCaptureEntry `json:"network,omitempty"`
+	Feeds     []xiaohongshu.Feed                `json:"feeds"`
+	Count     int                               `json:"count"`
+	Cursor    string                            `json:"cursor,omitempty"`
+	HasMore   bool                              `json:"has_more"`
+	SeenCount int                               `json:"seen_count"`
+	Network   []xiaohongshu.NetworkCaptureEntry `json:"network,omitempty"`
+}
+
+type feedCursorEntry struct {
+	SessionID string
+	QueryKey  string
+	Cursor    *xiaohongshu.FeedCursor
+}
+
+func (e feedCursorEntry) Validate(sessionID, queryKey string) error {
+	if e.SessionID != sessionID || e.QueryKey != queryKey {
+		return fmt.Errorf("feed cursor 与当前 session 或查询不匹配")
+	}
+	return nil
+}
+
+func feedQueryKey(kind, keyword string, filters []xiaohongshu.FilterOption) (string, error) {
+	data, err := json.Marshal(filters)
+	if err != nil {
+		return "", err
+	}
+	return kind + ":" + strings.TrimSpace(keyword) + ":" + string(data), nil
 }
 
 // UserProfileResponse 用户主页响应
@@ -842,30 +900,100 @@ func (s *XiaohongshuService) SessionState(ctx context.Context, id string) (*xiao
 }
 
 // SessionListFeeds 在 session 浏览器中获取首页 Feeds 列表
-func (s *XiaohongshuService) SessionListFeeds(ctx context.Context, id string) (*FeedsListResponse, error) {
+func (s *XiaohongshuService) SessionListFeeds(ctx context.Context, id, cursorID string, maxItems int) (*FeedsListResponse, error) {
 	session, err := s.browseSessions.Get(id)
 	if err != nil {
 		return nil, err
 	}
-	feeds, err := session.ListFeeds(ctx)
+
+	queryKey := "home::"
+	var cursor *xiaohongshu.FeedCursor
+	if cursorID != "" {
+		entry, ok := s.getFeedCursor(cursorID)
+		if !ok {
+			return nil, fmt.Errorf("feed cursor 不存在或已过期")
+		}
+		if err := entry.Validate(id, queryKey); err != nil {
+			return nil, err
+		}
+		cursor = entry.Cursor
+	}
+
+	feeds, nextCursor, hasMore, err := session.ListFeedsBatch(ctx, cursor, maxItems)
 	if err != nil {
 		s.recordRiskFromSession(session, err)
 		return nil, err
 	}
-	return &FeedsListResponse{Feeds: feeds, Count: len(feeds)}, nil
+
+	nextCursorID := ""
+	if hasMore && nextCursor != nil {
+		nextCursorID = fmt.Sprintf("fc_%s_%d", id, time.Now().UnixNano())
+		s.setFeedCursor(nextCursorID, feedCursorEntry{SessionID: id, QueryKey: queryKey, Cursor: nextCursor})
+	}
+	if cursorID != "" {
+		s.delFeedCursor(cursorID)
+	}
+	seenCount := 0
+	if nextCursor != nil {
+		seenCount = len(nextCursor.ReturnedIDs)
+	}
+	return &FeedsListResponse{
+		Feeds:     feeds,
+		Count:     len(feeds),
+		Cursor:    nextCursorID,
+		HasMore:   hasMore,
+		SeenCount: seenCount,
+	}, nil
 }
 
-func (s *XiaohongshuService) SessionSearch(ctx context.Context, id, keyword string, filters ...xiaohongshu.FilterOption) (*FeedsListResponse, error) {
+func (s *XiaohongshuService) SessionSearch(ctx context.Context, id, keyword, cursorID string, maxItems int, filters ...xiaohongshu.FilterOption) (*FeedsListResponse, error) {
 	session, err := s.browseSessions.Get(id)
 	if err != nil {
 		return nil, err
 	}
-	feeds, err := session.Search(ctx, keyword, filters...)
+
+	queryKey, err := feedQueryKey("search", keyword, filters)
+	if err != nil {
+		return nil, fmt.Errorf("计算 query key 失败: %w", err)
+	}
+
+	var cursor *xiaohongshu.FeedCursor
+	if cursorID != "" {
+		entry, ok := s.getFeedCursor(cursorID)
+		if !ok {
+			return nil, fmt.Errorf("feed cursor 不存在或已过期")
+		}
+		if err := entry.Validate(id, queryKey); err != nil {
+			return nil, err
+		}
+		cursor = entry.Cursor
+	}
+
+	feeds, nextCursor, hasMore, err := session.SearchBatch(ctx, keyword, filters, cursor, maxItems)
 	if err != nil {
 		s.recordRiskFromSession(session, err)
 		return nil, err
 	}
-	return &FeedsListResponse{Feeds: feeds, Count: len(feeds)}, nil
+
+	nextCursorID := ""
+	if hasMore && nextCursor != nil {
+		nextCursorID = fmt.Sprintf("fc_%s_%d", id, time.Now().UnixNano())
+		s.setFeedCursor(nextCursorID, feedCursorEntry{SessionID: id, QueryKey: queryKey, Cursor: nextCursor})
+	}
+	if cursorID != "" {
+		s.delFeedCursor(cursorID)
+	}
+	seenCount := 0
+	if nextCursor != nil {
+		seenCount = len(nextCursor.ReturnedIDs)
+	}
+	return &FeedsListResponse{
+		Feeds:     feeds,
+		Count:     len(feeds),
+		Cursor:    nextCursorID,
+		HasMore:   hasMore,
+		SeenCount: seenCount,
+	}, nil
 }
 
 func (s *XiaohongshuService) SessionOpenNote(ctx context.Context, id, resultRef, xsecToken string) (*xiaohongshu.SessionOpenNoteResponse, error) {

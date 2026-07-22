@@ -14,6 +14,33 @@ import (
 	hrod "github.com/xpzouying/xiaohongshu-mcp/pkg/humanize/rod"
 )
 
+func TestAppendSessionResultsExtendsNumericRefs(t *testing.T) {
+	feedsA := []Feed{{ID: "a"}, {ID: "b"}}
+	results := replaceSessionResults(feedsA)
+	require.Equal(t, 0, results["0"].Index)
+	require.Equal(t, 1, results["1"].Index)
+
+	feedsB := []Feed{{ID: "c"}, {ID: "d"}}
+	results = appendSessionResults(results, feedsB)
+	require.Equal(t, 2, results["2"].Index)
+	require.Equal(t, 3, results["3"].Index)
+	require.Equal(t, "c", results["2"].ID)
+	require.Equal(t, "d", results["c"].ID)
+}
+
+func TestAppendSessionResultsCreatesNewMapWhenNil(t *testing.T) {
+	results := appendSessionResults(nil, []Feed{{ID: "a"}})
+	require.Equal(t, 0, results["0"].Index)
+	require.Equal(t, "a", results["0"].ID)
+}
+
+func TestNormalizeFeedPageSizeClampsToRange(t *testing.T) {
+	require.Equal(t, 35, normalizeFeedPageSize(0))
+	require.Equal(t, 20, normalizeFeedPageSize(20))
+	require.Equal(t, 50, normalizeFeedPageSize(100))
+	require.Equal(t, 35, normalizeFeedPageSize(-1))
+}
+
 func TestReplaceSessionResultsAssignsIndexesToReturnedSlice(t *testing.T) {
 	feeds := []Feed{{ID: "feed-a", Index: 99}, {ID: "feed-b", Index: 99}}
 	results := replaceSessionResults(feeds)

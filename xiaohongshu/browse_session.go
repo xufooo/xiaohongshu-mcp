@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -373,68 +374,132 @@ func (s *BrowseSession) PageState(ctx context.Context) (*BrowseSessionPageState,
 }
 
 func (s *BrowseSession) Search(ctx context.Context, keyword string, filters ...FilterOption) ([]Feed, error) {
-	opCtx, err := s.beginLockedOperation(ctx, true)
-	if err != nil {
-		return nil, err
-	}
-	defer s.finishOperation()
-
-	action := NewSearchActionWithState(s.page.Context(opCtx), s.state)
-	feeds, err := action.Search(opCtx, keyword, filters...)
-	if err != nil {
-		return nil, err
-	}
-
-	s.mu.Lock()
-	s.sourceURL = ""
-	s.currentFeedID = ""
-	s.currentXsecToken = ""
-	s.opened = false
-	s.read = false
-	s.results = replaceSessionResults(feeds)
-	s.recordTimelineLocked("search", keyword, "ok", time.Now(), fmt.Sprintf("results=%d", len(feeds)))
-	s.mu.Unlock()
-	s.probeWatchdogSelectorsForKind(opCtx, XHSReadySearch, "")
-	return feeds, nil
+	feeds, _, _, err := s.SearchBatch(ctx, keyword, filters, nil, 35)
+	return feeds, err
 }
 
-// ListFeeds 在 session 浏览器中获取首页 Feeds 列表
-func (s *BrowseSession) ListFeeds(ctx context.Context) ([]Feed, error) {
+// ListFeedsBatch 在 session 浏览器中分页获取首页 Feeds。
+// cursor 为空时执行首页导航/ready；非空时从当前页继续滚动。
+func (s *BrowseSession) ListFeedsBatch(ctx context.Context, cursor *FeedCursor, maxItems int) ([]Feed, *FeedCursor, bool, error) {
 	opCtx, err := s.beginLockedOperation(ctx, true)
 	if err != nil {
-		return nil, err
+		return nil, nil, false, err
 	}
 	defer s.finishOperation()
+
+	maxItems = normalizeFeedPageSize(maxItems)
 
 	s.mu.Lock()
 	page := s.page
 	s.mu.Unlock()
 
 	if page == nil {
-		return nil, fmt.Errorf("browse session 页面不存在: %s", s.id)
+		return nil, nil, false, fmt.Errorf("browse session 页面不存在: %s", s.id)
 	}
 
-	action, err := NewFeedsListAction(page.Context(opCtx))
-	if err != nil {
-		return nil, err
-	}
+	var feeds []Feed
+	var nextCursor *FeedCursor
+	var hasMore bool
 
-	feeds, err := action.GetFeedsList(opCtx)
-	if err != nil {
-		return nil, err
+	if cursor == nil {
+		action, err := NewFeedsListAction(page.Context(opCtx))
+		if err != nil {
+			return nil, nil, false, err
+		}
+		feeds, err = action.GetFeedsList(opCtx)
+		if err != nil {
+			return nil, nil, false, err
+		}
+		cursor = &FeedCursor{Kind: FeedPageHome, CreatedAt: time.Now()}
+		nextCursor = cursor
+		hasMore = false
+	} else {
+		feeds, nextCursor, hasMore, err = LoadFeedBatch(opCtx, page.Context(opCtx), FeedPageHome, cursor, maxItems, func() ([]Feed, error) {
+			return collectHomeFeeds(page.Context(opCtx))
+		})
+		if err != nil {
+			return nil, nil, false, err
+		}
 	}
 
 	s.mu.Lock()
-	s.sourceURL = ""
-	s.currentFeedID = ""
-	s.currentXsecToken = ""
-	s.opened = false
-	s.read = false
-	s.initialCommentIDs = nil
-	s.results = replaceSessionResults(feeds)
+	if cursor == nextCursor {
+		s.sourceURL = ""
+		s.currentFeedID = ""
+		s.currentXsecToken = ""
+		s.opened = false
+		s.read = false
+		s.initialCommentIDs = nil
+		s.results = replaceSessionResults(feeds)
+	} else {
+		s.results = appendSessionResults(s.results, feeds)
+	}
 	s.recordTimelineLocked("list_feeds", "", "ok", time.Now(), fmt.Sprintf("results=%d", len(feeds)))
 	s.mu.Unlock()
-	return feeds, nil
+	return feeds, nextCursor, hasMore, nil
+}
+
+// ListFeeds 是 ListFeedsBatch 的兼容 wrapper，不传游标且默认 35 条。
+func (s *BrowseSession) ListFeeds(ctx context.Context) ([]Feed, error) {
+	feeds, _, _, err := s.ListFeedsBatch(ctx, nil, 35)
+	return feeds, err
+}
+
+// SearchBatch 在 session 浏览器中分页搜索。
+// cursor 为空时执行真实 UI 搜索和筛选；非空时从当前页继续滚动。
+func (s *BrowseSession) SearchBatch(ctx context.Context, keyword string, filters []FilterOption, cursor *FeedCursor, maxItems int) ([]Feed, *FeedCursor, bool, error) {
+	opCtx, err := s.beginLockedOperation(ctx, true)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	defer s.finishOperation()
+
+	maxItems = normalizeFeedPageSize(maxItems)
+
+	s.mu.Lock()
+	page := s.page
+	s.mu.Unlock()
+
+	if page == nil {
+		return nil, nil, false, fmt.Errorf("browse session 页面不存在: %s", s.id)
+	}
+
+	if cursor == nil {
+		action := NewSearchActionWithState(page.Context(opCtx), s.state)
+		feeds, err := action.Search(opCtx, keyword, filters...)
+		if err != nil {
+			return nil, nil, false, err
+		}
+		cursor = &FeedCursor{
+			Kind:      FeedPageSearch,
+			Keyword:   keyword,
+			FilterKey: filterKeyFromFilters(filters),
+			CreatedAt: time.Now(),
+		}
+		s.mu.Lock()
+		s.sourceURL = ""
+		s.currentFeedID = ""
+		s.currentXsecToken = ""
+		s.opened = false
+		s.read = false
+		s.results = replaceSessionResults(feeds)
+		s.recordTimelineLocked("search", keyword, "ok", time.Now(), fmt.Sprintf("results=%d", len(feeds)))
+		s.mu.Unlock()
+		s.probeWatchdogSelectorsForKind(opCtx, XHSReadySearch, "")
+		return feeds, cursor, false, nil
+	}
+
+	feeds, nextCursor, hasMore, err := LoadFeedBatch(opCtx, page.Context(opCtx), FeedPageSearch, cursor, maxItems, func() ([]Feed, error) {
+		return collectSearchFeeds(page.Context(opCtx), false)
+	})
+	if err != nil {
+		return nil, nil, false, err
+	}
+
+	s.mu.Lock()
+	s.results = appendSessionResults(s.results, feeds)
+	s.mu.Unlock()
+	return feeds, nextCursor, hasMore, nil
 }
 
 func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, xsecToken string) (*SessionOpenNoteResponse, error) {
@@ -1529,6 +1594,43 @@ func compactTimelineNote(value string) string {
 		return value
 	}
 	return string(runes[:40]) + "..."
+}
+
+func filterKeyFromFilters(filters []FilterOption) string {
+	data, _ := json.Marshal(filters)
+	return string(data)
+}
+
+func normalizeFeedPageSize(maxItems int) int {
+	if maxItems <= 0 {
+		return 35
+	}
+	if maxItems > 50 {
+		return 50
+	}
+	return maxItems
+}
+
+func appendSessionResults(results map[string]Feed, feeds []Feed) map[string]Feed {
+	if results == nil {
+		results = make(map[string]Feed, len(feeds)*2)
+	}
+	next := 0
+	for {
+		if _, exists := results[strconv.Itoa(next)]; !exists {
+			break
+		}
+		next++
+	}
+	for i := range feeds {
+		feeds[i].Index = next
+		results[strconv.Itoa(next)] = feeds[i]
+		if feeds[i].ID != "" {
+			results[feeds[i].ID] = feeds[i]
+		}
+		next++
+	}
+	return results
 }
 
 func replaceSessionResults(feeds []Feed) map[string]Feed {
