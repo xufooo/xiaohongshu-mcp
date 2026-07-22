@@ -33,6 +33,7 @@ jobs:
       run: |
         export GOOS=${{ matrix.goos }}
         export GOARCH=${{ matrix.goarch }}
+        export GOFLAGS=-buildvcs=false
         EXT=""
         if [ "$GOOS" = "windows" ]; then EXT=".exe"; fi
         go build -v -o xiaohongshu-mcp-${GOOS}-${GOARCH}${EXT} .
