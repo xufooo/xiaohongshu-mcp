@@ -260,18 +260,21 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 		}),
 	)
 
-	// 工具 5: 获取Feed列表
+	// 工具 5: 获取Feed列表（需要 session_id）
 	mcp.AddTool(server,
 		&mcp.Tool{
 			Name:        "list_feeds",
-			Description: "获取首页 Feeds 列表",
+			Description: "获取首页 Feeds 列表（需要 session_id）",
 			Annotations: &mcp.ToolAnnotations{
 				Title:        "List Feeds",
 				ReadOnlyHint: true,
 			},
+			InputSchema: mcp.NewObjectSchema(map[string]mcp.JSONSchema{
+				"session_id": mcp.NewStringSchema("浏览会话ID", true),
+			}),
 		},
-		withPanicRecovery("list_feeds", func(ctx context.Context, req *mcp.CallToolRequest, _ any) (*mcp.CallToolResult, any, error) {
-			result := appServer.handleListFeeds(ctx)
+		withPanicRecovery("list_feeds", func(ctx context.Context, req *mcp.CallToolRequest, args BrowseSessionIDArgs) (*mcp.CallToolResult, any, error) {
+			result := appServer.handleListFeeds(ctx, args)
 			return convertToMCPResult(result), nil, nil
 		}),
 	)
