@@ -699,24 +699,21 @@ func (s *SearchAction) collectResults(page *hrod.Page, filters ...FilterOption) 
 		}
 	}
 
-	if appliedFilters {
-		// 筛选后优先读取应用状态，和 fixup 分支保持一致，避免拿到旧的 DOM 卡片。
-		if feeds, err := readSearchFeedsFromState(page); err == nil && len(feeds) > 0 {
-			return feeds, nil
-		}
+	domFeeds, domErr := ExtractSearchFeedsFromDOM(page)
+	stateFeeds, stateErr := readSearchFeedsFromState(page)
+	if appliedFilters && stateErr == nil && len(stateFeeds) > 0 {
+		return mergeFeedsByID(stateFeeds, domFeeds), nil
 	}
-
-	if feeds, err := ExtractSearchFeedsFromDOM(page); err == nil && len(feeds) > 0 {
-		if hasEmptyXsecToken(feeds) {
-			if stateFeeds, stateErr := readSearchFeedsFromState(page); stateErr == nil {
-				mergeSearchFeedXsecTokens(feeds, stateFeeds)
-			}
-		}
-		return feeds, nil
+	if domErr == nil && len(domFeeds) > 0 {
+		return mergeFeedsByID(domFeeds, stateFeeds), nil
 	}
-
-	// DOM 提取失败时降级到 __INITIAL_STATE__，兼容页面结构变动或虚拟列表未渲染的情况。
-	return readSearchFeedsFromState(page)
+	if stateErr == nil && len(stateFeeds) > 0 {
+		return stateFeeds, nil
+	}
+	if domErr != nil {
+		return nil, domErr
+	}
+	return nil, stateErr
 }
 
 func readSearchFeedsFromState(page *hrod.Page) ([]Feed, error) {
@@ -748,30 +745,99 @@ func readSearchFeedsFromState(page *hrod.Page) ([]Feed, error) {
 	return feeds, nil
 }
 
-func hasEmptyXsecToken(feeds []Feed) bool {
-	for _, feed := range feeds {
-		if feed.XsecToken == "" {
-			return true
+func mergeFeedsByID(primary, fallback []Feed) []Feed {
+	byID := make(map[string]Feed, len(fallback))
+	for _, feed := range fallback {
+		if feed.ID != "" {
+			byID[feed.ID] = feed
 		}
 	}
-	return false
-}
-
-func mergeSearchFeedXsecTokens(feeds, stateFeeds []Feed) {
-	tokenByID := make(map[string]string, len(stateFeeds))
-	for _, feed := range stateFeeds {
-		if feed.ID != "" && feed.XsecToken != "" {
-			tokenByID[feed.ID] = feed.XsecToken
+	result := make([]Feed, 0, len(primary)+len(fallback))
+	seen := make(map[string]bool, len(primary))
+	for _, feed := range primary {
+		if other, ok := byID[feed.ID]; ok {
+			fillMissingFeedFields(&feed, other)
+		}
+		result = append(result, feed)
+		if feed.ID != "" {
+			seen[feed.ID] = true
 		}
 	}
-
-	for i := range feeds {
-		if feeds[i].XsecToken != "" {
+	for _, feed := range fallback {
+		if feed.ID == "" || seen[feed.ID] {
 			continue
 		}
-		if token := tokenByID[feeds[i].ID]; token != "" {
-			feeds[i].XsecToken = token
-		}
+		result = append(result, feed)
+		seen[feed.ID] = true
+	}
+	return result
+}
+
+func fillMissingFeedFields(dst *Feed, src Feed) {
+	if dst.ID == "" {
+		dst.ID = src.ID
+	}
+	if dst.XsecToken == "" {
+		dst.XsecToken = src.XsecToken
+	}
+	if dst.ModelType == "" {
+		dst.ModelType = src.ModelType
+	}
+	if dst.NoteCard.Type == "" {
+		dst.NoteCard.Type = src.NoteCard.Type
+	}
+	if dst.NoteCard.DisplayTitle == "" {
+		dst.NoteCard.DisplayTitle = src.NoteCard.DisplayTitle
+	}
+	if dst.NoteCard.User.UserID == "" {
+		dst.NoteCard.User.UserID = src.NoteCard.User.UserID
+	}
+	if dst.NoteCard.User.Nickname == "" {
+		dst.NoteCard.User.Nickname = src.NoteCard.User.Nickname
+	}
+	if dst.NoteCard.User.NickName == "" {
+		dst.NoteCard.User.NickName = src.NoteCard.User.NickName
+	}
+	if dst.NoteCard.User.Avatar == "" {
+		dst.NoteCard.User.Avatar = src.NoteCard.User.Avatar
+	}
+	if dst.NoteCard.InteractInfo.LikedCount == "" {
+		dst.NoteCard.InteractInfo.LikedCount = src.NoteCard.InteractInfo.LikedCount
+	}
+	if dst.NoteCard.InteractInfo.SharedCount == "" {
+		dst.NoteCard.InteractInfo.SharedCount = src.NoteCard.InteractInfo.SharedCount
+	}
+	if dst.NoteCard.InteractInfo.CommentCount == "" {
+		dst.NoteCard.InteractInfo.CommentCount = src.NoteCard.InteractInfo.CommentCount
+	}
+	if dst.NoteCard.InteractInfo.CollectedCount == "" {
+		dst.NoteCard.InteractInfo.CollectedCount = src.NoteCard.InteractInfo.CollectedCount
+	}
+	dst.NoteCard.InteractInfo.Liked = dst.NoteCard.InteractInfo.Liked || src.NoteCard.InteractInfo.Liked
+	dst.NoteCard.InteractInfo.Collected = dst.NoteCard.InteractInfo.Collected || src.NoteCard.InteractInfo.Collected
+	if dst.NoteCard.Cover.Width == 0 {
+		dst.NoteCard.Cover.Width = src.NoteCard.Cover.Width
+	}
+	if dst.NoteCard.Cover.Height == 0 {
+		dst.NoteCard.Cover.Height = src.NoteCard.Cover.Height
+	}
+	if dst.NoteCard.Cover.URL == "" {
+		dst.NoteCard.Cover.URL = src.NoteCard.Cover.URL
+	}
+	if dst.NoteCard.Cover.FileID == "" {
+		dst.NoteCard.Cover.FileID = src.NoteCard.Cover.FileID
+	}
+	if dst.NoteCard.Cover.URLPre == "" {
+		dst.NoteCard.Cover.URLPre = src.NoteCard.Cover.URLPre
+	}
+	if dst.NoteCard.Cover.URLDefault == "" {
+		dst.NoteCard.Cover.URLDefault = src.NoteCard.Cover.URLDefault
+	}
+	if len(dst.NoteCard.Cover.InfoList) == 0 {
+		dst.NoteCard.Cover.InfoList = src.NoteCard.Cover.InfoList
+	}
+	if dst.NoteCard.Video == nil {
+		dst.NoteCard.Video = src.NoteCard.Video
 	}
 }
 
