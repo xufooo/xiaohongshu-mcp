@@ -716,6 +716,24 @@ func (s *SearchAction) collectResults(page *hrod.Page, filters ...FilterOption) 
 	return nil, stateErr
 }
 
+func collectSearchFeeds(page *hrod.Page, stateFirst bool) ([]Feed, error) {
+	domFeeds, domErr := ExtractSearchFeedsFromDOM(page)
+	stateFeeds, stateErr := readSearchFeedsFromState(page)
+	if stateFirst && stateErr == nil && len(stateFeeds) > 0 {
+		return mergeFeedsByID(stateFeeds, domFeeds), nil
+	}
+	if domErr == nil && len(domFeeds) > 0 {
+		return mergeFeedsByID(domFeeds, stateFeeds), nil
+	}
+	if stateErr == nil && len(stateFeeds) > 0 {
+		return stateFeeds, nil
+	}
+	if domErr != nil {
+		return nil, domErr
+	}
+	return nil, stateErr
+}
+
 func readSearchFeedsFromState(page *hrod.Page) ([]Feed, error) {
 	result, err := page.Eval(`() => {
 		if (window.__INITIAL_STATE__ &&
