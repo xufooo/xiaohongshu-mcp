@@ -269,9 +269,6 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 				Title:        "List Feeds",
 				ReadOnlyHint: true,
 			},
-			InputSchema: mcp.NewObjectSchema(map[string]mcp.JSONSchema{
-				"session_id": mcp.NewStringSchema("浏览会话ID", true),
-			}),
 		},
 		withPanicRecovery("list_feeds", func(ctx context.Context, req *mcp.CallToolRequest, args BrowseSessionIDArgs) (*mcp.CallToolResult, any, error) {
 			result := appServer.handleListFeeds(ctx, args)
