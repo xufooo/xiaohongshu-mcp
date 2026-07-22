@@ -431,12 +431,18 @@ func (s *BrowseSession) ListFeeds(ctx context.Context) ([]Feed, error) {
 	}
 
 	s.mu.Lock()
+	s.sourceURL = ""
+	s.currentFeedID = ""
+	s.currentXsecToken = ""
+	s.opened = false
+	s.read = false
+	s.initialCommentIDs = nil
 	s.results = make(map[string]Feed, len(feeds)*2)
-	for i, feed := range feeds {
-		feed.Index = i
-		s.results[strconv.Itoa(i)] = feed
-		if feed.ID != "" {
-			s.results[feed.ID] = feed
+	for i := range feeds {
+		feeds[i].Index = i
+		s.results[strconv.Itoa(i)] = feeds[i]
+		if feeds[i].ID != "" {
+			s.results[feeds[i].ID] = feeds[i]
 		}
 	}
 	s.recordTimelineLocked("list_feeds", "", "ok", time.Now(), fmt.Sprintf("results=%d", len(feeds)))
