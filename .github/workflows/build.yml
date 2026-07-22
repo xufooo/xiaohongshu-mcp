@@ -2,7 +2,7 @@ name: Build Check
 
 on:
   push:
-    branches: [ fixup ]
+    branches: [ fixup, fixup-pre ]
   workflow_dispatch:
 
 jobs:
@@ -27,8 +27,10 @@ jobs:
       uses: actions/setup-go@v4
       with:
         go-version: "1.24"
-    - name: Tidy
-      run: go mod tidy
+    - name: Verify module files
+      run: |
+        go mod tidy
+        git diff --exit-code -- go.mod go.sum
     - name: Build
       run: |
         export GOOS=${{ matrix.goos }}
@@ -36,9 +38,11 @@ jobs:
         export GOFLAGS=-buildvcs=false
         EXT=""
         if [ "$GOOS" = "windows" ]; then EXT=".exe"; fi
-        go build -v -o xiaohongshu-mcp-${GOOS}-${GOARCH}${EXT} .
+        mkdir -p dist
+        go build -v -o "dist/xiaohongshu-mcp-${GOOS}-${GOARCH}${EXT}" .
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
         name: xiaohongshu-mcp-${{ matrix.goos }}-${{ matrix.goarch }}
-        path: xiaohongshu-mcp-*
+        path: dist/xiaohongshu-mcp-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.goos == 'windows' && '.exe' || '' }}
+        if-no-files-found: error
