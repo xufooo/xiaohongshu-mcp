@@ -128,6 +128,19 @@ func TestCreateBrowseSessionReusesActiveSessionBeforeCreating(t *testing.T) {
 	}
 }
 
+func TestFeedCursorEntryRejectsDifferentSessionOrQuery(t *testing.T) {
+	entry := feedCursorEntry{SessionID: "s1", QueryKey: "search:go:{}", Cursor: &xiaohongshu.FeedCursor{}}
+	if err := entry.Validate("s2", "search:go:{}"); err == nil {
+		t.Fatal("cursor from another session must be rejected")
+	}
+	if err := entry.Validate("s1", "search:rust:{}"); err == nil {
+		t.Fatal("cursor from another query must be rejected")
+	}
+	if err := entry.Validate("s1", "search:go:{}"); err != nil {
+		t.Fatalf("matching cursor rejected: %v", err)
+	}
+}
+
 func TestCreateBrowseSessionUsesHomeSearchReady(t *testing.T) {
 	source, err := os.ReadFile("service.go")
 	if err != nil {

@@ -516,7 +516,7 @@ func (s *AppServer) handlePublishVideo(ctx context.Context, args map[string]inte
 }
 
 // handleListFeeds 处理获取Feeds列表
-func (s *AppServer) handleListFeeds(ctx context.Context, args BrowseSessionIDArgs) *MCPToolResult {
+func (s *AppServer) handleListFeeds(ctx context.Context, args ListFeedsArgs) *MCPToolResult {
 	if args.SessionID == "" {
 		return sessionMCPErrorResult("获取Feeds列表失败: 缺少session_id参数", sessionNextStepCreateSession())
 	}
@@ -525,7 +525,7 @@ func (s *AppServer) handleListFeeds(ctx context.Context, args BrowseSessionIDArg
 	}
 	logrus.Info("MCP: 获取Feeds列表", "session_id", args.SessionID)
 
-	result, err := s.xiaohongshuService.SessionListFeeds(ctx, args.SessionID)
+	result, err := s.xiaohongshuService.SessionListFeeds(ctx, args.SessionID, args.Cursor, args.MaxItems)
 	if err != nil {
 		return &MCPToolResult{
 			Content: []MCPContent{{
@@ -1003,7 +1003,7 @@ func (s *AppServer) handleSessionSearch(ctx context.Context, args SessionSearchA
 		SearchScope: args.Filters.SearchScope,
 		Location:    args.Filters.Location,
 	}
-	result, err := s.xiaohongshuService.SessionSearch(ctx, args.SessionID, args.Keyword, filter)
+	result, err := s.xiaohongshuService.SessionSearch(ctx, args.SessionID, args.Keyword, args.Cursor, args.MaxItems, filter)
 	if err != nil {
 		return sessionMCPErrorFromErr("session搜索失败", err, sessionNextStepState())
 	}
