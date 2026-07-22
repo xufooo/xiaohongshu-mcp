@@ -404,6 +404,46 @@ func (s *BrowseSession) Search(ctx context.Context, keyword string, filters ...F
 	return feeds, nil
 }
 
+// ListFeeds 在 session 浏览器中获取首页 Feeds 列表
+func (s *BrowseSession) ListFeeds(ctx context.Context) ([]Feed, error) {
+	opCtx, err := s.beginLockedOperation(ctx, true)
+	if err != nil {
+		return nil, err
+	}
+	defer s.finishOperation()
+
+	s.mu.Lock()
+	page := s.page
+	s.mu.Unlock()
+
+	if page == nil {
+		return nil, fmt.Errorf("browse session 页面不存在: %s", s.id)
+	}
+
+	action, err := NewFeedsListAction(page.Context(opCtx))
+	if err != nil {
+		return nil, err
+	}
+
+	feeds, err := action.GetFeedsList(opCtx)
+	if err != nil {
+		return nil, err
+	}
+
+	s.mu.Lock()
+	s.results = make(map[string]Feed, len(feeds)*2)
+	for i, feed := range feeds {
+		feed.Index = i
+		s.results[strconv.Itoa(i)] = feed
+		if feed.ID != "" {
+			s.results[feed.ID] = feed
+		}
+	}
+	s.recordTimelineLocked("list_feeds", "", "ok", time.Now(), fmt.Sprintf("results=%d", len(feeds)))
+	s.mu.Unlock()
+	return feeds, nil
+}
+
 func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, xsecToken string) (*SessionOpenNoteResponse, error) {
 	opCtx, err := s.beginLockedOperation(ctx, true)
 	if err != nil {

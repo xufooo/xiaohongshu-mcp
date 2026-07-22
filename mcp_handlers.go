@@ -20,7 +20,7 @@ var sessionCreateTools = []string{"create_browse_session", "list_feeds", "check_
 // session 不同状态下的可用工具
 var (
 	afterCreateTools = append([]string{"session_search", "list_feeds"}, sessionBaseTools...)
-	afterFeedsTools  = append([]string{"get_feed_detail", "like_feed", "favorite_feed", "post_comment_to_feed", "reply_comment_in_feed", "search_feeds", "create_browse_session"}, sessionBaseTools...)
+	afterFeedsTools  = append([]string{"session_open_note", "session_search", "list_feeds"}, sessionBaseTools...)
 	afterSearchTools = append([]string{"session_open_note", "session_search"}, sessionBaseTools...)
 	afterOpenTools   = append([]string{"session_like", "session_comment", "session_detail", "session_back"}, sessionBaseTools...)
 	afterBackTools   = append([]string{"session_search", "session_open_note"}, sessionBaseTools...)
@@ -516,16 +516,19 @@ func (s *AppServer) handlePublishVideo(ctx context.Context, args map[string]inte
 }
 
 // handleListFeeds 处理获取Feeds列表
-func (s *AppServer) handleListFeeds(ctx context.Context) *MCPToolResult {
+func (s *AppServer) handleListFeeds(ctx context.Context, args BrowseSessionIDArgs) *MCPToolResult {
+	if args.SessionID == "" {
+		return sessionMCPErrorResult("获取Feeds列表失败: 缺少session_id参数", sessionNextStepCreateSession())
+	}
 	if blocked := s.requireBrowserAvailableForMCP("获取Feeds列表"); blocked != nil {
 		return blocked
 	}
 	if blocked := s.rateLimitMCP(ctx, "获取Feeds列表", ratelimit.ActionBrowse); blocked != nil {
 		return blocked
 	}
-	logrus.Info("MCP: 获取Feeds列表")
+	logrus.Info("MCP: 获取Feeds列表", "session_id", args.SessionID)
 
-	result, err := s.xiaohongshuService.ListFeeds(ctx)
+	result, err := s.xiaohongshuService.SessionListFeeds(ctx, args.SessionID)
 	if err != nil {
 		return &MCPToolResult{
 			Content: []MCPContent{{

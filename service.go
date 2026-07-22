@@ -841,6 +841,20 @@ func (s *XiaohongshuService) SessionState(ctx context.Context, id string) (*xiao
 	return session.PageState(ctx)
 }
 
+// SessionListFeeds 在 session 浏览器中获取首页 Feeds 列表
+func (s *XiaohongshuService) SessionListFeeds(ctx context.Context, id string) (*FeedsListResponse, error) {
+	session, err := s.browseSessions.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	feeds, err := session.ListFeeds(ctx)
+	if err != nil {
+		s.recordRiskFromSession(session, err)
+		return nil, err
+	}
+	return &FeedsListResponse{Feeds: feeds, Count: len(feeds)}, nil
+}
+
 func (s *XiaohongshuService) SessionSearch(ctx context.Context, id, keyword string, filters ...xiaohongshu.FilterOption) (*FeedsListResponse, error) {
 	session, err := s.browseSessions.Get(id)
 	if err != nil {
