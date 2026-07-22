@@ -32,9 +32,6 @@ type toolResult struct {
 	Data           interface{} `json:"data"`
 	AvailableTools []string    `json:"available_tools"`
 }
-	"github.com/xpzouying/xiaohongshu-mcp/pkg/ratelimit"
-	"github.com/xpzouying/xiaohongshu-mcp/xiaohongshu"
-)
 
 // MCP 工具处理函数
 
