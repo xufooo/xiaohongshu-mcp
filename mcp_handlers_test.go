@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -156,6 +157,36 @@ func functionSource(t *testing.T, source, marker string) string {
 		return rest
 	}
 	return rest[:next+1]
+}
+
+func TestListFeedsAvailableAfterSearchAndBack(t *testing.T) {
+	for name, tools := range map[string][]string{
+		"after search": afterSearchTools,
+		"after back":   afterBackTools,
+	} {
+		if !slices.Contains(tools, "list_feeds") {
+			t.Fatalf("%s tools missing list_feeds: %v", name, tools)
+		}
+	}
+}
+
+func TestAvailableToolListsHaveNoDuplicates(t *testing.T) {
+	for name, list := range map[string][]string{
+		"afterCreateTools": afterCreateTools,
+		"afterFeedsTools":  afterFeedsTools,
+		"afterSearchTools": afterSearchTools,
+		"afterOpenTools":   afterOpenTools,
+		"afterBackTools":   afterBackTools,
+		"afterCloseTools":  afterCloseTools,
+	} {
+		seen := make(map[string]bool, len(list))
+		for _, tool := range list {
+			if seen[tool] {
+				t.Fatalf("%s has duplicate: %s", name, tool)
+			}
+			seen[tool] = true
+		}
+	}
 }
 
 func TestHandleListFeedsDoesNotUseGlobalBrowserBusyGuard(t *testing.T) {
