@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -140,6 +141,31 @@ func TestSessionOpenNoteAllowsMissingXsecTokenThroughValidation(t *testing.T) {
 	}
 	if !strings.Contains(text, `"next_step"`) {
 		t.Fatalf("expected next_step payload when xsec_token is omitted, got %q", text)
+	}
+}
+
+func functionSource(t *testing.T, source, marker string) string {
+	t.Helper()
+	start := strings.Index(source, marker)
+	if start < 0 {
+		t.Fatalf("function marker missing: %s", marker)
+	}
+	rest := source[start:]
+	next := strings.Index(rest[1:], "\nfunc ")
+	if next < 0 {
+		return rest
+	}
+	return rest[:next+1]
+}
+
+func TestHandleListFeedsDoesNotUseGlobalBrowserBusyGuard(t *testing.T) {
+	source, err := os.ReadFile("mcp_handlers.go")
+	if err != nil {
+		t.Fatalf("read mcp_handlers.go: %v", err)
+	}
+	body := functionSource(t, string(source), "func (s *AppServer) handleListFeeds(")
+	if strings.Contains(body, "requireBrowserAvailableForMCP") {
+		t.Fatal("list_feeds must rely on BrowseSession.beginLockedOperation, not the global busy guard")
 	}
 }
 
