@@ -414,7 +414,7 @@ func (s *BrowseSession) ListFeedsBatch(ctx context.Context, cursor *FeedCursor, 
 		cursor = &FeedCursor{Kind: FeedPageHome, CreatedAt: time.Now(), ReturnedIDs: make([]string, 0)}
 		feeds = takeNewFeeds(allFeeds, cursor, maxItems)
 		nextCursor = cursor
-		hasMore = !hasEndSignal(page.Context(opCtx))
+		hasMore = len(allFeeds) > len(feeds) || !hasEndSignal(page.Context(opCtx))
 	} else {
 		feeds, nextCursor, hasMore, err = LoadFeedBatch(opCtx, page.Context(opCtx), FeedPageHome, cursor, maxItems, func() ([]Feed, error) {
 			return collectHomeFeeds(page.Context(opCtx))
@@ -480,7 +480,7 @@ func (s *BrowseSession) SearchBatch(ctx context.Context, keyword string, filters
 			ReturnedIDs: make([]string, 0),
 		}
 		feeds = takeNewFeeds(allFeeds, cursor, maxItems)
-		hasMore := !hasEndSignal(page.Context(opCtx))
+		hasMore := len(allFeeds) > len(feeds) || !hasEndSignal(page.Context(opCtx))
 		s.mu.Lock()
 		s.sourceURL = ""
 		s.currentFeedID = ""
