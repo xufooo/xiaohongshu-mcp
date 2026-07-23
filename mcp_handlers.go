@@ -953,12 +953,9 @@ func (s *AppServer) handleReplyComment(ctx context.Context, args map[string]inte
 	}
 }
 
-func (s *AppServer) handleCreateBrowseSession(ctx context.Context) *MCPToolResult {
+func (s *AppServer) handleCreateBrowseSession(ctx context.Context, args CreateBrowseSessionArgs) *MCPToolResult {
 	logrus.Info("MCP: 创建浏览会话")
-	if blocked := s.rateLimitMCP(ctx, "创建浏览会话", ratelimit.ActionBrowse); blocked != nil {
-		return blocked
-	}
-	info, err := s.xiaohongshuService.CreateBrowseSession(ctx)
+	info, err := s.xiaohongshuService.CreateBrowseSession(ctx, args.ForceRecreate)
 	if err != nil {
 		return &MCPToolResult{
 			Content: []MCPContent{{Type: "text", Text: "创建浏览会话失败: " + err.Error()}},

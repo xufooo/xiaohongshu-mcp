@@ -26,11 +26,14 @@ type XiaohongshuService struct {
 	actionState    *xiaohongshu.ActionStateStore
 	browseSessions *xiaohongshu.BrowseSessionManager
 	rateLimiter    *ratelimit.Limiter
+	rateLimitFunc  func(ctx context.Context, name string, action ratelimit.Action) bool
 
 	commentCursors   sync.Map
 	commentCursorTTL time.Duration
 	feedCursors      sync.Map
 	feedCursorTTL    time.Duration
+
+	createSessionMu sync.Mutex
 }
 
 // NewXiaohongshuService 创建小红书服务实例
@@ -53,6 +56,17 @@ func NewXiaohongshuService() *XiaohongshuService {
 
 func (s *XiaohongshuService) SetRateLimiter(limiter *ratelimit.Limiter) {
 	s.rateLimiter = limiter
+	s.rateLimitFunc = func(ctx context.Context, name string, action ratelimit.Action) bool {
+		if limiter == nil {
+			return true
+		}
+		_, _, canProceed, err := limiter.ReserveAction(ctx, action)
+		if err != nil {
+			logrus.Errorf("rate limit check error: %v", err)
+			return false
+		}
+		return canProceed
+	}
 }
 
 func (s *XiaohongshuService) setCommentCursor(id string, cursor *xiaohongshu.CommentCursor) {
@@ -862,31 +876,117 @@ func (s *XiaohongshuService) ReplyCommentToFeed(ctx context.Context, feedID, xse
 	}, nil
 }
 
-func (s *XiaohongshuService) CreateBrowseSession(ctx context.Context) (*xiaohongshu.BrowseSessionInfo, error) {
-	if info, ok := s.browseSessions.ActiveInfo(); ok {
-		if session, err := s.browseSessions.Get(info.ID); err == nil {
-			info = session.Renew()
-			return &info, nil
+func (s *XiaohongshuService) CreateBrowseSession(ctx context.Context, forceRecreate bool) (*xiaohongshu.CreateBrowseSessionResult, error) {
+	s.createSessionMu.Lock()
+	if err := ctx.Err(); err != nil {
+		s.createSessionMu.Unlock()
+		return nil, err
+	}
+	defer s.createSessionMu.Unlock()
+
+	if !forceRecreate {
+		if result := s.tryReuseSession(ctx); result != nil {
+			return result, nil
 		}
 	}
 
+	if s.rateLimitFunc != nil && !s.rateLimitFunc(ctx, "创建浏览会话", ratelimit.ActionBrowse) {
+		return &xiaohongshu.CreateBrowseSessionResult{
+			Outcome:           "blocked",
+			RecommendedAction: "retry",
+			Status: xiaohongshu.BrowseSessionStatusInfo{
+				Status:    xiaohongshu.SessionNotReady,
+				LastError: "操作频率过高，请稍后重试",
+			},
+		}, nil
+	}
+
 	s.browseSessions.CloseAll()
+
 	page, err := s.acquirePageFor(ctx, "session")
 	if err != nil {
 		return nil, err
 	}
-	session := s.browseSessions.Create(page, s.actionState, s.browserManager.Release)
-	s.browserManager.UpdateOwner("session:" + session.ID())
+
 	if err := page.Navigate("https://www.xiaohongshu.com/explore"); err != nil {
-		s.browseSessions.Close(session.ID())
+		s.browserManager.Release(page)
 		return nil, fmt.Errorf("导航探索页失败: %w", err)
 	}
 	if err := xiaohongshu.WaitForXHSReady(page, xiaohongshu.XHSReadyOptions{Kind: xiaohongshu.XHSReadyHomeSearch}); err != nil {
-		s.browseSessions.Close(session.ID())
+		s.browserManager.Release(page)
 		return nil, fmt.Errorf("等待探索页就绪失败: %w", err)
 	}
+
+	session := s.browseSessions.Create(page, s.actionState, s.browserManager.Release)
+	s.browserManager.UpdateOwner("session:" + session.ID())
 	info := session.Info()
-	return &info, nil
+	return &xiaohongshu.CreateBrowseSessionResult{
+		Outcome:           "created",
+		Session:           &info,
+		RecommendedAction: "continue",
+		Status: xiaohongshu.BrowseSessionStatusInfo{
+			Status:  xiaohongshu.SessionReady,
+			Session: &info,
+			Ready:   true,
+		},
+	}, nil
+}
+
+func (s *XiaohongshuService) tryReuseSession(ctx context.Context) *xiaohongshu.CreateBrowseSessionResult {
+	info, ok := s.browseSessions.ActiveInfo()
+	if !ok {
+		return nil
+	}
+
+	session, err := s.browseSessions.Get(info.ID)
+	if err != nil {
+		return nil
+	}
+
+	check := session.CheckReusable(ctx)
+
+	switch check.Status {
+	case xiaohongshu.SessionReady:
+		info = session.Renew()
+		return &xiaohongshu.CreateBrowseSessionResult{
+			Outcome:           "reused",
+			Session:           &info,
+			RecommendedAction: "continue",
+			Status: xiaohongshu.BrowseSessionStatusInfo{
+				Status:          xiaohongshu.SessionReady,
+				Session:         &info,
+				HealthCheckedAt: check.HealthCheckedAt,
+				Ready:           true,
+			},
+		}
+	case xiaohongshu.SessionBusy:
+		return &xiaohongshu.CreateBrowseSessionResult{
+			Outcome:           "blocked",
+			RecommendedAction: "wait",
+			Status: xiaohongshu.BrowseSessionStatusInfo{
+				Status:    xiaohongshu.SessionBusy,
+				LastError: "session 正在执行操作",
+			},
+		}
+	case xiaohongshu.SessionExpired, xiaohongshu.SessionNotReady:
+		return &xiaohongshu.CreateBrowseSessionResult{
+			Outcome:           "blocked",
+			RecommendedAction: "retry",
+			Status: xiaohongshu.BrowseSessionStatusInfo{
+				Status:    check.Status,
+				LastError: check.LastError,
+			},
+		}
+	default:
+		return &xiaohongshu.CreateBrowseSessionResult{
+			Outcome:           "blocked",
+			RecommendedAction: "recreate",
+			Status: xiaohongshu.BrowseSessionStatusInfo{
+				Status:    check.Status,
+				LastError: check.LastError,
+			},
+		}
+	}
 }
 
 func (s *XiaohongshuService) CloseBrowseSession(id string) error {
