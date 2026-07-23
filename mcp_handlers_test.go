@@ -213,7 +213,7 @@ func TestHandleListFeedsPassesCursorAndMaxItemsToService(t *testing.T) {
 	})
 
 	t.Run("expired cursor returns cursor error", func(t *testing.T) {
-		_ = app.xiaohongshuService.setFeedCursor("expired-cursor", feedCursorEntry{
+		app.xiaohongshuService.setFeedCursor("expired-cursor", feedCursorEntry{
 			SessionID: "session-1",
 			QueryKey:  "home::",
 		})
