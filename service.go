@@ -201,6 +201,15 @@ type feedCursorEntry struct {
 	Cursor    *xiaohongshu.FeedCursor
 }
 
+func cloneFeedCursor(cursor *xiaohongshu.FeedCursor) *xiaohongshu.FeedCursor {
+	if cursor == nil {
+		return nil
+	}
+	cloned := *cursor
+	cloned.ReturnedIDs = append([]string(nil), cursor.ReturnedIDs...)
+	return &cloned
+}
+
 func (e feedCursorEntry) Validate(sessionID, queryKey string) error {
 	if e.SessionID != sessionID || e.QueryKey != queryKey {
 		return fmt.Errorf("feed cursor 与当前 session 或查询不匹配")
@@ -916,7 +925,7 @@ func (s *XiaohongshuService) SessionListFeeds(ctx context.Context, id, cursorID 
 		if err := entry.Validate(id, queryKey); err != nil {
 			return nil, err
 		}
-		cursor = entry.Cursor
+		cursor = cloneFeedCursor(entry.Cursor)
 	}
 
 	feeds, nextCursor, hasMore, err := session.ListFeedsBatch(ctx, cursor, maxItems)
@@ -966,7 +975,7 @@ func (s *XiaohongshuService) SessionSearch(ctx context.Context, id, keyword, cur
 		if err := entry.Validate(id, queryKey); err != nil {
 			return nil, err
 		}
-		cursor = entry.Cursor
+		cursor = cloneFeedCursor(entry.Cursor)
 	}
 
 	feeds, nextCursor, hasMore, err := session.SearchBatch(ctx, keyword, filters, cursor, maxItems)

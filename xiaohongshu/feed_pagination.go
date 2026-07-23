@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/sirupsen/logrus"
 	hrod "github.com/xpzouying/xiaohongshu-mcp/pkg/humanize/rod"
 )
 
@@ -66,6 +67,7 @@ type feedPageOps struct {
 	collect       func() ([]Feed, error)
 	scroll        func() error
 	waitForGrowth func(context.Context, map[string]bool) (grew bool, atEnd bool, err error)
+	atEnd         func() bool
 }
 
 func feedKeySet(feeds []Feed) map[string]bool {
@@ -80,13 +82,21 @@ func loadFeedBatchWithOps(ctx context.Context, cursor *FeedCursor, maxItems int,
 	batch := make([]Feed, 0, maxItems)
 	for len(batch) < maxItems {
 		feeds, err := ops.collect()
-		if err != nil && len(batch) == 0 {
-			return nil, true, err
+		if err != nil {
+			if len(batch) == 0 {
+				return nil, true, err
+			}
+			logrus.WithError(err).Warnf(
+				"collect feeds failed; returning partial batch: count=%d",
+				len(batch),
+			)
+			return batch, true, nil
 		}
 		before := feedKeySet(feeds)
 		batch = append(batch, takeNewFeeds(feeds, cursor, maxItems-len(batch))...)
 		if len(batch) == maxItems {
-			return batch, true, nil
+			atEnd := ops.atEnd != nil && ops.atEnd()
+			return batch, !atEnd, nil
 		}
 		if err := ctx.Err(); err != nil {
 			return batch, true, err
@@ -106,7 +116,7 @@ func loadFeedBatchWithOps(ctx context.Context, cursor *FeedCursor, maxItems int,
 			return batch, false, nil
 		}
 		if !grew {
-			return batch, false, nil
+			return batch, true, nil
 		}
 	}
 	return batch, true, nil
@@ -125,6 +135,9 @@ func LoadFeedBatch(ctx context.Context, page *hrod.Page, kind FeedPageKind, curs
 		scroll: func() error {
 			return page.Actor().Mouse.Scroll(0, 700)
 		},
+		atEnd: func() bool {
+			return hasEndSignal(page)
+		},
 		waitForGrowth: func(ctx context.Context, before map[string]bool) (bool, bool, error) {
 			deadline := time.Now().Add(8 * time.Second)
 			for time.Now().Before(deadline) {
@@ -141,8 +154,7 @@ func LoadFeedBatch(ctx context.Context, page *hrod.Page, kind FeedPageKind, curs
 						return true, false, nil
 					}
 				}
-				atEnd := hasEndSignal(page)
-				if atEnd {
+				if ops.atEnd() {
 					return false, true, nil
 				}
 				if err := page.Context(ctx).SleepRandom(300*time.Millisecond, 500*time.Millisecond); err != nil {

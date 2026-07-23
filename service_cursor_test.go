@@ -141,6 +141,30 @@ func TestFeedCursorEntryRejectsDifferentSessionOrQuery(t *testing.T) {
 	}
 }
 
+func TestCloneFeedCursorDeepCopiesReturnedIDs(t *testing.T) {
+	original := &xiaohongshu.FeedCursor{
+		Kind:        xiaohongshu.FeedPageHome,
+		Round:       2,
+		ReturnedIDs: []string{"feed-1"},
+	}
+
+	cloned := cloneFeedCursor(original)
+	if cloned == original {
+		t.Fatal("clone must use a different cursor pointer")
+	}
+
+	cloned.Round++
+	cloned.ReturnedIDs[0] = "changed"
+	cloned.ReturnedIDs = append(cloned.ReturnedIDs, "feed-2")
+
+	if original.Round != 2 {
+		t.Fatalf("original round was mutated: %d", original.Round)
+	}
+	if len(original.ReturnedIDs) != 1 || original.ReturnedIDs[0] != "feed-1" {
+		t.Fatalf("original returned IDs were mutated: %#v", original.ReturnedIDs)
+	}
+}
+
 func TestCreateBrowseSessionUsesHomeSearchReady(t *testing.T) {
 	source, err := os.ReadFile("service.go")
 	if err != nil {
