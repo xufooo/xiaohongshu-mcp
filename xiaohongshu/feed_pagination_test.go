@@ -214,3 +214,93 @@ func TestTakeNewFeedsRespectsMaxItemsLimit(t *testing.T) {
 	require.Equal(t, "a", batch[0].ID)
 	require.Equal(t, "b", batch[1].ID)
 }
+
+func TestHasUnseenFeedsTrueWhenCollectHasItemsNotInCursor(t *testing.T) {
+	cursor := &FeedCursor{ReturnedIDs: []string{"a"}}
+	feeds := []Feed{{ID: "a"}, {ID: "b"}}
+	require.True(t, hasUnseenFeeds(feeds, cursor))
+}
+
+func TestHasUnseenFeedsFalseWhenAllCollectItemsInCursor(t *testing.T) {
+	cursor := &FeedCursor{ReturnedIDs: []string{"a", "b"}}
+	feeds := []Feed{{ID: "a"}, {ID: "b"}}
+	require.False(t, hasUnseenFeeds(feeds, cursor))
+}
+
+func TestHasUnseenFeedsSkipsInvalidKeys(t *testing.T) {
+	cursor := &FeedCursor{}
+	feeds := []Feed{
+		{NoteCard: NoteCard{DisplayTitle: "", User: User{UserID: ""}}},
+		{ID: "a"},
+	}
+	require.True(t, hasUnseenFeeds(feeds, cursor))
+}
+
+func TestBatchFullWithLocalRemainingAndAtEndReturnsHasMoreTrue(t *testing.T) {
+	feeds, hasMore, err := loadFeedBatchWithOps(context.Background(), &FeedCursor{}, 2, feedPageOps{
+		collect: func() ([]Feed, error) {
+			return []Feed{{ID: "a"}, {ID: "b"}, {ID: "c"}}, nil
+		},
+		atEnd: func() bool { return true },
+	})
+	require.NoError(t, err)
+	require.Len(t, feeds, 2)
+	require.True(t, hasMore)
+}
+
+func TestBatchFullExactMatchWithAtEndReturnsHasMoreFalse(t *testing.T) {
+	feeds, hasMore, err := loadFeedBatchWithOps(context.Background(), &FeedCursor{}, 2, feedPageOps{
+		collect: func() ([]Feed, error) {
+			return []Feed{{ID: "a"}, {ID: "b"}}, nil
+		},
+		atEnd: func() bool { return true },
+	})
+	require.NoError(t, err)
+	require.Len(t, feeds, 2)
+	require.False(t, hasMore)
+}
+
+func TestBatchFullLocalRemainingButAllSeenViaCursorReturnsHasMoreFalse(t *testing.T) {
+	cursor := &FeedCursor{ReturnedIDs: []string{"a", "c"}}
+	feeds, hasMore, err := loadFeedBatchWithOps(context.Background(), cursor, 1, feedPageOps{
+		collect: func() ([]Feed, error) {
+			return []Feed{{ID: "a"}, {ID: "b"}, {ID: "c"}}, nil
+		},
+		atEnd: func() bool { return true },
+	})
+	require.NoError(t, err)
+	require.Len(t, feeds, 1)
+	require.False(t, hasMore)
+}
+
+func TestWaitForGrowthCollectErrorReturnsPartialBatchWithHasMore(t *testing.T) {
+	var ops feedPageOps
+	sawCollectError := false
+	ops = feedPageOps{
+		collect: func() ([]Feed, error) {
+			if !sawCollectError {
+				return []Feed{{ID: "a"}}, nil
+			}
+			return nil, errors.New("growth collect failed")
+		},
+		scroll: func() error { return nil },
+		waitForGrowth: func(ctx context.Context, before map[string]bool) (bool, bool, error) {
+			// 模拟修复后的行为：waitForGrowth 内部 collect 失败时不再向上抛 error
+			sawCollectError = true
+			_, err := ops.collect()
+			if err != nil {
+				return false, false, nil
+			}
+			return false, false, nil
+		},
+	}
+	feeds, hasMore, err := loadFeedBatchWithOps(
+		context.Background(),
+		&FeedCursor{},
+		10,
+		ops,
+	)
+	require.NoError(t, err)
+	require.Equal(t, []Feed{{ID: "a"}}, feeds)
+	require.True(t, hasMore)
+}
