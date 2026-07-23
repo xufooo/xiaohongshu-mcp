@@ -98,6 +98,10 @@ type BrowseSessionIDArgs struct {
 	SessionID string `json:"session_id" jsonschema:"浏览会话ID，由create_browse_session返回"`
 }
 
+type CreateBrowseSessionArgs struct {
+	ForceRecreate bool `json:"force_recreate,omitempty"`
+}
+
 type ListFeedsArgs struct {
 	SessionID string `json:"session_id" jsonschema:"浏览会话ID，由create_browse_session返回"`
 	MaxItems  int    `json:"max_items,omitempty" jsonschema:"可选，本批最多返回数量，默认20，最大50"`
@@ -453,8 +457,8 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 				ReadOnlyHint: true,
 			},
 		},
-		withPanicRecovery("create_browse_session", func(ctx context.Context, req *mcp.CallToolRequest, _ any) (*mcp.CallToolResult, any, error) {
-			result := appServer.handleCreateBrowseSession(ctx)
+		withPanicRecovery("create_browse_session", func(ctx context.Context, req *mcp.CallToolRequest, args CreateBrowseSessionArgs) (*mcp.CallToolResult, any, error) {
+			result := appServer.handleCreateBrowseSession(ctx, args)
 			return convertToMCPResult(result), nil, nil
 		}),
 	)

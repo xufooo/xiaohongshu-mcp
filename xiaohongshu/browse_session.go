@@ -22,6 +22,17 @@ const (
 	browseSessionRefreshTimeout       = 2 * time.Second
 	maxBrowseSessionTimelineEntries   = 10
 	browseSessionBackTimeout          = 15 * time.Second
+	healthCheckTimeout                = 30 * time.Second
+)
+
+type BrowseSessionStatus string
+
+const (
+	SessionReady        BrowseSessionStatus = "ready"
+	SessionBusy         BrowseSessionStatus = "busy"
+	SessionNotReady     BrowseSessionStatus = "not_ready"
+	SessionExpired      BrowseSessionStatus = "expired"
+	SessionUnhealthy    BrowseSessionStatus = "unhealthy"
 )
 
 type BrowseSessionInfo struct {
@@ -42,6 +53,30 @@ type SessionOpenNoteResponse struct {
 	Note     OpenedNoteContent              `json:"note"`
 	Comments []Comment                      `json:"comments"`
 	Media    SessionMediaReadStatus         `json:"media"`
+}
+
+type CreateBrowseSessionResult struct {
+	Outcome           string                  `json:"outcome"`
+	Session           *BrowseSessionInfo      `json:"session,omitempty"`
+	Status            BrowseSessionStatusInfo `json:"status"`
+	RecommendedAction string                  `json:"recommended_action"`
+}
+
+type BrowseSessionStatusInfo struct {
+	Status          BrowseSessionStatus `json:"status"`
+	Session         *BrowseSessionInfo  `json:"session,omitempty"`
+	LastError       string              `json:"last_error,omitempty"`
+	HealthCheckedAt time.Time           `json:"health_checked_at,omitempty"`
+	Ready           bool                `json:"ready"`
+	Risk            string              `json:"risk,omitempty"`
+}
+
+type ReuseCheck struct {
+	Status          BrowseSessionStatus
+	LastError       string
+	HealthCheckedAt time.Time
+	Ready           bool
+	Risk            string
 }
 
 type BrowseSessionPageState struct {
@@ -146,9 +181,9 @@ type BrowseSession struct {
 }
 
 type BrowseSessionManager struct {
-	mu       sync.Mutex
-	timeout  time.Duration
-	sessions map[string]*BrowseSession
+	mu            sync.Mutex
+	timeout       time.Duration
+	sessions      map[string]*BrowseSession
 }
 
 func NewBrowseSessionManager(timeout time.Duration) *BrowseSessionManager {
@@ -1052,6 +1087,97 @@ func (s *BrowseSession) Back(ctx context.Context) error {
 	return nil
 }
 
+func (s *BrowseSession) CheckReusable(ctx context.Context) ReuseCheck {
+	select {
+	case <-s.opToken:
+	default:
+		return ReuseCheck{Status: SessionBusy, LastError: "session 正在执行操作"}
+	}
+	defer func() { s.opToken <- struct{}{} }()
+
+	checkedAt := time.Now()
+
+	s.mu.Lock()
+	closed := s.closed
+	expired := !closed && time.Now().After(s.expiresAt)
+	page := s.page
+	s.mu.Unlock()
+
+	if closed {
+		return ReuseCheck{Status: SessionNotReady, HealthCheckedAt: checkedAt, Ready: false, LastError: "session 已关闭"}
+	}
+
+	if expired {
+		return ReuseCheck{Status: SessionExpired, LastError: "session 已过期", HealthCheckedAt: checkedAt, Ready: false}
+	}
+
+	if page == nil {
+		return ReuseCheck{Status: SessionNotReady, LastError: "session 页面不存在", HealthCheckedAt: checkedAt, Ready: false}
+	}
+
+	evalCtx, cancel := context.WithTimeout(ctx, healthCheckTimeout)
+	defer cancel()
+
+	result, err := s.evalJS(evalCtx, page, `() => JSON.stringify({url: location.href, readyState: document.readyState})`)
+	if err != nil || result == nil {
+		if errors.Is(ctx.Err(), context.Canceled) || errors.Is(evalCtx.Err(), context.DeadlineExceeded) {
+			return ReuseCheck{
+				Status:          SessionNotReady,
+				LastError:       "健康检查超时或被取消",
+				HealthCheckedAt: checkedAt,
+				Ready:           false,
+			}
+		}
+		return ReuseCheck{
+			Status:          SessionUnhealthy,
+			LastError:       "CDP 连接异常",
+			HealthCheckedAt: checkedAt,
+			Ready:           false,
+			Risk:            "cdp_disconnected",
+		}
+	}
+
+	var pageState struct {
+		URL         string `json:"url"`
+		ReadyState  string `json:"readyState"`
+	}
+	if err := json.Unmarshal([]byte(result.Value.Str()), &pageState); err != nil || pageState.URL == "" || pageState.ReadyState == "" {
+		return ReuseCheck{
+			Status:          SessionUnhealthy,
+			LastError:       "页面 JS 不可用",
+			HealthCheckedAt: checkedAt,
+			Ready:           false,
+			Risk:            "js_unavailable",
+		}
+	}
+
+	if strings.HasPrefix(pageState.URL, "about:") {
+		return ReuseCheck{
+			Status:          SessionNotReady,
+			LastError:       "页面URL异常",
+			HealthCheckedAt: checkedAt,
+			Ready:           false,
+		}
+	}
+
+	readyState := pageState.ReadyState
+
+	if readyState != "complete" && readyState != "interactive" {
+		return ReuseCheck{
+			Status:          SessionNotReady,
+			LastError:       fmt.Sprintf("页面未就绪: %s", readyState),
+			HealthCheckedAt: checkedAt,
+			Ready:           false,
+		}
+	}
+
+	return ReuseCheck{
+		Status:          SessionReady,
+		HealthCheckedAt: checkedAt,
+		Ready:           true,
+	}
+}
+
 func (s *BrowseSession) Close() {
 	s.close()
 }
@@ -1091,11 +1217,11 @@ func (s *BrowseSession) close() {
 	hasActiveOp := s.activeOp != nil
 	page := s.page
 	onClose := s.onClose
+	onRemove := s.onRemove
 	if !hasActiveOp {
 		s.page = nil
 		s.onClose = nil
 	}
-	onRemove := s.onRemove
 	s.mu.Unlock()
 
 	if onRemove != nil {
