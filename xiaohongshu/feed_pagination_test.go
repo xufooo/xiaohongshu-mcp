@@ -112,7 +112,7 @@ func TestTakeNewFeedsSkipsEmptyKey(t *testing.T) {
 	require.Equal(t, "a", batch[0].ID)
 }
 
-func TestLoadFeedBatchWithOpsNoGrowthReturnsPartialBatch(t *testing.T) {
+func TestLoadFeedBatchWithOpsNoGrowthConservativelyReturnsHasMore(t *testing.T) {
 	feeds, hasMore, err := loadFeedBatchWithOps(context.Background(), &FeedCursor{}, 10, feedPageOps{
 		collect: func() ([]Feed, error) { return []Feed{{ID: "a"}}, nil },
 		scroll:  func() error { return nil },
@@ -122,6 +122,60 @@ func TestLoadFeedBatchWithOpsNoGrowthReturnsPartialBatch(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Len(t, feeds, 1)
+	require.True(t, hasMore)
+}
+
+func TestLoadFeedBatchWithOpsCollectErrorReturnsPartialBatch(t *testing.T) {
+	callCount := 0
+	expectedErr := errors.New("collect failed")
+
+	feeds, hasMore, err := loadFeedBatchWithOps(
+		context.Background(),
+		&FeedCursor{},
+		2,
+		feedPageOps{
+			collect: func() ([]Feed, error) {
+				callCount++
+				if callCount == 1 {
+					return []Feed{{ID: "a"}}, nil
+				}
+				return nil, expectedErr
+			},
+			scroll: func() error { return nil },
+			waitForGrowth: func(context.Context, map[string]bool) (bool, bool, error) {
+				return true, false, nil
+			},
+		},
+	)
+
+	require.NoError(t, err)
+	require.Equal(t, []Feed{{ID: "a"}}, feeds)
+	require.True(t, hasMore)
+}
+
+func TestLoadFeedBatchWithOpsMaxItemsWithoutEndSignalHasMore(t *testing.T) {
+	feeds, hasMore, err := loadFeedBatchWithOps(context.Background(), &FeedCursor{}, 2, feedPageOps{
+		collect: func() ([]Feed, error) {
+			return []Feed{{ID: "a"}, {ID: "b"}}, nil
+		},
+		atEnd: func() bool { return false },
+	})
+
+	require.NoError(t, err)
+	require.Len(t, feeds, 2)
+	require.True(t, hasMore)
+}
+
+func TestLoadFeedBatchWithOpsMaxItemsAtEndHasMoreFalse(t *testing.T) {
+	feeds, hasMore, err := loadFeedBatchWithOps(context.Background(), &FeedCursor{}, 2, feedPageOps{
+		collect: func() ([]Feed, error) {
+			return []Feed{{ID: "a"}, {ID: "b"}}, nil
+		},
+		atEnd: func() bool { return true },
+	})
+
+	require.NoError(t, err)
+	require.Len(t, feeds, 2)
 	require.False(t, hasMore)
 }
 
