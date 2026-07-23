@@ -100,7 +100,7 @@ type BrowseSessionIDArgs struct {
 
 type ListFeedsArgs struct {
 	SessionID string `json:"session_id" jsonschema:"浏览会话ID，由create_browse_session返回"`
-	MaxItems  int    `json:"max_items,omitempty" jsonschema:"可选，本批最多返回数量，默认35，最大50"`
+	MaxItems  int    `json:"max_items,omitempty" jsonschema:"可选，本批最多返回数量，默认20，最大50"`
 	Cursor    string `json:"cursor,omitempty" jsonschema:"可选，继续滚动时传上次 list_feeds 返回的 cursor"`
 }
 
@@ -117,7 +117,7 @@ type SessionSearchArgs struct {
 	SessionID string       `json:"session_id" jsonschema:"浏览会话ID，由create_browse_session返回"`
 	Keyword   string       `json:"keyword" jsonschema:"搜索关键词；续页时必须与首次调用相同"`
 	Filters   FilterOption `json:"filters,omitempty" jsonschema:"筛选选项；续页时必须与首次调用相同"`
-	MaxItems  int          `json:"max_items,omitempty" jsonschema:"可选，本批最多返回数量，默认35，最大50"`
+	MaxItems  int          `json:"max_items,omitempty" jsonschema:"可选，本批最多返回数量，默认20，最大50"`
 	Cursor    string       `json:"cursor,omitempty" jsonschema:"可选，继续滚动时传上次 session_search 返回的 cursor"`
 }
 
