@@ -125,7 +125,14 @@ func loadFeedBatchWithOps(ctx context.Context, cursor *FeedCursor, maxItems int,
 		cursor.Round++
 		grew, atEnd, err := ops.waitForGrowth(ctx, before)
 		if err != nil {
-			return batch, true, err
+			if len(batch) > 0 {
+				logrus.WithError(err).Warnf(
+					"waitForGrowth failed; returning partial batch: count=%d",
+					len(batch),
+				)
+				return batch, true, nil
+			}
+			return nil, true, err
 		}
 		if atEnd {
 			return batch, false, nil
@@ -161,10 +168,7 @@ func LoadFeedBatch(ctx context.Context, page *hrod.Page, kind FeedPageKind, curs
 				}
 				feeds, err := ops.collect()
 				if err != nil {
-					logrus.WithError(err).Warn(
-						"collect feeds while waiting for growth failed; preserving partial batch",
-					)
-					return false, false, nil
+					return false, false, err
 				}
 				after := feedKeySet(feeds)
 				for key := range after {
