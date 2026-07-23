@@ -400,19 +400,21 @@ func (s *BrowseSession) ListFeedsBatch(ctx context.Context, cursor *FeedCursor, 
 	var feeds []Feed
 	var nextCursor *FeedCursor
 	var hasMore bool
+	isFirstPage := cursor == nil
 
 	if cursor == nil {
 		action, err := NewFeedsListAction(page.Context(opCtx))
 		if err != nil {
 			return nil, nil, false, err
 		}
-		feeds, err = action.GetFeedsList(opCtx)
+		allFeeds, err := action.GetFeedsList(opCtx)
 		if err != nil {
 			return nil, nil, false, err
 		}
-		cursor = &FeedCursor{Kind: FeedPageHome, CreatedAt: time.Now()}
+		cursor = &FeedCursor{Kind: FeedPageHome, CreatedAt: time.Now(), ReturnedIDs: make([]string, 0)}
+		feeds = takeNewFeeds(allFeeds, cursor, maxItems)
 		nextCursor = cursor
-		hasMore = false
+		hasMore = len(feeds) == maxItems
 	} else {
 		feeds, nextCursor, hasMore, err = LoadFeedBatch(opCtx, page.Context(opCtx), FeedPageHome, cursor, maxItems, func() ([]Feed, error) {
 			return collectHomeFeeds(page.Context(opCtx))
@@ -423,7 +425,7 @@ func (s *BrowseSession) ListFeedsBatch(ctx context.Context, cursor *FeedCursor, 
 	}
 
 	s.mu.Lock()
-	if cursor == nextCursor {
+	if isFirstPage {
 		s.sourceURL = ""
 		s.currentFeedID = ""
 		s.currentXsecToken = ""
@@ -466,16 +468,19 @@ func (s *BrowseSession) SearchBatch(ctx context.Context, keyword string, filters
 
 	if cursor == nil {
 		action := NewSearchActionWithState(page.Context(opCtx), s.state)
-		feeds, err := action.Search(opCtx, keyword, filters...)
+		allFeeds, err := action.Search(opCtx, keyword, filters...)
 		if err != nil {
 			return nil, nil, false, err
 		}
 		cursor = &FeedCursor{
-			Kind:      FeedPageSearch,
-			Keyword:   keyword,
-			FilterKey: filterKeyFromFilters(filters),
-			CreatedAt: time.Now(),
+			Kind:        FeedPageSearch,
+			Keyword:     keyword,
+			FilterKey:   filterKeyFromFilters(filters),
+			CreatedAt:   time.Now(),
+			ReturnedIDs: make([]string, 0),
 		}
+		feeds = takeNewFeeds(allFeeds, cursor, maxItems)
+		hasMore := len(feeds) == maxItems
 		s.mu.Lock()
 		s.sourceURL = ""
 		s.currentFeedID = ""
@@ -486,7 +491,7 @@ func (s *BrowseSession) SearchBatch(ctx context.Context, keyword string, filters
 		s.recordTimelineLocked("search", keyword, "ok", time.Now(), fmt.Sprintf("results=%d", len(feeds)))
 		s.mu.Unlock()
 		s.probeWatchdogSelectorsForKind(opCtx, XHSReadySearch, "")
-		return feeds, cursor, false, nil
+		return feeds, cursor, hasMore, nil
 	}
 
 	feeds, nextCursor, hasMore, err := LoadFeedBatch(opCtx, page.Context(opCtx), FeedPageSearch, cursor, maxItems, func() ([]Feed, error) {
