@@ -119,11 +119,11 @@ func LoadFeedBatch(ctx context.Context, page *hrod.Page, kind FeedPageKind, curs
 	if cursor.ReturnedIDs == nil {
 		cursor.ReturnedIDs = make([]string, 0)
 	}
-	ops := feedPageOps{
+	var ops feedPageOps
+	ops = feedPageOps{
 		collect: collect,
 		scroll: func() error {
-			_, err := page.Actor().Mouse.Scroll(0, 700)
-			return err
+			return page.Actor().Mouse.Scroll(0, 700)
 		},
 		waitForGrowth: func(ctx context.Context, before map[string]bool) (bool, bool, error) {
 			deadline := time.Now().Add(8 * time.Second)
@@ -159,7 +159,7 @@ func LoadFeedBatch(ctx context.Context, page *hrod.Page, kind FeedPageKind, curs
 func hasEndSignal(page *hrod.Page) bool {
 	result, err := page.Eval(`() => {
 		const text = (document.body?.innerText || "").toLowerCase();
-		if (/没有更多|到底了|no more|end/.test(text)) return true;
+		if (/没有更多|到底了|no more/.test(text)) return true;
 		if (document.querySelector('.end-container, .no-more')) return true;
 		return false;
 	}`)
