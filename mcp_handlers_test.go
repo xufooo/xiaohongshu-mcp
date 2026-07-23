@@ -206,9 +206,10 @@ func TestHandleListFeedsPassesCursorAndMaxItemsToService(t *testing.T) {
 		if !result.IsError {
 			t.Fatal("should return error for non-existent cursor")
 		}
+		// SessionListFeeds 先经过 browseSessions.Get，返回 session 错误
 		text := result.Content[0].Text
-		if !strings.Contains(text, "feed cursor 不存在或已过期") {
-			t.Fatalf("expected cursor-not-found error, got: %q", text)
+		if !strings.Contains(text, "browse session 不存在或已过期") {
+			t.Fatalf("expected session-not-found error (cursor check occurs after session get), got: %q", text)
 		}
 	})
 
