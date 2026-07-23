@@ -235,11 +235,16 @@ func (s *SearchAction) searchByUI(page *hrod.Page, keyword string) error {
 	if err := input.Input(keyword); err != nil {
 		return fmt.Errorf("输入关键词失败: %w", err)
 	}
+	baseline, err := captureSearchResultsBaseline(page)
+	if err != nil {
+		return fmt.Errorf("捕获搜索结果基线失败: %w", err)
+	}
+
 	if err := page.Actor().Keyboard.Press(rodinput.Enter); err != nil {
 		return fmt.Errorf("提交搜索失败: %w", err)
 	}
 
-	if err := waitForSearchResults(page, keyword, searchResultsBaseline{}); err != nil {
+	if err := waitForSearchResults(page, keyword, baseline); err != nil {
 		return err
 	}
 	return nil
@@ -453,9 +458,9 @@ func searchResultsReady(probe searchResultsKeywordProbe, baseline searchResultsB
 	domReady := probe.URLKeywordMatched &&
 		probe.HasVisibleCards &&
 		signatureChanged(probe.DOMSignature, baseline.DOMSignature)
-	inputReady := probe.OnSearchPage &&
-		probe.InputMatched &&
+	inputReady := probe.InputMatched &&
 		probe.HasVisibleCards &&
+		(probe.OnSearchPage || baseline.StateSignature != "" || baseline.DOMSignature != "") &&
 		searchResultsChanged(probe, baseline)
 	return stateReady || domReady || inputReady
 }
