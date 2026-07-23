@@ -466,6 +466,10 @@ func (s *BrowseSession) SearchBatch(ctx context.Context, keyword string, filters
 		return nil, nil, false, fmt.Errorf("browse session 页面不存在: %s", s.id)
 	}
 
+	var feeds []Feed
+	var nextCursor *FeedCursor
+	var hasMore bool
+
 	if cursor == nil {
 		action := NewSearchActionWithState(page.Context(opCtx), s.state)
 		allFeeds, err := action.Search(opCtx, keyword, filters...)
@@ -480,7 +484,7 @@ func (s *BrowseSession) SearchBatch(ctx context.Context, keyword string, filters
 			ReturnedIDs: make([]string, 0),
 		}
 		feeds = takeNewFeeds(allFeeds, cursor, maxItems)
-		hasMore := len(allFeeds) > len(feeds) || !hasEndSignal(page.Context(opCtx))
+		hasMore = len(allFeeds) > len(feeds) || !hasEndSignal(page.Context(opCtx))
 		s.mu.Lock()
 		s.sourceURL = ""
 		s.currentFeedID = ""
@@ -494,7 +498,7 @@ func (s *BrowseSession) SearchBatch(ctx context.Context, keyword string, filters
 		return feeds, cursor, hasMore, nil
 	}
 
-	feeds, nextCursor, hasMore, err := LoadFeedBatch(opCtx, page.Context(opCtx), FeedPageSearch, cursor, maxItems, func() ([]Feed, error) {
+	feeds, nextCursor, hasMore, err = LoadFeedBatch(opCtx, page.Context(opCtx), FeedPageSearch, cursor, maxItems, func() ([]Feed, error) {
 		return collectSearchFeeds(page.Context(opCtx), false)
 	})
 	if err != nil {
