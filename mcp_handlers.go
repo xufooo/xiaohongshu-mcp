@@ -525,6 +525,9 @@ func (s *AppServer) handleListFeeds(ctx context.Context, args ListFeedsArgs) *MC
 	}
 	logrus.Info("MCP: 获取Feeds列表", "session_id", args.SessionID)
 
+	if args.MaxItems <= 0 {
+		args.MaxItems = 20
+	}
 	result, err := s.xiaohongshuService.SessionListFeeds(ctx, args.SessionID, args.Cursor, args.MaxItems)
 	if err != nil {
 		return &MCPToolResult{
@@ -1002,6 +1005,9 @@ func (s *AppServer) handleSessionSearch(ctx context.Context, args SessionSearchA
 		PublishTime: args.Filters.PublishTime,
 		SearchScope: args.Filters.SearchScope,
 		Location:    args.Filters.Location,
+	}
+	if args.MaxItems <= 0 {
+		args.MaxItems = 20
 	}
 	result, err := s.xiaohongshuService.SessionSearch(ctx, args.SessionID, args.Keyword, args.Cursor, args.MaxItems, filter)
 	if err != nil {
