@@ -63,6 +63,20 @@ func takeNewFeeds(feeds []Feed, cursor *FeedCursor, maxItems int) []Feed {
 	return batch
 }
 
+func hasUnseenFeeds(feeds []Feed, cursor *FeedCursor) bool {
+	seen := make(map[string]bool, len(cursor.ReturnedIDs))
+	for _, id := range cursor.ReturnedIDs {
+		seen[id] = true
+	}
+	for _, feed := range feeds {
+		key := feedKey(feed)
+		if key != "card:||" && !seen[key] {
+			return true
+		}
+	}
+	return false
+}
+
 type feedPageOps struct {
 	collect       func() ([]Feed, error)
 	scroll        func() error
@@ -95,8 +109,9 @@ func loadFeedBatchWithOps(ctx context.Context, cursor *FeedCursor, maxItems int,
 		before := feedKeySet(feeds)
 		batch = append(batch, takeNewFeeds(feeds, cursor, maxItems-len(batch))...)
 		if len(batch) == maxItems {
+			hasLocalRemaining := hasUnseenFeeds(feeds, cursor)
 			atEnd := ops.atEnd != nil && ops.atEnd()
-			return batch, !atEnd, nil
+			return batch, hasLocalRemaining || !atEnd, nil
 		}
 		if err := ctx.Err(); err != nil {
 			return batch, true, err
@@ -146,7 +161,10 @@ func LoadFeedBatch(ctx context.Context, page *hrod.Page, kind FeedPageKind, curs
 				}
 				feeds, err := ops.collect()
 				if err != nil {
-					return false, false, err
+					logrus.WithError(err).Warn(
+						"collect feeds while waiting for growth failed; preserving partial batch",
+					)
+					return false, false, nil
 				}
 				after := feedKeySet(feeds)
 				for key := range after {
