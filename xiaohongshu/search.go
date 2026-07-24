@@ -7,13 +7,13 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/go-rod/rod"
 	rodinput "github.com/go-rod/rod/lib/input"
 	"github.com/go-rod/rod/lib/proto"
 	"github.com/sirupsen/logrus"
 	"github.com/xpzouying/xiaohongshu-mcp/errors"
-	"github.com/xpzouying/xiaohongshu-mcp/pkg/humanize"
 	hrod "github.com/xpzouying/xiaohongshu-mcp/pkg/humanize/rod"
+
+	"github.com/go-rod/rod"
 )
 
 type SearchResult struct {
@@ -181,10 +181,15 @@ func NewSearchActionWithState(page *hrod.Page, state *ActionStateStore) *SearchA
 
 func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...FilterOption) ([]Feed, error) {
 	page := s.page.Context(ctx)
-	if err := s.searchByUI(page, keyword); err != nil {
-		return nil, err
+
+	// 检查当前页面是否已在该关键词搜索结果上，是则跳过搜索
+	if !isCurrentSearchPage(page, keyword) {
+		if err := s.searchByUI(page, keyword); err != nil {
+			return nil, err
+		}
 	}
-	return s.collectResults(page, filters...)
+
+	return s.collectResults(page, keyword, filters...)
 }
 
 func (s *SearchAction) SearchByURLFallback(ctx context.Context, keyword string, filters ...FilterOption) ([]Feed, error) {
@@ -197,7 +202,7 @@ func (s *SearchAction) SearchByURLFallback(ctx context.Context, keyword string, 
 		return nil, fmt.Errorf("URL兜底等待搜索结果失败: %w", err)
 	}
 
-	return s.collectResults(page, filters...)
+	return s.collectResults(page, keyword, filters...)
 }
 
 func (s *SearchAction) searchByUI(page *hrod.Page, keyword string) error {
@@ -482,6 +487,72 @@ func searchResultsChanged(probe searchResultsKeywordProbe, baseline searchResult
 	return false
 }
 
+func findFilterTagByText(page *hrod.Page, text string) (*hrod.Element, error) {
+	_, _ = page.Eval(`() => document.querySelectorAll('[data-xhs-mcp-filter-tag="1"]').forEach(el => el.removeAttribute('data-xhs-mcp-filter-tag'))`)
+
+	result, err := page.Eval(`(targetText) => {
+		const visible = (el) => {
+			if (!el || !el.isConnected) return false;
+			const style = window.getComputedStyle(el);
+			const rect = el.getBoundingClientRect();
+			return style.display !== "none" &&
+				style.visibility !== "hidden" &&
+				Number(style.opacity || "1") > 0 &&
+				rect.width > 0 && rect.height > 0;
+		};
+		const tags = document.querySelectorAll('.filter-panel .tags');
+		for (const tag of tags) {
+			if (!visible(tag)) continue;
+			if ((tag.innerText || tag.textContent || '').trim() === targetText) {
+				tag.setAttribute('data-xhs-mcp-filter-tag', '1');
+				return 'found';
+			}
+		}
+		return '';
+	}`, text)
+	if err != nil {
+		return nil, fmt.Errorf("查找筛选标签失败: %w", err)
+	}
+	if result == nil || result.Value.Str() == "" {
+		return nil, fmt.Errorf("未找到文本为 %q 的筛选标签", text)
+	}
+	tag, err := page.Element(`[data-xhs-mcp-filter-tag="1"]`)
+	if err != nil {
+		return nil, fmt.Errorf("获取筛选标签元素失败: %w", err)
+	}
+	return tag, nil
+}
+
+func waitForFilterRefresh(page *hrod.Page, baseline searchResultsBaseline, keyword string) (stateRefreshed bool, _ error) {
+	deadline := time.Now().Add(searchFilterRefreshWaitTimeout)
+	var lastErr error
+
+	for time.Now().Before(deadline) {
+		if err := page.Err(); err != nil {
+			return false, err
+		}
+
+		probe, err := probeSearchResultsKeyword(page, keyword)
+		if err != nil {
+			lastErr = err
+		} else {
+			lastErr = nil
+			if probe.OnSearchPage && probe.InputMatched && probe.HasVisibleCards && searchResultsChanged(probe, baseline) {
+				return probe.StateSignature != "" && probe.StateSignature != baseline.StateSignature, nil
+			}
+		}
+
+		if err := page.Sleep(300 * time.Millisecond); err != nil {
+			return false, err
+		}
+	}
+
+	if lastErr != nil {
+		return false, fmt.Errorf("筛选结果未刷新: %w", lastErr)
+	}
+	return false, fmt.Errorf("筛选结果未刷新: 基线未变化")
+}
+
 type searchInputProbe struct {
 	URL                string   `json:"url"`
 	Title              string   `json:"title"`
@@ -613,8 +684,9 @@ func formatSearchInputProbe(probe searchInputProbe) string {
 	return string(data)
 }
 
-func (s *SearchAction) collectResults(page *hrod.Page, filters ...FilterOption) ([]Feed, error) {
+func (s *SearchAction) collectResults(page *hrod.Page, keyword string, filters ...FilterOption) ([]Feed, error) {
 	appliedFilters := false
+	var stateRefreshed bool
 
 	// 如果有筛选条件，则应用筛选
 	if len(filters) > 0 {
@@ -635,70 +707,70 @@ func (s *SearchAction) collectResults(page *hrod.Page, filters ...FilterOption) 
 			}
 		}
 
+		stageErr := func(stage string, t0 time.Time, err error, tag string) error {
+			fields := logrus.Fields{
+				"stage":      stage,
+				"elapsed_ms": time.Since(t0).Milliseconds(),
+				"error":      err.Error(),
+			}
+			if tag != "" {
+				fields["tag"] = tag
+			}
+			logrus.WithFields(fields).Error("筛选阶段失败")
+			return fmt.Errorf("筛选阶段 %s 失败", stage)
+		}
+
 		if len(allInternalFilters) > 0 {
-			// 点击筛选按钮打开面板
-			filterButton, err := page.Element(".filter.ai-chat-filter")
+			filterCtx, cancel := context.WithTimeout(page.Actor().Ctx(), searchFilterRefreshWaitTimeout)
+			defer cancel()
+			filterPage := page.Context(filterCtx)
+
+			t0 := time.Now()
+			filterButton, err := filterPage.Element("div.filter")
 			if err != nil {
-				return nil, fmt.Errorf("未找到筛选按钮: %w", err)
-			}
-			// 用 mouse.Click 绕过 waitInteractable，避免浮层遮挡误判
-			if err := page.Actor().Mouse.Click(filterButton.Rod); err != nil {
-				return nil, fmt.Errorf("打开筛选面板失败: %w", err)
-			}
-			humanize.SleepContext(page.Actor().Ctx(), 300*time.Millisecond, 800*time.Millisecond)
-			if err := page.Wait(rod.Eval(`() => document.querySelector('.filter-panel') !== null`)); err != nil {
-				return nil, fmt.Errorf("等待筛选面板失败: %w", err)
+				return nil, stageErr("filter_button_lookup", t0, err, "")
 			}
 
-			for _, filter := range allInternalFilters {
-				// 用索引精确定位：.filter-panel div.filters:nth-child(N) div.tags:nth-child(N)
-				selector := fmt.Sprintf(".filter-panel div.filters:nth-child(%d) div.tags:nth-child(%d)",
-					filter.FiltersIndex, filter.TagsIndex)
-				option, err := page.Element(selector)
+			t0 = time.Now()
+			if err := filterButton.Rod.Hover(); err != nil {
+				return nil, stageErr("filter_button_hover", t0, err, "")
+			}
+
+			t0 = time.Now()
+			if err := filterPage.Wait(rod.Eval(`() => document.querySelector('.filter-panel') !== null`)); err != nil {
+				return nil, stageErr("filter_panel_wait", t0, err, "")
+			}
+
+			for _, f := range allInternalFilters {
+				tag, err := findFilterTagByText(filterPage, f.Text)
 				if err != nil {
-					return nil, fmt.Errorf("未找到筛选选项 %s: %w", filter.Text, err)
+					return nil, stageErr("filter_tag_lookup", time.Now(), err, f.Text)
 				}
-				// 用 mouse.Click 绕过 waitInteractable，维持浮层面板不关
-				if err := page.Actor().Mouse.Click(option.Rod); err != nil {
-					return nil, fmt.Errorf("筛选标签 %q 点击失败: %w", filter.Text, err)
+
+				t0 = time.Now()
+				if err := filterPage.Actor().Mouse.Click(tag.Rod); err != nil {
+					return nil, stageErr("filter_tag_click", t0, err, f.Text)
 				}
-				humanize.SleepContext(page.Actor().Ctx(), 200*time.Millisecond, 500*time.Millisecond)
-			}
-			// 等待页面稳定
-			if err := page.WaitStable(5 * time.Second); err != nil {
-				return nil, fmt.Errorf("筛选后页面稳定失败: %w", err)
+
+				t0 = time.Now()
+				if err := filterPage.SleepRandom(200*time.Millisecond, 500*time.Millisecond); err != nil {
+					return nil, stageErr("filter_tag_settle", t0, err, f.Text)
+				}
 			}
 
-			// 记录关闭筛选面板前的 feeds 数据长度
-			previousFeedsJSONLengthResult, err := page.Eval(`() => {
-			const feeds = window.__INITIAL_STATE__?.search?.feeds;
-			const data = feeds?.value !== undefined ? feeds.value : (feeds?._value !== undefined ? feeds._value : feeds?._rawValue);
-			return Array.isArray(data) ? JSON.stringify(data).length : 0;
-		}`)
-			if err != nil {
-				return nil, fmt.Errorf("读取筛选前 state 长度失败: %w", err)
-			}
-			if previousFeedsJSONLengthResult == nil {
-				return nil, fmt.Errorf("读取筛选前 state 长度失败: 无返回")
-			}
-			previousFeedsJSONLength := previousFeedsJSONLengthResult.Value.Int()
-
-			// 点击页面空白关闭面板。
-			if _, err := page.Eval(`() => document.body.click()`); err != nil {
-				return nil, fmt.Errorf("关闭筛选面板失败: %w", err)
-			}
-			if err := page.Sleep(2 * time.Second); err != nil {
-				return nil, err
+			// body.click 关闭面板触发筛选生效
+			if _, err := filterPage.Eval(`() => document.body.click()`); err != nil {
+				return nil, stageErr("filter_panel_close", t0, err, "")
 			}
 
-			// 等应用状态刷新
-			if err := page.Wait(rod.Eval(`(previousFeedsJSONLength, deadline) => {
-			const feeds = window.__INITIAL_STATE__?.search?.feeds;
-			const data = feeds?.value !== undefined ? feeds.value : (feeds?._value !== undefined ? feeds._value : feeds?._rawValue);
-			return (Array.isArray(data) && JSON.stringify(data).length !== previousFeedsJSONLength) ||
-				Date.now() >= deadline;
-		}`, previousFeedsJSONLength, time.Now().Add(5*time.Second).UnixMilli())); err != nil {
-				return nil, fmt.Errorf("等待筛选结果刷新失败: %w", err)
+			t0 = time.Now()
+			if err := filterPage.WaitStable(5 * time.Second); err != nil {
+				return nil, stageErr("filter_wait_stable", t0, err, "")
+			}
+
+			if feeds, err := readSearchFeedsFromState(page); err == nil && len(feeds) > 0 {
+				domFeeds, _ := ExtractSearchFeedsFromDOM(page)
+				return mergeFeedsByID(feeds, domFeeds), nil
 			}
 			appliedFilters = true
 		}
@@ -706,9 +778,23 @@ func (s *SearchAction) collectResults(page *hrod.Page, filters ...FilterOption) 
 
 	domFeeds, domErr := ExtractSearchFeedsFromDOM(page)
 	stateFeeds, stateErr := readSearchFeedsFromState(page)
-	if appliedFilters && stateErr == nil && len(stateFeeds) > 0 {
-		return mergeFeedsByID(stateFeeds, domFeeds), nil
+
+	if appliedFilters {
+		if stateRefreshed && stateErr == nil && len(stateFeeds) > 0 {
+			return mergeFeedsByID(stateFeeds, domFeeds), nil
+		}
+		if domErr == nil && len(domFeeds) > 0 {
+			return domFeeds, nil
+		}
+		if stateRefreshed && stateErr == nil && len(stateFeeds) > 0 {
+			return stateFeeds, nil
+		}
+		if domErr != nil {
+			return nil, domErr
+		}
+		return nil, stateErr
 	}
+
 	if domErr == nil && len(domFeeds) > 0 {
 		return mergeFeedsByID(domFeeds, stateFeeds), nil
 	}
@@ -925,4 +1011,18 @@ func makeSearchURL(keyword string) string {
 	// From https://www.xiaohongshu.com/explore, the current search button routes to
 	// /search_result_ai while keeping source=web_explore_feed.
 	return fmt.Sprintf("https://www.xiaohongshu.com/search_result_ai?%s", values.Encode())
+}
+
+// isCurrentSearchPage 检查页面 URL 是否已在指定关键词搜索结果上
+func isCurrentSearchPage(page *hrod.Page, keyword string) bool {
+	info, err := page.Rod.Info()
+	if err != nil || info == nil {
+		return false
+	}
+	u, err := url.Parse(info.URL)
+	if err != nil {
+		return false
+	}
+	q := u.Query()
+	return q.Get("keyword") == keyword
 }
