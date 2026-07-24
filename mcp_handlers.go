@@ -13,6 +13,26 @@ import (
 	"github.com/xpzouying/xiaohongshu-mcp/xiaohongshu"
 )
 
+// session 基础工具
+var sessionBaseTools = []string{"close_browse_session"}
+var sessionCreateTools = []string{"create_browse_session", "list_feeds", "check_login_status", "search_feeds"}
+
+// session 不同状态下的可用工具
+var (
+	afterCreateTools = append([]string{"session_search", "list_feeds"}, sessionBaseTools...)
+	afterFeedsTools  = append([]string{"session_open_note", "session_search", "list_feeds"}, sessionBaseTools...)
+	afterSearchTools = append([]string{"session_open_note", "session_search", "list_feeds"}, sessionBaseTools...)
+	afterOpenTools   = append([]string{"session_like", "session_comment", "session_detail", "session_back"}, sessionBaseTools...)
+	afterBackTools   = append([]string{"session_search", "session_open_note", "list_feeds"}, sessionBaseTools...)
+	afterCloseTools  = sessionCreateTools
+)
+
+// toolResult 包装响应数据，附上下一步可用工具列表
+type toolResult struct {
+	Data           interface{} `json:"data"`
+	AvailableTools []string    `json:"available_tools"`
+}
+
 // MCP 工具处理函数
 
 // parseVisibility 从 MCP 参数中解析可见范围
@@ -496,16 +516,19 @@ func (s *AppServer) handlePublishVideo(ctx context.Context, args map[string]inte
 }
 
 // handleListFeeds 处理获取Feeds列表
-func (s *AppServer) handleListFeeds(ctx context.Context) *MCPToolResult {
-	if blocked := s.requireBrowserAvailableForMCP("获取Feeds列表"); blocked != nil {
-		return blocked
+func (s *AppServer) handleListFeeds(ctx context.Context, args ListFeedsArgs) *MCPToolResult {
+	if args.SessionID == "" {
+		return sessionMCPErrorResult("获取Feeds列表失败: 缺少session_id参数", sessionNextStepCreateSession())
 	}
 	if blocked := s.rateLimitMCP(ctx, "获取Feeds列表", ratelimit.ActionBrowse); blocked != nil {
 		return blocked
 	}
-	logrus.Info("MCP: 获取Feeds列表")
+	logrus.Info("MCP: 获取Feeds列表", "session_id", args.SessionID)
 
-	result, err := s.xiaohongshuService.ListFeeds(ctx)
+	if args.MaxItems <= 0 {
+		args.MaxItems = 20
+	}
+	result, err := s.xiaohongshuService.SessionListFeeds(ctx, args.SessionID, args.Cursor, args.MaxItems)
 	if err != nil {
 		return &MCPToolResult{
 			Content: []MCPContent{{
@@ -528,12 +551,17 @@ func (s *AppServer) handleListFeeds(ctx context.Context) *MCPToolResult {
 		}
 	}
 
-	return &MCPToolResult{
-		Content: []MCPContent{{
-			Type: "text",
-			Text: string(jsonData),
-		}},
+	// 序列化一次以获取结构化的 data；再包上 available_tools
+	var raw any
+	if err := json.Unmarshal(jsonData, &raw); err != nil {
+		return &MCPToolResult{
+			Content: []MCPContent{{
+				Type: "text",
+				Text: string(jsonData),
+			}},
+		}
 	}
+	return jsonMCPResultWithTools(raw, afterFeedsTools)
 }
 
 // handleSearchFeeds 处理搜索Feeds
@@ -925,19 +953,16 @@ func (s *AppServer) handleReplyComment(ctx context.Context, args map[string]inte
 	}
 }
 
-func (s *AppServer) handleCreateBrowseSession(ctx context.Context) *MCPToolResult {
+func (s *AppServer) handleCreateBrowseSession(ctx context.Context, args CreateBrowseSessionArgs) *MCPToolResult {
 	logrus.Info("MCP: 创建浏览会话")
-	if blocked := s.rateLimitMCP(ctx, "创建浏览会话", ratelimit.ActionBrowse); blocked != nil {
-		return blocked
-	}
-	info, err := s.xiaohongshuService.CreateBrowseSession(ctx)
+	info, err := s.xiaohongshuService.CreateBrowseSession(ctx, args.ForceRecreate)
 	if err != nil {
 		return &MCPToolResult{
 			Content: []MCPContent{{Type: "text", Text: "创建浏览会话失败: " + err.Error()}},
 			IsError: true,
 		}
 	}
-	return jsonMCPResult(info, "创建浏览会话成功")
+	return jsonMCPResultWithTools(info, afterCreateTools)
 }
 
 func (s *AppServer) handleCloseBrowseSession(ctx context.Context, args BrowseSessionIDArgs) *MCPToolResult {
@@ -947,7 +972,7 @@ func (s *AppServer) handleCloseBrowseSession(ctx context.Context, args BrowseSes
 	if err := s.xiaohongshuService.CloseBrowseSession(args.SessionID); err != nil {
 		return sessionMCPErrorFromErr("关闭浏览会话失败", err, sessionNextStepCreateSession())
 	}
-	return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "浏览会话已关闭: " + args.SessionID}}}
+	return jsonMCPResultWithTools(map[string]string{"closed_session_id": args.SessionID}, afterCloseTools)
 }
 
 func (s *AppServer) handleSessionState(ctx context.Context, args BrowseSessionIDArgs) *MCPToolResult {
@@ -978,11 +1003,14 @@ func (s *AppServer) handleSessionSearch(ctx context.Context, args SessionSearchA
 		SearchScope: args.Filters.SearchScope,
 		Location:    args.Filters.Location,
 	}
-	result, err := s.xiaohongshuService.SessionSearch(ctx, args.SessionID, args.Keyword, filter)
+	if args.MaxItems <= 0 {
+		args.MaxItems = 20
+	}
+	result, err := s.xiaohongshuService.SessionSearch(ctx, args.SessionID, args.Keyword, args.Cursor, args.MaxItems, filter)
 	if err != nil {
 		return sessionMCPErrorFromErr("session搜索失败", err, sessionNextStepState())
 	}
-	return jsonMCPResult(result, "session搜索成功")
+	return jsonMCPResultWithTools(result, afterSearchTools)
 }
 
 func (s *AppServer) handleSessionOpenNote(ctx context.Context, args SessionOpenNoteArgs) *MCPToolResult {
@@ -1002,7 +1030,7 @@ func (s *AppServer) handleSessionOpenNote(ctx context.Context, args SessionOpenN
 	if err != nil {
 		return sessionMCPErrorFromErr("session打开笔记失败", err, sessionNextStepState())
 	}
-	return jsonMCPResult(info, "session打开笔记成功")
+	return jsonMCPResultWithTools(info, afterOpenTools)
 }
 
 func (s *AppServer) handleSessionDetail(ctx context.Context, args SessionDetailArgs) *MCPToolResult {
@@ -1033,7 +1061,7 @@ func (s *AppServer) handleSessionDetail(ctx context.Context, args SessionDetailA
 		if err != nil {
 			return sessionMCPErrorFromErr("session分批加载评论失败", err, sessionNextStepOpenNote())
 		}
-		return jsonMCPResult(result, "session分批加载评论成功")
+		return jsonMCPResultWithTools(result, afterOpenTools)
 	}
 
 	detail, err := s.xiaohongshuService.SessionDetail(ctx, args.SessionID, false, 0)
@@ -1044,7 +1072,7 @@ func (s *AppServer) handleSessionDetail(ctx context.Context, args SessionDetailA
 	if detail.Comments == nil {
 		detail.Comments = []xiaohongshu.Comment{}
 	}
-	return jsonMCPResult(detail, "session详情获取成功")
+	return jsonMCPResultWithTools(detail, afterOpenTools)
 }
 
 func (s *AppServer) handleSessionLike(ctx context.Context, args SessionLikeArgs) *MCPToolResult {
@@ -1067,7 +1095,7 @@ func (s *AppServer) handleSessionLike(ctx context.Context, args SessionLikeArgs)
 	if err != nil {
 		return sessionMCPErrorFromErr("session点赞失败", err, sessionNextStepState())
 	}
-	return jsonMCPResult(result, "session点赞成功")
+	return jsonMCPResultWithTools(result, afterOpenTools)
 }
 
 func (s *AppServer) handleSessionComment(ctx context.Context, args SessionCommentArgs) *MCPToolResult {
@@ -1089,7 +1117,7 @@ func (s *AppServer) handleSessionComment(ctx context.Context, args SessionCommen
 	if err != nil {
 		return sessionMCPErrorFromErr("session评论失败", err, sessionNextStepState())
 	}
-	return jsonMCPResult(result, "session评论成功")
+	return jsonMCPResultWithTools(result, afterOpenTools)
 }
 
 func (s *AppServer) handleSessionBack(ctx context.Context, args BrowseSessionIDArgs) *MCPToolResult {
@@ -1100,13 +1128,22 @@ func (s *AppServer) handleSessionBack(ctx context.Context, args BrowseSessionIDA
 	if err != nil {
 		return sessionMCPErrorFromErr("session返回失败", err, sessionNextStepState())
 	}
-	return jsonMCPResult(info, "session返回成功")
+	return jsonMCPResultWithTools(info, afterBackTools)
 }
 
 func jsonMCPResult(value any, fallback string) *MCPToolResult {
 	data, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {
 		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: fallback + "，但序列化失败: " + err.Error()}}, IsError: true}
+	}
+	return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: string(data)}}}
+}
+
+// jsonMCPResultWithTools 在返回数据中附带下一步可用工具列表
+func jsonMCPResultWithTools(value any, tools []string) *MCPToolResult {
+	data, err := json.MarshalIndent(toolResult{Data: value, AvailableTools: tools}, "", "  ")
+	if err != nil {
+		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "操作成功，但序列化失败: " + err.Error()}}, IsError: true}
 	}
 	return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: string(data)}}}
 }

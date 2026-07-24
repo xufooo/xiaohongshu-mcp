@@ -45,6 +45,24 @@ func ExtractSearchFeedsFromDOM(page *hrod.Page) ([]Feed, error) {
 			}
 			return "";
 		};
+		const pickImageURL = (img) => {
+			if (!img) return "";
+			for (const value of [
+				img.currentSrc,
+				img.getAttribute("src"),
+				img.getAttribute("data-src"),
+				img.getAttribute("data-original"),
+				img.getAttribute("data-lazy-src"),
+			]) {
+				if (value && !value.startsWith("data:image")) return value;
+			}
+			const srcset = img.getAttribute("srcset") || img.getAttribute("data-srcset") || "";
+			return srcset.split(",")[0]?.trim().split(/\s+/)[0] || "";
+		};
+		const userIDFromHref = (href) => {
+			const match = String(href || "").match(/\/user\/profile\/([^/?#]+)/);
+			return match ? decodeURIComponent(match[1]) : "";
+		};
 
 		const cards = Array.from(document.querySelectorAll(selector));
 		return JSON.stringify(cards.map((card, index) => {
@@ -53,6 +71,8 @@ func ExtractSearchFeedsFromDOM(page *hrod.Page) ([]Feed, error) {
 			const href = noteLink?.href || "";
 			const text = clean(card.innerText || card.textContent);
 			const img = card.querySelector("img");
+			const authorLink = links.find((a) => /\/user\/profile\//.test(a.href));
+			const coverURL = pickImageURL(img);
 			const title = pickText(card, [
 				".title", ".note-title", ".footer .title", ".content .title",
 				"[class*='title']", "a[title]",
@@ -64,23 +84,38 @@ func ExtractSearchFeedsFromDOM(page *hrod.Page) ([]Feed, error) {
 			const avatar = pickAttr(card, [
 				".author img", ".user img", ".avatar img", "img.avatar", "[class*='avatar'] img",
 			], "src");
+			const likedCount = pickText(card, [".like-wrapper .count", ".like-wrapper", "[class*='like'] [class*='count']"])
+				|| countAfter(text, ["赞", "点赞"]);
+			const commentCount = pickText(card, ["[class*='comment'] [class*='count']"]) || countAfter(text, ["评论"]);
+			const collectedCount = pickText(card, ["[class*='collect'] [class*='count']"]) || countAfter(text, ["收藏"]);
 
 			return {
-				id: card.dataset?.noteId || card.dataset?.id || noteIDFromHref(href),
-				xsecToken: xsecTokenFromHref(href),
-				modelType: "",
+				id: card.dataset?.noteId || card.getAttribute("data-note-id") || card.dataset?.id || noteIDFromHref(href),
+				xsecToken: card.dataset?.xsecToken || card.getAttribute("data-xsec-token") || xsecTokenFromHref(href),
+				modelType: card.dataset?.modelType || "",
 				index,
 				noteCard: {
-					type: card.querySelector("video") ? "video" : "normal",
+					type: card.dataset?.noteType || (card.querySelector("video, [class*='video']") ? "video" : "normal"),
 					displayTitle: title,
-					user: { nickname: author, nickName: author, avatar },
-					interactInfo: {
-						likedCount: countAfter(text, ["赞", "点赞"]),
-						commentCount: countAfter(text, ["评论"]),
-						collectedCount: countAfter(text, ["收藏"])
+					user: {
+						userId: card.dataset?.userId || userIDFromHref(authorLink?.href),
+						nickname: author,
+						nickName: author,
+						avatar,
 					},
-					cover: { url: img?.src || "", urlDefault: img?.src || "", urlPre: img?.src || "" }
-				}
+					interactInfo: {
+						likedCount,
+						commentCount,
+						collectedCount,
+					},
+					cover: {
+						width: img?.naturalWidth || img?.width || 0,
+						height: img?.naturalHeight || img?.height || 0,
+						url: coverURL,
+						urlDefault: coverURL,
+						urlPre: coverURL,
+					},
+				},
 			};
 		}).filter((feed) => feed.id || feed.noteCard.displayTitle));
 	}`, SelectorFeedCard)

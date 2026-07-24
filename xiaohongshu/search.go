@@ -5,15 +5,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
-	"strings"
 	"time"
 
-	"github.com/go-rod/rod"
 	rodinput "github.com/go-rod/rod/lib/input"
 	"github.com/go-rod/rod/lib/proto"
 	"github.com/sirupsen/logrus"
 	"github.com/xpzouying/xiaohongshu-mcp/errors"
 	hrod "github.com/xpzouying/xiaohongshu-mcp/pkg/humanize/rod"
+
+	"github.com/go-rod/rod"
 )
 
 type SearchResult struct {
@@ -181,10 +181,15 @@ func NewSearchActionWithState(page *hrod.Page, state *ActionStateStore) *SearchA
 
 func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...FilterOption) ([]Feed, error) {
 	page := s.page.Context(ctx)
-	if err := s.searchByUI(page, keyword); err != nil {
-		return nil, err
+
+	// 检查当前页面是否已在该关键词搜索结果上，是则跳过搜索
+	if !isCurrentSearchPage(page, keyword) {
+		if err := s.searchByUI(page, keyword); err != nil {
+			return nil, err
+		}
 	}
-	return s.collectResults(page, filters...)
+
+	return s.collectResults(page, keyword, filters...)
 }
 
 func (s *SearchAction) SearchByURLFallback(ctx context.Context, keyword string, filters ...FilterOption) ([]Feed, error) {
@@ -197,7 +202,7 @@ func (s *SearchAction) SearchByURLFallback(ctx context.Context, keyword string, 
 		return nil, fmt.Errorf("URL兜底等待搜索结果失败: %w", err)
 	}
 
-	return s.collectResults(page, filters...)
+	return s.collectResults(page, keyword, filters...)
 }
 
 func (s *SearchAction) searchByUI(page *hrod.Page, keyword string) error {
@@ -235,11 +240,16 @@ func (s *SearchAction) searchByUI(page *hrod.Page, keyword string) error {
 	if err := input.Input(keyword); err != nil {
 		return fmt.Errorf("输入关键词失败: %w", err)
 	}
+	baseline, err := captureSearchResultsBaseline(page)
+	if err != nil {
+		return fmt.Errorf("捕获搜索结果基线失败: %w", err)
+	}
+
 	if err := page.Actor().Keyboard.Press(rodinput.Enter); err != nil {
 		return fmt.Errorf("提交搜索失败: %w", err)
 	}
 
-	if err := waitForSearchResults(page, keyword, searchResultsBaseline{}); err != nil {
+	if err := waitForSearchResults(page, keyword, baseline); err != nil {
 		return err
 	}
 	return nil
@@ -453,9 +463,9 @@ func searchResultsReady(probe searchResultsKeywordProbe, baseline searchResultsB
 	domReady := probe.URLKeywordMatched &&
 		probe.HasVisibleCards &&
 		signatureChanged(probe.DOMSignature, baseline.DOMSignature)
-	inputReady := probe.OnSearchPage &&
-		probe.InputMatched &&
+	inputReady := probe.InputMatched &&
 		probe.HasVisibleCards &&
+		(probe.OnSearchPage || baseline.StateSignature != "" || baseline.DOMSignature != "") &&
 		searchResultsChanged(probe, baseline)
 	return stateReady || domReady || inputReady
 }
@@ -475,6 +485,72 @@ func searchResultsChanged(probe searchResultsKeywordProbe, baseline searchResult
 		return true
 	}
 	return false
+}
+
+func findFilterTagByText(page *hrod.Page, text string) (*hrod.Element, error) {
+	_, _ = page.Eval(`() => document.querySelectorAll('[data-xhs-mcp-filter-tag="1"]').forEach(el => el.removeAttribute('data-xhs-mcp-filter-tag'))`)
+
+	result, err := page.Eval(`(targetText) => {
+		const visible = (el) => {
+			if (!el || !el.isConnected) return false;
+			const style = window.getComputedStyle(el);
+			const rect = el.getBoundingClientRect();
+			return style.display !== "none" &&
+				style.visibility !== "hidden" &&
+				Number(style.opacity || "1") > 0 &&
+				rect.width > 0 && rect.height > 0;
+		};
+		const tags = document.querySelectorAll('.filter-panel .tags');
+		for (const tag of tags) {
+			if (!visible(tag)) continue;
+			if ((tag.innerText || tag.textContent || '').trim() === targetText) {
+				tag.setAttribute('data-xhs-mcp-filter-tag', '1');
+				return 'found';
+			}
+		}
+		return '';
+	}`, text)
+	if err != nil {
+		return nil, fmt.Errorf("查找筛选标签失败: %w", err)
+	}
+	if result == nil || result.Value.Str() == "" {
+		return nil, fmt.Errorf("未找到文本为 %q 的筛选标签", text)
+	}
+	tag, err := page.Element(`[data-xhs-mcp-filter-tag="1"]`)
+	if err != nil {
+		return nil, fmt.Errorf("获取筛选标签元素失败: %w", err)
+	}
+	return tag, nil
+}
+
+func waitForFilterRefresh(page *hrod.Page, baseline searchResultsBaseline, keyword string) (stateRefreshed bool, _ error) {
+	deadline := time.Now().Add(searchFilterRefreshWaitTimeout)
+	var lastErr error
+
+	for time.Now().Before(deadline) {
+		if err := page.Err(); err != nil {
+			return false, err
+		}
+
+		probe, err := probeSearchResultsKeyword(page, keyword)
+		if err != nil {
+			lastErr = err
+		} else {
+			lastErr = nil
+			if probe.OnSearchPage && probe.InputMatched && probe.HasVisibleCards && searchResultsChanged(probe, baseline) {
+				return probe.StateSignature != "" && probe.StateSignature != baseline.StateSignature, nil
+			}
+		}
+
+		if err := page.Sleep(300 * time.Millisecond); err != nil {
+			return false, err
+		}
+	}
+
+	if lastErr != nil {
+		return false, fmt.Errorf("筛选结果未刷新: %w", lastErr)
+	}
+	return false, fmt.Errorf("筛选结果未刷新: 基线未变化")
 }
 
 type searchInputProbe struct {
@@ -608,8 +684,9 @@ func formatSearchInputProbe(probe searchInputProbe) string {
 	return string(data)
 }
 
-func (s *SearchAction) collectResults(page *hrod.Page, filters ...FilterOption) ([]Feed, error) {
+func (s *SearchAction) collectResults(page *hrod.Page, keyword string, filters ...FilterOption) ([]Feed, error) {
 	appliedFilters := false
+	var stateRefreshed bool
 
 	// 如果有筛选条件，则应用筛选
 	if len(filters) > 0 {
@@ -630,93 +707,122 @@ func (s *SearchAction) collectResults(page *hrod.Page, filters ...FilterOption) 
 			}
 		}
 
+		stageErr := func(stage string, t0 time.Time, err error, tag string) error {
+			fields := logrus.Fields{
+				"stage":      stage,
+				"elapsed_ms": time.Since(t0).Milliseconds(),
+				"error":      err.Error(),
+			}
+			if tag != "" {
+				fields["tag"] = tag
+			}
+			logrus.WithFields(fields).Error("筛选阶段失败")
+			return fmt.Errorf("筛选阶段 %s 失败", stage)
+		}
+
 		if len(allInternalFilters) > 0 {
-			// 点击筛选按钮打开面板
-			filterButton, err := page.Element(".filter.ai-chat-filter")
+			filterCtx, cancel := context.WithTimeout(page.Actor().Ctx(), searchFilterRefreshWaitTimeout)
+			defer cancel()
+			filterPage := page.Context(filterCtx)
+
+			t0 := time.Now()
+			filterButton, err := filterPage.Element("div.filter")
 			if err != nil {
-				return nil, fmt.Errorf("未找到筛选按钮: %w", err)
-			}
-			if err := filterButton.Click(proto.InputMouseButtonLeft, 1); err != nil {
-				return nil, fmt.Errorf("打开筛选面板失败: %w", err)
-			}
-			if err := page.Wait(rod.Eval(`() => document.querySelector('.filter-panel') !== null`)); err != nil {
-				return nil, fmt.Errorf("等待筛选面板失败: %w", err)
+				return nil, stageErr("filter_button_lookup", t0, err, "")
 			}
 
-			for _, filter := range allInternalFilters {
-				tags, err := page.Elements(".filter-panel .tags")
+			t0 = time.Now()
+			if err := filterButton.Rod.Hover(); err != nil {
+				return nil, stageErr("filter_button_hover", t0, err, "")
+			}
+
+			t0 = time.Now()
+			if err := filterPage.Wait(rod.Eval(`() => document.querySelector('.filter-panel') !== null`)); err != nil {
+				return nil, stageErr("filter_panel_wait", t0, err, "")
+			}
+
+			for _, f := range allInternalFilters {
+				tag, err := findFilterTagByText(filterPage, f.Text)
 				if err != nil {
-					return nil, fmt.Errorf("读取筛选标签失败: %w", err)
+					return nil, stageErr("filter_tag_lookup", time.Now(), err, f.Text)
 				}
-				var tag *hrod.Element
-				for _, candidate := range tags {
-					text, textErr := candidate.Text()
-					if textErr == nil && strings.TrimSpace(text) == filter.Text {
-						tag = candidate
-						break
-					}
+
+				t0 = time.Now()
+				if err := filterPage.Actor().Mouse.Click(tag.Rod); err != nil {
+					return nil, stageErr("filter_tag_click", t0, err, f.Text)
 				}
-				if tag == nil {
-					return nil, fmt.Errorf("未找到筛选标签 %q", filter.Text)
-				}
-				if err := tag.Click(proto.InputMouseButtonLeft, 1); err != nil {
-					return nil, fmt.Errorf("筛选标签 %q 点击失败: %w", filter.Text, err)
+
+				t0 = time.Now()
+				if err := filterPage.SleepRandom(200*time.Millisecond, 500*time.Millisecond); err != nil {
+					return nil, stageErr("filter_tag_settle", t0, err, f.Text)
 				}
 			}
 
-			// 记录关闭筛选面板前的 feeds 数据长度
-			previousFeedsJSONLengthResult, err := page.Eval(`() => {
-			const feeds = window.__INITIAL_STATE__?.search?.feeds;
-			const data = feeds?.value !== undefined ? feeds.value : (feeds?._value !== undefined ? feeds._value : feeds?._rawValue);
-			return Array.isArray(data) ? JSON.stringify(data).length : 0;
-		}`)
-			if err != nil {
-				return nil, fmt.Errorf("读取筛选前 state 长度失败: %w", err)
-			}
-			if previousFeedsJSONLengthResult == nil {
-				return nil, fmt.Errorf("读取筛选前 state 长度失败: 无返回")
-			}
-			previousFeedsJSONLength := previousFeedsJSONLengthResult.Value.Int()
-
-			// 点击页面空白关闭面板。
-			if _, err := page.Eval(`() => document.body.click()`); err != nil {
-				return nil, fmt.Errorf("关闭筛选面板失败: %w", err)
-			}
-			if err := page.Sleep(2 * time.Second); err != nil {
-				return nil, err
+			// body.click 关闭面板触发筛选生效
+			if _, err := filterPage.Eval(`() => document.body.click()`); err != nil {
+				return nil, stageErr("filter_panel_close", t0, err, "")
 			}
 
-			// 等应用状态刷新
-			if err := page.Wait(rod.Eval(`(previousFeedsJSONLength, deadline) => {
-			const feeds = window.__INITIAL_STATE__?.search?.feeds;
-			const data = feeds?.value !== undefined ? feeds.value : (feeds?._value !== undefined ? feeds._value : feeds?._rawValue);
-			return (Array.isArray(data) && JSON.stringify(data).length !== previousFeedsJSONLength) ||
-				Date.now() >= deadline;
-		}`, previousFeedsJSONLength, time.Now().Add(5*time.Second).UnixMilli())); err != nil {
-				return nil, fmt.Errorf("等待筛选结果刷新失败: %w", err)
+			t0 = time.Now()
+			if err := filterPage.WaitStable(5 * time.Second); err != nil {
+				return nil, stageErr("filter_wait_stable", t0, err, "")
+			}
+
+			if feeds, err := readSearchFeedsFromState(page); err == nil && len(feeds) > 0 {
+				domFeeds, _ := ExtractSearchFeedsFromDOM(page)
+				return mergeFeedsByID(feeds, domFeeds), nil
 			}
 			appliedFilters = true
 		}
 	}
 
+	domFeeds, domErr := ExtractSearchFeedsFromDOM(page)
+	stateFeeds, stateErr := readSearchFeedsFromState(page)
+
 	if appliedFilters {
-		// 筛选后优先读取应用状态，和 fixup 分支保持一致，避免拿到旧的 DOM 卡片。
-		if feeds, err := readSearchFeedsFromState(page); err == nil && len(feeds) > 0 {
-			return feeds, nil
+		if stateRefreshed && stateErr == nil && len(stateFeeds) > 0 {
+			return mergeFeedsByID(stateFeeds, domFeeds), nil
 		}
+		if domErr == nil && len(domFeeds) > 0 {
+			return domFeeds, nil
+		}
+		if stateRefreshed && stateErr == nil && len(stateFeeds) > 0 {
+			return stateFeeds, nil
+		}
+		if domErr != nil {
+			return nil, domErr
+		}
+		return nil, stateErr
 	}
 
-	if feeds, err := ExtractSearchFeedsFromDOM(page); err == nil && len(feeds) > 0 {
-		if hasEmptyXsecToken(feeds) {
-			if stateFeeds, stateErr := readSearchFeedsFromState(page); stateErr == nil {
-				mergeSearchFeedXsecTokens(feeds, stateFeeds)
-			}
-		}
-		return feeds, nil
+	if domErr == nil && len(domFeeds) > 0 {
+		return mergeFeedsByID(domFeeds, stateFeeds), nil
 	}
+	if stateErr == nil && len(stateFeeds) > 0 {
+		return stateFeeds, nil
+	}
+	if domErr != nil {
+		return nil, domErr
+	}
+	return nil, stateErr
+}
 
-	// DOM 提取失败时降级到 __INITIAL_STATE__，兼容页面结构变动或虚拟列表未渲染的情况。
-	return readSearchFeedsFromState(page)
+func collectSearchFeeds(page *hrod.Page, stateFirst bool) ([]Feed, error) {
+	domFeeds, domErr := ExtractSearchFeedsFromDOM(page)
+	stateFeeds, stateErr := readSearchFeedsFromState(page)
+	if stateFirst && stateErr == nil && len(stateFeeds) > 0 {
+		return mergeFeedsByID(stateFeeds, domFeeds), nil
+	}
+	if domErr == nil && len(domFeeds) > 0 {
+		return mergeFeedsByID(domFeeds, stateFeeds), nil
+	}
+	if stateErr == nil && len(stateFeeds) > 0 {
+		return stateFeeds, nil
+	}
+	if domErr != nil {
+		return nil, domErr
+	}
+	return nil, stateErr
 }
 
 func readSearchFeedsFromState(page *hrod.Page) ([]Feed, error) {
@@ -748,30 +854,99 @@ func readSearchFeedsFromState(page *hrod.Page) ([]Feed, error) {
 	return feeds, nil
 }
 
-func hasEmptyXsecToken(feeds []Feed) bool {
-	for _, feed := range feeds {
-		if feed.XsecToken == "" {
-			return true
+func mergeFeedsByID(primary, fallback []Feed) []Feed {
+	byID := make(map[string]Feed, len(fallback))
+	for _, feed := range fallback {
+		if feed.ID != "" {
+			byID[feed.ID] = feed
 		}
 	}
-	return false
-}
-
-func mergeSearchFeedXsecTokens(feeds, stateFeeds []Feed) {
-	tokenByID := make(map[string]string, len(stateFeeds))
-	for _, feed := range stateFeeds {
-		if feed.ID != "" && feed.XsecToken != "" {
-			tokenByID[feed.ID] = feed.XsecToken
+	result := make([]Feed, 0, len(primary)+len(fallback))
+	seen := make(map[string]bool, len(primary))
+	for _, feed := range primary {
+		if other, ok := byID[feed.ID]; ok {
+			fillMissingFeedFields(&feed, other)
+		}
+		result = append(result, feed)
+		if feed.ID != "" {
+			seen[feed.ID] = true
 		}
 	}
-
-	for i := range feeds {
-		if feeds[i].XsecToken != "" {
+	for _, feed := range fallback {
+		if feed.ID == "" || seen[feed.ID] {
 			continue
 		}
-		if token := tokenByID[feeds[i].ID]; token != "" {
-			feeds[i].XsecToken = token
-		}
+		result = append(result, feed)
+		seen[feed.ID] = true
+	}
+	return result
+}
+
+func fillMissingFeedFields(dst *Feed, src Feed) {
+	if dst.ID == "" {
+		dst.ID = src.ID
+	}
+	if dst.XsecToken == "" {
+		dst.XsecToken = src.XsecToken
+	}
+	if dst.ModelType == "" {
+		dst.ModelType = src.ModelType
+	}
+	if dst.NoteCard.Type == "" {
+		dst.NoteCard.Type = src.NoteCard.Type
+	}
+	if dst.NoteCard.DisplayTitle == "" {
+		dst.NoteCard.DisplayTitle = src.NoteCard.DisplayTitle
+	}
+	if dst.NoteCard.User.UserID == "" {
+		dst.NoteCard.User.UserID = src.NoteCard.User.UserID
+	}
+	if dst.NoteCard.User.Nickname == "" {
+		dst.NoteCard.User.Nickname = src.NoteCard.User.Nickname
+	}
+	if dst.NoteCard.User.NickName == "" {
+		dst.NoteCard.User.NickName = src.NoteCard.User.NickName
+	}
+	if dst.NoteCard.User.Avatar == "" {
+		dst.NoteCard.User.Avatar = src.NoteCard.User.Avatar
+	}
+	if dst.NoteCard.InteractInfo.LikedCount == "" {
+		dst.NoteCard.InteractInfo.LikedCount = src.NoteCard.InteractInfo.LikedCount
+	}
+	if dst.NoteCard.InteractInfo.SharedCount == "" {
+		dst.NoteCard.InteractInfo.SharedCount = src.NoteCard.InteractInfo.SharedCount
+	}
+	if dst.NoteCard.InteractInfo.CommentCount == "" {
+		dst.NoteCard.InteractInfo.CommentCount = src.NoteCard.InteractInfo.CommentCount
+	}
+	if dst.NoteCard.InteractInfo.CollectedCount == "" {
+		dst.NoteCard.InteractInfo.CollectedCount = src.NoteCard.InteractInfo.CollectedCount
+	}
+	dst.NoteCard.InteractInfo.Liked = dst.NoteCard.InteractInfo.Liked || src.NoteCard.InteractInfo.Liked
+	dst.NoteCard.InteractInfo.Collected = dst.NoteCard.InteractInfo.Collected || src.NoteCard.InteractInfo.Collected
+	if dst.NoteCard.Cover.Width == 0 {
+		dst.NoteCard.Cover.Width = src.NoteCard.Cover.Width
+	}
+	if dst.NoteCard.Cover.Height == 0 {
+		dst.NoteCard.Cover.Height = src.NoteCard.Cover.Height
+	}
+	if dst.NoteCard.Cover.URL == "" {
+		dst.NoteCard.Cover.URL = src.NoteCard.Cover.URL
+	}
+	if dst.NoteCard.Cover.FileID == "" {
+		dst.NoteCard.Cover.FileID = src.NoteCard.Cover.FileID
+	}
+	if dst.NoteCard.Cover.URLPre == "" {
+		dst.NoteCard.Cover.URLPre = src.NoteCard.Cover.URLPre
+	}
+	if dst.NoteCard.Cover.URLDefault == "" {
+		dst.NoteCard.Cover.URLDefault = src.NoteCard.Cover.URLDefault
+	}
+	if len(dst.NoteCard.Cover.InfoList) == 0 {
+		dst.NoteCard.Cover.InfoList = src.NoteCard.Cover.InfoList
+	}
+	if dst.NoteCard.Video == nil {
+		dst.NoteCard.Video = src.NoteCard.Video
 	}
 }
 
@@ -836,4 +1011,18 @@ func makeSearchURL(keyword string) string {
 	// From https://www.xiaohongshu.com/explore, the current search button routes to
 	// /search_result_ai while keeping source=web_explore_feed.
 	return fmt.Sprintf("https://www.xiaohongshu.com/search_result_ai?%s", values.Encode())
+}
+
+// isCurrentSearchPage 检查页面 URL 是否已在指定关键词搜索结果上
+func isCurrentSearchPage(page *hrod.Page, keyword string) bool {
+	info, err := page.Rod.Info()
+	if err != nil || info == nil {
+		return false
+	}
+	u, err := url.Parse(info.URL)
+	if err != nil {
+		return false
+	}
+	q := u.Query()
+	return q.Get("keyword") == keyword
 }

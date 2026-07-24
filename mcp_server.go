@@ -98,19 +98,31 @@ type BrowseSessionIDArgs struct {
 	SessionID string `json:"session_id" jsonschema:"浏览会话ID，由create_browse_session返回"`
 }
 
+type CreateBrowseSessionArgs struct {
+	ForceRecreate bool `json:"force_recreate,omitempty"`
+}
+
+type ListFeedsArgs struct {
+	SessionID string `json:"session_id" jsonschema:"浏览会话ID，由create_browse_session返回"`
+	MaxItems  int    `json:"max_items,omitempty" jsonschema:"可选，本批最多返回数量，默认20，最大50"`
+	Cursor    string `json:"cursor,omitempty" jsonschema:"可选，继续滚动时传上次 list_feeds 返回的 cursor"`
+}
+
 type SessionDetailArgs struct {
 	SessionID       string `json:"session_id" jsonschema:"浏览会话ID，由create_browse_session返回"`
 	MaxItems        int    `json:"max_items,omitempty" jsonschema:"可选，分批加载每批最多返回数量，默认20，最大50；不传或传0则仅返回当前可见评论"`
 	Cursor          string `json:"cursor,omitempty" jsonschema:"可选，分批加载游标，由上次 session_detail 返回的 cursor 字段提供"`
-	ClickMoreReplies *bool  `json:"click_more_replies,omitempty" jsonschema:"可选，是否自动点击展开子评论（二级回复），默认true"`
+	ClickMoreReplies *bool  `json:"click_more_replies,omitempty" jsonschema:"可选，是否自动点击展开子评论（二级回复），默认false"`
 	ReplyLimit      int    `json:"reply_limit,omitempty" jsonschema:"可选，子评论展开阈值，回复数超过此值的评论不展开，默认10"`
 	ScrollSpeed     string `json:"scroll_speed,omitempty" jsonschema:"可选，滚动速度: slow|normal|fast，默认fast"`
 }
 
 type SessionSearchArgs struct {
 	SessionID string       `json:"session_id" jsonschema:"浏览会话ID，由create_browse_session返回"`
-	Keyword   string       `json:"keyword" jsonschema:"搜索关键词"`
-	Filters   FilterOption `json:"filters,omitempty" jsonschema:"筛选选项"`
+	Keyword   string       `json:"keyword" jsonschema:"搜索关键词；续页时必须与首次调用相同"`
+	Filters   FilterOption `json:"filters,omitempty" jsonschema:"筛选选项；续页时必须与首次调用相同"`
+	MaxItems  int          `json:"max_items,omitempty" jsonschema:"可选，本批最多返回数量，默认20，最大50"`
+	Cursor    string       `json:"cursor,omitempty" jsonschema:"可选，继续滚动时传上次 session_search 返回的 cursor"`
 }
 
 type SessionOpenNoteArgs struct {
@@ -260,18 +272,18 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 		}),
 	)
 
-	// 工具 5: 获取Feed列表
+	// 工具 5: 获取Feed列表（需要 session_id）
 	mcp.AddTool(server,
 		&mcp.Tool{
 			Name:        "list_feeds",
-			Description: "获取首页 Feeds 列表",
+			Description: "获取首页 Feeds 列表（需要 session_id）",
 			Annotations: &mcp.ToolAnnotations{
 				Title:        "List Feeds",
 				ReadOnlyHint: true,
 			},
 		},
-		withPanicRecovery("list_feeds", func(ctx context.Context, req *mcp.CallToolRequest, _ any) (*mcp.CallToolResult, any, error) {
-			result := appServer.handleListFeeds(ctx)
+		withPanicRecovery("list_feeds", func(ctx context.Context, req *mcp.CallToolRequest, args ListFeedsArgs) (*mcp.CallToolResult, any, error) {
+			result := appServer.handleListFeeds(ctx, args)
 			return convertToMCPResult(result), nil, nil
 		}),
 	)
@@ -445,8 +457,8 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 				ReadOnlyHint: true,
 			},
 		},
-		withPanicRecovery("create_browse_session", func(ctx context.Context, req *mcp.CallToolRequest, _ any) (*mcp.CallToolResult, any, error) {
-			result := appServer.handleCreateBrowseSession(ctx)
+		withPanicRecovery("create_browse_session", func(ctx context.Context, req *mcp.CallToolRequest, args CreateBrowseSessionArgs) (*mcp.CallToolResult, any, error) {
+			result := appServer.handleCreateBrowseSession(ctx, args)
 			return convertToMCPResult(result), nil, nil
 		}),
 	)

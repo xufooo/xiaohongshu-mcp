@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -20,6 +21,18 @@ const (
 	DefaultBrowseSessionTimeout       = 10 * time.Minute
 	browseSessionRefreshTimeout       = 2 * time.Second
 	maxBrowseSessionTimelineEntries   = 10
+	browseSessionBackTimeout          = 15 * time.Second
+	healthCheckTimeout                = 30 * time.Second
+)
+
+type BrowseSessionStatus string
+
+const (
+	SessionReady        BrowseSessionStatus = "ready"
+	SessionBusy         BrowseSessionStatus = "busy"
+	SessionNotReady     BrowseSessionStatus = "not_ready"
+	SessionExpired      BrowseSessionStatus = "expired"
+	SessionUnhealthy    BrowseSessionStatus = "unhealthy"
 )
 
 type BrowseSessionInfo struct {
@@ -40,6 +53,30 @@ type SessionOpenNoteResponse struct {
 	Note     OpenedNoteContent              `json:"note"`
 	Comments []Comment                      `json:"comments"`
 	Media    SessionMediaReadStatus         `json:"media"`
+}
+
+type CreateBrowseSessionResult struct {
+	Outcome           string                  `json:"outcome"`
+	Session           *BrowseSessionInfo      `json:"session,omitempty"`
+	Status            BrowseSessionStatusInfo `json:"status"`
+	RecommendedAction string                  `json:"recommended_action"`
+}
+
+type BrowseSessionStatusInfo struct {
+	Status          BrowseSessionStatus `json:"status"`
+	Session         *BrowseSessionInfo  `json:"session,omitempty"`
+	LastError       string              `json:"last_error,omitempty"`
+	HealthCheckedAt time.Time           `json:"health_checked_at,omitempty"`
+	Ready           bool                `json:"ready"`
+	Risk            string              `json:"risk,omitempty"`
+}
+
+type ReuseCheck struct {
+	Status          BrowseSessionStatus
+	LastError       string
+	HealthCheckedAt time.Time
+	Ready           bool
+	Risk            string
 }
 
 type BrowseSessionPageState struct {
@@ -144,9 +181,9 @@ type BrowseSession struct {
 }
 
 type BrowseSessionManager struct {
-	mu       sync.Mutex
-	timeout  time.Duration
-	sessions map[string]*BrowseSession
+	mu            sync.Mutex
+	timeout       time.Duration
+	sessions      map[string]*BrowseSession
 }
 
 func NewBrowseSessionManager(timeout time.Duration) *BrowseSessionManager {
@@ -372,36 +409,141 @@ func (s *BrowseSession) PageState(ctx context.Context) (*BrowseSessionPageState,
 }
 
 func (s *BrowseSession) Search(ctx context.Context, keyword string, filters ...FilterOption) ([]Feed, error) {
+	feeds, _, _, err := s.SearchBatch(ctx, keyword, filters, nil, 35)
+	return feeds, err
+}
+
+// ListFeedsBatch 在 session 浏览器中分页获取首页 Feeds。
+// cursor 为空时执行首页导航/ready；非空时从当前页继续滚动。
+func (s *BrowseSession) ListFeedsBatch(ctx context.Context, cursor *FeedCursor, maxItems int) ([]Feed, *FeedCursor, bool, error) {
 	opCtx, err := s.beginLockedOperation(ctx, true)
 	if err != nil {
-		return nil, err
+		return nil, nil, false, err
 	}
 	defer s.finishOperation()
 
-	action := NewSearchActionWithState(s.page.Context(opCtx), s.state)
-	feeds, err := action.Search(opCtx, keyword, filters...)
-	if err != nil {
-		return nil, err
+	maxItems = normalizeFeedPageSize(maxItems)
+
+	s.mu.Lock()
+	page := s.page
+	s.mu.Unlock()
+
+	if page == nil {
+		return nil, nil, false, fmt.Errorf("browse session 页面不存在: %s", s.id)
+	}
+
+	var feeds []Feed
+	var nextCursor *FeedCursor
+	var hasMore bool
+	isFirstPage := cursor == nil
+
+	if cursor == nil {
+		action, err := NewFeedsListAction(page.Context(opCtx))
+		if err != nil {
+			return nil, nil, false, err
+		}
+		allFeeds, err := action.GetFeedsList(opCtx)
+		if err != nil {
+			return nil, nil, false, err
+		}
+		cursor = &FeedCursor{Kind: FeedPageHome, CreatedAt: time.Now(), ReturnedIDs: make([]string, 0)}
+		feeds = takeNewFeeds(allFeeds, cursor, maxItems)
+		nextCursor = cursor
+		hasMore = len(allFeeds) > len(feeds) || !hasEndSignal(page.Context(opCtx))
+	} else {
+		feeds, nextCursor, hasMore, err = LoadFeedBatch(opCtx, page.Context(opCtx), FeedPageHome, cursor, maxItems, func() ([]Feed, error) {
+			return collectHomeFeeds(page.Context(opCtx))
+		})
+		if err != nil {
+			return nil, nil, false, err
+		}
 	}
 
 	s.mu.Lock()
-	s.sourceURL = ""
-	s.currentFeedID = ""
-	s.currentXsecToken = ""
-	s.opened = false
-	s.read = false
-	s.results = make(map[string]Feed, len(feeds)*2)
-	for i, feed := range feeds {
-		feed.Index = i
-		s.results[strconv.Itoa(i)] = feed
-		if feed.ID != "" {
-			s.results[feed.ID] = feed
-		}
+	if isFirstPage {
+		s.sourceURL = ""
+		s.currentFeedID = ""
+		s.currentXsecToken = ""
+		s.opened = false
+		s.read = false
+		s.initialCommentIDs = nil
+		s.results = replaceSessionResults(feeds)
+	} else {
+		s.results = appendSessionResults(s.results, feeds)
 	}
-	s.recordTimelineLocked("search", keyword, "ok", time.Now(), fmt.Sprintf("results=%d", len(feeds)))
+	s.recordTimelineLocked("list_feeds", "", "ok", time.Now(), fmt.Sprintf("results=%d", len(feeds)))
 	s.mu.Unlock()
-	s.probeWatchdogSelectorsForKind(opCtx, XHSReadySearch, "")
-	return feeds, nil
+	return feeds, nextCursor, hasMore, nil
+}
+
+// ListFeeds 是 ListFeedsBatch 的兼容 wrapper，不传游标且默认 35 条。
+func (s *BrowseSession) ListFeeds(ctx context.Context) ([]Feed, error) {
+	feeds, _, _, err := s.ListFeedsBatch(ctx, nil, 35)
+	return feeds, err
+}
+
+// SearchBatch 在 session 浏览器中分页搜索。
+// cursor 为空时执行真实 UI 搜索和筛选；非空时从当前页继续滚动。
+func (s *BrowseSession) SearchBatch(ctx context.Context, keyword string, filters []FilterOption, cursor *FeedCursor, maxItems int) ([]Feed, *FeedCursor, bool, error) {
+	opCtx, err := s.beginLockedOperation(ctx, true)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	defer s.finishOperation()
+
+	maxItems = normalizeFeedPageSize(maxItems)
+
+	s.mu.Lock()
+	page := s.page
+	s.mu.Unlock()
+
+	if page == nil {
+		return nil, nil, false, fmt.Errorf("browse session 页面不存在: %s", s.id)
+	}
+
+	var feeds []Feed
+	var nextCursor *FeedCursor
+	var hasMore bool
+
+	if cursor == nil {
+		action := NewSearchActionWithState(page.Context(opCtx), s.state)
+		allFeeds, err := action.Search(opCtx, keyword, filters...)
+		if err != nil {
+			return nil, nil, false, err
+		}
+		cursor = &FeedCursor{
+			Kind:        FeedPageSearch,
+			Keyword:     keyword,
+			FilterKey:   filterKeyFromFilters(filters),
+			CreatedAt:   time.Now(),
+			ReturnedIDs: make([]string, 0),
+		}
+		feeds = takeNewFeeds(allFeeds, cursor, maxItems)
+		hasMore = len(allFeeds) > len(feeds) || !hasEndSignal(page.Context(opCtx))
+		s.mu.Lock()
+		s.sourceURL = ""
+		s.currentFeedID = ""
+		s.currentXsecToken = ""
+		s.opened = false
+		s.read = false
+		s.results = replaceSessionResults(feeds)
+		s.recordTimelineLocked("search", keyword, "ok", time.Now(), fmt.Sprintf("results=%d", len(feeds)))
+		s.mu.Unlock()
+		s.probeWatchdogSelectorsForKind(opCtx, XHSReadySearch, "")
+		return feeds, cursor, hasMore, nil
+	}
+
+	feeds, nextCursor, hasMore, err = LoadFeedBatch(opCtx, page.Context(opCtx), FeedPageSearch, cursor, maxItems, func() ([]Feed, error) {
+		return collectSearchFeeds(page.Context(opCtx), false)
+	})
+	if err != nil {
+		return nil, nil, false, err
+	}
+
+	s.mu.Lock()
+	s.results = appendSessionResults(s.results, feeds)
+	s.mu.Unlock()
+	return feeds, nextCursor, hasMore, nil
 }
 
 func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, xsecToken string) (*SessionOpenNoteResponse, error) {
@@ -862,6 +1004,45 @@ func (s *BrowseSession) reply(ctx context.Context, expectedFeedID, commentID, us
 	return nil
 }
 
+func historyTargetReady(probe xhsReadyProbe, fromURL string, kind XHSReadyKind) bool {
+	return probe.URL != "" && probe.URL != fromURL && isXHSReady(probe, kind, "", false)
+}
+
+func waitForHistoryTargetReady(ctx context.Context, page *hrod.Page, fromURL, sourceURL string) (xhsReadyProbe, error) {
+	deadline := time.Now().Add(browseSessionBackTimeout)
+	var last xhsReadyProbe
+	var lastErr error
+	for time.Now().Before(deadline) {
+		if err := ctx.Err(); err != nil {
+			return last, err
+		}
+		probe, err := probeXHSReady(page.Context(ctx), "")
+		if err != nil {
+			lastErr = err
+		} else {
+			last = probe
+			kindURL := probe.URL
+			if sourceURL != "" {
+				kindURL = sourceURL
+			}
+			kind := inferXHSReadyKindFromURL(kindURL)
+			if probe.RiskText != "" {
+				return last, fmt.Errorf("返回页出现风险信号: %s", probe.RiskText)
+			}
+			if historyTargetReady(probe, fromURL, kind) {
+				return probe, nil
+			}
+		}
+		if err := page.Context(ctx).SleepRandom(300*time.Millisecond, 500*time.Millisecond); err != nil {
+			return last, err
+		}
+	}
+	if lastErr != nil {
+		return last, fmt.Errorf("等待 history.back 目标页超时: %w; %s", lastErr, formatXHSReadyProbe(last))
+	}
+	return last, fmt.Errorf("等待 history.back 目标页超时: %s", formatXHSReadyProbe(last))
+}
+
 func (s *BrowseSession) Back(ctx context.Context) error {
 	opCtx, err := s.beginLockedOperation(ctx, true)
 	if err != nil {
@@ -872,20 +1053,31 @@ func (s *BrowseSession) Back(ctx context.Context) error {
 	s.mu.Lock()
 	page := s.page
 	feedID := s.currentFeedID
+	sourceURL := s.sourceURL
 	s.mu.Unlock()
 
 	if page == nil {
 		return fmt.Errorf("browse session 页面不存在: %s", s.id)
 	}
 
+	fromURL, err := s.currentPageURL(opCtx)
+	if err != nil {
+		return fmt.Errorf("读取后退前 URL: %w", err)
+	}
+
 	// 通用后退：从任意页面返回上一步
-	if _, err := page.Eval(`() => window.history.back()`); err != nil {
+	if _, err := page.Context(opCtx).Eval(`() => window.history.back()`); err != nil {
 		return fmt.Errorf("history.back 失败: %w", err)
 	}
-	page.Sleep(1000 * time.Millisecond) // 等待 SPA 渲染
 
-	s.refreshPageState(opCtx)
+	probe, err := waitForHistoryTargetReady(opCtx, page, fromURL, sourceURL)
+	if err != nil {
+		return err
+	}
 	s.mu.Lock()
+	s.currentURL = probe.URL
+	s.scrollY = probe.ScrollY
+	s.sourceURL = ""
 	s.currentFeedID = ""
 	s.currentXsecToken = ""
 	s.opened = false
@@ -895,38 +1087,95 @@ func (s *BrowseSession) Back(ctx context.Context) error {
 	return nil
 }
 
-func (s *BrowseSession) CloseNote(ctx context.Context) error {
-	opCtx, err := s.beginLockedOperation(ctx, true)
-	if err != nil {
-		return err
+func (s *BrowseSession) CheckReusable(ctx context.Context) ReuseCheck {
+	select {
+	case <-s.opToken:
+	default:
+		return ReuseCheck{Status: SessionBusy, LastError: "session 正在执行操作"}
 	}
-	defer s.finishOperation()
+	defer func() { s.opToken <- struct{}{} }()
+
+	checkedAt := time.Now()
 
 	s.mu.Lock()
+	closed := s.closed
+	expired := !closed && time.Now().After(s.expiresAt)
 	page := s.page
-	sourceURL := s.sourceURL
-	feedID := s.currentFeedID
 	s.mu.Unlock()
+
+	if closed {
+		return ReuseCheck{Status: SessionNotReady, HealthCheckedAt: checkedAt, Ready: false, LastError: "session 已关闭"}
+	}
+
+	if expired {
+		return ReuseCheck{Status: SessionExpired, LastError: "session 已过期", HealthCheckedAt: checkedAt, Ready: false}
+	}
 
 	if page == nil {
-		return fmt.Errorf("browse session 页面不存在: %s", s.id)
+		return ReuseCheck{Status: SessionNotReady, LastError: "session 页面不存在", HealthCheckedAt: checkedAt, Ready: false}
 	}
 
-	method, err := closeNoteOverlay(page.Context(opCtx), sourceURL)
-	if err != nil {
-		return fmt.Errorf("关闭笔记面板失败: %w", err)
-	}
-	logrus.Debugf("关闭笔记面板方式: %s", method)
+	evalCtx, cancel := context.WithTimeout(ctx, healthCheckTimeout)
+	defer cancel()
 
-	s.refreshPageState(opCtx)
-	s.mu.Lock()
-	s.currentFeedID = ""
-	s.currentXsecToken = ""
-	s.opened = false
-	s.read = false
-	s.recordTimelineLocked("close_note", feedID, "ok", time.Now(), method)
-	s.mu.Unlock()
-	return nil
+	result, err := s.evalJS(evalCtx, page, `() => JSON.stringify({url: location.href, readyState: document.readyState})`)
+	if err != nil || result == nil {
+		if errors.Is(ctx.Err(), context.Canceled) || errors.Is(evalCtx.Err(), context.DeadlineExceeded) {
+			return ReuseCheck{
+				Status:          SessionNotReady,
+				LastError:       "健康检查超时或被取消",
+				HealthCheckedAt: checkedAt,
+				Ready:           false,
+			}
+		}
+		return ReuseCheck{
+			Status:          SessionUnhealthy,
+			LastError:       "CDP 连接异常",
+			HealthCheckedAt: checkedAt,
+			Ready:           false,
+			Risk:            "cdp_disconnected",
+		}
+	}
+
+	var pageState struct {
+		URL         string `json:"url"`
+		ReadyState  string `json:"readyState"`
+	}
+	if err := json.Unmarshal([]byte(result.Value.Str()), &pageState); err != nil || pageState.URL == "" || pageState.ReadyState == "" {
+		return ReuseCheck{
+			Status:          SessionUnhealthy,
+			LastError:       "页面 JS 不可用",
+			HealthCheckedAt: checkedAt,
+			Ready:           false,
+			Risk:            "js_unavailable",
+		}
+	}
+
+	if strings.HasPrefix(pageState.URL, "about:") {
+		return ReuseCheck{
+			Status:          SessionNotReady,
+			LastError:       "页面URL异常",
+			HealthCheckedAt: checkedAt,
+			Ready:           false,
+		}
+	}
+
+	readyState := pageState.ReadyState
+
+	if readyState != "complete" && readyState != "interactive" {
+		return ReuseCheck{
+			Status:          SessionNotReady,
+			LastError:       fmt.Sprintf("页面未就绪: %s", readyState),
+			HealthCheckedAt: checkedAt,
+			Ready:           false,
+		}
+	}
+
+	return ReuseCheck{
+		Status:          SessionReady,
+		HealthCheckedAt: checkedAt,
+		Ready:           true,
+	}
 }
 
 func (s *BrowseSession) Close() {
@@ -968,11 +1217,11 @@ func (s *BrowseSession) close() {
 	hasActiveOp := s.activeOp != nil
 	page := s.page
 	onClose := s.onClose
+	onRemove := s.onRemove
 	if !hasActiveOp {
 		s.page = nil
 		s.onClose = nil
 	}
-	onRemove := s.onRemove
 	s.mu.Unlock()
 
 	if onRemove != nil {
@@ -1480,6 +1729,55 @@ func compactTimelineNote(value string) string {
 		return value
 	}
 	return string(runes[:40]) + "..."
+}
+
+func filterKeyFromFilters(filters []FilterOption) string {
+	data, _ := json.Marshal(filters)
+	return string(data)
+}
+
+func normalizeFeedPageSize(maxItems int) int {
+	if maxItems <= 0 {
+		return 35
+	}
+	if maxItems > 50 {
+		return 50
+	}
+	return maxItems
+}
+
+func appendSessionResults(results map[string]Feed, feeds []Feed) map[string]Feed {
+	if results == nil {
+		results = make(map[string]Feed, len(feeds)*2)
+	}
+	next := 0
+	for {
+		if _, exists := results[strconv.Itoa(next)]; !exists {
+			break
+		}
+		next++
+	}
+	for i := range feeds {
+		feeds[i].Index = next
+		results[strconv.Itoa(next)] = feeds[i]
+		if feeds[i].ID != "" {
+			results[feeds[i].ID] = feeds[i]
+		}
+		next++
+	}
+	return results
+}
+
+func replaceSessionResults(feeds []Feed) map[string]Feed {
+	results := make(map[string]Feed, len(feeds)*2)
+	for i := range feeds {
+		feeds[i].Index = i
+		results[strconv.Itoa(i)] = feeds[i]
+		if feeds[i].ID != "" {
+			results[feeds[i].ID] = feeds[i]
+		}
+	}
+	return results
 }
 
 func inferXHSReadyKindFromSessionURL(rawURL string) XHSReadyKind {
