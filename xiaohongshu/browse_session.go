@@ -485,9 +485,19 @@ func (s *BrowseSession) ListFeeds(ctx context.Context) ([]Feed, error) {
 // SearchBatch 在 session 浏览器中分页搜索。
 // cursor 为空时执行真实 UI 搜索和筛选；非空时从当前页继续滚动。
 func (s *BrowseSession) SearchBatch(ctx context.Context, keyword string, filters []FilterOption, cursor *FeedCursor, maxItems int) ([]Feed, *FeedCursor, bool, error) {
+	result, nextCursor, hasMore, err := s.searchBatch(ctx, keyword, filters, cursor, maxItems, false)
+	return result.Feeds, nextCursor, hasMore, err
+}
+
+// SearchBatchWithAI 在首次搜索时额外返回 AI 回复，续页不重复读取。
+func (s *BrowseSession) SearchBatchWithAI(ctx context.Context, keyword string, filters []FilterOption, cursor *FeedCursor, maxItems int) (SearchPageResult, *FeedCursor, bool, error) {
+	return s.searchBatch(ctx, keyword, filters, cursor, maxItems, true)
+}
+
+func (s *BrowseSession) searchBatch(ctx context.Context, keyword string, filters []FilterOption, cursor *FeedCursor, maxItems int, includeAI bool) (SearchPageResult, *FeedCursor, bool, error) {
 	opCtx, err := s.beginLockedOperation(ctx, true)
 	if err != nil {
-		return nil, nil, false, err
+		return SearchPageResult{}, nil, false, err
 	}
 	defer s.finishOperation()
 
@@ -498,18 +508,30 @@ func (s *BrowseSession) SearchBatch(ctx context.Context, keyword string, filters
 	s.mu.Unlock()
 
 	if page == nil {
-		return nil, nil, false, fmt.Errorf("browse session 页面不存在: %s", s.id)
+		return SearchPageResult{}, nil, false, fmt.Errorf("browse session 页面不存在: %s", s.id)
 	}
 
 	var feeds []Feed
+	var aiChat *AIChatReply
 	var nextCursor *FeedCursor
 	var hasMore bool
 
 	if cursor == nil {
 		action := NewSearchActionWithState(page.Context(opCtx), s.state)
-		allFeeds, err := action.Search(opCtx, keyword, filters...)
-		if err != nil {
-			return nil, nil, false, err
+		var allFeeds []Feed
+		if includeAI {
+			searchResult, searchErr := action.Search(opCtx, keyword, filters...)
+			if searchErr != nil {
+				return SearchPageResult{}, nil, false, searchErr
+			}
+			allFeeds = searchResult.Feeds
+			aiChat = searchResult.AIChat
+		} else {
+			var searchErr error
+			allFeeds, searchErr = action.SearchFeedsOnly(opCtx, keyword, filters...)
+			if searchErr != nil {
+				return SearchPageResult{}, nil, false, searchErr
+			}
 		}
 		cursor = &FeedCursor{
 			Kind:        FeedPageSearch,
@@ -530,20 +552,20 @@ func (s *BrowseSession) SearchBatch(ctx context.Context, keyword string, filters
 		s.recordTimelineLocked("search", keyword, "ok", time.Now(), fmt.Sprintf("results=%d", len(feeds)))
 		s.mu.Unlock()
 		s.probeWatchdogSelectorsForKind(opCtx, XHSReadySearch, "")
-		return feeds, cursor, hasMore, nil
+		return SearchPageResult{Feeds: feeds, AIChat: aiChat}, cursor, hasMore, nil
 	}
 
 	feeds, nextCursor, hasMore, err = LoadFeedBatch(opCtx, page.Context(opCtx), FeedPageSearch, cursor, maxItems, func() ([]Feed, error) {
 		return collectSearchFeeds(page.Context(opCtx), false)
 	})
 	if err != nil {
-		return nil, nil, false, err
+		return SearchPageResult{}, nil, false, err
 	}
 
 	s.mu.Lock()
 	s.results = appendSessionResults(s.results, feeds)
 	s.mu.Unlock()
-	return feeds, nextCursor, hasMore, nil
+	return SearchPageResult{Feeds: feeds}, nextCursor, hasMore, nil
 }
 
 func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, xsecToken string) (*SessionOpenNoteResponse, error) {

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"sort"
+	"strings"
 	"time"
 
 	rodinput "github.com/go-rod/rod/lib/input"
@@ -26,6 +28,8 @@ const (
 	searchInputWaitTimeout         = 45 * time.Second
 	searchResultsWaitTimeout       = 30 * time.Second
 	searchFilterRefreshWaitTimeout = 20 * time.Second
+	aiResponseWaitTimeout          = 3 * time.Second
+	aiResponsePollInterval         = 500 * time.Millisecond
 )
 
 // FilterOption 筛选选项结构体
@@ -179,17 +183,55 @@ func NewSearchActionWithState(page *hrod.Page, state *ActionStateStore) *SearchA
 	return &SearchAction{page: page, state: state}
 }
 
-func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...FilterOption) ([]Feed, error) {
+func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...FilterOption) (SearchPageResult, error) {
+	var previousAIState *aiStateProbe
+	pageBeforeSearch := s.page.Context(ctx)
+	if !isCurrentSearchPage(pageBeforeSearch, keyword) || len(filters) > 0 {
+		previousAIState = &aiStateProbe{}
+		if probe, err := probeAIResponseState(pageBeforeSearch.Timeout(time.Second)); err == nil {
+			previousAIState = &probe
+		}
+	}
+
+	page, feeds, err := s.searchFeeds(ctx, keyword, filters...)
+	if err != nil {
+		return SearchPageResult{}, err
+	}
+
+	result := SearchPageResult{Feeds: feeds}
+	aiChat, err := readAIResponseFromState(page, previousAIState)
+	if err != nil {
+		logrus.WithError(err).Warn("读取搜索页 AI 回复失败")
+		return result, nil
+	}
+	result.AIChat = aiChat
+	return result, nil
+}
+
+func (s *SearchAction) searchFeeds(ctx context.Context, keyword string, filters ...FilterOption) (*hrod.Page, []Feed, error) {
 	page := s.page.Context(ctx)
 
 	// 检查当前页面是否已在该关键词搜索结果上，是则跳过搜索
 	if !isCurrentSearchPage(page, keyword) {
 		if err := s.searchByUI(page, keyword); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 
-	return s.collectResults(page, keyword, filters...)
+	feeds, err := s.collectResults(page, keyword, filters...)
+	if err != nil {
+		return nil, nil, err
+	}
+	return page, feeds, nil
+}
+
+// SearchFeedsOnly 保留仅返回笔记列表的兼容入口。
+func (s *SearchAction) SearchFeedsOnly(ctx context.Context, keyword string, filters ...FilterOption) ([]Feed, error) {
+	_, feeds, err := s.searchFeeds(ctx, keyword, filters...)
+	if err != nil {
+		return nil, err
+	}
+	return feeds, nil
 }
 
 func (s *SearchAction) SearchByURLFallback(ctx context.Context, keyword string, filters ...FilterOption) ([]Feed, error) {
@@ -852,6 +894,309 @@ func readSearchFeedsFromState(page *hrod.Page) ([]Feed, error) {
 	}
 
 	return feeds, nil
+}
+
+type aiStateProbe struct {
+	OneboxInfo         json.RawMessage `json:"onebox_info"`
+	DQAInstantElements json.RawMessage `json:"dqa_instant_elements"`
+	Active             bool            `json:"active"`
+	SearchRoundID      json.RawMessage `json:"search_round_id"`
+	UserMessageID      json.RawMessage `json:"user_message_id"`
+}
+
+func readAIResponseFromState(page *hrod.Page, previousState *aiStateProbe) (*AIChatReply, error) {
+	// 没有前状态或前状态非 AI 激活 → 直接读一次，不轮询
+	if previousState == nil || !previousState.Active {
+		probe, err := probeAIResponseState(page.Timeout(aiResponseWaitTimeout))
+		if err != nil {
+			return nil, err
+		}
+		reply, _ := normalizeAIResponse(probe)
+		return reply, nil
+	}
+
+	// AI 激活状态 → 有界轮询等待回复
+	deadline := time.Now().Add(aiResponseWaitTimeout)
+	var lastReply *AIChatReply
+	var prevRoundID, prevMsgID string
+	if previousState.SearchRoundID != nil {
+		json.Unmarshal(previousState.SearchRoundID, &prevRoundID)
+	}
+	if previousState.UserMessageID != nil {
+		json.Unmarshal(previousState.UserMessageID, &prevMsgID)
+	}
+
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return lastReply, nil
+		}
+		probe, err := probeAIResponseState(page.Timeout(remaining))
+		if err != nil {
+			if lastReply != nil {
+				return lastReply, nil
+			}
+			return nil, err
+		}
+
+		// 用 round/message ID 判断是否有新回复，不依赖正文内容
+		var curRoundID, curMsgID string
+		if probe.SearchRoundID != nil {
+			json.Unmarshal(probe.SearchRoundID, &curRoundID)
+		}
+		if probe.UserMessageID != nil {
+			json.Unmarshal(probe.UserMessageID, &curMsgID)
+		}
+		idsChanged := curRoundID != prevRoundID || curMsgID != prevMsgID
+
+		reply, pending := normalizeAIResponse(probe)
+		if idsChanged && reply != nil {
+			lastReply = reply
+		}
+		if !pending {
+			return lastReply, nil
+		}
+		if !time.Now().Before(deadline) {
+			return lastReply, nil
+		}
+		sleepFor := min(aiResponsePollInterval, time.Until(deadline))
+		if err := page.Sleep(sleepFor); err != nil {
+			if lastReply != nil {
+				return lastReply, nil
+			}
+			return nil, err
+		}
+	}
+}
+
+func probeAIResponseState(page *hrod.Page) (aiStateProbe, error) {
+	result, err := page.Eval(`() => {
+		const hasOwn = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
+		const isObject = (value) => value !== null && typeof value === "object";
+
+		const unwrapRef = (value) => {
+			const seen = new Set();
+			let current = value;
+			while (isObject(current) && !seen.has(current)) {
+				seen.add(current);
+				if ((current.__v_isReactive || current.__v_isReadonly) &&
+					isObject(current.__v_raw) && current.__v_raw !== current) {
+					current = current.__v_raw;
+					continue;
+				}
+				if (current.__v_isRef === true) {
+					const next = current.value;
+					if (next === current) break;
+					current = next;
+					continue;
+				}
+				if (hasOwn(current, "_value")) {
+					const next = current._value;
+					if (next === current) break;
+					current = next;
+					continue;
+				}
+				if (hasOwn(current, "value")) {
+					const next = current.value;
+					if (next === current) break;
+					current = next;
+					continue;
+				}
+				break;
+			}
+			return current;
+		};
+
+		const snapshot = (value) => {
+			const json = JSON.stringify(unwrapRef(value), (_key, nested) => unwrapRef(nested));
+			return json === undefined ? undefined : JSON.parse(json);
+		};
+
+		const search = unwrapRef(window.__INITIAL_STATE__?.search);
+		if (!search) return "";
+
+		// 页面版本不同，AI 字段可能位于 search 或其 AI 子状态中。
+		const roots = [
+			search,
+			unwrapRef(search.aiSearch),
+			unwrapRef(search.aiWendian),
+			unwrapRef(search.wendian),
+			unwrapRef(search.aiChat),
+		].filter(isObject);
+		const pick = (...names) => {
+			for (const root of roots) {
+				for (const name of names) {
+					if (hasOwn(root, name)) return unwrapRef(root[name]);
+				}
+			}
+			return undefined;
+		};
+
+		return JSON.stringify(snapshot({
+			onebox_info: pick("oneboxInfo", "oneBoxInfo"),
+			dqa_instant_elements: pick("dqaInstantElements", "dqaElements"),
+			active: Boolean(pick("aiWendianActive", "wendianActive", "aiActive")),
+			search_round_id: pick("currentSearchRoundId", "searchRoundId"),
+			user_message_id: pick("currentUserMessageId", "userMessageId"),
+		}));
+	}`)
+	if err != nil {
+		return aiStateProbe{}, fmt.Errorf("提取搜索页 AI 状态失败: %w", err)
+	}
+	if result == nil || result.Value.Str() == "" {
+		return aiStateProbe{}, nil
+	}
+
+	var probe aiStateProbe
+	if err := json.Unmarshal([]byte(result.Value.Str()), &probe); err != nil {
+		return aiStateProbe{}, fmt.Errorf("解析搜索页 AI 状态失败: %w", err)
+	}
+	return probe, nil
+}
+
+func normalizeAIResponse(probe aiStateProbe) (*AIChatReply, bool) {
+	dqa := decodeAIStateValue(probe.DQAInstantElements)
+	onebox := decodeAIStateValue(probe.OneboxInfo)
+	content := firstNonEmpty(extractAIText(dqa), extractAIText(onebox))
+	hasMore := aiStateHasMore(dqa) || aiStateHasMore(onebox)
+	if content == "" {
+		return nil, probe.Active || hasMore
+	}
+	return &AIChatReply{Content: content, HasMore: hasMore}, hasMore
+}
+
+func decodeAIStateValue(raw json.RawMessage) any {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return nil
+	}
+	return value
+}
+
+func extractAIText(value any) string {
+	parts := extractAITextParts(value)
+	seen := make(map[string]bool, len(parts))
+	result := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" || seen[part] {
+			continue
+		}
+		seen[part] = true
+		result = append(result, part)
+	}
+	return strings.Join(result, "\n")
+}
+
+func extractAITextParts(value any) []string {
+	switch typed := value.(type) {
+	case string:
+		return []string{typed}
+	case []any:
+		var parts []string
+		for _, item := range typed {
+			parts = append(parts, extractAITextParts(item)...)
+		}
+		return parts
+	case map[string]any:
+		textKeys := []string{"content", "answer", "summary", "text", "markdown", "desc"}
+		if parts := extractAIMapKeys(typed, textKeys); hasAIText(parts) {
+			return parts
+		}
+		containerKeys := []string{
+			"elements", "items", "list", "children", "data", "result",
+			"response", "message", "onebox", "dqa",
+		}
+		if parts := extractAIMapKeys(typed, containerKeys); hasAIText(parts) {
+			return parts
+		}
+
+		keys := make([]string, 0, len(typed))
+		for key := range typed {
+			lower := strings.ToLower(key)
+			if strings.Contains(lower, "content") ||
+				strings.Contains(lower, "answer") ||
+				strings.Contains(lower, "summary") ||
+				strings.Contains(lower, "element") ||
+				strings.Contains(lower, "message") {
+				keys = append(keys, key)
+			}
+		}
+		sort.Strings(keys)
+		return extractAIMapKeys(typed, keys)
+	default:
+		return nil
+	}
+}
+
+func hasAIText(parts []string) bool {
+	for _, part := range parts {
+		if strings.TrimSpace(part) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func extractAIMapKeys(value map[string]any, keys []string) []string {
+	var parts []string
+	for _, wanted := range keys {
+		for key, nested := range value {
+			if strings.EqualFold(key, wanted) {
+				parts = append(parts, extractAITextParts(nested)...)
+				break
+			}
+		}
+	}
+	return parts
+}
+
+func aiStateHasMore(value any) bool {
+	switch typed := value.(type) {
+	case []any:
+		for _, item := range typed {
+			if aiStateHasMore(item) {
+				return true
+			}
+		}
+	case map[string]any:
+		for key, nested := range typed {
+			normalizedKey := strings.ToLower(strings.ReplaceAll(key, "_", ""))
+			switch normalizedKey {
+			case "hasmore", "isgenerating", "generating", "loading", "streaming":
+				if flag, ok := nested.(bool); ok && flag {
+					return true
+				}
+			case "isend", "finished", "completed", "done":
+				if flag, ok := nested.(bool); ok && !flag {
+					return true
+				}
+			case "status":
+				if status, ok := nested.(string); ok {
+					switch strings.ToLower(status) {
+					case "pending", "generating", "streaming", "loading":
+						return true
+					}
+				}
+			}
+			if aiStateHasMore(nested) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func mergeFeedsByID(primary, fallback []Feed) []Feed {
