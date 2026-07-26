@@ -26,6 +26,18 @@ type Feed struct {
 	Index     int      `json:"index"`
 }
 
+// AIChatReply 表示搜索页生成的 AI 回复。
+type AIChatReply struct {
+	Content string `json:"content,omitempty"`
+	HasMore bool   `json:"has_more"`
+}
+
+// SearchPageResult 聚合搜索页的笔记和 AI 回复。
+type SearchPageResult struct {
+	Feeds  []Feed       `json:"feeds"`
+	AIChat *AIChatReply `json:"ai_chat,omitempty"`
+}
+
 // NoteCard 表示笔记卡片信息
 type NoteCard struct {
 	Type         string       `json:"type"`

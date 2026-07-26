@@ -203,6 +203,7 @@ type PublishVideoResponse struct {
 // FeedsListResponse Feeds列表响应
 type FeedsListResponse struct {
 	Feeds     []xiaohongshu.Feed                `json:"feeds"`
+	AIChat    *xiaohongshu.AIChatReply          `json:"ai_chat,omitempty"`
 	Count     int                               `json:"count"`
 	Cursor    string                            `json:"cursor,omitempty"`
 	HasMore   bool                              `json:"has_more"`
@@ -595,7 +596,7 @@ func (s *XiaohongshuService) SearchFeeds(ctx context.Context, keyword string, fi
 	action := xiaohongshu.NewSearchActionWithState(page.Context(searchCtx), s.actionState)
 	capture := s.startReadNetworkCapture(page)
 
-	feeds, err := action.Search(searchCtx, keyword, filters...)
+	feeds, err := action.SearchFeedsOnly(searchCtx, keyword, filters...)
 	network := stopReadNetworkCapture(capture)
 	if err != nil {
 		s.recordRiskFromPage(page, err)
@@ -1088,11 +1089,12 @@ func (s *XiaohongshuService) SessionSearch(ctx context.Context, id, keyword, cur
 		cursor = cloneFeedCursor(entry.Cursor)
 	}
 
-	feeds, nextCursor, hasMore, err := session.SearchBatch(ctx, keyword, filters, cursor, maxItems)
+	searchResult, nextCursor, hasMore, err := session.SearchBatchWithAI(ctx, keyword, filters, cursor, maxItems)
 	if err != nil {
 		s.recordRiskFromSession(session, err)
 		return nil, err
 	}
+	feeds := searchResult.Feeds
 
 	nextCursorID := ""
 	if hasMore && nextCursor != nil {
@@ -1108,6 +1110,7 @@ func (s *XiaohongshuService) SessionSearch(ctx context.Context, id, keyword, cur
 	}
 	return &FeedsListResponse{
 		Feeds:     feeds,
+		AIChat:    searchResult.AIChat,
 		Count:     len(feeds),
 		Cursor:    nextCursorID,
 		HasMore:   hasMore,
