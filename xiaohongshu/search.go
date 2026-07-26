@@ -1034,37 +1034,47 @@ func probeAIResponseState(page *hrod.Page) (aiStateProbe, error) {
 
 		// 尝试从 DOM 中提取 AI 回答（右边栏渲染的内容，不在 __INITIAL_STATE__ 中）
 		const domAIText = (() => {
-			const selectors = [
-				".search-layout", ".feeds-container", ".note-list",
-				"[class*='aiAnswer']", "[class*='ai_answer']",
-				"[class*='aiSidebar']", "[class*='ai-sidebar']",
-				".ai-wendian-panel", "[class*='wendian']",
-			];
-			// 页面通常有多个搜索容器（左边笔记列表 + 右边AI回答），
-			// 找包含较长文本（80+字符）且不包含笔记标题的容器，
-			// 从后面往前检查（AI回答通常在右侧/后面）
-			const containers = document.querySelectorAll(selectors.join(","));
-			for (let ci = containers.length - 1; ci >= 0; ci--) {
-				try {
-					const txt = (containers[ci].textContent || "").trim();
-					if (txt.length > 80 && !txt.includes("注") && containers[ci].querySelectorAll("section.note-item, .note-item").length === 0) {
-						return txt.slice(0, 3000);
-					}
-				} catch (e) {}
+			// 策略1：查找所有搜索容器，过滤出不含笔记卡片且文本最长的那个
+			const searchContainers = document.querySelectorAll(".search-layout, .feeds-container, .note-list, [class*='search_layout'], [class*='searchResult']");
+			let bestText = "";
+			for (const c of searchContainers) {
+				const txt = (c.textContent || "").trim();
+				if (txt.length > 100 && txt.length > bestText.length &&
+				    c.querySelectorAll("section.note-item, .note-item, [class*='note-item']").length === 0) {
+					bestText = txt;
+				}
 			}
-			// 最后尝试：找一个包含较长 AI 风格文本的非nav、非header的面板
+			if (bestText.length > 100) return bestText.slice(0, 3000);
+
+			// 策略2：找到页面右侧区域（AI 回答通常在右边）
+			const sidePanels = document.querySelectorAll("[class*='right'], [class*='side'], [class*='aside'], [class*='sidebar'], aside, [class*='ai-panel'], [class*='aiPanel']");
+			for (const p of sidePanels) {
+				const txt = (p.textContent || "").trim();
+				if (txt.length > 80 && !txt.includes("登录") && !txt.includes("扫码")) {
+					return txt.slice(0, 3000);
+				}
+			}
+
+			// 策略3：取 body 文本，排除 nav/header/footer
 			try {
-				const all = document.querySelectorAll("main > *, #app > main > *, #app > div > *");
-				for (let i = all.length - 1; i >= 0; i--) {
-					const el = all[i];
-					if (!el || el.children.length > 50) continue;
-					const tag = (el.tagName || "").toLowerCase();
+				const body = document.body;
+				if (!body) return "";
+				const clones = [];
+				for (const child of body.children) {
+					const tag = (child.tagName || "").toLowerCase();
 					if (tag === "nav" || tag === "header" || tag === "footer") continue;
-					const txt = (el.textContent || "").trim();
-					if (txt.length > 100 && !txt.includes("登录") && !txt.includes("推荐")) {
-						return txt.slice(0, 3000);
+					const txt = (child.textContent || "").trim();
+					if (txt.length > 200 && !txt.includes("登录") && !txt.includes("扫码")) {
+						clones.push({txt, len: txt.length});
 					}
 				}
+				clones.sort((a, b) => b.len - a.len);
+				for (const c of clones.slice(0, 3)) {
+					if (c.txt.includes("海南") || c.txt.includes("三亚") || c.txt.includes("攻略") || c.txt.includes("推荐")) {
+						return c.txt.slice(0, 3000);
+					}
+				}
+				if (clones.length > 0) return clones[0].txt.slice(0, 3000);
 			} catch (e) {}
 			return "";
 		})();
