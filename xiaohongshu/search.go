@@ -902,6 +902,7 @@ type aiStateProbe struct {
 	Active             bool            `json:"active"`
 	SearchRoundID      json.RawMessage `json:"search_round_id"`
 	UserMessageID      json.RawMessage `json:"user_message_id"`
+	DomAIText          string          `json:"dom_ai_text"`
 }
 
 func readAIResponseFromState(page *hrod.Page, previousState *aiStateProbe) (*AIChatReply, error) {
@@ -1013,16 +1014,15 @@ func probeAIResponseState(page *hrod.Page) (aiStateProbe, error) {
 		};
 
 		const search = unwrapRef(window.__INITIAL_STATE__?.search);
-		if (!search) return "";
 
 		// 页面版本不同，AI 字段可能位于 search 或其 AI 子状态中。
-		const roots = [
+		const roots = search ? [
 			search,
 			unwrapRef(search.aiSearch),
 			unwrapRef(search.aiWendian),
 			unwrapRef(search.wendian),
 			unwrapRef(search.aiChat),
-		].filter(isObject);
+		].filter(isObject) : [];
 		const pick = (...names) => {
 			for (const root of roots) {
 				for (const name of names) {
@@ -1032,12 +1032,45 @@ func probeAIResponseState(page *hrod.Page) (aiStateProbe, error) {
 			return undefined;
 		};
 
+		// 尝试从 DOM 中提取 AI 回答（右边栏渲染的内容，不在 __INITIAL_STATE__ 中）
+		const domAIText = (() => {
+			const selectors = [
+				".search-ai-answer", ".ai-answer-content", ".ai-chat-content",
+				"[class*='aiAnswer']", "[class*='ai_answer']",
+				"[class*='aiSidebar']", "[class*='ai-sidebar']",
+				".ai-wendian-panel", "[class*='wendian']",
+			];
+			for (const sel of selectors) {
+				try {
+					const el = document.querySelector(sel);
+					if (el && el.textContent && el.textContent.trim().length > 20) {
+						return el.textContent.trim().slice(0, 3000);
+					}
+				} catch (e) {}
+			}
+			// 最后尝试：找一个包含较长 AI 风格文本的右侧面板
+			try {
+				const main = document.querySelector("main, .main-content, [class*='content']");
+				if (main) {
+					const children = main.children;
+					for (let i = children.length - 1; i >= 0; i--) {
+						const txt = (children[i].textContent || "").trim();
+						if (txt.length > 100 && !txt.includes("登录") && !txt.includes("推荐")) {
+							return txt.slice(0, 3000);
+						}
+					}
+				}
+			} catch (e) {}
+			return "";
+		})();
+
 		return JSON.stringify(snapshot({
 			onebox_info: pick("oneboxInfo", "oneBoxInfo"),
 			dqa_instant_elements: pick("dqaInstantElements", "dqaElements"),
 			active: Boolean(pick("aiWendianActive", "wendianActive", "aiActive")),
 			search_round_id: pick("currentSearchRoundId", "searchRoundId"),
 			user_message_id: pick("currentUserMessageId", "userMessageId"),
+			dom_ai_text: domAIText,
 		}));
 	}`)
 	if err != nil {
@@ -1057,7 +1090,7 @@ func probeAIResponseState(page *hrod.Page) (aiStateProbe, error) {
 func normalizeAIResponse(probe aiStateProbe) (*AIChatReply, bool) {
 	dqa := decodeAIStateValue(probe.DQAInstantElements)
 	onebox := decodeAIStateValue(probe.OneboxInfo)
-	content := firstNonEmpty(extractAIText(dqa), extractAIText(onebox))
+	content := firstNonEmpty(probe.DomAIText, extractAIText(dqa), extractAIText(onebox))
 	hasMore := aiStateHasMore(dqa) || aiStateHasMore(onebox)
 	if content == "" {
 		return nil, probe.Active || hasMore
