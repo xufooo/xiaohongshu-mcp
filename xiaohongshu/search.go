@@ -1035,29 +1035,34 @@ func probeAIResponseState(page *hrod.Page) (aiStateProbe, error) {
 		// 尝试从 DOM 中提取 AI 回答（右边栏渲染的内容，不在 __INITIAL_STATE__ 中）
 		const domAIText = (() => {
 			const selectors = [
-				".search-ai-answer", ".ai-answer-content", ".ai-chat-content",
+				".search-layout", ".feeds-container", ".note-list",
 				"[class*='aiAnswer']", "[class*='ai_answer']",
 				"[class*='aiSidebar']", "[class*='ai-sidebar']",
 				".ai-wendian-panel", "[class*='wendian']",
 			];
-			for (const sel of selectors) {
+			// 页面通常有多个搜索容器（左边笔记列表 + 右边AI回答），
+			// 找包含较长文本（80+字符）且不包含笔记标题的容器，
+			// 从后面往前检查（AI回答通常在右侧/后面）
+			const containers = document.querySelectorAll(selectors.join(","));
+			for (let ci = containers.length - 1; ci >= 0; ci--) {
 				try {
-					const el = document.querySelector(sel);
-					if (el && el.textContent && el.textContent.trim().length > 20) {
-						return el.textContent.trim().slice(0, 3000);
+					const txt = (containers[ci].textContent || "").trim();
+					if (txt.length > 80 && !txt.includes("注") && containers[ci].querySelectorAll("section.note-item, .note-item").length === 0) {
+						return txt.slice(0, 3000);
 					}
 				} catch (e) {}
 			}
-			// 最后尝试：找一个包含较长 AI 风格文本的右侧面板
+			// 最后尝试：找一个包含较长 AI 风格文本的非nav、非header的面板
 			try {
-				const main = document.querySelector("main, .main-content, [class*='content']");
-				if (main) {
-					const children = main.children;
-					for (let i = children.length - 1; i >= 0; i--) {
-						const txt = (children[i].textContent || "").trim();
-						if (txt.length > 100 && !txt.includes("登录") && !txt.includes("推荐")) {
-							return txt.slice(0, 3000);
-						}
+				const all = document.querySelectorAll("main > *, #app > main > *, #app > div > *");
+				for (let i = all.length - 1; i >= 0; i--) {
+					const el = all[i];
+					if (!el || el.children.length > 50) continue;
+					const tag = (el.tagName || "").toLowerCase();
+					if (tag === "nav" || tag === "header" || tag === "footer") continue;
+					const txt = (el.textContent || "").trim();
+					if (txt.length > 100 && !txt.includes("登录") && !txt.includes("推荐")) {
+						return txt.slice(0, 3000);
 					}
 				}
 			} catch (e) {}
