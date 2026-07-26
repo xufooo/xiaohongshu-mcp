@@ -1032,51 +1032,39 @@ func probeAIResponseState(page *hrod.Page) (aiStateProbe, error) {
 			return undefined;
 		};
 
-		// 尝试从 DOM 中提取 AI 回答（右边栏渲染的内容，不在 __INITIAL_STATE__ 中）
+		// 尝试从 DOM 中提取 AI 回答
 		const domAIText = (() => {
-			// 策略1：查找所有搜索容器，过滤出不含笔记卡片且文本最长的那个
-			const searchContainers = document.querySelectorAll(".search-layout, .feeds-container, .note-list, [class*='search_layout'], [class*='searchResult']");
-			let bestText = "";
-			for (const c of searchContainers) {
-				const txt = (c.textContent || "").trim();
-				if (txt.length > 100 && txt.length > bestText.length &&
-				    c.querySelectorAll("section.note-item, .note-item, [class*='note-item']").length === 0) {
-					bestText = txt;
-				}
-			}
-			if (bestText.length > 100) return bestText.slice(0, 3000);
-
-			// 策略2：找到页面右侧区域（AI 回答通常在右边）
-			const sidePanels = document.querySelectorAll("[class*='right'], [class*='side'], [class*='aside'], [class*='sidebar'], aside, [class*='ai-panel'], [class*='aiPanel']");
-			for (const p of sidePanels) {
-				const txt = (p.textContent || "").trim();
-				if (txt.length > 80 && !txt.includes("登录") && !txt.includes("扫码")) {
-					return txt.slice(0, 3000);
-				}
-			}
-
-			// 策略3：取 body 文本，排除 nav/header/footer
+			// 从 __INITIAL_STATE__ 搜索页的可见文本找，包括所有容器
 			try {
 				const body = document.body;
 				if (!body) return "";
-				const clones = [];
-				for (const child of body.children) {
-					const tag = (child.tagName || "").toLowerCase();
-					if (tag === "nav" || tag === "header" || tag === "footer") continue;
-					const txt = (child.textContent || "").trim();
-					if (txt.length > 200 && !txt.includes("登录") && !txt.includes("扫码")) {
-						clones.push({txt, len: txt.length});
+				const fullText = (body.innerText || "").trim();
+				// 如果全文长度 < 100 或者包含登录提示，跳过
+				if (fullText.length < 500 || fullText.includes("登录") && fullText.length < 2000) return "";
+
+				// 查找所有匹配搜索结果选择器的容器，找最长文本的那个（排除笔记项）
+				const containers = document.querySelectorAll(".search-layout, .feeds-container, .note-list, [class*='feeds'], [class*='search_result'], [class*='searchResult'], section[class]");
+				let bestAI = "";
+				for (const c of containers) {
+					const txt = (c.textContent || "").trim();
+					const hasNoteItems = c.querySelectorAll("section.note-item, .note-item, [class*='note-item'], article, .feed-item").length;
+					if (txt.length > 100 && hasNoteItems === 0 && !txt.startsWith("沪ICP")) {
+						if (txt.length > bestAI.length) bestAI = txt;
 					}
 				}
-				clones.sort((a, b) => b.len - a.len);
-				for (const c of clones.slice(0, 3)) {
-					if (c.txt.includes("海南") || c.txt.includes("三亚") || c.txt.includes("攻略") || c.txt.includes("推荐")) {
-						return c.txt.slice(0, 3000);
-					}
+				// 如果找到了非笔记容器的长文本，就是 AI 回答
+				if (bestAI.length > 120) return bestAI.slice(0, 3000);
+
+				// 最后的 fallback: 取所有非空文本，过滤掉导航/页脚/笔记标题
+				const walker = document.createTreeWalker(body, 4 /*NodeFilter.SHOW_TEXT*/, null, false);
+				const texts = [];
+				while (walker.nextNode()) {
+					const t = (walker.currentNode.textContent || "").trim();
+					if (t.length > 20) texts.push(t);
 				}
-				if (clones.length > 0) return clones[0].txt.slice(0, 3000);
-			} catch (e) {}
-			return "";
+				// 拼接成一段文本，用换行分隔
+				return texts.join("\n").slice(0, 3000);
+			} catch (e) { return ""; }
 		})();
 
 		return JSON.stringify(snapshot({
