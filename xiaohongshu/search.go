@@ -1066,7 +1066,7 @@ func probeAIResponseState(page *hrod.Page) (aiStateProbe, error) {
 				const fullText = (body.innerText || "").trim();
 				if (fullText.length < 500 || fullText.includes("登录") && fullText.length < 2000) return "";
 
-				// 策略：找不含笔记卡片的长文本容器
+				// 策略1：找不含笔记卡片的长文本容器
 				const containers = document.querySelectorAll(".search-layout, .feeds-container, .note-list, [class*='feeds'], [class*='search_result'], section[class]");
 				let bestAI = "";
 				for (const c of containers) {
@@ -1076,21 +1076,33 @@ func probeAIResponseState(page *hrod.Page) (aiStateProbe, error) {
 						if (txt.length > bestAI.length) bestAI = txt;
 					}
 				}
-				// 去掉尾部的法律声明和广告拦截提示
 				if (bestAI.length > 120) {
-					const clean = bestAI
+					return bestAI
 						.replace(/沪ICP.*?号/g, "")
-						.replace(/营业执照/g, "")
-						.replace(/增值电信.*?号/g, "")
-						.replace(/违法不良信息.*/g, "")
-						.replace(/个性化推荐算法.*/g, "")
-						.replace(/广告屏蔽.*/g, "")
-						.replace(/__.*?__=.*/g, "")
-						.replace(/\n{3,}/g, "\n")
-						.trim();
-					return clean.slice(0, 3000);
+						.replace(/营业执照|增值电信|违法不良.*|个性化推荐算法.*|广告屏蔽.*|__.*?__=.*/g, "")
+						.replace(/\n{3,}/g, "\n").trim().slice(0, 3000);
 				}
-				return "";
+
+				// 策略2：全页面所有文本节点，过滤垃圾
+				const walker = document.createTreeWalker(body, 4, null, false);
+				const blocks = [];
+				let cur = [];
+				while (walker.nextNode()) {
+					const t = (walker.currentNode.textContent || "").trim();
+					if (t.length > 15) {
+						cur.push(t);
+					} else if (cur.length > 0) {
+						blocks.push(cur.join(" "));
+						cur = [];
+					}
+				}
+				if (cur.length > 0) blocks.push(cur.join(" "));
+				const clean = blocks
+					.filter(b => b.length > 60 && !b.startsWith("沪ICP") && !b.includes("营业执照"))
+					.join("\n")
+					.replace(/沪ICP.*?号|增值电信.*?号|违法不良信息.*|个性化推荐算法.*|广告屏蔽.*|__.*?__=.*/g, "")
+					.replace(/\n{3,}/g, "\n").trim();
+				return clean.length > 100 ? clean.slice(0, 3000) : "";
 			} catch (e) { return ""; }
 		})();
 
