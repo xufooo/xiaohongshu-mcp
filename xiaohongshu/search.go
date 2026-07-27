@@ -906,8 +906,34 @@ type aiStateProbe struct {
 }
 
 func readAIResponseFromState(page *hrod.Page, previousState *aiStateProbe) (*AIChatReply, error) {
-	// 没有前状态或前状态非 AI 激活 → 直接读一次，不轮询
-	if previousState == nil || !previousState.Active {
+	// 没有前状态（首次搜索）→ 等 3s 让 AI 异步加载完再读
+	if previousState == nil {
+		deadline := time.Now().Add(aiResponseWaitTimeout)
+		var lastReply *AIChatReply
+		for {
+			if !time.Now().Before(deadline) {
+				return lastReply, nil
+			}
+			probe, err := probeAIResponseState(page.Timeout(time.Until(deadline)))
+			if err != nil {
+				return lastReply, nil
+			}
+			reply, pending := normalizeAIResponse(probe)
+			if reply != nil {
+				lastReply = reply
+			}
+			if !pending {
+				return lastReply, nil
+			}
+			sleepFor := min(aiResponsePollInterval, time.Until(deadline))
+			if err := page.Sleep(sleepFor); err != nil {
+				return lastReply, nil
+			}
+		}
+	}
+
+	// 非 AI 激活搜索 → 读一次即可（没有 AI 内容）
+	if !previousState.Active {
 		probe, err := probeAIResponseState(page.Timeout(aiResponseWaitTimeout))
 		if err != nil {
 			return nil, err
