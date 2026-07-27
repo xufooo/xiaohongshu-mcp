@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
-	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -15,6 +14,8 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/xpzouying/xiaohongshu-mcp/errors"
 	hrod "github.com/xpzouying/xiaohongshu-mcp/pkg/humanize/rod"
+
+	"github.com/go-rod/rod"
 )
 
 type SearchResult struct {
@@ -40,52 +41,133 @@ type FilterOption struct {
 	Location    string `json:"location,omitempty" jsonschema:"位置距离: 不限|同城|附近,默认为'不限'"`
 }
 
-// filterGroup 面板上的一个筛选组：标签、取值函数、允许的取值列表
-type filterGroup struct {
-	label   string                    // 面板上这一组的标签文本
-	pick    func(FilterOption) string // 从入参里取本组的值
-	allowed []string                  // 合法取值；导航前校验用
+// internalFilterOption 内部使用的筛选选项(基于索引)
+type internalFilterOption struct {
+	FiltersIndex int    // 筛选组索引
+	TagsIndex    int    // 标签索引
+	Text         string // 标签文本描述
 }
 
-// pendingFilter 一个待应用的筛选项
-type pendingFilter struct {
-	group  string // 组标签
-	option string // 选项文本
+// 预定义的筛选选项映射表（内部使用）
+var filterOptionsMap = map[int][]internalFilterOption{
+	1: { // 排序依据
+		{FiltersIndex: 1, TagsIndex: 1, Text: "综合"},
+		{FiltersIndex: 1, TagsIndex: 2, Text: "最新"},
+		{FiltersIndex: 1, TagsIndex: 3, Text: "最多点赞"},
+		{FiltersIndex: 1, TagsIndex: 4, Text: "最多评论"},
+		{FiltersIndex: 1, TagsIndex: 5, Text: "最多收藏"},
+	},
+	2: { // 笔记类型
+		{FiltersIndex: 2, TagsIndex: 1, Text: "不限"},
+		{FiltersIndex: 2, TagsIndex: 2, Text: "视频"},
+		{FiltersIndex: 2, TagsIndex: 3, Text: "图文"},
+	},
+	3: { // 发布时间
+		{FiltersIndex: 3, TagsIndex: 1, Text: "不限"},
+		{FiltersIndex: 3, TagsIndex: 2, Text: "一天内"},
+		{FiltersIndex: 3, TagsIndex: 3, Text: "一周内"},
+		{FiltersIndex: 3, TagsIndex: 4, Text: "半年内"},
+	},
+	4: { // 搜索范围
+		{FiltersIndex: 4, TagsIndex: 1, Text: "不限"},
+		{FiltersIndex: 4, TagsIndex: 2, Text: "已看过"},
+		{FiltersIndex: 4, TagsIndex: 3, Text: "未看过"},
+		{FiltersIndex: 4, TagsIndex: 4, Text: "已关注"},
+	},
+	5: { // 位置距离
+		{FiltersIndex: 5, TagsIndex: 1, Text: "不限"},
+		{FiltersIndex: 5, TagsIndex: 2, Text: "同城"},
+		{FiltersIndex: 5, TagsIndex: 3, Text: "附近"},
+	},
 }
 
-var filterGroups = []filterGroup{
-	{"排序依据", func(f FilterOption) string { return f.SortBy },
-		[]string{"综合", "最新", "最多点赞", "最多评论", "最多收藏"}},
-	{"笔记类型", func(f FilterOption) string { return f.NoteType },
-		[]string{"不限", "视频", "图文"}},
-	{"发布时间", func(f FilterOption) string { return f.PublishTime },
-		[]string{"不限", "一天内", "一周内", "半年内"}},
-	{"搜索范围", func(f FilterOption) string { return f.SearchScope },
-		[]string{"不限", "已看过", "未看过", "已关注"}},
-	{"位置距离", func(f FilterOption) string { return f.Location },
-		[]string{"不限", "同城", "附近"}},
+// convertToInternalFilters 将 FilterOption 转换为内部的 internalFilterOption 列表
+func convertToInternalFilters(filter FilterOption) ([]internalFilterOption, error) {
+	var internalFilters []internalFilterOption
+
+	// 处理排序依据
+	if filter.SortBy != "" {
+		internal, err := findInternalOption(1, filter.SortBy)
+		if err != nil {
+			return nil, fmt.Errorf("排序依据错误: %w", err)
+		}
+		internalFilters = append(internalFilters, internal)
+	}
+
+	// 处理笔记类型
+	if filter.NoteType != "" {
+		internal, err := findInternalOption(2, filter.NoteType)
+		if err != nil {
+			return nil, fmt.Errorf("笔记类型错误: %w", err)
+		}
+		internalFilters = append(internalFilters, internal)
+	}
+
+	// 处理发布时间
+	if filter.PublishTime != "" {
+		internal, err := findInternalOption(3, filter.PublishTime)
+		if err != nil {
+			return nil, fmt.Errorf("发布时间错误: %w", err)
+		}
+		internalFilters = append(internalFilters, internal)
+	}
+
+	// 处理搜索范围
+	if filter.SearchScope != "" {
+		internal, err := findInternalOption(4, filter.SearchScope)
+		if err != nil {
+			return nil, fmt.Errorf("搜索范围错误: %w", err)
+		}
+		internalFilters = append(internalFilters, internal)
+	}
+
+	// 处理位置距离
+	if filter.Location != "" {
+		internal, err := findInternalOption(5, filter.Location)
+		if err != nil {
+			return nil, fmt.Errorf("位置距离错误: %w", err)
+		}
+		internalFilters = append(internalFilters, internal)
+	}
+
+	return internalFilters, nil
 }
 
-// collectFilters 将入参展开为待应用筛选项，同时校验取值
-//
-// 校验放在这里是为了在打开浏览器之前就能挡掉写错的值，
-// 否则需要等导航、展开面板、找不到之后才能报错。
-func collectFilters(filters []FilterOption) ([]pendingFilter, error) {
-	var pending []pendingFilter
-	for _, f := range filters {
-		for _, g := range filterGroups {
-			value := g.pick(f)
-			if value == "" {
-				continue
-			}
-			if !slices.Contains(g.allowed, value) {
-				return nil, fmt.Errorf("%s 不支持 %q，可选：%s",
-					g.label, value, strings.Join(g.allowed, "、"))
-			}
-			pending = append(pending, pendingFilter{group: g.label, option: value})
+// findInternalOption 根据筛选组索引和文本查找内部筛选选项
+func findInternalOption(filtersIndex int, text string) (internalFilterOption, error) {
+	options, exists := filterOptionsMap[filtersIndex]
+	if !exists {
+		return internalFilterOption{}, fmt.Errorf("筛选组 %d 不存在", filtersIndex)
+	}
+
+	for _, option := range options {
+		if option.Text == text {
+			return option, nil
 		}
 	}
-	return pending, nil
+
+	return internalFilterOption{}, fmt.Errorf("在筛选组 %d 中未找到文本 '%s'", filtersIndex, text)
+}
+
+// validateInternalFilterOption 验证内部筛选选项是否在有效范围内
+func validateInternalFilterOption(filter internalFilterOption) error {
+	// 检查筛选组索引是否有效
+	if filter.FiltersIndex < 1 || filter.FiltersIndex > 5 {
+		return fmt.Errorf("无效的筛选组索引 %d，有效范围为 1-5", filter.FiltersIndex)
+	}
+
+	// 检查标签索引是否在对应筛选组的有效范围内
+	options, exists := filterOptionsMap[filter.FiltersIndex]
+	if !exists {
+		return fmt.Errorf("筛选组 %d 不存在", filter.FiltersIndex)
+	}
+
+	if filter.TagsIndex < 1 || filter.TagsIndex > len(options) {
+		return fmt.Errorf("筛选组 %d 的标签索引 %d 超出范围，有效范围为 1-%d",
+			filter.FiltersIndex, filter.TagsIndex, len(options))
+	}
+
+	return nil
 }
 
 type SearchAction struct {
@@ -129,11 +211,6 @@ func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...Fi
 func (s *SearchAction) searchFeeds(ctx context.Context, keyword string, filters ...FilterOption) (*hrod.Page, []Feed, error) {
 	page := s.page.Context(ctx)
 
-	pending, err := collectFilters(filters)
-	if err != nil {
-		return nil, nil, err
-	}
-
 	// 检查当前页面是否已在该关键词搜索结果上，是则跳过搜索
 	if !isCurrentSearchPage(page, keyword) {
 		if err := s.searchByUI(page, keyword); err != nil {
@@ -141,7 +218,7 @@ func (s *SearchAction) searchFeeds(ctx context.Context, keyword string, filters 
 		}
 	}
 
-	feeds, err := s.collectResults(page, keyword, pending)
+	feeds, err := s.collectResults(page, keyword, filters...)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -159,12 +236,6 @@ func (s *SearchAction) SearchFeedsOnly(ctx context.Context, keyword string, filt
 
 func (s *SearchAction) SearchByURLFallback(ctx context.Context, keyword string, filters ...FilterOption) ([]Feed, error) {
 	page := s.page.Context(ctx)
-
-	pending, err := collectFilters(filters)
-	if err != nil {
-		return nil, err
-	}
-
 	searchURL := makeSearchURL(keyword)
 	if err := page.Navigate(searchURL); err != nil {
 		return nil, fmt.Errorf("导航搜索页失败: %w", err)
@@ -173,7 +244,7 @@ func (s *SearchAction) SearchByURLFallback(ctx context.Context, keyword string, 
 		return nil, fmt.Errorf("URL兜底等待搜索结果失败: %w", err)
 	}
 
-	return s.collectResults(page, keyword, pending)
+	return s.collectResults(page, keyword, filters...)
 }
 
 func (s *SearchAction) searchByUI(page *hrod.Page, keyword string) error {
@@ -458,49 +529,40 @@ func searchResultsChanged(probe searchResultsKeywordProbe, baseline searchResult
 	return false
 }
 
-// findFilterOption 在筛选面板里定位选项：按标签找到组，再在组内按文本找选项
-//
-// 作用域限定在 div.filter-panel 内且只认 div.tags：页面别处存在同文本的
-// 可见元素（顶部频道栏的「图文」「视频」、标签「综合」），放宽会点错地方。
-// 全程不用序号——同一选项渲染成多个 div.tags 时取第一个即可。
-func findFilterOption(page *hrod.Page, pf pendingFilter) (*hrod.Element, error) {
-	groups, err := page.Elements("div.filter-panel div.filters")
+func findFilterTagByText(page *hrod.Page, text string) (*hrod.Element, error) {
+	_, _ = page.Eval(`() => document.querySelectorAll('[data-xhs-mcp-filter-tag="1"]').forEach(el => el.removeAttribute('data-xhs-mcp-filter-tag'))`)
+
+	result, err := page.Eval(`(targetText) => {
+		const visible = (el) => {
+			if (!el || !el.isConnected) return false;
+			const style = window.getComputedStyle(el);
+			const rect = el.getBoundingClientRect();
+			return style.display !== "none" &&
+				style.visibility !== "hidden" &&
+				Number(style.opacity || "1") > 0 &&
+				rect.width > 0 && rect.height > 0;
+		};
+		const tags = document.querySelectorAll('.filter-panel .tags');
+		for (const tag of tags) {
+			if (!visible(tag)) continue;
+			if ((tag.innerText || tag.textContent || '').trim() === targetText) {
+				tag.setAttribute('data-xhs-mcp-filter-tag', '1');
+				return 'found';
+			}
+		}
+		return '';
+	}`, text)
 	if err != nil {
-		return nil, fmt.Errorf("读取筛选面板失败: %w", err)
+		return nil, fmt.Errorf("查找筛选标签失败: %w", err)
 	}
-
-	for _, group := range groups {
-		label, err := group.Element(":scope > span")
-		if err != nil {
-			continue
-		}
-		text, err := label.Text()
-		if err != nil || strings.TrimSpace(text) != pf.group {
-			continue
-		}
-
-		options, err := group.Elements("div.tags")
-		if err != nil {
-			return nil, fmt.Errorf("读取「%s」的选项失败: %w", pf.group, err)
-		}
-
-		var available []string
-		for _, opt := range options {
-			t, err := opt.Text()
-			if err != nil {
-				continue
-			}
-			t = strings.TrimSpace(t)
-			if t == pf.option {
-				return opt, nil
-			}
-			available = append(available, t)
-		}
-		return nil, fmt.Errorf("「%s」里没有选项「%s」，页面上是：%s",
-			pf.group, pf.option, strings.Join(available, "、"))
+	if result == nil || result.Value.Str() == "" {
+		return nil, fmt.Errorf("未找到文本为 %q 的筛选标签", text)
 	}
-
-	return nil, fmt.Errorf("筛选面板里没有「%s」这一组", pf.group)
+	tag, err := page.Element(`[data-xhs-mcp-filter-tag="1"]`)
+	if err != nil {
+		return nil, fmt.Errorf("获取筛选标签元素失败: %w", err)
+	}
+	return tag, nil
 }
 
 func waitForFilterRefresh(page *hrod.Page, baseline searchResultsBaseline, keyword string) (stateRefreshed bool, _ error) {
@@ -664,12 +726,28 @@ func formatSearchInputProbe(probe searchInputProbe) string {
 	return string(data)
 }
 
-func (s *SearchAction) collectResults(page *hrod.Page, keyword string, pending []pendingFilter) ([]Feed, error) {
+func (s *SearchAction) collectResults(page *hrod.Page, keyword string, filters ...FilterOption) ([]Feed, error) {
 	appliedFilters := false
 	var stateRefreshed bool
 
-	if len(pending) > 0 {
-		appliedFilters = true
+	// 如果有筛选条件，则应用筛选
+	if len(filters) > 0 {
+		// 将所有 FilterOption 转换为内部筛选选项
+		var allInternalFilters []internalFilterOption
+		for _, filter := range filters {
+			internalFilters, err := convertToInternalFilters(filter)
+			if err != nil {
+				return nil, fmt.Errorf("筛选选项转换失败: %w", err)
+			}
+			allInternalFilters = append(allInternalFilters, internalFilters...)
+		}
+
+		// 验证所有内部筛选选项
+		for _, filter := range allInternalFilters {
+			if err := validateInternalFilterOption(filter); err != nil {
+				return nil, fmt.Errorf("筛选选项验证失败: %w", err)
+			}
+		}
 
 		stageErr := func(stage string, t0 time.Time, err error, tag string) error {
 			fields := logrus.Fields{
@@ -684,51 +762,60 @@ func (s *SearchAction) collectResults(page *hrod.Page, keyword string, pending [
 			return fmt.Errorf("筛选阶段 %s 失败", stage)
 		}
 
-		filterCtx, cancel := context.WithTimeout(page.Actor().Ctx(), searchFilterRefreshWaitTimeout)
-		defer cancel()
-		filterPage := page.Context(filterCtx)
+		if len(allInternalFilters) > 0 {
+			filterCtx, cancel := context.WithTimeout(page.Actor().Ctx(), searchFilterRefreshWaitTimeout)
+			defer cancel()
+			filterPage := page.Context(filterCtx)
 
-		t0 := time.Now()
-		filterButton, err := filterPage.Element("div.filter")
-		if err != nil {
-			return nil, stageErr("filter_button_lookup", t0, err, "")
-		}
-
-		t0 = time.Now()
-		if err := filterButton.Rod.Hover(); err != nil {
-			return nil, stageErr("filter_button_hover", t0, err, "")
-		}
-
-		t0 = time.Now()
-		if _, err := filterPage.Element(".filter-panel"); err != nil {
-			return nil, stageErr("filter_panel_wait", t0, err, "")
-		}
-
-		// 记下筛选前的结果 id，用来判断数据是否已更新
-		before := readFeedIDs(page)
-
-		for _, pf := range pending {
-			tag, err := findFilterOption(filterPage, pf)
+			t0 := time.Now()
+			filterButton, err := filterPage.Element("div.filter")
 			if err != nil {
-				return nil, stageErr("filter_tag_lookup", time.Now(), err, pf.option)
+				return nil, stageErr("filter_button_lookup", t0, err, "")
 			}
 
 			t0 = time.Now()
-			if err := filterPage.Actor().Mouse.Click(tag.Rod); err != nil {
-				return nil, stageErr("filter_tag_click", t0, err, pf.option)
+			if err := filterButton.Rod.Hover(); err != nil {
+				return nil, stageErr("filter_button_hover", t0, err, "")
 			}
 
 			t0 = time.Now()
-			if err := filterPage.SleepRandom(200*time.Millisecond, 500*time.Millisecond); err != nil {
-				return nil, stageErr("filter_tag_settle", t0, err, pf.option)
+			if err := filterPage.Wait(rod.Eval(`() => document.querySelector('.filter-panel') !== null`)); err != nil {
+				return nil, stageErr("filter_panel_wait", t0, err, "")
 			}
-		}
 
-		if err := filterPage.Actor().Keyboard.Press(rodinput.Escape); err != nil {
-			return nil, stageErr("filter_panel_close", t0, err, "")
-		}
+			for _, f := range allInternalFilters {
+				tag, err := findFilterTagByText(filterPage, f.Text)
+				if err != nil {
+					return nil, stageErr("filter_tag_lookup", time.Now(), err, f.Text)
+				}
 
-		stateRefreshed = waitFeedsChanged(page, before, searchFilterRefreshWaitTimeout)
+				t0 = time.Now()
+				if err := filterPage.Actor().Mouse.Click(tag.Rod); err != nil {
+					return nil, stageErr("filter_tag_click", t0, err, f.Text)
+				}
+
+				t0 = time.Now()
+				if err := filterPage.SleepRandom(200*time.Millisecond, 500*time.Millisecond); err != nil {
+					return nil, stageErr("filter_tag_settle", t0, err, f.Text)
+				}
+			}
+
+			// body.click 关闭面板触发筛选生效
+			if _, err := filterPage.Eval(`() => document.body.click()`); err != nil {
+				return nil, stageErr("filter_panel_close", t0, err, "")
+			}
+
+			t0 = time.Now()
+			if err := filterPage.WaitStable(5 * time.Second); err != nil {
+				return nil, stageErr("filter_wait_stable", t0, err, "")
+			}
+
+			if feeds, err := readSearchFeedsFromState(page); err == nil && len(feeds) > 0 {
+				domFeeds, _ := ExtractSearchFeedsFromDOM(page)
+				return mergeFeedsByID(feeds, domFeeds), nil
+			}
+			appliedFilters = true
+		}
 	}
 
 	domFeeds, domErr := ExtractSearchFeedsFromDOM(page)
@@ -760,41 +847,6 @@ func (s *SearchAction) collectResults(page *hrod.Page, keyword string, pending [
 		return nil, domErr
 	}
 	return nil, stateErr
-}
-
-// 从 window.__INITIAL_STATE__.search.feeds 中提取 id 列表，判断数据是否已换一批
-func readFeedIDs(page *hrod.Page) string {
-	feeds, err := readSearchFeedsFromState(page)
-	if err != nil || len(feeds) == 0 {
-		return ""
-	}
-	ids := make([]string, 0, len(feeds))
-	for _, feed := range feeds {
-		ids = append(ids, feed.ID)
-	}
-	return strings.Join(ids, ",")
-}
-
-// waitFeedsChanged 等筛选后的数据到位
-//
-// 点完筛选项后站点先把 feeds 清空、再灌入新数据，
-// 中间时段读到的要么是空，要么还是旧数据。
-// 超时不报错——筛选已点上，宁可返回可能偏旧的数据也不让搜索失败。
-func waitFeedsChanged(page *hrod.Page, before string, timeout time.Duration) bool {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if err := page.Err(); err != nil {
-			return false
-		}
-		if now := readFeedIDs(page); now != "" && now != before {
-			return true
-		}
-		if err := page.Sleep(300 * time.Millisecond); err != nil {
-			return false
-		}
-	}
-	logrus.Warnf("筛选后等待结果刷新超时（%s），返回的可能是筛选前的数据", timeout)
-	return false
 }
 
 func collectSearchFeeds(page *hrod.Page, stateFirst bool) ([]Feed, error) {
