@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"net/url"
 	"sort"
 	"strings"
@@ -542,6 +543,55 @@ func findFilterOption(page *hrod.Page, pf pendingFilter) (*hrod.Element, error) 
 	return nil, fmt.Errorf("筛选面板里没有「%s」组", pf.GroupLabel)
 }
 
+// clickNoWait 等价上游 humanize.ClickNoWait：取元素形状中心→移过去→点击。
+// 跳过 WaitInteractable/遮挡检查，用于 hover 浮层内的元素。
+func clickNoWait(el *rod.Element) error {
+	shape, err := el.Shape()
+	if err != nil {
+		return err
+	}
+	if len(shape.Quads) == 0 {
+		return fmt.Errorf("元素无可点击区域")
+	}
+	q := shape.Quads[0]
+	// 对角线中点 = 四边形中心
+	center := proto.Point{X: (q[0] + q[4]) / 2, Y: (q[1] + q[5]) / 2}
+
+	// 在四边形范围内加随机抖动
+	var jitX, jitY float64
+	if q.Len() == 4 {
+		minX, maxX, minY, maxY := q[0], q[0], q[1], q[1]
+		for i := 0; i < q.Len(); i++ {
+			if x := q[i*2]; x < minX {
+				minX = x
+			} else if x > maxX {
+				maxX = x
+			}
+			if y := q[i*2+1]; y < minY {
+				minY = y
+			} else if y > maxY {
+				maxY = y
+			}
+		}
+		rx, ry := maxX-minX, maxY-minY
+		jitX = (rand.Float64()*2 - 1) * rx * 0.15
+		jitY = (rand.Float64()*2 - 1) * ry * 0.15
+	}
+	target := proto.Point{X: center.X + jitX, Y: center.Y + jitY}
+
+	mouse := el.Page().Mouse
+	if err := mouse.MoveTo(target); err != nil {
+		return err
+	}
+	if err := mouse.Down(proto.InputMouseButtonLeft, 1); err != nil {
+		return err
+	}
+	if err := mouse.Up(proto.InputMouseButtonLeft, 1); err != nil {
+		return err
+	}
+	return nil
+}
+
 // readFeedIDs 从 __INITIAL_STATE__ 读取当前搜索结果 feed ID 列表
 func readFeedIDs(page *hrod.Page) (string, error) {
 	result, err := page.Eval(feedIDsJS)
@@ -780,8 +830,13 @@ func (s *SearchAction) collectResults(page *hrod.Page, keyword string, pfs []pen
 				return nil, stageErr("filter_option_lookup", time.Now(), err, pf.OptionText)
 			}
 
+			// 点击前随机延迟（等价上游 humanize.Delay + humanize.BeforeClick）
+			if err := filterPage.SleepRandom(200*time.Millisecond, 500*time.Millisecond); err != nil {
+				return nil, stageErr("filter_option_delay", time.Now(), err, pf.OptionText)
+			}
+
 			t0 = time.Now()
-			if err := filterPage.Actor().Mouse.ClickNoScroll(option.Rod); err != nil {
+			if err := clickNoWait(option.Rod); err != nil {
 				return nil, stageErr("filter_option_click", t0, err, pf.OptionText)
 			}
 		}
