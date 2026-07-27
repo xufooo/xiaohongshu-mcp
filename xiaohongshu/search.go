@@ -1061,17 +1061,36 @@ func probeAIResponseState(page *hrod.Page) (aiStateProbe, error) {
 		// 尝试从 DOM 提取 AI 回答文本（从 __INITIAL_STATE__ 拿不到时兜底）
 		const domAIText = (() => {
 			try {
+				// 方案A：直接取 AI 回复消息（实测 .ai-message-finished 为最优选择器）
+				const aiMsg = document.querySelector('.ai-message-finished, .ai-message');
+				if (aiMsg) {
+					const text = aiMsg.textContent.trim();
+					if (text.length > 50) return text.slice(0, 3000);
+				}
+
+				// 方案B：取 AI 聊天滚动区域
+				const scrollBody = document.querySelector('.ai-chat-scroll-body');
+				if (scrollBody) {
+					const text = scrollBody.textContent.trim();
+					if (text.length > 50) return text.slice(0, 3000);
+				}
+
+				// 方案C：旧策略兜底（兼容未发现的结构）
 				const body = document.body;
 				if (!body) return "";
 				const fullText = (body.innerText || "").trim();
 				if (fullText.length < 500 || fullText.includes("登录") && fullText.length < 2000) return "";
 
-				// 策略1：找不含笔记卡片的长文本容器
-				const containers = document.querySelectorAll(".search-layout, .feeds-container, .note-list, [class*='feeds'], [class*='search_result'], section[class]");
+				const containers = document.querySelectorAll(
+					".search-layout, .feeds-container, .note-list, [class*='feeds'], [class*='search_result'], " +
+					"section[class], .ai-chat-section, .ai-chat-inner"
+				);
 				let bestAI = "";
 				for (const c of containers) {
 					const txt = (c.textContent || "").trim();
-					const hasNoteItems = c.querySelectorAll("section.note-item, .note-item, [class*='note-item'], article, .feed-item").length;
+					const hasNoteItems = c.querySelectorAll(
+						"section.note-item, .note-item, [class*='note-item'], article, .feed-item"
+					).length;
 					if (txt.length > 100 && hasNoteItems === 0 && !txt.startsWith("沪ICP")) {
 						if (txt.length > bestAI.length) bestAI = txt;
 					}
@@ -1082,27 +1101,7 @@ func probeAIResponseState(page *hrod.Page) (aiStateProbe, error) {
 						.replace(/营业执照|增值电信|违法不良.*|个性化推荐算法.*|广告屏蔽.*|__.*?__=.*/g, "")
 						.replace(/\n{3,}/g, "\n").trim().slice(0, 3000);
 				}
-
-				// 策略2：全页面所有文本节点，过滤垃圾
-				const walker = document.createTreeWalker(body, 4, null, false);
-				const blocks = [];
-				let cur = [];
-				while (walker.nextNode()) {
-					const t = (walker.currentNode.textContent || "").trim();
-					if (t.length > 15) {
-						cur.push(t);
-					} else if (cur.length > 0) {
-						blocks.push(cur.join(" "));
-						cur = [];
-					}
-				}
-				if (cur.length > 0) blocks.push(cur.join(" "));
-				const clean = blocks
-					.filter(b => b.length > 60 && !b.startsWith("沪ICP") && !b.includes("营业执照"))
-					.join("\n")
-					.replace(/沪ICP.*?号|增值电信.*?号|违法不良信息.*|个性化推荐算法.*|广告屏蔽.*|__.*?__=.*/g, "")
-					.replace(/\n{3,}/g, "\n").trim();
-				return clean.length > 100 ? clean.slice(0, 3000) : "";
+				return "";
 			} catch (e) { return ""; }
 		})();
 
