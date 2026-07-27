@@ -1032,18 +1032,16 @@ func probeAIResponseState(page *hrod.Page) (aiStateProbe, error) {
 			return undefined;
 		};
 
-		// 尝试从 DOM 中提取 AI 回答
+		// 尝试从 DOM 提取 AI 回答文本（从 __INITIAL_STATE__ 拿不到时兜底）
 		const domAIText = (() => {
-			// 从 __INITIAL_STATE__ 搜索页的可见文本找，包括所有容器
 			try {
 				const body = document.body;
 				if (!body) return "";
 				const fullText = (body.innerText || "").trim();
-				// 如果全文长度 < 100 或者包含登录提示，跳过
 				if (fullText.length < 500 || fullText.includes("登录") && fullText.length < 2000) return "";
 
-				// 查找所有匹配搜索结果选择器的容器，找最长文本的那个（排除笔记项）
-				const containers = document.querySelectorAll(".search-layout, .feeds-container, .note-list, [class*='feeds'], [class*='search_result'], [class*='searchResult'], section[class]");
+				// 策略：找不含笔记卡片的长文本容器
+				const containers = document.querySelectorAll(".search-layout, .feeds-container, .note-list, [class*='feeds'], [class*='search_result'], section[class]");
 				let bestAI = "";
 				for (const c of containers) {
 					const txt = (c.textContent || "").trim();
@@ -1052,18 +1050,21 @@ func probeAIResponseState(page *hrod.Page) (aiStateProbe, error) {
 						if (txt.length > bestAI.length) bestAI = txt;
 					}
 				}
-				// 如果找到了非笔记容器的长文本，就是 AI 回答
-				if (bestAI.length > 120) return bestAI.slice(0, 3000);
-
-				// 最后的 fallback: 取所有非空文本，过滤掉导航/页脚/笔记标题
-				const walker = document.createTreeWalker(body, 4 /*NodeFilter.SHOW_TEXT*/, null, false);
-				const texts = [];
-				while (walker.nextNode()) {
-					const t = (walker.currentNode.textContent || "").trim();
-					if (t.length > 20) texts.push(t);
+				// 去掉尾部的法律声明和广告拦截提示
+				if (bestAI.length > 120) {
+					const clean = bestAI
+						.replace(/沪ICP.*?号/g, "")
+						.replace(/营业执照/g, "")
+						.replace(/增值电信.*?号/g, "")
+						.replace(/违法不良信息.*/g, "")
+						.replace(/个性化推荐算法.*/g, "")
+						.replace(/广告屏蔽.*/g, "")
+						.replace(/__.*?__=.*/g, "")
+						.replace(/\n{3,}/g, "\n")
+						.trim();
+					return clean.slice(0, 3000);
 				}
-				// 拼接成一段文本，用换行分隔
-				return texts.join("\n").slice(0, 3000);
+				return "";
 			} catch (e) { return ""; }
 		})();
 
