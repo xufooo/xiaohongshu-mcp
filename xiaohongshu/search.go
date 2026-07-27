@@ -506,40 +506,40 @@ func searchResultsChanged(probe searchResultsKeywordProbe, baseline searchResult
 	return false
 }
 
-func findFilterTagByText(page *hrod.Page, text string) (*hrod.Element, error) {
-	_, _ = page.Eval(`() => document.querySelectorAll('[data-xhs-mcp-filter-tag="1"]').forEach(el => el.removeAttribute('data-xhs-mcp-filter-tag'))`)
-
-	result, err := page.Eval(`(targetText) => {
-		const visible = (el) => {
-			if (!el || !el.isConnected) return false;
-			const style = window.getComputedStyle(el);
-			const rect = el.getBoundingClientRect();
-			return style.display !== "none" &&
-				style.visibility !== "hidden" &&
-				Number(style.opacity || "1") > 0 &&
-				rect.width > 0 && rect.height > 0;
-		};
-		const tags = document.querySelectorAll('.filter-panel .tags');
-		for (const tag of tags) {
-			if (!visible(tag)) continue;
-			if ((tag.innerText || tag.textContent || '').trim() === targetText) {
-				tag.setAttribute('data-xhs-mcp-filter-tag', '1');
-				return 'found';
+// findFilterOption 按组标签+选项文本定位筛选项，返回 hrod 元素。
+func findFilterOption(page *hrod.Page, pf pendingFilter) (*hrod.Element, error) {
+	groups, err := page.Elements("div.filter-panel div.filters")
+	if err != nil {
+		return nil, fmt.Errorf("查找筛选组失败: %w", err)
+	}
+	for _, group := range groups {
+		label, err := group.Element(":scope > span")
+		if err != nil {
+			continue
+		}
+		text, err := label.Text()
+		if err != nil {
+			continue
+		}
+		if strings.TrimSpace(text) != pf.GroupLabel {
+			continue
+		}
+		tags, err := group.Elements("div.tags")
+		if err != nil || len(tags) == 0 {
+			return nil, fmt.Errorf("「%s」没有选项", pf.GroupLabel)
+		}
+		for _, tag := range tags {
+			t, err := tag.Text()
+			if err != nil {
+				continue
+			}
+			if strings.TrimSpace(t) == pf.OptionText {
+				return tag, nil
 			}
 		}
-		return '';
-	}`, text)
-	if err != nil {
-		return nil, fmt.Errorf("查找筛选标签失败: %w", err)
+		return nil, fmt.Errorf("「%s」里没有「%s」", pf.GroupLabel, pf.OptionText)
 	}
-	if result == nil || result.Value.Str() == "" {
-		return nil, fmt.Errorf("未找到文本为 %q 的筛选标签", text)
-	}
-	tag, err := page.Element(`[data-xhs-mcp-filter-tag="1"]`)
-	if err != nil {
-		return nil, fmt.Errorf("获取筛选标签元素失败: %w", err)
-	}
-	return tag, nil
+	return nil, fmt.Errorf("筛选面板里没有「%s」组", pf.GroupLabel)
 }
 
 // readFeedIDs 从 __INITIAL_STATE__ 读取当前搜索结果 feed ID 列表
@@ -775,30 +775,15 @@ func (s *SearchAction) collectResults(page *hrod.Page, keyword string, pfs []pen
 		before, _ := readFeedIDs(page)
 
 		for _, pf := range pfs {
-			tag, err := findFilterTagByText(filterPage, pf.OptionText)
+			option, err := findFilterOption(filterPage, pf)
 			if err != nil {
-				return nil, stageErr("filter_tag_lookup", time.Now(), err, pf.OptionText)
+				return nil, stageErr("filter_option_lookup", time.Now(), err, pf.OptionText)
 			}
 
 			t0 = time.Now()
-			if err := filterPage.Actor().Mouse.Click(tag.Rod); err != nil {
-				return nil, stageErr("filter_tag_click", t0, err, pf.OptionText)
+			if err := filterPage.Actor().Mouse.ClickNoScroll(option.Rod); err != nil {
+				return nil, stageErr("filter_option_click", t0, err, pf.OptionText)
 			}
-
-			t0 = time.Now()
-			if err := filterPage.SleepRandom(200*time.Millisecond, 500*time.Millisecond); err != nil {
-				return nil, stageErr("filter_tag_settle", t0, err, pf.OptionText)
-			}
-		}
-
-		// body.click 关闭面板触发筛选生效
-		if _, err := filterPage.Eval(`() => document.body.click()`); err != nil {
-			return nil, stageErr("filter_panel_close", t0, err, "")
-		}
-
-		t0 = time.Now()
-		if err := filterPage.WaitStable(5 * time.Second); err != nil {
-			return nil, stageErr("filter_wait_stable", t0, err, "")
 		}
 
 		stateRefreshed = waitFeedsChanged(page, before, searchFilterRefreshWaitTimeout)
