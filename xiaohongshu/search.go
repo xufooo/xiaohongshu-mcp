@@ -700,8 +700,18 @@ func (s *SearchAction) collectResults(page *hrod.Page, keyword string, pending [
 		}
 
 		t0 = time.Now()
-		if _, err := filterPage.Element(".filter-panel"); err != nil {
-			return nil, stageErr("filter_panel_wait", t0, err, "")
+		// 持续轮询等待面板出现（hover 后有延迟）
+		for i := 0; i < 100; i++ {
+			if ok, _, _ := filterPage.Has(".filter-panel"); ok {
+				break
+			}
+			if err := filterPage.Sleep(200 * time.Millisecond); err != nil {
+				return nil, stageErr("filter_panel_wait", t0, err, "")
+			}
+		}
+		if ok, _, _ := filterPage.Has(".filter-panel"); !ok {
+			return nil, stageErr("filter_panel_wait", t0,
+				fmt.Errorf("hover 后 20s 内未出现筛选面板"), "")
 		}
 
 		// 记下筛选前的结果 id，用来判断数据是否已更新
