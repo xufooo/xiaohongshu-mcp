@@ -508,7 +508,7 @@ func searchResultsChanged(probe searchResultsKeywordProbe, baseline searchResult
 
 // findFilterOption 按组标签+选项文本定位筛选项，返回 hrod 元素。
 func findFilterOption(page *hrod.Page, pf pendingFilter) (*hrod.Element, error) {
-	groups, err := page.Elements(".filter-panel .filters")
+	groups, err := page.Elements("div.filter-panel div.filters")
 	if err != nil {
 		return nil, fmt.Errorf("查找筛选组失败: %w", err)
 	}
@@ -524,7 +524,7 @@ func findFilterOption(page *hrod.Page, pf pendingFilter) (*hrod.Element, error) 
 		if strings.TrimSpace(text) != pf.GroupLabel {
 			continue
 		}
-		tags, err := group.Elements(".tags")
+		tags, err := group.Elements("div.tags")
 		if err != nil || len(tags) == 0 {
 			return nil, fmt.Errorf("「%s」没有选项", pf.GroupLabel)
 		}
@@ -775,7 +775,7 @@ func (s *SearchAction) collectResults(page *hrod.Page, keyword string, pfs []pen
 		before, _ := readFeedIDs(page)
 
 		for _, pf := range pfs {
-			option, err := findFilterOption(filterPage, pf)
+			option, err := findFilterOption(page, pf)
 			if err != nil {
 				return nil, stageErr("filter_option_lookup", time.Now(), err, pf.OptionText)
 			}
