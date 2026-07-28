@@ -48,8 +48,6 @@ type SearchFeedsArgs struct {
 
 // FilterOption 筛选选项结构体
 type FilterOption struct {
-	Tab         string `json:"tab,omitempty" jsonschema:"频道: 全部|图文|视频|用户,默认为'全部'"`
-	Tag         string `json:"tag,omitempty" jsonschema:"动态标签,传「综合」清除筛选"`
 	SortBy      string `json:"sort_by,omitempty" jsonschema:"排序依据: 综合|最新|最多点赞|最多评论|最多收藏,默认为'综合'"`
 	NoteType    string `json:"note_type,omitempty" jsonschema:"笔记类型: 不限|视频|图文,默认为'不限'"`
 	PublishTime string `json:"publish_time,omitempty" jsonschema:"发布时间: 不限|一天内|一周内|半年内,默认为'不限'"`
