@@ -1032,7 +1032,7 @@ func clickTab(page *hrod.Page, tabText string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("获取搜索区域父节点失败: %w", err)
 	}
-	children, err := parent.Elements("*")
+	children, err := parent.Children()
 	if err != nil {
 		return false, fmt.Errorf("获取子节点列表失败: %w", err)
 	}
@@ -1040,7 +1040,7 @@ func clickTab(page *hrod.Page, tabText string) (bool, error) {
 		return false, fmt.Errorf("搜索区域子节点不足（需要 >=2，实际 %d）", len(children))
 	}
 	tabContainer := children[1]
-	tabChildren, err := tabContainer.Elements("*")
+	tabChildren, err := tabContainer.Children()
 	if err != nil {
 		return false, fmt.Errorf("获取 Tab 容器子节点失败: %w", err)
 	}
@@ -1077,7 +1077,7 @@ func clickTag(page *hrod.Page, tagText string) error {
 	if err != nil {
 		return fmt.Errorf("获取搜索区域父节点失败: %w", err)
 	}
-	children, err := parent.Elements("*")
+	children, err := parent.Children()
 	if err != nil {
 		return fmt.Errorf("获取子节点列表失败: %w", err)
 	}
