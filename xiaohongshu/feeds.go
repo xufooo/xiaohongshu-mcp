@@ -62,10 +62,10 @@ func collectHomeFeeds(page *hrod.Page) ([]Feed, error) {
 	domFeeds, domErr := ExtractSearchFeedsFromDOM(page)
 	stateFeeds, stateErr := readHomeFeedsFromState(page)
 	if domErr == nil && len(domFeeds) > 0 {
-		return mergeFeedsByID(domFeeds, stateFeeds), nil
+		return onlyNotes(mergeFeedsByID(domFeeds, stateFeeds)), nil
 	}
 	if stateErr == nil && len(stateFeeds) > 0 {
-		return stateFeeds, nil
+		return onlyNotes(stateFeeds), nil
 	}
 	if domErr != nil {
 		return nil, domErr
