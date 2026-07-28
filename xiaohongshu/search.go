@@ -850,13 +850,13 @@ func (s *SearchAction) collectResults(page *hrod.Page, keyword string, pfs []pen
 
 	if appliedFilters {
 		if stateRefreshed && stateErr == nil && len(stateFeeds) > 0 {
-			return mergeFeedsByID(stateFeeds, domFeeds), nil
+			return onlyNotes(mergeFeedsByID(stateFeeds, domFeeds)), nil
 		}
 		if domErr == nil && len(domFeeds) > 0 {
-			return domFeeds, nil
+			return onlyNotes(domFeeds), nil
 		}
 		if stateRefreshed && stateErr == nil && len(stateFeeds) > 0 {
-			return stateFeeds, nil
+			return onlyNotes(stateFeeds), nil
 		}
 		if domErr != nil {
 			return nil, domErr
@@ -865,10 +865,10 @@ func (s *SearchAction) collectResults(page *hrod.Page, keyword string, pfs []pen
 	}
 
 	if domErr == nil && len(domFeeds) > 0 {
-		return mergeFeedsByID(domFeeds, stateFeeds), nil
+		return onlyNotes(mergeFeedsByID(domFeeds, stateFeeds)), nil
 	}
 	if stateErr == nil && len(stateFeeds) > 0 {
-		return stateFeeds, nil
+		return onlyNotes(stateFeeds), nil
 	}
 	if domErr != nil {
 		return nil, domErr
@@ -880,13 +880,13 @@ func collectSearchFeeds(page *hrod.Page, stateFirst bool) ([]Feed, error) {
 	domFeeds, domErr := ExtractSearchFeedsFromDOM(page)
 	stateFeeds, stateErr := readSearchFeedsFromState(page)
 	if stateFirst && stateErr == nil && len(stateFeeds) > 0 {
-		return mergeFeedsByID(stateFeeds, domFeeds), nil
+		return onlyNotes(mergeFeedsByID(stateFeeds, domFeeds)), nil
 	}
 	if domErr == nil && len(domFeeds) > 0 {
-		return mergeFeedsByID(domFeeds, stateFeeds), nil
+		return onlyNotes(mergeFeedsByID(domFeeds, stateFeeds)), nil
 	}
 	if stateErr == nil && len(stateFeeds) > 0 {
-		return stateFeeds, nil
+		return onlyNotes(stateFeeds), nil
 	}
 	if domErr != nil {
 		return nil, domErr
