@@ -1142,11 +1142,9 @@ func checkEndContainer(page *hrod.Page) bool {
 				return nil
 			}
 
-			// 检查结束文本（中英文）
+			// 检测到底标记（页面显示"THE END"）
 			textUpper := strings.ToUpper(strings.TrimSpace(text))
-			textTrim := strings.TrimSpace(text)
-			result = strings.Contains(textUpper, "THE END") || strings.Contains(textUpper, "THEEND") ||
-				strings.Contains(textTrim, "没有更多")
+			result = strings.Contains(textUpper, "THE END") || strings.Contains(textUpper, "THEEND")
 			return nil
 		},
 		retry.Attempts(3),
