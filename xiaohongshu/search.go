@@ -680,8 +680,7 @@ func waitForSearchInput(page *hrod.Page, timeout time.Duration, searchSelector s
 			last = probe
 			if probe.HasSearchInput && probe.SearchInputVisible {
 					// 优先用 marker 取回 probe 实际选中的元素
-					selector := SelectorMarkedSearchInput
-				input, err := page.Element(selector)
+					input, err := page.Element(SelectorMarkedSearchInput)
 				if err == nil {
 					return input, nil
 				}

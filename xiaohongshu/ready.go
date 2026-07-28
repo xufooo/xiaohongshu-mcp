@@ -170,17 +170,19 @@ func probeXHSReady(page *hrod.Page, feedID string) (xhsReadyProbe, error) {
 			? text.slice(Math.max(0, riskIndex - 40), Math.min(text.length, riskIndex + 100))
 			: "";
 		const searchInputInFeedsReady = (() => {
-			const el = document.querySelector(searchInputInFeedsSelector);
-			if (!el || !el.isConnected) return false;
-			if (!visible(el)) return false;
-			if (el.disabled || el.readOnly) return false;
-			const r = el.getBoundingClientRect();
-			if (r.top >= window.innerHeight || r.bottom <= 0 ||
-				r.left >= window.innerWidth || r.right <= 0) return false;
-			const cx = r.left + r.width / 2;
-			const cy = r.top + r.height / 2;
-			const hit = document.elementFromPoint(cx, cy);
-			return hit && (el === hit || el.contains(hit));
+			const candidates = Array.from(document.querySelectorAll(searchInputInFeedsSelector));
+			return candidates.some(el => {
+				if (!el || !el.isConnected) return false;
+				if (!visible(el)) return false;
+				if (el.disabled || el.readOnly) return false;
+				const r = el.getBoundingClientRect();
+				if (r.top >= window.innerHeight || r.bottom <= 0 ||
+					r.left >= window.innerWidth || r.right <= 0) return false;
+				const cx = r.left + r.width / 2;
+				const cy = r.top + r.height / 2;
+				const hit = document.elementFromPoint(cx, cy);
+				return hit && (el === hit || el.contains(hit));
+			});
 		})();
 		const homeFeedCount = sizeOf(homeFeeds);
 		const searchFeedCount = sizeOf(searchFeeds);
