@@ -26,23 +26,6 @@ type Feed struct {
 	Index     int      `json:"index"`
 }
 
-// modelTypeNote 笔记条目的 modelType 取值。
-const modelTypeNote = "note"
-
-// onlyNotes 滤掉非笔记条目（直播卡片 live_v2、搜索热词 hot_query 等）。
-//
-// 保留 DOM 提取的空 modelType：fork 的 DOM 提取路径可能不设 modelType，
-// 保留空值让 mergeFeedsByID 从 state 补全或原样保留，避免误删 DOM 笔记。
-func onlyNotes(feeds []Feed) []Feed {
-	notes := make([]Feed, 0, len(feeds))
-	for _, f := range feeds {
-		if f.ModelType == "" || f.ModelType == modelTypeNote {
-			notes = append(notes, f)
-		}
-	}
-	return notes
-}
-
 // AIChatReply 表示搜索页生成的 AI 回复。
 type AIChatReply struct {
 	Content string `json:"content,omitempty"`
