@@ -673,7 +673,7 @@ func waitForSearchInput(page *hrod.Page, timeout time.Duration, searchSelector s
 			return nil, err
 		}
 
-		probe, err := probeSearchInput(page, searchSelector)
+		probe, err := probeSearchInput(page, searchSelector, SelectorSearchInputInFeeds+", "+SelectorSearchInputInSearchResult)
 		if err != nil {
 			lastErr = err
 		} else {
@@ -704,8 +704,8 @@ func waitForSearchInput(page *hrod.Page, timeout time.Duration, searchSelector s
 	return nil, fmt.Errorf("等待搜索框超时(%s): %s", timeout, formatSearchInputProbe(last))
 }
 
-func probeSearchInput(page *hrod.Page, searchSelector string) (searchInputProbe, error) {
-	obj, err := page.Eval(`(searchSelector) => {
+func probeSearchInput(page *hrod.Page, searchSelector, primarySelector string) (searchInputProbe, error) {
+	obj, err := page.Eval(`(searchSelector, primarySelector) => {
 		const visible = (el) => {
 			if (!el || !el.isConnected) return false;
 			const style = window.getComputedStyle(el);
@@ -734,7 +734,11 @@ func probeSearchInput(page *hrod.Page, searchSelector string) (searchInputProbe,
 		document.querySelectorAll('[data-xhs-mcp-search-input="1"]').forEach((el) => {
 			el.removeAttribute("data-xhs-mcp-search-input");
 		});
-		const candidates = Array.from(document.querySelectorAll(searchSelector));
+				// 优先查稳定 ID 选择器，查不到再查 placeholder 兜底
+				let searchInput = Array.from(document.querySelectorAll(primarySelector)).find((el) => visible(el) && clickHit(el));
+				if (!searchInput) {
+					searchInput = Array.from(document.querySelectorAll(searchSelector)).find((el) => visible(el) && clickHit(el));
+				}
 		const clickHit = (el) => {
 			const rect = el.getBoundingClientRect();
 			const x = Math.min(Math.max(rect.left + rect.width / 2, 1), window.innerWidth - 1);
@@ -742,8 +746,7 @@ func probeSearchInput(page *hrod.Page, searchSelector string) (searchInputProbe,
 			const hit = document.elementFromPoint(x, y);
 			return !!hit && (hit === el || el.contains(hit));
 		};
-		const searchInput = candidates.find((el) => visible(el) && clickHit(el));
-		if (searchInput) {
+				if (searchInput) {
 			searchInput.setAttribute("data-xhs-mcp-search-input", "1");
 		}
 		const inputs = Array.from(document.querySelectorAll('input, textarea, [contenteditable="true"]'))
@@ -759,7 +762,7 @@ func probeSearchInput(page *hrod.Page, searchSelector string) (searchInputProbe,
 			inputSummary: inputs,
 			bodyText: (document.body?.innerText || "").replace(/\s+/g, " ").slice(0, 180),
 		});
-	}`, searchSelector)
+		}`, searchSelector, primarySelector)
 	if err != nil {
 		return searchInputProbe{}, err
 	}
