@@ -29,12 +29,18 @@ const (
 	searchInputWaitTimeout         = 45 * time.Second
 	searchResultsWaitTimeout       = 30 * time.Second
 	searchFilterRefreshWaitTimeout = 20 * time.Second
+	searchTabClickTimeout          = 15 * time.Second
+	searchTagClickTimeout          = 15 * time.Second
 	aiResponseWaitTimeout          = 3 * time.Second
 	aiResponsePollInterval         = 500 * time.Millisecond
+
+
 )
 
 // FilterOption 筛选选项结构体
 type FilterOption struct {
+	Tab         string `json:"tab,omitempty" jsonschema:"频道: 全部|图文|视频|用户,默认为'全部'"`
+	Tag         string `json:"tag,omitempty" jsonschema:"动态标签,传「综合」清除筛选"`
 	SortBy      string `json:"sort_by,omitempty" jsonschema:"排序依据: 综合|最新|最多点赞|最多评论|最多收藏,默认为'综合'"`
 	NoteType    string `json:"note_type,omitempty" jsonschema:"笔记类型: 不限|视频|图文,默认为'不限'"`
 	PublishTime string `json:"publish_time,omitempty" jsonschema:"发布时间: 不限|一天内|一周内|半年内,默认为'不限'"`
@@ -148,60 +154,71 @@ func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...Fi
 	pageBeforeSearch := s.page.Context(ctx)
 	if !isCurrentSearchPage(pageBeforeSearch, keyword) || len(filters) > 0 {
 		previousAIState = &aiStateProbe{}
-		if probe, err := probeAIResponseState(pageBeforeSearch.Timeout(time.Second)); err == nil {
-			previousAIState = &probe
+		if reply, err := probeAIResponseStateWithTimeout(pageBeforeSearch, time.Second); err == nil && reply != nil {
+			previousAIState.Active = true
+			previousAIState.DomAIText = reply.Content
 		}
 	}
 
-	page, feeds, err := s.searchFeeds(ctx, keyword, filters...)
+	page, result, err := s.searchFeeds(ctx, keyword, filters...)
 	if err != nil {
 		return SearchPageResult{}, err
 	}
 
-	result := SearchPageResult{Feeds: feeds}
 	aiChat, err := readAIResponseFromState(page, previousAIState)
 	if err != nil {
 		logrus.WithError(err).Warn("读取搜索页 AI 回复失败")
-		return result, nil
+	} else {
+		result.AIChat = aiChat
 	}
-	result.AIChat = aiChat
 	return result, nil
 }
 
-func (s *SearchAction) searchFeeds(ctx context.Context, keyword string, filters ...FilterOption) (*hrod.Page, []Feed, error) {
+func (s *SearchAction) searchFeeds(ctx context.Context, keyword string, filters ...FilterOption) (*hrod.Page, SearchPageResult, error) {
 	page := s.page.Context(ctx)
 
 	// 导航前校验筛选值，及时报错
+	var filter FilterOption
 	var pfs []pendingFilter
 	for _, f := range filters {
+		filter = f
 		collected, err := collectFilters(f)
 		if err != nil {
-			return nil, nil, err
+			return nil, SearchPageResult{}, err
 		}
 		pfs = append(pfs, collected...)
 	}
 
-	// 检查当前页面是否已在该关键词搜索结果上，是则跳过搜索
+	// 检查当前页面是否已在该关键词搜索结果上
 	if !isCurrentSearchPage(page, keyword) {
 		if err := s.searchByUI(page, keyword); err != nil {
-			return nil, nil, err
+			return nil, SearchPageResult{}, err
+		}
+	} else if filter.Tab != "" || filter.Tag != "" || len(pfs) > 0 {
+		// 复用同关键词页面时，有筛选条件则需要刷新以重置 Tab/Tag 状态
+		searchURL := makeSearchURL(keyword)
+		if err := page.Navigate(searchURL); err != nil {
+			return nil, SearchPageResult{}, fmt.Errorf("刷新搜索页重置状态失败: %w", err)
+		}
+		if err := waitForSearchResults(page, keyword, searchResultsBaseline{}); err != nil {
+			return nil, SearchPageResult{}, err
 		}
 	}
 
-	feeds, err := s.collectResults(page, keyword, pfs)
+	result, err := s.collectResults(page, keyword, filter, pfs)
 	if err != nil {
-		return nil, nil, err
+		return nil, SearchPageResult{}, err
 	}
-	return page, feeds, nil
+	return page, result, nil
 }
 
 // SearchFeedsOnly 保留仅返回笔记列表的兼容入口。
 func (s *SearchAction) SearchFeedsOnly(ctx context.Context, keyword string, filters ...FilterOption) ([]Feed, error) {
-	_, feeds, err := s.searchFeeds(ctx, keyword, filters...)
+	_, result, err := s.searchFeeds(ctx, keyword, filters...)
 	if err != nil {
 		return nil, err
 	}
-	return feeds, nil
+	return result.Feeds, nil
 }
 
 func (s *SearchAction) SearchByURLFallback(ctx context.Context, keyword string, filters ...FilterOption) ([]Feed, error) {
@@ -214,15 +231,21 @@ func (s *SearchAction) SearchByURLFallback(ctx context.Context, keyword string, 
 		return nil, fmt.Errorf("URL兜底等待搜索结果失败: %w", err)
 	}
 
+	var filter FilterOption
 	var pfs []pendingFilter
 	for _, f := range filters {
+		filter = f
 		collected, err := collectFilters(f)
 		if err != nil {
 			return nil, err
 		}
 		pfs = append(pfs, collected...)
 	}
-	return s.collectResults(page, keyword, pfs)
+	result, err := s.collectResults(page, keyword, filter, pfs)
+	if err != nil {
+		return nil, err
+	}
+	return result.Feeds, nil
 }
 
 func (s *SearchAction) searchByUI(page *hrod.Page, keyword string) error {
@@ -604,22 +627,22 @@ func readFeedIDs(page *hrod.Page) (string, error) {
 	return result.Value.Str(), nil
 }
 
-// waitFeedsChanged 轮询等待搜索结果 ID 列表发生变化
-func waitFeedsChanged(page *hrod.Page, before string, timeout time.Duration) bool {
+// waitFeedsChanged 轮询等待搜索结果 ID 列表发生变化，超时返回阶段错误
+func waitFeedsChanged(page *hrod.Page, before string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if err := page.Err(); err != nil {
-			return false
+			return err
 		}
 		after, err := readFeedIDs(page)
 		if err == nil && after != "" && after != before {
-			return true
+			return nil
 		}
 		if err := page.Sleep(300 * time.Millisecond); err != nil {
-			return false
+			return err
 		}
 	}
-	return false
+	return fmt.Errorf("等待 feed 变化超时(%s)", timeout)
 }
 
 func waitForFilterRefresh(page *hrod.Page, baseline searchResultsBaseline, keyword string) (stateRefreshed bool, _ error) {
@@ -783,20 +806,106 @@ func formatSearchInputProbe(probe searchInputProbe) string {
 	return string(data)
 }
 
-func (s *SearchAction) collectResults(page *hrod.Page, keyword string, pfs []pendingFilter) ([]Feed, error) {
-	appliedFilters := false
+func (s *SearchAction) collectResults(page *hrod.Page, keyword string, filter FilterOption, pfs []pendingFilter) (SearchPageResult, error) {
+	var result SearchPageResult
 	var stateRefreshed bool
 
-	// 如果有筛选条件，则应用筛选
+	// 旧 NoteType 兼容：NoteType=图文/视频 自动映射到同名 Tab
+	noteTypeMappedToTab := false
+	if filter.NoteType != "" && filter.Tab == "" {
+		switch filter.NoteType {
+		case "图文", "视频":
+			filter.Tab = filter.NoteType
+			noteTypeMappedToTab = true
+		}
+	}
+
+	// NoteType 已映射为 Tab 时，从面板筛选中移除，避免重复过滤
+	if noteTypeMappedToTab {
+		filtered := pfs[:0]
+		for _, pf := range pfs {
+			if pf.GroupLabel != "笔记类型" {
+				filtered = append(filtered, pf)
+			}
+		}
+		pfs = filtered
+	}
+
+	tab := filter.Tab
+	tag := filter.Tag
+
+	// 1. 点 Tab → waitFeedsChanged（先读基线再点 Tab，实际点击了才等变化）
+	if tab != "" {
+		before, err := readFeedIDs(page)
+		if err != nil {
+			return result, fmt.Errorf("读取 tab=%s 点击前基线失败: %w", tab, err)
+		}
+
+		clicked, err := clickTab(page, tab)
+		if err != nil {
+			return result, fmt.Errorf("选择频道 tab=%s 失败: %w", tab, err)
+		}
+
+		if clicked {
+			// "用户" Tab 不走 feed 等待，等用户卡片渲染
+			if tab == "用户" {
+				if err := page.SleepRandom(1*time.Second, 2*time.Second); err != nil {
+					return result, err
+				}
+			} else {
+				if err := waitFeedsChanged(page, before, searchTabClickTimeout); err != nil {
+					return result, fmt.Errorf("tab=%s 点击后等待 feed 变化超时: %w", tab, err)
+				}
+			}
+		}
+	}
+
+	// 2. 读取 available_tabs 和 available_tags
+	result.AvailableTabs = readAvailableTabsFromDOM(page)
+	availableTags, err := readAvailableTagsFromDOM(page)
+	if err != nil {
+		return result, fmt.Errorf("读取可用标签失败: %w", err)
+	}
+
+	// 3. 点 Tag → waitFeedsChanged
+	if tag != "" {
+		if tab == "用户" {
+			if err := clickTag(page, tag); err != nil {
+				return result, fmt.Errorf("选择标签 tag=%s 失败: %w", tag, err)
+			}
+			if err := page.SleepRandom(1*time.Second, 2*time.Second); err != nil {
+				return result, err
+			}
+		} else {
+			before, err := readFeedIDs(page)
+			if err != nil {
+				return result, fmt.Errorf("读取 tag=%s 点击前基线失败: %w", tag, err)
+			}
+
+			if err := clickTag(page, tag); err != nil {
+				return result, fmt.Errorf("选择标签 tag=%s 失败: %w", tag, err)
+			}
+
+			if err := waitFeedsChanged(page, before, searchTagClickTimeout); err != nil {
+				return result, fmt.Errorf("tag=%s 点击后等待 feed 变化超时: %w", tag, err)
+			}
+		}
+		availableTags, err = readAvailableTagsFromDOM(page)
+		if err != nil {
+			return result, fmt.Errorf("点击标签后重读可用标签失败: %w", err)
+		}
+	}
+
+	// 4. 面板筛选 → waitFeedsChanged
 	if len(pfs) > 0 {
-		stageErr := func(stage string, t0 time.Time, err error, tag string) error {
+		stageErr := func(stage string, t0 time.Time, err error, tagName string) error {
 			fields := logrus.Fields{
 				"stage":      stage,
 				"elapsed_ms": time.Since(t0).Milliseconds(),
 				"error":      err.Error(),
 			}
-			if tag != "" {
-				fields["tag"] = tag
+			if tagName != "" {
+				fields["tag"] = tagName
 			}
 			logrus.WithFields(fields).Error("筛选阶段失败")
 			return fmt.Errorf("筛选阶段 %s 失败", stage)
@@ -809,17 +918,17 @@ func (s *SearchAction) collectResults(page *hrod.Page, keyword string, pfs []pen
 		t0 := time.Now()
 		filterButton, err := filterPage.Element("div.filter")
 		if err != nil {
-			return nil, stageErr("filter_button_lookup", t0, err, "")
+			return result, stageErr("filter_button_lookup", t0, err, "")
 		}
 
 		t0 = time.Now()
 		if err := filterButton.Rod.Hover(); err != nil {
-			return nil, stageErr("filter_button_hover", t0, err, "")
+			return result, stageErr("filter_button_hover", t0, err, "")
 		}
 
 		t0 = time.Now()
 		if err := filterPage.Wait(rod.Eval(`() => document.querySelector('.filter-panel') !== null`)); err != nil {
-			return nil, stageErr("filter_panel_wait", t0, err, "")
+			return result, stageErr("filter_panel_wait", t0, err, "")
 		}
 
 		before, _ := readFeedIDs(page)
@@ -827,53 +936,258 @@ func (s *SearchAction) collectResults(page *hrod.Page, keyword string, pfs []pen
 		for _, pf := range pfs {
 			option, err := findFilterOption(page, pf)
 			if err != nil {
-				return nil, stageErr("filter_option_lookup", time.Now(), err, pf.OptionText)
+				return result, stageErr("filter_option_lookup", time.Now(), err, pf.OptionText)
 			}
 
-			// 点击前随机延迟（等价上游 humanize.Delay + humanize.BeforeClick）
 			if err := filterPage.SleepRandom(200*time.Millisecond, 500*time.Millisecond); err != nil {
-				return nil, stageErr("filter_option_delay", time.Now(), err, pf.OptionText)
+				return result, stageErr("filter_option_delay", time.Now(), err, pf.OptionText)
 			}
 
 			t0 = time.Now()
 			if err := clickNoWait(option.Rod); err != nil {
-				return nil, stageErr("filter_option_click", t0, err, pf.OptionText)
+				return result, stageErr("filter_option_click", t0, err, pf.OptionText)
 			}
 		}
 
-		stateRefreshed = waitFeedsChanged(page, before, searchFilterRefreshWaitTimeout)
-		appliedFilters = true
+		if err := waitFeedsChanged(page, before, searchFilterRefreshWaitTimeout); err != nil {
+			return result, fmt.Errorf("面板筛选后等待 feed 变化超时: %w", err)
+		}
+		stateRefreshed = true
+
+		// 面板筛选后重读 available_tags
+		availableTags, err = readAvailableTagsFromDOM(page)
+		if err != nil {
+			return result, fmt.Errorf("筛选后重读可用标签失败: %w", err)
+		}
 	}
+
+	// 5. 最终提取结果
+	result.AvailableTags = availableTags
+
+	if tab == "用户" {
+		users, err := extractSearchUsersFromDOM(page)
+		if err != nil {
+			return result, fmt.Errorf("提取用户数据失败: %w", err)
+		}
+		result.ResultType = ResultTypeUser
+		result.Users = users
+		result.Count = len(users)
+		return result, nil
+	}
+
+	result.ResultType = ResultTypeFeed
 
 	domFeeds, domErr := ExtractSearchFeedsFromDOM(page)
 	stateFeeds, stateErr := readSearchFeedsFromState(page)
 
-	if appliedFilters {
+	if len(pfs) > 0 {
 		if stateRefreshed && stateErr == nil && len(stateFeeds) > 0 {
-			return mergeFeedsByID(stateFeeds, domFeeds), nil
+			result.Feeds = mergeFeedsByID(stateFeeds, domFeeds)
+			result.Count = len(result.Feeds)
+			return result, nil
 		}
 		if domErr == nil && len(domFeeds) > 0 {
-			return domFeeds, nil
+			result.Feeds = domFeeds
+			result.Count = len(result.Feeds)
+			return result, nil
 		}
 		if stateRefreshed && stateErr == nil && len(stateFeeds) > 0 {
-			return stateFeeds, nil
+			result.Feeds = stateFeeds
+			result.Count = len(result.Feeds)
+			return result, nil
 		}
 		if domErr != nil {
-			return nil, domErr
+			return result, domErr
 		}
-		return nil, stateErr
+		return result, stateErr
 	}
 
 	if domErr == nil && len(domFeeds) > 0 {
-		return mergeFeedsByID(domFeeds, stateFeeds), nil
+		result.Feeds = mergeFeedsByID(domFeeds, stateFeeds)
+		result.Count = len(result.Feeds)
+		return result, nil
 	}
 	if stateErr == nil && len(stateFeeds) > 0 {
-		return stateFeeds, nil
+		result.Feeds = stateFeeds
+		result.Count = len(result.Feeds)
+		return result, nil
 	}
 	if domErr != nil {
-		return nil, domErr
+		return result, domErr
 	}
-	return nil, stateErr
+	return result, stateErr
+}
+
+// clickTab 通过搜索框 DOM 定位点击 Tab，返回是否实际点击。
+func clickTab(page *hrod.Page, tabText string) (bool, error) {
+	input, err := page.ElementX("//input[contains(@placeholder, '搜索')]")
+	if err != nil {
+		return false, fmt.Errorf("未找到搜索框: %w", err)
+	}
+	searchArea, err := input.Rod.Parent()
+	if err != nil {
+		return false, fmt.Errorf("获取搜索框父节点失败: %w", err)
+	}
+	parent, err := searchArea.Parent()
+	if err != nil {
+		return false, fmt.Errorf("获取搜索区域父节点失败: %w", err)
+	}
+	children, err := parent.Children()
+	if err != nil {
+		return false, fmt.Errorf("获取子节点列表失败: %w", err)
+	}
+	if len(children) < 2 {
+		return false, fmt.Errorf("搜索区域子节点不足（需要 >=2，实际 %d）", len(children))
+	}
+	tabContainer := children[1]
+	tabChildren, err := tabContainer.Children()
+	if err != nil {
+		return false, fmt.Errorf("获取 Tab 容器子节点失败: %w", err)
+	}
+	for _, tab := range tabChildren {
+		text, err := tab.Text()
+		if err != nil {
+			continue
+		}
+		if strings.TrimSpace(text) == tabText {
+			class, err := tab.Attribute("class")
+			if err != nil {
+				return false, fmt.Errorf("获取 Tab class 失败: %w", err)
+			}
+			if class != nil && strings.Contains(*class, "active") {
+				return false, nil
+			}
+			return true, tab.Click(proto.InputMouseButtonLeft, 1)
+		}
+	}
+	return false, fmt.Errorf("未找到 Tab「%s」", tabText)
+}
+
+// clickTag 通过搜索框 DOM 定位点击标签按钮。
+func clickTag(page *hrod.Page, tagText string) error {
+	input, err := page.ElementX("//input[contains(@placeholder, '搜索')]")
+	if err != nil {
+		return fmt.Errorf("未找到搜索框: %w", err)
+	}
+	searchArea, err := input.Rod.Parent()
+	if err != nil {
+		return fmt.Errorf("获取搜索框父节点失败: %w", err)
+	}
+	parent, err := searchArea.Parent()
+	if err != nil {
+		return fmt.Errorf("获取搜索区域父节点失败: %w", err)
+	}
+	children, err := parent.Children()
+	if err != nil {
+		return fmt.Errorf("获取子节点列表失败: %w", err)
+	}
+	if len(children) < 4 {
+		return fmt.Errorf("搜索区域子节点不足（需要 >=4，实际 %d）", len(children))
+	}
+	tagContainer := children[3]
+	tagButtons, err := tagContainer.Elements("button")
+	if err != nil {
+		return fmt.Errorf("获取 Tag 按钮列表失败: %w", err)
+	}
+	for _, tag := range tagButtons {
+		text, err := tag.Text()
+		if err != nil {
+			continue
+		}
+		if strings.TrimSpace(text) == tagText {
+			return tag.Click(proto.InputMouseButtonLeft, 1)
+		}
+	}
+	return fmt.Errorf("未找到标签「%s」", tagText)
+}
+
+// readAvailableTagsFromDOM 从搜索区域第 4 子节点的 button 读取标签文本。
+func readAvailableTagsFromDOM(page *hrod.Page) ([]string, error) {
+	result, err := page.Eval(`() => {
+		const input = document.querySelector('input[placeholder*="搜索"]');
+		if (!input) throw new Error("未找到搜索输入框");
+		const searchArea = input.parentElement.parentElement;
+		const tagContainer = searchArea.children[3];
+		if (!tagContainer) throw new Error("未找到标签容器");
+		return JSON.stringify(
+			Array.from(tagContainer.querySelectorAll('button'))
+				.map(b => (b.textContent || '').trim())
+				.filter(Boolean)
+		);
+	}`)
+	if err != nil {
+		return nil, err
+	}
+	if result == nil {
+		return nil, fmt.Errorf("readAvailableTagsFromDOM: JS 无返回")
+	}
+	var tags []string
+	if err := json.Unmarshal([]byte(result.Value.Str()), &tags); err != nil {
+		return nil, err
+	}
+	return tags, nil
+}
+
+// readAvailableTabsFromDOM 从搜索区域第 2 子节点读取可用 Tab 文本列表。
+func readAvailableTabsFromDOM(page *hrod.Page) []string {
+	result, err := page.Eval(`() => {
+		const input = document.querySelector('input[placeholder*="搜索"]');
+		if (!input) return JSON.stringify([]);
+		const searchArea = input.parentElement.parentElement;
+		const tabContainer = searchArea.children[1];
+		if (!tabContainer) return JSON.stringify([]);
+		return JSON.stringify(
+			Array.from(tabContainer.children)
+				.map(ch => (ch.textContent || '').trim())
+				.filter(Boolean)
+		);
+	}`)
+	if err != nil || result == nil {
+		return nil
+	}
+	var tabs []string
+	if err := json.Unmarshal([]byte(result.Value.Str()), &tabs); err != nil {
+		return nil
+	}
+	return tabs
+}
+
+// extractSearchUsersFromDOM 从 DOM 提取搜索用户结果。
+func extractSearchUsersFromDOM(page *hrod.Page) ([]SearchUserResult, error) {
+	result, err := page.Eval(`() => {
+		const clean = (v) => (v || '').replace(/\s+/g, ' ').trim();
+		try {
+			const state = window.__INITIAL_STATE__;
+			if (state && state.search && state.search.users) {
+				const users = state.search.users;
+				const list = users._value || users.value || users;
+				if (Array.isArray(list) && list.length > 0) {
+					return JSON.stringify(list.map(u => ({
+						user_id: u.user_id || u.userId || u.id || '',
+						nickname: u.nickname || u.nickName || u.name || '',
+						avatar: u.avatar || u.avatar_url || u.headImage || '',
+						description: u.desc || u.description || u.introduction || '',
+						profile_url: u.profile_url || u.profileUrl || '',
+					})).filter(u => u.user_id));
+				}
+			}
+		} catch (e) {}
+		return JSON.stringify([]);
+	}`)
+	if err != nil {
+		return nil, err
+	}
+	if result == nil || result.Value.Str() == "" {
+		return nil, fmt.Errorf("JS 无返回")
+	}
+	var users []SearchUserResult
+	if err := json.Unmarshal([]byte(result.Value.Str()), &users); err != nil {
+		return nil, fmt.Errorf("解析用户数据失败: %w", err)
+	}
+	if len(users) == 0 {
+		return nil, fmt.Errorf("未从 __INITIAL_STATE__ 提取到用户数据")
+	}
+	return users, nil
 }
 
 func collectSearchFeeds(page *hrod.Page, stateFirst bool) ([]Feed, error) {
@@ -935,57 +1249,29 @@ type aiStateProbe struct {
 func readAIResponseFromState(page *hrod.Page, previousState *aiStateProbe) (*AIChatReply, error) {
 	// 没有前状态（首次搜索）→ 等 3s 让 AI 异步加载完再读
 	if previousState == nil {
-		deadline := time.Now().Add(aiResponseWaitTimeout)
-		var lastReply *AIChatReply
-		for {
-			if !time.Now().Before(deadline) {
-				return lastReply, nil
-			}
-			probe, err := probeAIResponseState(page.Timeout(time.Until(deadline)))
-			if err != nil {
-				return lastReply, nil
-			}
-			reply, pending := normalizeAIResponse(probe)
-			if reply != nil {
-				lastReply = reply
-			}
-			if !pending {
-				return lastReply, nil
-			}
-			sleepFor := min(aiResponsePollInterval, time.Until(deadline))
-			if err := page.Sleep(sleepFor); err != nil {
-				return lastReply, nil
-			}
-		}
+		reply, _ := probeAIResponseStateWithTimeout(page, aiResponseWaitTimeout)
+		return reply, nil
 	}
 
 	// 非 AI 激活搜索 → 读一次即可（没有 AI 内容）
 	if !previousState.Active {
-		probe, err := probeAIResponseState(page.Timeout(aiResponseWaitTimeout))
+		reply, err := probeAIResponseStateWithTimeout(page, aiResponseWaitTimeout)
 		if err != nil {
 			return nil, err
 		}
-		reply, _ := normalizeAIResponse(probe)
 		return reply, nil
 	}
 
 	// AI 激活状态 → 有界轮询等待回复
 	deadline := time.Now().Add(aiResponseWaitTimeout)
 	var lastReply *AIChatReply
-	var prevRoundID, prevMsgID string
-	if previousState.SearchRoundID != nil {
-		json.Unmarshal(previousState.SearchRoundID, &prevRoundID)
-	}
-	if previousState.UserMessageID != nil {
-		json.Unmarshal(previousState.UserMessageID, &prevMsgID)
-	}
 
 	for {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
 			return lastReply, nil
 		}
-		probe, err := probeAIResponseState(page.Timeout(remaining))
+		reply, err := probeAIResponseStateWithTimeout(page, remaining)
 		if err != nil {
 			if lastReply != nil {
 				return lastReply, nil
@@ -993,21 +1279,10 @@ func readAIResponseFromState(page *hrod.Page, previousState *aiStateProbe) (*AIC
 			return nil, err
 		}
 
-		// 用 round/message ID 判断是否有新回复，不依赖正文内容
-		var curRoundID, curMsgID string
-		if probe.SearchRoundID != nil {
-			json.Unmarshal(probe.SearchRoundID, &curRoundID)
-		}
-		if probe.UserMessageID != nil {
-			json.Unmarshal(probe.UserMessageID, &curMsgID)
-		}
-		idsChanged := curRoundID != prevRoundID || curMsgID != prevMsgID
-
-		reply, pending := normalizeAIResponse(probe)
-		if idsChanged && reply != nil {
+		if reply != nil {
 			lastReply = reply
 		}
-		if !pending {
+		if !reply.HasMore {
 			return lastReply, nil
 		}
 		if !time.Now().Before(deadline) {
@@ -1021,6 +1296,21 @@ func readAIResponseFromState(page *hrod.Page, previousState *aiStateProbe) (*AIC
 			return nil, err
 		}
 	}
+}
+
+func probeAIResponseStateWithTimeout(page *hrod.Page, timeout time.Duration) (*AIChatReply, error) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		probe, err := probeAIResponseState(page)
+		if err == nil {
+			reply, _ := normalizeAIResponse(probe)
+			if reply != nil && reply.Content != "" {
+				return reply, nil
+			}
+		}
+		time.Sleep(aiResponsePollInterval)
+	}
+	return nil, fmt.Errorf("AI 回复超时 (%v)", timeout)
 }
 
 func probeAIResponseState(page *hrod.Page) (aiStateProbe, error) {
