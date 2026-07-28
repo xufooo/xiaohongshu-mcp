@@ -269,7 +269,13 @@ func (s *SearchAction) searchByUI(page *hrod.Page, keyword string) error {
 		return fmt.Errorf("提交搜索失败: %w", err)
 	}
 
-	if err := waitForSearchResults(page, keyword, baseline); err != nil {
+	if err := waitForSearchResultsWithURLFallback(keyword, baseline, searchResultsFallbackHooks{
+		wait: func(b searchResultsBaseline) error {
+			return waitForSearchResults(page, keyword, b)
+		},
+		pageErr:  page.Err,
+		navigate: page.Navigate,
+	}); err != nil {
 		return err
 	}
 	return nil
