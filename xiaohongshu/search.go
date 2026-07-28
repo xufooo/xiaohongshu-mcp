@@ -734,11 +734,7 @@ func probeSearchInput(page *hrod.Page, searchSelector, primarySelector string) (
 		document.querySelectorAll('[data-xhs-mcp-search-input="1"]').forEach((el) => {
 			el.removeAttribute("data-xhs-mcp-search-input");
 		});
-				// 优先查稳定 ID 选择器，查不到再查 placeholder 兜底
-				let searchInput = Array.from(document.querySelectorAll(primarySelector)).find((el) => visible(el) && clickHit(el));
-				if (!searchInput) {
-					searchInput = Array.from(document.querySelectorAll(searchSelector)).find((el) => visible(el) && clickHit(el));
-				}
+		// 优先查稳定 ID 选择器，查不到再查 placeholder 兜底
 		const clickHit = (el) => {
 			const rect = el.getBoundingClientRect();
 			const x = Math.min(Math.max(rect.left + rect.width / 2, 1), window.innerWidth - 1);
@@ -746,7 +742,11 @@ func probeSearchInput(page *hrod.Page, searchSelector, primarySelector string) (
 			const hit = document.elementFromPoint(x, y);
 			return !!hit && (hit === el || el.contains(hit));
 		};
-				if (searchInput) {
+		let searchInput = Array.from(document.querySelectorAll(primarySelector)).find((el) => visible(el) && clickHit(el));
+		if (!searchInput) {
+			searchInput = Array.from(document.querySelectorAll(searchSelector)).find((el) => visible(el) && clickHit(el));
+		}
+		if (searchInput) {
 			searchInput.setAttribute("data-xhs-mcp-search-input", "1");
 		}
 		const inputs = Array.from(document.querySelectorAll('input, textarea, [contenteditable="true"]'))
