@@ -192,7 +192,9 @@ func LoadFeedBatch(ctx context.Context, page *hrod.Page, kind FeedPageKind, curs
 
 func hasEndSignal(page *hrod.Page) bool {
 	result, err := page.Eval(`() => {
+		const text = (document.body?.innerText || "").toLowerCase();
 		if (document.querySelector('.end-container, .no-more')) return true;
+		if (/没有更多|到底了/.test(text)) return true;
 		return false;
 	}`)
 	if err != nil || result == nil {
