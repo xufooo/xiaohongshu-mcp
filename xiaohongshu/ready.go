@@ -215,7 +215,7 @@ func probeXHSReady(page *hrod.Page, feedID string) (xhsReadyProbe, error) {
 			risk_text: riskText.slice(0, 180),
 		});
 	}`
-	obj, err := page.Eval(probeJS, feedID, SelectorSearchInput, SelectorSearchResult, SelectorFeedCard, SelectorFeedDetailReady, SelectorCommentBox, SelectorLikeButton, SelectorSearchInputInFeeds)
+	obj, err := page.Eval(probeJS, feedID, SelectorSearchInput, SelectorSearchResult, SelectorFeedCard, SelectorFeedDetailReady, SelectorCommentBox, SelectorLikeButton, SelectorSearchInput)
 	if err != nil {
 		return xhsReadyProbe{}, err
 	}

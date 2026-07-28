@@ -679,12 +679,8 @@ func waitForSearchInput(page *hrod.Page, timeout time.Duration, searchSelector s
 		} else {
 			last = probe
 			if probe.HasSearchInput && probe.SearchInputVisible {
-				// Explore 首页的搜索框有唯一且已验收的 ID。直接按该 selector
-				// 取回并点击，避免 probe 的 marker 再次定位到重叠 textarea。
-				selector := SelectorMarkedSearchInput
-				if searchSelector == SelectorSearchInputInFeeds {
-					selector = SelectorSearchInputInFeeds
-				}
+					// 优先用 marker 取回 probe 实际选中的元素
+					selector := SelectorMarkedSearchInput
 				input, err := page.Element(selector)
 				if err == nil {
 					return input, nil
