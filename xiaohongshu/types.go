@@ -26,40 +26,16 @@ type Feed struct {
 	Index     int      `json:"index"`
 }
 
-// SearchResultType 搜索结果类型
-type SearchResultType string
-
-const (
-	ResultTypeFeed SearchResultType = "feed"
-	ResultTypeUser SearchResultType = "user"
-)
-
-// SearchUserResult 搜索用户结果
-type SearchUserResult struct {
-	UserID      string `json:"user_id"`
-	Nickname    string `json:"nickname"`
-	Avatar      string `json:"avatar,omitempty"`
-	Description string `json:"description,omitempty"`
-	ProfileURL  string `json:"profile_url,omitempty"`
-}
-
 // AIChatReply 表示搜索页生成的 AI 回复。
 type AIChatReply struct {
 	Content string `json:"content,omitempty"`
 	HasMore bool   `json:"has_more"`
 }
 
-// SearchPageResult 聚合搜索页的结果。
+// SearchPageResult 聚合搜索页的笔记和 AI 回复。
 type SearchPageResult struct {
-	ResultType    SearchResultType   `json:"result_type"`
-	Feeds         []Feed             `json:"feeds"`
-	Users         []SearchUserResult `json:"users,omitempty"`
-	AIChat        *AIChatReply       `json:"ai_chat,omitempty"`
-	Count         int                `json:"count"`
-	HasMore       bool               `json:"has_more"`
-	Cursor        string             `json:"cursor"`
-	AvailableTabs []string           `json:"available_tabs,omitempty"`
-	AvailableTags []string           `json:"available_tags,omitempty"`
+	Feeds  []Feed       `json:"feeds"`
+	AIChat *AIChatReply `json:"ai_chat,omitempty"`
 }
 
 // NoteCard 表示笔记卡片信息

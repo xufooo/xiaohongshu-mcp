@@ -585,12 +585,10 @@ func (s *AppServer) handleSearchFeeds(ctx context.Context, args SearchFeedsArgs)
 		}
 	}
 
-	logrus.Infof("MCP: 搜索Feeds - 关键词: %s, Tab: %s, Tag: %s", args.Keyword, args.Filters.Tab, args.Filters.Tag)
+	logrus.Infof("MCP: 搜索Feeds - 关键词: %s", args.Keyword)
 
 	// 将 MCP 的 FilterOption 转换为 xiaohongshu.FilterOption
 	filter := xiaohongshu.FilterOption{
-		Tab:         args.Filters.Tab,
-		Tag:         args.Filters.Tag,
 		SortBy:      args.Filters.SortBy,
 		NoteType:    args.Filters.NoteType,
 		PublishTime: args.Filters.PublishTime,
@@ -999,8 +997,6 @@ func (s *AppServer) handleSessionSearch(ctx context.Context, args SessionSearchA
 		return blocked
 	}
 	filter := xiaohongshu.FilterOption{
-		Tab:         args.Filters.Tab,
-		Tag:         args.Filters.Tag,
 		SortBy:      args.Filters.SortBy,
 		NoteType:    args.Filters.NoteType,
 		PublishTime: args.Filters.PublishTime,
