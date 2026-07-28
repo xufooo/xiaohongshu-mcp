@@ -1144,7 +1144,9 @@ func checkEndContainer(page *hrod.Page) bool {
 
 			// 转换为大写并检查
 			textUpper := strings.ToUpper(strings.TrimSpace(text))
-			result = strings.Contains(textUpper, "THE END") || strings.Contains(textUpper, "THEEND")
+			textTrim := strings.TrimSpace(text)
+			result = strings.Contains(textUpper, "THE END") || strings.Contains(textUpper, "THEEND") ||
+				strings.Contains(textTrim, "没有更多") || strings.Contains(textTrim, "到底了")
 			return nil
 		},
 		retry.Attempts(3),
