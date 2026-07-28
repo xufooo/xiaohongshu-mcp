@@ -518,21 +518,24 @@ func (s *BrowseSession) searchBatch(ctx context.Context, keyword string, filters
 
 	if cursor == nil {
 		action := NewSearchActionWithState(page.Context(opCtx), s.state)
-		var allFeeds []Feed
+		var pageResult SearchPageResult
 		if includeAI {
-			searchResult, searchErr := action.Search(opCtx, keyword, filters...)
+			var searchErr error
+			pageResult, searchErr = action.Search(opCtx, keyword, filters...)
 			if searchErr != nil {
 				return SearchPageResult{}, nil, false, searchErr
 			}
-			allFeeds = searchResult.Feeds
-			aiChat = searchResult.AIChat
 		} else {
 			var searchErr error
-			allFeeds, searchErr = action.SearchFeedsOnly(opCtx, keyword, filters...)
+			allFeeds, searchErr := action.SearchFeedsOnly(opCtx, keyword, filters...)
 			if searchErr != nil {
 				return SearchPageResult{}, nil, false, searchErr
 			}
+			pageResult = SearchPageResult{Feeds: allFeeds}
 		}
+		allFeeds := pageResult.Feeds
+		aiChat = pageResult.AIChat
+
 		cursor = &FeedCursor{
 			Kind:        FeedPageSearch,
 			Keyword:     keyword,
@@ -552,7 +555,10 @@ func (s *BrowseSession) searchBatch(ctx context.Context, keyword string, filters
 		s.recordTimelineLocked("search", keyword, "ok", time.Now(), fmt.Sprintf("results=%d", len(feeds)))
 		s.mu.Unlock()
 		s.probeWatchdogSelectorsForKind(opCtx, XHSReadySearch, "")
-		return SearchPageResult{Feeds: feeds, AIChat: aiChat}, cursor, hasMore, nil
+		pageResult.Feeds = feeds
+		pageResult.AIChat = aiChat
+		pageResult.Count = len(feeds)
+		return pageResult, cursor, hasMore, nil
 	}
 
 	feeds, nextCursor, hasMore, err = LoadFeedBatch(opCtx, page.Context(opCtx), FeedPageSearch, cursor, maxItems, func() ([]Feed, error) {

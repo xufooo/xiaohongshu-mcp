@@ -202,13 +202,16 @@ type PublishVideoResponse struct {
 
 // FeedsListResponse Feeds列表响应
 type FeedsListResponse struct {
-	Feeds     []xiaohongshu.Feed                `json:"feeds"`
-	AIChat    *xiaohongshu.AIChatReply          `json:"ai_chat,omitempty"`
-	Count     int                               `json:"count"`
-	Cursor    string                            `json:"cursor,omitempty"`
-	HasMore   bool                              `json:"has_more"`
-	SeenCount int                               `json:"seen_count"`
-	Network   []xiaohongshu.NetworkCaptureEntry `json:"network,omitempty"`
+	Feeds         []xiaohongshu.Feed                `json:"feeds"`
+	Users         []xiaohongshu.SearchUserResult    `json:"users,omitempty"`
+	AIChat        *xiaohongshu.AIChatReply          `json:"ai_chat,omitempty"`
+	Count         int                               `json:"count"`
+	Cursor        string                            `json:"cursor,omitempty"`
+	HasMore       bool                              `json:"has_more"`
+	SeenCount     int                               `json:"seen_count"`
+	Network       []xiaohongshu.NetworkCaptureEntry `json:"network,omitempty"`
+	AvailableTabs []string                          `json:"available_tabs,omitempty"`
+	AvailableTags []string                          `json:"available_tags,omitempty"`
 }
 
 type feedCursorEntry struct {
@@ -596,7 +599,7 @@ func (s *XiaohongshuService) SearchFeeds(ctx context.Context, keyword string, fi
 	action := xiaohongshu.NewSearchActionWithState(page.Context(searchCtx), s.actionState)
 	capture := s.startReadNetworkCapture(page)
 
-	feeds, err := action.SearchFeedsOnly(searchCtx, keyword, filters...)
+	searchResult, err := action.Search(searchCtx, keyword, filters...)
 	network := stopReadNetworkCapture(capture)
 	if err != nil {
 		s.recordRiskFromPage(page, err)
@@ -604,9 +607,14 @@ func (s *XiaohongshuService) SearchFeeds(ctx context.Context, keyword string, fi
 	}
 
 	response := &FeedsListResponse{
-		Feeds:   feeds,
-		Count:   len(feeds),
-		Network: network,
+		Feeds:         searchResult.Feeds,
+		Users:         searchResult.Users,
+		AIChat:        searchResult.AIChat,
+		Count:         searchResult.Count,
+		HasMore:       searchResult.HasMore,
+		Network:       network,
+		AvailableTabs: searchResult.AvailableTabs,
+		AvailableTags: searchResult.AvailableTags,
 	}
 
 	return response, nil
@@ -1109,12 +1117,15 @@ func (s *XiaohongshuService) SessionSearch(ctx context.Context, id, keyword, cur
 		seenCount = len(nextCursor.ReturnedIDs)
 	}
 	return &FeedsListResponse{
-		Feeds:     feeds,
-		AIChat:    searchResult.AIChat,
-		Count:     len(feeds),
-		Cursor:    nextCursorID,
-		HasMore:   hasMore,
-		SeenCount: seenCount,
+		Feeds:         feeds,
+		Users:         searchResult.Users,
+		AIChat:        searchResult.AIChat,
+		Count:         searchResult.Count,
+		Cursor:        nextCursorID,
+		HasMore:       hasMore,
+		SeenCount:     seenCount,
+		AvailableTabs: searchResult.AvailableTabs,
+		AvailableTags: searchResult.AvailableTags,
 	}, nil
 }
 
