@@ -1408,18 +1408,18 @@ func decideSearchPage(pageURL string) searchPageDecision {
 	if isSearchResultPage(pageURL) {
 		return searchPageDecision{
 			NavigateExplore: false,
-			SearchSelector:  SelectorSearchInputInSearchResult,
+			SearchSelector:  SelectorSearchInput,
 		}
 	}
 	if isExplorePage(pageURL) {
 		return searchPageDecision{
 			NavigateExplore: false,
-			SearchSelector:  SelectorSearchInputInFeeds,
+			SearchSelector:  SelectorSearchInput,
 		}
 	}
 	return searchPageDecision{
 		NavigateExplore: true,
-		SearchSelector:  SelectorSearchInputInFeeds,
+		SearchSelector:  SelectorSearchInput,
 	}
 }
 
