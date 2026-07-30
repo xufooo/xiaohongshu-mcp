@@ -406,7 +406,7 @@ sc.sort(function(a,b){if(a.z!==b.z)return b.z-a.z;if(a.o!==b.o)return b.o-a.o;re
 var dA=sc.length>1&&sc[0].z===sc[1].z&&sc[0].o===sc[1].o;
 var bst=sc[0];var dRs=bst.rs;
 var sR=dRs.map(function(rt){var rect=rt.getBoundingClientRect();var ar=Math.max(0,Math.min(rect.right,window.innerWidth)-Math.max(rect.left,0))*Math.max(0,Math.min(rect.bottom,window.innerHeight)-Math.max(rect.top,0));
-var hp=rt.querySelector(':scope>.parent-comment')!==null;var tt=(rt.querySelector('.total'))?.innerText||'';var ht=/共\s*\d+\s*条评论/.test(tt);
+var hp=rt.querySelector('.parent-comment')!==null;var tt=(rt.querySelector('.total'))?.innerText||'';var ht=/共\s*\d+\s*条评论/.test(tt);
 var ne=rt.querySelector('.no-comments-text');var nc=ne?.textContent||'';var hn=!!ne&&V(ne)&&I(ne)&&nc.includes('这是一片荒地');var ee=rt.querySelector('.end-container');var et=ee?.textContent||'';var he=!!ee&&V(ee)&&I(ee)&&/THE\s*END/i.test(et);
 var dp=0,p=rt.parentElement;while(p&&p!==bst.d){dp++;p=p.parentElement}return{r:rt,ar:ar,dp:dp,sg:(hp?1:0)+(ht?1:0)+(hn?1:0)+(he?1:0)}});
 sR.sort(function(a,b){if(a.sg!==b.sg)return b.sg-a.sg;if(a.ar!==b.ar)return b.ar-a.ar;return b.dp-a.dp});
@@ -416,7 +416,7 @@ var sl=tR.r;var dI=aD.indexOf(bst.d);var rI=dRs.indexOf(sl);var rk=dI+':'+rI+':'
 var te=(sl.querySelector('.total'))?.innerText||'';var tm=te.match(/共\s*(\d+)\s*条评论/);var tk=!!tm;var tl=tm?Number(tm[1]):0;
 var ee2=sl.querySelector('.end-container');var et2=ee2?.textContent||'';var ev=!!ee2&&V(ee2)&&I(ee2)&&/THE\s*END/i.test(et2);var ne2=sl.querySelector('.no-comments-text');var nc2=ne2?.textContent||'';var nv=!!ne2&&V(ne2)&&I(ne2)&&nc2.includes('这是一片荒地');
 var EC=function(el,isSub){var tp=isSub?el:(el.querySelector(':scope>.comment-item')||el);var ct=C(tp.querySelector('.content,.note-text,[class*="content"]')?.innerText||tp.innerText);var us=C(tp.querySelector('.author-wrapper .name,.name,.nickname,[class*="name"]')?.innerText);var lt=C(tp.querySelector('.interactions .like,.like,[class*="like"]')?.innerText);return{id:tp.getAttribute('id')||el.dataset?.id||el.getAttribute('data-comment-id')||tp.dataset?.id||tp.getAttribute('data-comment-id')||'',noteId:fd,content:ct,likeCount:(lt.match(/([\d.万wWkK]+)/)||['',''])[1],userInfo:{nickname:us,nickName:us},subComments:[],showTags:[]}};
-var pcs=Array.from(sl.querySelectorAll(':scope>.parent-comment'));var mc=0;var co=[];
+var pcs=Array.from(sl.querySelectorAll('.parent-comment'));var mc=0;var co=[];
 for(var pi=0;pi<pcs.length;pi++){var pc=pcs[pi];var rc=EC(pc,false);if(rc.content){if(!rc.id)mc++;co.push(rc);var ses=Array.from(pc.querySelectorAll(':scope>.reply-container>.list-container>.comment-item,:scope>.children-comments>.comment-item-sub'));for(var si=0;si<ses.length;si++){var stc=EC(ses[si],true);if(stc.content){if(!stc.id)mc++;co.push(stc)}}}}
 var sp=null,cu=sl.parentElement;while(cu&&cu!==document.body){var sy=getComputedStyle(cu);var ov=sy.overflowY;if((ov==='auto'||ov==='scroll'||ov==='overlay')&&cu.clientHeight>0){sp=cu;break}if(cu===bst.d)break;cu=cu.parentElement}
 if(!sp&&(ev||nv))return JSON.stringify({rf:true,ra:rA,sf:false,rk:rk,mv:false,st:0,sh:0,ch:0,ab:false,tk:tk,tl:tl,ev:ev,nv:nv,mc:mc,co:co});
