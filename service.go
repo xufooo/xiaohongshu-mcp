@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -28,10 +31,15 @@ type XiaohongshuService struct {
 	rateLimiter    *ratelimit.Limiter
 	rateLimitFunc  func(ctx context.Context, name string, action ratelimit.Action) bool
 
-	commentCursors   sync.Map
-	commentCursorTTL time.Duration
-	feedCursors      sync.Map
-	feedCursorTTL    time.Duration
+	commentCursors     sync.Map
+	commentCursorTTL   time.Duration
+	commentReplays     sync.Map
+	feedCursors        sync.Map
+	feedCursorTTL      time.Duration
+	commentCursorGen   int64
+	commentReplayGen   int64
+	cursorGuardMu   sync.Mutex
+	cursorGuardMap  map[string]*cursorGuardEntry
 
 	createSessionMu sync.Mutex
 }
@@ -49,8 +57,9 @@ func NewXiaohongshuService() *XiaohongshuService {
 			cookies.GetCookiesFilePath(),
 		),
 		browseSessions: xiaohongshu.NewBrowseSessionManager(xiaohongshu.DefaultBrowseSessionTimeout),
-		commentCursorTTL: 5 * time.Minute,
+		commentCursorTTL: 15 * time.Minute,
 		feedCursorTTL:   5 * time.Minute,
+		cursorGuardMap:  make(map[string]*cursorGuardEntry),
 	}
 }
 
@@ -69,33 +78,248 @@ func (s *XiaohongshuService) SetRateLimiter(limiter *ratelimit.Limiter) {
 	}
 }
 
-func (s *XiaohongshuService) setCommentCursor(id string, cursor *xiaohongshu.CommentCursor) {
-	if strings.TrimSpace(id) == "" || cursor == nil {
+func (s *XiaohongshuService) setCommentCursor(id string, cursor *xiaohongshu.CommentCursor, scope replayScope) {
+	id = strings.TrimSpace(id)
+	if id == "" || cursor == nil {
 		return
 	}
 	ttl := s.commentCursorTTL
 	if ttl <= 0 {
-		ttl = 5 * time.Minute
+		ttl = 15 * time.Minute
 	}
-	s.commentCursors.Store(id, cursor)
+	gen := atomic.AddInt64(&s.commentCursorGen, 1)
+	entry := &commentCursorEntry{Cursor: cursor, Generation: gen, Scope: scope}
+	s.commentCursors.Store(id, entry)
 	time.AfterFunc(ttl, func() {
-		if value, ok := s.commentCursors.Load(id); ok && value == cursor {
-			s.commentCursors.Delete(id)
-		}
+		s.commentCursors.CompareAndDelete(id, entry)
 	})
 }
 
-func (s *XiaohongshuService) getCommentCursor(id string) (*xiaohongshu.CommentCursor, bool) {
-	value, ok := s.commentCursors.Load(strings.TrimSpace(id))
-	if !ok {
-		return nil, false
+func normalizeMaxItems(maxItems int) int {
+	if maxItems <= 0 {
+		return 20
 	}
-	cursor, ok := value.(*xiaohongshu.CommentCursor)
-	return cursor, ok
+	return maxItems
+}
+
+func normalizeScopeSpeed(speed string) string {
+	if speed != "slow" && speed != "normal" && speed != "fast" {
+		return xiaohongshu.DefaultCommentLoadConfig().ScrollSpeed
+	}
+	return speed
+}
+
+func scopeMatch(a, b replayScope) bool {
+	if a.EntryType != b.EntryType {
+		return false
+	}
+	if a.SessionID != b.SessionID {
+		return false
+	}
+	if a.FeedID != b.FeedID {
+		return false
+	}
+	if a.MaxItems != b.MaxItems {
+		return false
+	}
+	if a.ClickMoreReplies != b.ClickMoreReplies {
+		return false
+	}
+	if a.MaxRepliesThreshold != b.MaxRepliesThreshold {
+		return false
+	}
+	if a.ScrollSpeed != b.ScrollSpeed {
+		return false
+	}
+	if a.XsecDigest != b.XsecDigest {
+		return false
+	}
+	return true
+}
+
+func (s *XiaohongshuService) getCommentCursor(id string, expected replayScope) (*xiaohongshu.CommentCursor, error) {
+	id = strings.TrimSpace(id)
+	value, ok := s.commentCursors.Load(id)
+	if !ok {
+		return nil, fmt.Errorf("cursor expired, please start a new session")
+	}
+	entry, ok := value.(*commentCursorEntry)
+	if !ok || entry == nil || entry.Cursor == nil {
+		return nil, fmt.Errorf("cursor expired, please start a new session")
+	}
+	if !scopeMatch(entry.Scope, expected) {
+		return nil, fmt.Errorf("cursor scope mismatch")
+	}
+	gen := atomic.AddInt64(&s.commentCursorGen, 1)
+	newEntry := &commentCursorEntry{Cursor: entry.Cursor, Generation: gen, Scope: entry.Scope}
+	if !s.commentCursors.CompareAndSwap(id, entry, newEntry) {
+		return nil, fmt.Errorf("cursor consumed or expired")
+	}
+	ttl := s.commentCursorTTL
+	if ttl <= 0 {
+		ttl = 15 * time.Minute
+	}
+	time.AfterFunc(ttl, func() {
+		s.commentCursors.CompareAndDelete(id, newEntry)
+	})
+	return entry.Cursor, nil
+}
+
+type cursorGuardEntry struct {
+	mu   sync.Mutex
+	refs int
+}
+
+func (s *XiaohongshuService) withCursorGuard(cursorID string, scope replayScope, fn func(*xiaohongshu.CommentCursor) (*FeedDetailResponse, error)) (*FeedDetailResponse, error) {
+	cursorID = strings.TrimSpace(cursorID)
+	if cursorID == "" {
+		return fn(nil)
+	}
+
+	s.cursorGuardMu.Lock()
+	entry, ok := s.cursorGuardMap[cursorID]
+	if !ok {
+		entry = &cursorGuardEntry{}
+		s.cursorGuardMap[cursorID] = entry
+	}
+	entry.refs++
+	s.cursorGuardMu.Unlock()
+
+	entry.mu.Lock()
+	defer func() {
+		entry.mu.Unlock()
+
+		s.cursorGuardMu.Lock()
+		entry.refs--
+		if entry.refs == 0 {
+			if current, ok := s.cursorGuardMap[cursorID]; ok && current == entry {
+				delete(s.cursorGuardMap, cursorID)
+			}
+		}
+		s.cursorGuardMu.Unlock()
+	}()
+
+	if cached, ok := s.getCommentReplay(cursorID, scope); ok {
+		return cached, nil
+	}
+	cursor, err := s.getCommentCursor(cursorID, scope)
+	if err != nil {
+		return nil, err
+	}
+	return fn(cursor)
 }
 
 func (s *XiaohongshuService) delCommentCursor(id string) {
 	s.commentCursors.Delete(strings.TrimSpace(id))
+}
+
+func (s *XiaohongshuService) getCommentReplay(cursorID string, scope replayScope) (*FeedDetailResponse, bool) {
+	cursorID = strings.TrimSpace(cursorID)
+	if cursorID == "" {
+		return nil, false
+	}
+	value, ok := s.commentReplays.Load(cursorID)
+	if !ok {
+		return nil, false
+	}
+	entry, ok := value.(*commentReplayEntry)
+	if !ok || entry == nil {
+		return nil, false
+	}
+	if time.Since(entry.CreatedAt) > 2*time.Minute {
+		s.commentReplays.CompareAndDelete(cursorID, entry)
+		return nil, false
+	}
+	if entry.Scope.EntryType != scope.EntryType {
+		return nil, false
+	}
+	if scope.SessionID != "" && entry.Scope.SessionID != scope.SessionID {
+		return nil, false
+	}
+	if entry.Scope.FeedID != scope.FeedID || entry.Scope.MaxItems != scope.MaxItems {
+		return nil, false
+	}
+	if entry.Scope.ClickMoreReplies != scope.ClickMoreReplies ||
+		entry.Scope.MaxRepliesThreshold != scope.MaxRepliesThreshold ||
+		entry.Scope.ScrollSpeed != scope.ScrollSpeed {
+		return nil, false
+	}
+	if entry.Scope.XsecDigest != scope.XsecDigest {
+		return nil, false
+	}
+	return deepCopyFinalResult(entry.Detail), true
+}
+
+func (s *XiaohongshuService) commitCommentBatchResult(
+	feedID, cursorID string,
+	inputCursor *xiaohongshu.CommentCursor,
+	detail *xiaohongshu.FeedDetailResponse,
+	nextCursor *xiaohongshu.CommentCursor,
+	hasMore bool,
+	seenCount int,
+	network []xiaohongshu.NetworkCaptureEntry,
+	scope replayScope,
+) (*FeedDetailResponse, error) {
+	cursorID = strings.TrimSpace(cursorID)
+	if hasMore && (detail == nil || len(detail.Comments.List) == 0) {
+		return nil, fmt.Errorf("校验失败: hasMore=true 但评论列表为空")
+	}
+
+	if hasMore {
+		if nextCursor == nil {
+			return nil, fmt.Errorf("校验失败: hasMore=true 但 nextCursor 为空")
+		}
+		if nextCursor.FeedID != "" && nextCursor.FeedID != feedID {
+			return nil, fmt.Errorf("校验失败: nextCursor feed_id 不匹配")
+		}
+		inputLen := 0
+		if inputCursor != nil {
+			inputLen = len(inputCursor.ReturnedIDs)
+		}
+		if len(nextCursor.ReturnedIDs) <= inputLen {
+			return nil, fmt.Errorf("校验失败: nextCursor.ReturnedIDs 未增长 (input=%d, output=%d)", inputLen, len(nextCursor.ReturnedIDs))
+		}
+	}
+
+	nextCursorID := ""
+	if hasMore && nextCursor != nil {
+		nextCursorID = fmt.Sprintf("cc_%s_%d", feedID, time.Now().UnixNano())
+	}
+
+	detail.Comments.Cursor = nextCursorID
+	detail.Comments.HasMore = hasMore
+	if seenCount > 0 {
+		detail.Comments.SeenCount = seenCount
+	} else if nextCursor != nil {
+		detail.Comments.SeenCount = len(nextCursor.ReturnedIDs)
+	}
+	if detail.Comments.List == nil {
+		detail.Comments.List = []xiaohongshu.Comment{}
+	}
+
+	result := &FeedDetailResponse{FeedID: feedID, Data: detail, Network: network}
+	replaySnapshot := deepCopyFinalResult(result)
+
+	if nextCursorID != "" {
+		s.setCommentCursor(nextCursorID, nextCursor, scope)
+	}
+
+	if cursorID != "" {
+		gen := atomic.AddInt64(&s.commentReplayGen, 1)
+		replayEntry := &commentReplayEntry{
+			Detail:     replaySnapshot,
+			CreatedAt:  time.Now(),
+			Generation: gen,
+			Scope:      scope,
+		}
+		s.commentReplays.Store(cursorID, replayEntry)
+		time.AfterFunc(3*time.Minute, func() {
+			s.commentReplays.CompareAndDelete(cursorID, replayEntry)
+		})
+		s.delCommentCursor(cursorID)
+	}
+
+	return result, nil
 }
 
 func (s *XiaohongshuService) setFeedCursor(id string, entry feedCursorEntry) {
@@ -209,6 +433,91 @@ type FeedsListResponse struct {
 	HasMore   bool                              `json:"has_more"`
 	SeenCount int                               `json:"seen_count"`
 	Network   []xiaohongshu.NetworkCaptureEntry `json:"network,omitempty"`
+}
+
+type commentCursorEntry struct {
+	Cursor     *xiaohongshu.CommentCursor
+	Generation int64
+	Scope      replayScope
+}
+
+type replayScope struct {
+	EntryType           string
+	SessionID           string
+	FeedID              string
+	MaxItems            int
+	ClickMoreReplies    bool
+	MaxRepliesThreshold int
+	ScrollSpeed         string
+	XsecDigest          string
+}
+
+func xsecDigest(token string) string {
+	if token == "" {
+		return ""
+	}
+	h := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(h[:])
+}
+
+type commentReplayEntry struct {
+	Detail     *FeedDetailResponse
+	CreatedAt  time.Time
+	Generation int64
+	Scope      replayScope
+}
+
+func deepCopyCommentList(src []xiaohongshu.Comment) []xiaohongshu.Comment {
+	if src == nil {
+		return nil
+	}
+	dst := make([]xiaohongshu.Comment, len(src))
+	for i := range src {
+		dst[i] = src[i]
+		dst[i].SubComments = deepCopyCommentList(src[i].SubComments)
+		if src[i].ShowTags != nil {
+			dst[i].ShowTags = make([]string, len(src[i].ShowTags))
+			copy(dst[i].ShowTags, src[i].ShowTags)
+		}
+	}
+	return dst
+}
+
+func deepCopyFeedDetailResponse(src *xiaohongshu.FeedDetailResponse) *xiaohongshu.FeedDetailResponse {
+	if src == nil {
+		return nil
+	}
+	noteCopy := src.Note
+	if src.Note.ImageList != nil {
+		noteCopy.ImageList = make([]xiaohongshu.DetailImageInfo, len(src.Note.ImageList))
+		copy(noteCopy.ImageList, src.Note.ImageList)
+	}
+	return &xiaohongshu.FeedDetailResponse{
+		Note: noteCopy,
+		Comments: xiaohongshu.CommentList{
+			List:       deepCopyCommentList(src.Comments.List),
+			Cursor:     src.Comments.Cursor,
+			HasMore:    src.Comments.HasMore,
+			TotalItems: src.Comments.TotalItems,
+			SeenCount:  src.Comments.SeenCount,
+		},
+	}
+}
+
+func deepCopyFinalResult(src *FeedDetailResponse) *FeedDetailResponse {
+	if src == nil {
+		return nil
+	}
+	var dataCopy *xiaohongshu.FeedDetailResponse
+	if fdr, ok := src.Data.(*xiaohongshu.FeedDetailResponse); ok {
+		dataCopy = deepCopyFeedDetailResponse(fdr)
+	}
+	network := append([]xiaohongshu.NetworkCaptureEntry(nil), src.Network...)
+	return &FeedDetailResponse{
+		FeedID:  src.FeedID,
+		Data:    dataCopy,
+		Network: network,
+	}
 }
 
 type feedCursorEntry struct {
@@ -660,72 +969,63 @@ func (s *XiaohongshuService) GetFeedDetailWithConfig(ctx context.Context, feedID
 }
 
 func (s *XiaohongshuService) GetFeedDetailCommentsBatch(ctx context.Context, feedID, xsecToken, cursorID string, maxItems int, config xiaohongshu.CommentLoadConfig) (*FeedDetailResponse, error) {
-	var cursor *xiaohongshu.CommentCursor
-	if strings.TrimSpace(cursorID) != "" {
-		stored, ok := s.getCommentCursor(cursorID)
-		if !ok {
-			return nil, fmt.Errorf("cursor expired, please start a new session")
-		}
-		if stored.FeedID != "" && stored.FeedID != feedID {
-			return nil, fmt.Errorf("cursor feed_id mismatch")
-		}
-		cursor = stored
-	}
+	maxItems = normalizeMaxItems(maxItems)
+	config.ScrollSpeed = normalizeScopeSpeed(config.ScrollSpeed)
 
 	if sid, ok := s.activeSessionForFeed(feedID); ok {
-		detail, nextCursor, hasMore, err := s.SessionDetailCommentsBatch(ctx, sid, feedID, cursor, maxItems, config)
+		scope := replayScope{
+			EntryType:           "session",
+			SessionID:           sid,
+			FeedID:              feedID,
+			MaxItems:            maxItems,
+			ClickMoreReplies:    config.ClickMoreReplies,
+			MaxRepliesThreshold: config.MaxRepliesThreshold,
+			ScrollSpeed:         config.ScrollSpeed,
+		}
+		if cached, ok := s.getCommentReplay(cursorID, scope); ok {
+			return cached, nil
+		}
+		return s.withCursorGuard(cursorID, scope, func(guardCursor *xiaohongshu.CommentCursor) (*FeedDetailResponse, error) {
+			detail, nextCursor, hasMore, err := s.SessionDetailCommentsBatch(ctx, sid, feedID, guardCursor, maxItems, config)
+			if err != nil {
+				return nil, err
+			}
+			return s.commitCommentBatchResult(feedID, cursorID, guardCursor, detail, nextCursor, hasMore, 0, nil, scope)
+		})
+	}
+
+	scope := replayScope{
+		EntryType:           "standalone",
+		FeedID:              feedID,
+		MaxItems:            maxItems,
+		ClickMoreReplies:    config.ClickMoreReplies,
+		MaxRepliesThreshold: config.MaxRepliesThreshold,
+		ScrollSpeed:         config.ScrollSpeed,
+		XsecDigest:          xsecDigest(xsecToken),
+	}
+	if cached, ok := s.getCommentReplay(cursorID, scope); ok {
+		return cached, nil
+	}
+	return s.withCursorGuard(cursorID, scope, func(guardCursor *xiaohongshu.CommentCursor) (*FeedDetailResponse, error) {
+		detailCtx := ctx
+		if detailCtx == nil {
+			detailCtx = context.Background()
+		}
+		page, err := s.acquirePageFor(detailCtx, "feed_detail_comments_batch")
 		if err != nil {
 			return nil, err
 		}
-		nextCursorID := ""
-		if hasMore && nextCursor != nil {
-			nextCursorID = fmt.Sprintf("cc_%s_%d", feedID, time.Now().UnixMilli())
-			s.setCommentCursor(nextCursorID, nextCursor)
+		defer s.browserManager.Release(page)
+		action := xiaohongshu.NewFeedDetailActionWithState(page.Context(detailCtx), s.actionState)
+		capture := s.startReadNetworkCapture(page)
+		detail, nextCursor, hasMore, err := action.GetFeedDetailCommentsBatch(detailCtx, feedID, xsecToken, guardCursor, maxItems, config)
+		network := stopReadNetworkCapture(capture)
+		if err != nil {
+			s.recordRiskFromPage(page, err)
+			return nil, err
 		}
-		if cursorID != "" {
-			s.delCommentCursor(cursorID)
-		}
-		detail.Comments.Cursor = nextCursorID
-		detail.Comments.HasMore = hasMore
-		return &FeedDetailResponse{FeedID: feedID, Data: detail}, nil
-	}
-
-	detailCtx := ctx
-	if detailCtx == nil {
-		detailCtx = context.Background()
-	}
-
-	page, err := s.acquirePageFor(detailCtx, "feed_detail_comments_batch")
-	if err != nil {
-		return nil, err
-	}
-	defer s.browserManager.Release(page)
-
-	action := xiaohongshu.NewFeedDetailActionWithState(page.Context(detailCtx), s.actionState)
-	capture := s.startReadNetworkCapture(page)
-	detail, nextCursor, hasMore, err := action.GetFeedDetailCommentsBatch(detailCtx, feedID, xsecToken, cursor, maxItems, config)
-	network := stopReadNetworkCapture(capture)
-	if err != nil {
-		s.recordRiskFromPage(page, err)
-		return nil, err
-	}
-
-	nextCursorID := ""
-	if hasMore && nextCursor != nil {
-		nextCursorID = fmt.Sprintf("cc_%s_%d", feedID, time.Now().UnixMilli())
-		s.setCommentCursor(nextCursorID, nextCursor)
-	}
-	if cursorID != "" {
-		s.delCommentCursor(cursorID)
-	}
-	detail.Comments.Cursor = nextCursorID
-	detail.Comments.HasMore = hasMore
-
-	return &FeedDetailResponse{
-		FeedID:  feedID,
-		Data:    detail,
-		Network: network,
-	}, nil
+		return s.commitCommentBatchResult(feedID, cursorID, guardCursor, detail, nextCursor, hasMore, 0, network, scope)
+	})
 }
 
 // UserProfile 获取用户信息
@@ -1151,48 +1451,43 @@ func (s *XiaohongshuService) SessionDetailBatch(ctx context.Context, id, cursorI
 	}
 	info := session.Info()
 
-	var cursor *xiaohongshu.CommentCursor
-	if cursorID != "" {
-		stored, ok := s.getCommentCursor(cursorID)
-		if !ok {
-			return nil, fmt.Errorf("cursor expired, please start a new batch from current visible comments")
-		}
-		cursor = stored
-	} else if ids := session.GetInitialCommentIDs(); len(ids) > 0 {
-		cursor = &xiaohongshu.CommentCursor{
-			FeedID:      info.CurrentFeedID,
-			ReturnedIDs: ids,
-		}
+	maxItems = normalizeMaxItems(maxItems)
+	config.ScrollSpeed = normalizeScopeSpeed(config.ScrollSpeed)
+
+	scope := replayScope{
+		EntryType:           "session",
+		SessionID:           id,
+		FeedID:              info.CurrentFeedID,
+		MaxItems:            maxItems,
+		ClickMoreReplies:    config.ClickMoreReplies,
+		MaxRepliesThreshold: config.MaxRepliesThreshold,
+		ScrollSpeed:         config.ScrollSpeed,
 	}
 
-	detail, nextCursor, hasMore, err := session.DetailCommentsBatch(ctx, info.CurrentFeedID, cursor, maxItems, config)
-	if err != nil {
-		s.recordRiskFromSession(session, err)
-		return nil, err
+	if cached, ok := s.getCommentReplay(cursorID, scope); ok {
+		return cached, nil
 	}
 
-	nextCursorID := ""
-	if hasMore && nextCursor != nil {
-		nextCursorID = fmt.Sprintf("cc_%s_%d", info.CurrentFeedID, time.Now().UnixMilli())
-		s.setCommentCursor(nextCursorID, nextCursor)
-	}
-	if cursorID != "" {
-		s.delCommentCursor(cursorID)
-	}
-	detail.Comments.Cursor = nextCursorID
-	detail.Comments.HasMore = hasMore
-	detail.Comments.SeenCount = len(session.GetInitialCommentIDs())
-	if cursor != nil {
-		detail.Comments.SeenCount = len(cursor.ReturnedIDs)
-	}
-	if nextCursor != nil && len(nextCursor.ReturnedIDs) > 0 {
-		detail.Comments.SeenCount = len(nextCursor.ReturnedIDs)
-	}
-	// 确保 list 不为 null，避免前端困惑
-	if detail.Comments.List == nil {
-		detail.Comments.List = []xiaohongshu.Comment{}
-	}
-	return &FeedDetailResponse{FeedID: info.CurrentFeedID, Data: detail}, nil
+	return s.withCursorGuard(cursorID, scope, func(guardCursor *xiaohongshu.CommentCursor) (*FeedDetailResponse, error) {
+		if guardCursor == nil {
+			if ids := session.GetInitialCommentIDs(); len(ids) > 0 {
+				guardCursor = &xiaohongshu.CommentCursor{
+					FeedID:      info.CurrentFeedID,
+					ReturnedIDs: ids,
+				}
+			}
+		}
+		detail, nextCursor, hasMore, err := session.DetailCommentsBatch(ctx, info.CurrentFeedID, guardCursor, maxItems, config)
+		if err != nil {
+			s.recordRiskFromSession(session, err)
+			return nil, err
+		}
+		seenCount := 0
+		if nextCursor != nil {
+			seenCount = len(nextCursor.ReturnedIDs)
+		}
+		return s.commitCommentBatchResult(info.CurrentFeedID, cursorID, guardCursor, detail, nextCursor, hasMore, seenCount, nil, scope)
+	})
 }
 
 func (s *XiaohongshuService) SessionDetailForFeed(ctx context.Context, id, feedID string, loadComments bool, config xiaohongshu.CommentLoadConfig) (*xiaohongshu.FeedDetailResponse, error) {

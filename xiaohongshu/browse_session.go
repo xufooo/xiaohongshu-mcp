@@ -680,8 +680,11 @@ func (s *BrowseSession) DetailForFeed(ctx context.Context, expectedFeedID string
 
 func (s *BrowseSession) DetailCommentsBatch(ctx context.Context, expectedFeedID string, cursor *CommentCursor, maxItems int, config CommentLoadConfig) (*FeedDetailResponse, *CommentCursor, bool, error) {
 	return s.detailCommentsBatchLifecycle(
-		ctx, expectedFeedID, maxItems,
+		ctx, expectedFeedID, maxItems, cursor,
 		func(opCtx context.Context, page *hrod.Page, feedID string) error {
+			if cursor != nil && cursor.Round > 0 {
+				return s.recoverCommentBatchSession(opCtx, page, feedID)
+			}
 			return WaitForXHSReady(page.Context(opCtx), XHSReadyOptions{Kind: XHSReadyDetail, FeedID: feedID})
 		},
 		func(loadCtx context.Context, page *hrod.Page) ([]Comment, *CommentCursor, bool, error) {
@@ -694,6 +697,7 @@ func (s *BrowseSession) detailCommentsBatchLifecycle(
 	ctx context.Context,
 	expectedFeedID string,
 	maxItems int,
+	cursor *CommentCursor,
 	pretask func(context.Context, *hrod.Page, string) error,
 	loader func(context.Context, *hrod.Page) ([]Comment, *CommentCursor, bool, error),
 ) (*FeedDetailResponse, *CommentCursor, bool, error) {
@@ -731,8 +735,12 @@ func (s *BrowseSession) detailCommentsBatchLifecycle(
 
 func commentLoadDeadline(ctx context.Context) time.Time {
 	deadline := time.Now().Add(commentLoadTimeout)
-	if dl, ok := ctx.Deadline(); ok && dl.Before(deadline) {
-		deadline = dl
+	if dl, ok := ctx.Deadline(); ok {
+		reserve := 45 * time.Second
+		adjusted := dl.Add(-reserve)
+		if adjusted.Before(deadline) {
+			deadline = adjusted
+		}
 	}
 	return deadline
 }
@@ -741,11 +749,11 @@ func runDetailCommentsBatch(opCtx context.Context, loader func(context.Context) 
 	loadCtx, cancel := context.WithTimeout(opCtx, commentLoadTimeout)
 	defer cancel()
 	comments, nextCursor, hasMore, err := loader(loadCtx)
-	if loadCtx.Err() != nil {
-		return nil, nil, false, loadCtx.Err()
-	}
 	if err != nil {
 		return nil, nil, false, err
+	}
+	if len(comments) == 0 && !hasMore && loadCtx.Err() != nil {
+		return nil, nil, false, loadCtx.Err()
 	}
 	return comments, nextCursor, hasMore, nil
 }
@@ -774,6 +782,24 @@ func (s *BrowseSession) completeDetailCommentsBatch(opCtx context.Context, page 
 		return nil, nil, false, opCtx.Err()
 	}
 	return resp, nextCursor, hasMore, nil
+}
+
+func (s *BrowseSession) recoverCommentBatchSession(ctx context.Context, page *hrod.Page, expectedFeedID string) error {
+	p := page.Context(ctx)
+	feedID, err := currentFeedIDFromPage(p)
+	if err != nil || feedID == "" {
+		if err := p.Sleep(time.Second); err != nil {
+			return err
+		}
+		feedID, err = currentFeedIDFromPage(p)
+	}
+	if err != nil || feedID == "" {
+		return fmt.Errorf("session 当前页面无法确认 feed: expected=%s, err=%v", expectedFeedID, err)
+	}
+	if feedID != expectedFeedID {
+		return fmt.Errorf("session 当前页面与目标笔记不匹配: expected=%s, actual=%s", expectedFeedID, feedID)
+	}
+	return p.Sleep(1500 * time.Millisecond)
 }
 
 func (s *BrowseSession) detail(ctx context.Context, expectedFeedID string, loadComments bool, pages int, config CommentLoadConfig, useConfig bool) (*FeedDetailResponse, error) {
