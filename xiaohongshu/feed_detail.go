@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"math/rand"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -45,12 +44,10 @@ type CommentLoadConfig struct {
 
 type CommentCursor struct {
 	FeedID      string    `json:"feed_id"`
-	Round       int       `json:"round"`
-	ReturnedIDs []string  `json:"returned_ids"`
-	ExpandRound int       `json:"expand_round"`
+	Round       int       `json:"round"`        // 已完成的滚动轮次
+	ReturnedIDs []string  `json:"returned_ids"` // 已返回的评论ID
+	ExpandRound int       `json:"expand_round"` // 已完成的展开轮次
 	CreatedAt   time.Time `json:"created_at"`
-	TotalKnown  bool      `json:"total_known,omitempty"`
-	Total       int       `json:"total,omitempty"`
 }
 
 func DefaultCommentLoadConfig() CommentLoadConfig {
@@ -60,24 +57,6 @@ func DefaultCommentLoadConfig() CommentLoadConfig {
 		MaxCommentItems:     0,
 		ScrollSpeed:         "fast",
 	}
-}
-
-type commentBatchDOMState struct {
-	RootFound         bool      `json:"rootFound"`
-	RootAmbiguous     bool      `json:"rootAmbiguous"`
-	ScrollportFound   bool      `json:"scrollportFound"`
-	RootKey           string    `json:"rootKey"`
-	Moved             bool      `json:"moved"`
-	ScrollTop         float64   `json:"scrollTop"`
-	ScrollHeight      float64   `json:"scrollHeight"`
-	ClientHeight      float64   `json:"clientHeight"`
-	AtBottom          bool      `json:"atBottom"`
-	TotalKnown        bool      `json:"totalKnown"`
-	Total             int       `json:"total"`
-	EndVisible        bool      `json:"endVisible"`
-	NoCommentsVisible bool      `json:"noCommentsVisible"`
-	MissingIDCount    int       `json:"missingIdCount"`
-	Comments          []Comment `json:"comments"`
 }
 
 type FeedDetailAction struct {
@@ -220,9 +199,7 @@ func (f *FeedDetailAction) GetFeedDetailCommentsBatch(ctx context.Context, feedI
 		List:    comments,
 		HasMore: hasMore,
 	}
-	if nextCursor != nil && nextCursor.TotalKnown && nextCursor.Total > 0 {
-		detail.Comments.TotalItems = nextCursor.Total
-	} else if totalItems := knownCommentTotal(commentPage); totalItems > 0 {
+	if totalItems := knownCommentTotal(commentPage); totalItems > 0 {
 		detail.Comments.TotalItems = totalItems
 	}
 	return detail, nextCursor, hasMore, nil
@@ -392,243 +369,13 @@ func loadCommentsByJS(page *hrod.Page, config CommentLoadConfig) error {
 	return nil
 }
 
-func commentBatchSample(page *hrod.Page, feedID string, align bool, delta float64) (*commentBatchDOMState, error) {
-	js := `(fd,al,dl)=>{var V=function(e){if(!e||!e.isConnected)return false;var c=e;while(c){var s=getComputedStyle(c);if(s.display==='none'||s.visibility==='hidden')return false;c=c.parentElement}var r=e.getBoundingClientRect();return r.width>0&&r.height>0};
-var I=function(e){var r=e.getBoundingClientRect();return r.left<window.innerWidth&&r.right>0&&r.top<window.innerHeight&&r.bottom>0};
-var C=function(v){return(v||'').replace(/\s+/g,' ').trim()};
-var aR=Array.from(document.querySelectorAll('.comments-container,.comments-el'));var va=[];
-for(var ri=0;ri<aR.length;ri++){var rt=aR[ri];if(!V(rt))continue;var dt=rt.closest('.note-detail-mask,.note-container');if(!dt||!V(dt)||!I(dt))continue;va.push({r:rt,d:dt})}
-if(va.length===0)return JSON.stringify({rf:false,ra:false,sf:false,rk:'',mv:false,st:0,sh:0,ch:0,ab:false,tk:false,tl:0,ev:false,nv:false,mc:0,co:[]});
-var gr=new Map();for(var vi=0;vi<va.length;vi++){var v=va[vi];if(!gr.has(v.d))gr.set(v.d,[]);gr.get(v.d).push(v.r)}
-var aD=Array.from(document.querySelectorAll('.note-detail-mask,.note-container'));
-var sc=Array.from(gr.entries()).map(function(e){var d=e[0],rs=e[1];var z=parseInt(getComputedStyle(d).zIndex,10);if(isNaN(z))z=0;var o=aD.indexOf(d);var dp=0,p=d.parentElement;while(p&&p!==document.body){dp++;p=p.parentElement}return{d:d,rs:rs,z:z,o:o,dp:dp}});
-sc.sort(function(a,b){if(a.z!==b.z)return b.z-a.z;if(a.o!==b.o)return b.o-a.o;return b.dp-a.dp});
-var dA=sc.length>1&&sc[0].z===sc[1].z&&sc[0].o===sc[1].o;
-var bst=sc[0];var dRs=bst.rs;
-var sR=dRs.map(function(rt){var rect=rt.getBoundingClientRect();var ar=Math.max(0,Math.min(rect.right,window.innerWidth)-Math.max(rect.left,0))*Math.max(0,Math.min(rect.bottom,window.innerHeight)-Math.max(rect.top,0));
-var hp=rt.querySelector('.parent-comment')!==null;var tt=(rt.querySelector('.total'))?.innerText||'';var ht=/共\s*\d+\s*条评论/.test(tt);
-var ne=rt.querySelector('.no-comments-text');var nc=ne?.textContent||'';var hn=!!ne&&V(ne)&&I(ne)&&nc.includes('这是一片荒地');var ee=rt.querySelector('.end-container');var et=ee?.textContent||'';var he=!!ee&&V(ee)&&I(ee)&&/THE\s*END/i.test(et);
-var dp=0,p=rt.parentElement;while(p&&p!==bst.d){dp++;p=p.parentElement}return{r:rt,ar:ar,dp:dp,sg:(hp?1:0)+(ht?1:0)+(hn?1:0)+(he?1:0)}});
-sR.sort(function(a,b){if(a.sg!==b.sg)return b.sg-a.sg;if(a.ar!==b.ar)return b.ar-a.ar;return b.dp-a.dp});
-var tR=sR[0];var rA=dA||sR.length>1&&sR[0].sg===sR[1].sg&&sR[0].ar===sR[1].ar&&sR[0].dp===sR[1].dp;
-if(!tR)return JSON.stringify({rf:false,ra:false,sf:false,rk:'',mv:false,st:0,sh:0,ch:0,ab:false,tk:false,tl:0,ev:false,nv:false,mc:0,co:[]});
-var sl=tR.r;var dI=aD.indexOf(bst.d);var rI=dRs.indexOf(sl);var rk=dI+':'+rI+':'+sl.tagName+':'+Array.from(sl.classList).sort().join('.');
-var te=(sl.querySelector('.total'))?.innerText||'';var tm=te.match(/共\s*(\d+)\s*条评论/);var tk=!!tm;var tl=tm?Number(tm[1]):0;
-var ee2=sl.querySelector('.end-container');var et2=ee2?.textContent||'';var ev=!!ee2&&V(ee2)&&I(ee2)&&/THE\s*END/i.test(et2);var ne2=sl.querySelector('.no-comments-text');var nc2=ne2?.textContent||'';var nv=!!ne2&&V(ne2)&&I(ne2)&&nc2.includes('这是一片荒地');
-var EC=function(el,isSub){var tp=isSub?el:(el.querySelector(':scope>.comment-item')||el);var ct=C(tp.querySelector('.content,.note-text,[class*="content"]')?.innerText||tp.innerText);var us=C(tp.querySelector('.author-wrapper .name,.name,.nickname,[class*="name"]')?.innerText);var lt=C(tp.querySelector('.interactions .like,.like,[class*="like"]')?.innerText);return{id:tp.getAttribute('id')||el.dataset?.id||el.getAttribute('data-comment-id')||tp.dataset?.id||tp.getAttribute('data-comment-id')||'',noteId:fd,content:ct,likeCount:(lt.match(/([\d.万wWkK]+)/)||['',''])[1],userInfo:{nickname:us,nickName:us},subComments:[],showTags:[]}};
-var pcs=Array.from(sl.querySelectorAll('.parent-comment'));var mc=0;var co=[];
-for(var pi=0;pi<pcs.length;pi++){var pc=pcs[pi];var rc=EC(pc,false);if(rc.content){if(!rc.id)mc++;co.push(rc);var ses=Array.from(pc.querySelectorAll(':scope>.reply-container>.list-container>.comment-item,:scope>.children-comments>.comment-item-sub'));for(var si=0;si<ses.length;si++){var stc=EC(ses[si],true);if(stc.content){if(!stc.id)mc++;co.push(stc)}}}}
-var sp=null,cu=sl.parentElement;while(cu&&cu!==document.body){var sy=getComputedStyle(cu);var ov=sy.overflowY;if((ov==='auto'||ov==='scroll'||ov==='overlay')&&cu.clientHeight>0){sp=cu;break}if(cu===bst.d)break;cu=cu.parentElement}
-if(!sp&&(ev||nv))return JSON.stringify({rf:true,ra:rA,sf:false,rk:rk,mv:false,st:0,sh:0,ch:0,ab:false,tk:tk,tl:tl,ev:ev,nv:nv,mc:mc,co:co});
-if(!sp)return JSON.stringify({rf:true,ra:rA,sf:false,rk:rk,mv:false,st:0,sh:0,ch:0,ab:false,tk:tk,tl:tl,ev:ev,nv:nv,mc:mc,co:co});
-if(al&&dl>0){var t=sl.getBoundingClientRect().top-sp.getBoundingClientRect().top+sp.scrollTop;sp.scrollTo(0,Math.max(0,t-80))}
-var bf=sp.scrollTop;if(dl!==0)sp.scrollBy(0,dl);var mv=sp.scrollTop>bf;
-var st=sp.scrollTop,sh=sp.scrollHeight,ch=sp.clientHeight,ab=(sh-ch-st)<=2;
-return JSON.stringify({rf:true,ra:rA,sf:true,rk:rk,mv:mv,st:st,sh:sh,ch:ch,ab:ab,tk:tk,tl:tl,ev:ev,nv:nv,mc:mc,co:co});}`
-	result, err := page.Eval(js, feedID, align, delta)
-	if err != nil {
-		return nil, err
-	}
-	if result == nil || result.Value.Str() == "" {
-		return nil, fmt.Errorf("评论采样未返回结果")
-	}
-	var raw struct {
-		RootFound         bool        `json:"rf"`
-		RootAmbiguous     bool        `json:"ra"`
-		ScrollportFound   bool        `json:"sf"`
-		RootKey           string      `json:"rk"`
-		Moved             bool        `json:"mv"`
-		ScrollTop         float64     `json:"st"`
-		ScrollHeight      float64     `json:"sh"`
-		ClientHeight      float64     `json:"ch"`
-		AtBottom          bool        `json:"ab"`
-		TotalKnown        bool        `json:"tk"`
-		Total             int         `json:"tl"`
-		EndVisible        bool        `json:"ev"`
-		NoCommentsVisible bool        `json:"nv"`
-		MissingIDCount    int         `json:"mc"`
-		Comments          []Comment   `json:"co"`
-	}
-	if err := json.Unmarshal([]byte(result.Value.Str()), &raw); err != nil {
-		return nil, fmt.Errorf("解析评论采样状态: %w", err)
-	}
-	if !raw.RootFound {
-		return nil, fmt.Errorf("未找到评论 root")
-	}
-	if raw.RootAmbiguous {
-		return nil, fmt.Errorf("评论 root 模糊")
-	}
-	if !raw.ScrollportFound && !raw.NoCommentsVisible && !raw.EndVisible {
-		return nil, fmt.Errorf("未找到 scrollport")
-	}
-	return &commentBatchDOMState{
-		RootFound:         raw.RootFound,
-		RootAmbiguous:     raw.RootAmbiguous,
-		ScrollportFound:   raw.ScrollportFound,
-		RootKey:           raw.RootKey,
-		Moved:             raw.Moved,
-		ScrollTop:         raw.ScrollTop,
-		ScrollHeight:      raw.ScrollHeight,
-		ClientHeight:      raw.ClientHeight,
-		AtBottom:          raw.AtBottom,
-		TotalKnown:        raw.TotalKnown,
-		Total:             raw.Total,
-		EndVisible:        raw.EndVisible,
-		NoCommentsVisible: raw.NoCommentsVisible,
-		MissingIDCount:    raw.MissingIDCount,
-		Comments:          raw.Comments,
-	}, nil
-}
-
-func appendCommentBatch(state *commentBatchDOMState, batch *[]Comment, batchCursor *CommentCursor, returned map[string]struct{}, maxItems int) (hasUnseenDOMIDs bool) {
-	for _, c := range state.Comments {
-		id := strings.TrimSpace(c.ID)
-		if id == "" {
-			continue
-		}
-		if _, ok := returned[id]; ok {
-			continue
-		}
-		if len(*batch) < maxItems {
-			*batch = append(*batch, c)
-			returned[id] = struct{}{}
-			batchCursor.ReturnedIDs = append(batchCursor.ReturnedIDs, id)
-		} else {
-			hasUnseenDOMIDs = true
-		}
-	}
-	return
-}
-
-func updateBatchTotal(state *commentBatchDOMState, cursor *CommentCursor) {
-	if !state.TotalKnown {
-		return
-	}
-	if cursor.TotalKnown {
-		if state.Total > cursor.Total {
-			cursor.Total = state.Total
-		}
-	} else {
-		cursor.TotalKnown = true
-		cursor.Total = state.Total
-	}
-}
-
-func commentBatchEndCandidate(state *commentBatchDOMState, cursor *CommentCursor, hasUnseenDOMIDs bool) bool {
-	if !state.RootFound || state.RootAmbiguous {
-		return false
-	}
-	if !state.ScrollportFound && !state.EndVisible && !state.NoCommentsVisible {
-		return false
-	}
-	if state.ScrollportFound && !state.AtBottom {
-		return false
-	}
-	if hasUnseenDOMIDs {
-		return false
-	}
-	if state.MissingIDCount > 0 {
-		return false
-	}
-	if cursor.TotalKnown && len(cursor.ReturnedIDs) < cursor.Total {
-		return false
-	}
-	if state.NoCommentsVisible {
-		for _, c := range state.Comments {
-			if strings.TrimSpace(c.ID) != "" {
-				return false
-			}
-		}
-		return true
-	}
-	if !state.EndVisible {
-		return false
-	}
-	return true
-}
-
-func commentBatchStableEnd(page *hrod.Page, feedID string, firstState *commentBatchDOMState, await time.Duration, remaining func() time.Duration) (bool, *commentBatchDOMState, error) {
-	if remaining() < await+2*time.Second {
-		return false, nil, fmt.Errorf("到底确认预算不足")
-	}
-	if err := page.Sleep(await); err != nil {
-		return false, nil, err
-	}
-	secondState, err := commentBatchSample(page, feedID, false, 0)
-	if err != nil {
-		return false, nil, fmt.Errorf("稳定复采失败: %w", err)
-	}
-	if secondState.RootKey != firstState.RootKey {
-		return false, secondState, nil
-	}
-	if secondState.ScrollportFound != firstState.ScrollportFound ||
-		secondState.EndVisible != firstState.EndVisible ||
-		secondState.NoCommentsVisible != firstState.NoCommentsVisible {
-		return false, secondState, nil
-	}
-	if secondState.ScrollportFound && !secondState.AtBottom {
-		return false, secondState, nil
-	}
-	if !secondState.EndVisible && !secondState.NoCommentsVisible {
-		return false, secondState, nil
-	}
-	if secondState.MissingIDCount > 0 {
-		return false, secondState, nil
-	}
-	if secondState.ScrollportFound &&
-		(absDiff(secondState.ScrollTop, firstState.ScrollTop) > 1 ||
-			absDiff(secondState.ScrollHeight, firstState.ScrollHeight) > 1 ||
-			absDiff(secondState.ClientHeight, firstState.ClientHeight) > 1) {
-		return false, secondState, nil
-	}
-	if secondState.TotalKnown != firstState.TotalKnown || secondState.Total != firstState.Total {
-		return false, secondState, nil
-	}
-	firstIDs := sortedCommentIDs(firstState.Comments)
-	secondIDs := sortedCommentIDs(secondState.Comments)
-	if !stringSlicesEqual(firstIDs, secondIDs) {
-		return false, secondState, nil
-	}
-	return true, secondState, nil
-}
-
-func absDiff(a, b float64) float64 {
-	if a > b {
-		return a - b
-	}
-	return b - a
-}
-
-func sortedCommentIDs(comments []Comment) []string {
-	ids := make([]string, 0, len(comments))
-	for _, c := range comments {
-		id := strings.TrimSpace(c.ID)
-		if id != "" {
-			ids = append(ids, id)
-		}
-	}
-	sort.Strings(ids)
-	return ids
-}
-
-func stringSlicesEqual(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
 func LoadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadConfig, cursor *CommentCursor, maxItems int) ([]Comment, *CommentCursor, bool, error) {
 	config = normalizeCommentLoadConfig(config)
 	if maxItems <= 0 {
 		maxItems = 20
 	}
 
+	logrus.Infof("开始分批加载评论: maxItems=%d", maxItems)
 	await, scrollDelta := commentScrollSettings(config.ScrollSpeed)
 	deadline := commentLoadDeadline(ctx)
 	remaining := func() time.Duration { return time.Until(deadline) }
@@ -642,13 +389,10 @@ func LoadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 		batchCursor.Round = cursor.Round
 		batchCursor.ExpandRound = cursor.ExpandRound
 		batchCursor.CreatedAt = cursor.CreatedAt
-		batchCursor.TotalKnown = cursor.TotalKnown
-		batchCursor.Total = cursor.Total
 		if batchCursor.CreatedAt.IsZero() {
 			batchCursor.CreatedAt = time.Now()
 		}
 		for _, id := range cursor.ReturnedIDs {
-			id = strings.TrimSpace(id)
 			if id == "" || strings.HasPrefix(id, "idx_") {
 				continue
 			}
@@ -666,23 +410,15 @@ func LoadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 		}
 	}
 
-	inputBase := len(batchCursor.ReturnedIDs)
-	replyLimit := -1
-	if config.ClickMoreReplies {
-		replyLimit = config.MaxRepliesThreshold
-		if replyLimit < 0 {
-			replyLimit = 0
-		}
-	}
-
-	var batch []Comment
-
 	if batchCursor.Round == 0 {
-		state, err := commentBatchSample(page, feedID, true, 160)
-		if err != nil {
-			return nil, nil, false, fmt.Errorf("初始评论采样失败: %w", err)
+		if err := scrollToCommentsArea(page); err != nil {
+			return nil, nil, false, fmt.Errorf("定位评论区失败: %w", err)
 		}
-		if state.Moved {
+		moved, err := scrollNoteScrollerMoved(page, 160)
+		if err != nil {
+			return nil, nil, false, fmt.Errorf("初始滚动触发评论懒加载失败: %w", err)
+		}
+		if moved {
 			batchCursor.Round++
 		}
 		if err := page.Sleep(await); err != nil {
@@ -693,112 +429,118 @@ func LoadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 		}
 	}
 
-	state, err := commentBatchSample(page, feedID, false, 0)
-	if err != nil {
-		if len(batchCursor.ReturnedIDs) > inputBase && len(batch) > 0 && ctx.Err() == nil {
-			return batch, batchCursor, true, nil
+	collect := func(limit int) ([]Comment, bool, error) {
+		if limit <= 0 {
+			return nil, true, nil
 		}
-		return nil, nil, false, fmt.Errorf("评论采样失败: %w", err)
+		comments, err := ExtractCommentsFromDOM(page, feedID)
+		if err != nil {
+			return nil, false, err
+		}
+		flat := flattenComments(comments)
+		var batch []Comment
+		for i, comment := range flat {
+			key := commentBatchKey(i, comment)
+			if key == "" {
+				continue
+			}
+			if _, ok := returned[key]; ok {
+				continue
+			}
+			if len(batch) >= limit {
+				return batch, true, nil
+			}
+			returned[key] = struct{}{}
+			batchCursor.ReturnedIDs = append(batchCursor.ReturnedIDs, key)
+			batch = append(batch, comment)
+		}
+		return batch, false, nil
 	}
 
-	hasUnseen := appendCommentBatch(state, &batch, batchCursor, returned, maxItems)
-	updateBatchTotal(state, batchCursor)
+	var batch []Comment
+	replyClicksTotal := 0
+	replyStall := false
+	clickedParents := make(map[int]struct{})
+
+	inputBase := len(batchCursor.ReturnedIDs)
+
+	more, moreVisible, collectErr := collect(maxItems)
+	if collectErr != nil {
+		return nil, nil, false, collectErr
+	}
+	batch = append(batch, more...)
+
+	progress, progressErr := getCommentProgress(page)
+	if progressErr != nil {
+		if len(batchCursor.ReturnedIDs) > inputBase && ctx.Err() == nil {
+			return batch, batchCursor, true, nil
+		}
+		return nil, nil, false, fmt.Errorf("评论进度读取失败: %w", progressErr)
+	}
 
 	if len(batch) >= maxItems {
-		if commentBatchEndCandidate(state, batchCursor, hasUnseen) {
-			if stable, secondState, sErr := commentBatchStableEnd(page, feedID, state, await, remaining); sErr != nil {
-				if len(batchCursor.ReturnedIDs) > inputBase && len(batch) > 0 && ctx.Err() == nil {
-					return batch, batchCursor, true, nil
-				}
-				return nil, nil, false, sErr
-			} else if stable {
-				return batch, batchCursor, false, nil
-			} else if secondState != nil {
-				appendCommentBatch(secondState, &batch, batchCursor, returned, maxItems)
-				updateBatchTotal(secondState, batchCursor)
-			}
+		if progress.AtEnd && !moreVisible {
+			return batch, batchCursor, false, nil
 		}
 		return batch, batchCursor, true, nil
 	}
 
-	if commentBatchEndCandidate(state, batchCursor, hasUnseen) {
-		if stable, secondState, sErr := commentBatchStableEnd(page, feedID, state, await, remaining); sErr != nil {
-			if len(batchCursor.ReturnedIDs) > inputBase && len(batch) > 0 && ctx.Err() == nil {
-				return batch, batchCursor, true, nil
-			}
-			return nil, nil, false, sErr
-		} else if stable {
-			if len(batch) > 0 {
-				return batch, batchCursor, false, nil
-			}
-			return []Comment{}, batchCursor, false, nil
-		} else if secondState != nil {
-			appendCommentBatch(secondState, &batch, batchCursor, returned, maxItems)
-			updateBatchTotal(secondState, batchCursor)
+	if progress.AtEnd {
+		if !moreVisible {
+			return batch, batchCursor, false, nil
 		}
+		return batch, batchCursor, true, nil
 	}
 
-	replyClicksTotal := 0
-	replyStall := false
-	clickedParents := make(map[string]struct{})
-
-	for i := 0; i < 500; i++ {
+	for i := 0; i < 500 && len(batch) < maxItems; i++ {
 		if rem := remaining(); rem < 15*time.Second {
+			logrus.Warnf("评论分批加载剩余时间不足(%s)，停止新操作", rem.Round(time.Second))
 			break
 		}
 
-		scrollState, sErr := commentBatchSample(page, feedID, false, scrollDelta)
-		if sErr != nil {
-			if len(batchCursor.ReturnedIDs) > inputBase && len(batch) > 0 && ctx.Err() == nil {
+		moved, scrollErr := scrollNoteScrollerMoved(page, scrollDelta)
+		if scrollErr != nil {
+			if len(batchCursor.ReturnedIDs) > inputBase && ctx.Err() == nil {
 				return batch, batchCursor, true, nil
 			}
-			return nil, nil, false, fmt.Errorf("评论滚动采样失败: %w", sErr)
+			return nil, nil, false, fmt.Errorf("评论容器滚动失败: %w", scrollErr)
 		}
-		if scrollState.Moved {
+		if moved {
 			batchCursor.Round++
 		}
 		if err := page.Sleep(await); err != nil {
-			if len(batchCursor.ReturnedIDs) > inputBase && len(batch) > 0 && ctx.Err() == nil {
+			if len(batchCursor.ReturnedIDs) > inputBase && ctx.Err() == nil {
 				return batch, batchCursor, true, nil
 			}
 			return nil, nil, false, err
 		}
 
-		if config.ClickMoreReplies && !replyStall && scrollState.Moved {
+		if config.ClickMoreReplies && !replyStall && moved {
 			roundClicks := 0
 			for roundClicks < 2 && replyClicksTotal < 8 && !replyStall {
-				button, bErr := nextVisibleShowMoreButton(page, replyLimit)
-				if bErr != nil {
-					if len(batchCursor.ReturnedIDs) > inputBase && len(batch) > 0 && ctx.Err() == nil {
+				button, err := nextVisibleShowMoreButton(page, config.MaxRepliesThreshold)
+				if err != nil {
+					if len(batchCursor.ReturnedIDs) > inputBase && ctx.Err() == nil {
 						return batch, batchCursor, true, nil
 					}
-					return nil, nil, false, fmt.Errorf("查询展开按钮失败: %w", bErr)
+					return nil, nil, false, fmt.Errorf("查询展开按钮失败: %w", err)
 				}
 				if button == nil {
 					break
 				}
-				pid, pErr := commentParentID(page, button.ParentIndex)
-				if pErr != nil || pid == "" {
-					if len(batchCursor.ReturnedIDs) > inputBase && len(batch) > 0 && ctx.Err() == nil {
-						return batch, batchCursor, true, nil
-					}
-					if pErr != nil {
-						return nil, nil, false, fmt.Errorf("读取回复父评论ID失败: %w", pErr)
-					}
-					return nil, nil, false, fmt.Errorf("回复父评论缺少真实ID")
-				}
-				if _, clicked := clickedParents[pid]; clicked {
+				if _, clicked := clickedParents[button.ParentIndex]; clicked {
+					replyStall = true
 					break
 				}
-				before, cErr := countReplyItems(page, button.ParentIndex)
-				if cErr != nil {
-					if len(batchCursor.ReturnedIDs) > inputBase && len(batch) > 0 && ctx.Err() == nil {
+				before, countErr := countReplyItems(page, button.ParentIndex)
+				if countErr != nil {
+					if len(batchCursor.ReturnedIDs) > inputBase && ctx.Err() == nil {
 						return batch, batchCursor, true, nil
 					}
-					return nil, nil, false, fmt.Errorf("回复计数失败: %w", cErr)
+					return nil, nil, false, fmt.Errorf("回复计数失败: %w", countErr)
 				}
 				if err := dispatchMouseClick(page, button.X, button.Y); err != nil {
-					if len(batchCursor.ReturnedIDs) > inputBase && len(batch) > 0 && ctx.Err() == nil {
+					if len(batchCursor.ReturnedIDs) > inputBase && ctx.Err() == nil {
 						return batch, batchCursor, true, nil
 					}
 					return nil, nil, false, fmt.Errorf("回复展开点击失败: %w", err)
@@ -806,62 +548,56 @@ func LoadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 				replyClicksTotal++
 				roundClicks++
 				batchCursor.ExpandRound++
-				clickedParents[pid] = struct{}{}
-				if err := waitReplyItemsChanged(page, button.ParentIndex, before, 3*time.Second); err != nil {
+				clickedParents[button.ParentIndex] = struct{}{}
+				if waitErr := waitReplyItemsChanged(page, button.ParentIndex, before, 3*time.Second); waitErr != nil {
 					replyStall = true
 				}
 			}
 		}
 
-		state, err = commentBatchSample(page, feedID, false, 0)
-		if err != nil {
-			if len(batchCursor.ReturnedIDs) > inputBase && len(batch) > 0 && ctx.Err() == nil {
+		more, moreVisible, collectErr = collect(maxItems - len(batch))
+		if collectErr != nil {
+			if len(batchCursor.ReturnedIDs) > inputBase && ctx.Err() == nil {
 				return batch, batchCursor, true, nil
 			}
-			return nil, nil, false, fmt.Errorf("评论采样失败: %w", err)
+			return nil, nil, false, collectErr
+		}
+		batch = append(batch, more...)
+
+		progress, progressErr = getCommentProgress(page)
+		if progressErr != nil {
+			if len(batchCursor.ReturnedIDs) > inputBase && ctx.Err() == nil {
+				return batch, batchCursor, true, nil
+			}
+			return nil, nil, false, fmt.Errorf("评论进度读取失败: %w", progressErr)
 		}
 
-		beforeAppend := len(batchCursor.ReturnedIDs)
-		hasUnseen = appendCommentBatch(state, &batch, batchCursor, returned, maxItems)
-		updateBatchTotal(state, batchCursor)
-		roundNewIDs := len(batchCursor.ReturnedIDs) > beforeAppend
-
 		if len(batch) >= maxItems {
-			if commentBatchEndCandidate(state, batchCursor, hasUnseen) {
-				if stable, secondState, sErr := commentBatchStableEnd(page, feedID, state, await, remaining); sErr != nil {
-					if len(batchCursor.ReturnedIDs) > inputBase && len(batch) > 0 && ctx.Err() == nil {
-						return batch, batchCursor, true, nil
-					}
-					return nil, nil, false, sErr
-				} else if stable {
-					return batch, batchCursor, false, nil
-				} else if secondState != nil {
-					appendCommentBatch(secondState, &batch, batchCursor, returned, maxItems)
-					updateBatchTotal(secondState, batchCursor)
-				}
+			if progress.AtEnd && !moreVisible {
+				return batch, batchCursor, false, nil
 			}
 			return batch, batchCursor, true, nil
 		}
 
-		if commentBatchEndCandidate(state, batchCursor, hasUnseen) {
-			if stable, secondState, sErr := commentBatchStableEnd(page, feedID, state, await, remaining); sErr != nil {
-				if len(batchCursor.ReturnedIDs) > inputBase && len(batch) > 0 && ctx.Err() == nil {
-					return batch, batchCursor, true, nil
-				}
-				return nil, nil, false, sErr
-			} else if stable {
-				if len(batch) > 0 {
-					return batch, batchCursor, false, nil
-				}
-				return []Comment{}, batchCursor, false, nil
-			} else if secondState != nil {
-				appendCommentBatch(secondState, &batch, batchCursor, returned, maxItems)
-				updateBatchTotal(secondState, batchCursor)
+		if progress.AtEnd {
+			if !moreVisible {
+				return batch, batchCursor, false, nil
 			}
+			return batch, batchCursor, true, nil
 		}
 
-		if !scrollState.Moved && !roundNewIDs {
-			if len(batchCursor.ReturnedIDs) > inputBase && len(batch) > 0 && ctx.Err() == nil {
+		if !moved && len(more) == 0 {
+			if ctx.Err() != nil {
+				return nil, nil, false, ctx.Err()
+			}
+			p, pe := getCommentProgress(page)
+			if pe == nil && p.AtEnd {
+				if !moreVisible {
+					return batch, batchCursor, false, nil
+				}
+				return batch, batchCursor, true, nil
+			}
+			if len(batchCursor.ReturnedIDs) > inputBase && ctx.Err() == nil {
 				return batch, batchCursor, true, nil
 			}
 			return nil, nil, false, fmt.Errorf("评论滚动无进展，请重试")
@@ -872,40 +608,47 @@ func LoadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 		return nil, nil, false, ctx.Err()
 	}
 
-	state, err = commentBatchSample(page, feedID, false, 0)
-	if err != nil {
-		if len(batchCursor.ReturnedIDs) > inputBase && len(batch) > 0 && ctx.Err() == nil {
+	m, moreVis, collectErr := collect(maxItems - len(batch))
+	if collectErr != nil {
+		if len(batchCursor.ReturnedIDs) > inputBase && ctx.Err() == nil {
 			return batch, batchCursor, true, nil
 		}
-		return nil, nil, false, err
+		return nil, nil, false, collectErr
 	}
+	batch = append(batch, m...)
 
-	hasUnseen = appendCommentBatch(state, &batch, batchCursor, returned, maxItems)
-	updateBatchTotal(state, batchCursor)
 	idsGrew := len(batchCursor.ReturnedIDs) > inputBase
 
-	if commentBatchEndCandidate(state, batchCursor, hasUnseen) {
-		if stable, secondState, sErr := commentBatchStableEnd(page, feedID, state, await, remaining); sErr != nil {
-			if len(batchCursor.ReturnedIDs) > inputBase && len(batch) > 0 && ctx.Err() == nil {
-				return batch, batchCursor, true, nil
-			}
-			return nil, nil, false, sErr
-		} else if stable {
-			if len(batch) > 0 {
-				return batch, batchCursor, false, nil
-			}
-			return []Comment{}, batchCursor, false, nil
-		} else if secondState != nil {
-			appendCommentBatch(secondState, &batch, batchCursor, returned, maxItems)
-			updateBatchTotal(secondState, batchCursor)
-			idsGrew = len(batchCursor.ReturnedIDs) > inputBase
+	p, e := getCommentProgress(page)
+	if e != nil {
+		if len(batchCursor.ReturnedIDs) > inputBase && ctx.Err() == nil {
+			return batch, batchCursor, true, nil
 		}
+		return nil, nil, false, fmt.Errorf("评论进度读取失败: %w", e)
 	}
 
-	if idsGrew {
-		return batch, batchCursor, true, nil
+	if len(batch) == 0 && !p.AtEnd {
+		if ctx.Err() != nil {
+			return nil, nil, false, ctx.Err()
+		}
+		if len(batchCursor.ReturnedIDs) > inputBase && ctx.Err() == nil {
+			return batch, batchCursor, true, nil
+		}
+		return nil, nil, false, fmt.Errorf("评论滚动无进展，请重试")
 	}
-	return nil, nil, false, fmt.Errorf("评论滚动无进展，请重试")
+
+	if p.AtEnd && !moreVis {
+		return batch, batchCursor, false, nil
+	}
+
+	if !idsGrew {
+		if ctx.Err() != nil {
+			return nil, nil, false, ctx.Err()
+		}
+		return nil, nil, false, fmt.Errorf("评论滚动无进展，请重试")
+	}
+
+	return batch, batchCursor, true, nil
 }
 
 func commentBatchKey(_ int, comment Comment) string {
@@ -1196,21 +939,6 @@ func nextVisibleShowMoreButton(page *hrod.Page, maxRepliesThreshold int) (*showM
 		return nil, fmt.Errorf("解析可见展开按钮位置失败: %w", err)
 	}
 	return &button, nil
-}
-
-func commentParentID(page *hrod.Page, parentIndex int) (string, error) {
-	result, err := page.Eval(`(parentIndex) => {
-		const parent = document.querySelectorAll(".parent-comment")[parentIndex];
-		if (!parent) return "";
-		return parent.getAttribute("id") || parent.dataset?.id || parent.getAttribute("data-comment-id") || "";
-	}`, parentIndex)
-	if err != nil {
-		return "", err
-	}
-	if result == nil {
-		return "", nil
-	}
-	return strings.TrimSpace(result.Value.Str()), nil
 }
 
 func dispatchMouseClick(page *hrod.Page, x, y float64) error {
