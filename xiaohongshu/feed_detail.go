@@ -3,7 +3,6 @@ package xiaohongshu
 import (
 	"context"
 	"encoding/json"
-	stderrors "errors"
 	"fmt"
 	"math/rand"
 	"regexp"
@@ -376,7 +375,7 @@ func LoadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 		maxItems = 20
 	}
 
-	logrus.Infof("开始分批加载评论(note-scroller JS scrollBy): maxItems=%d, cursor=%+v", maxItems, cursor)
+	logrus.Infof("开始分批加载评论(note-scroller JS scrollBy): maxItems=%d", maxItems)
 	await, scrollDelta := commentScrollSettings(config.ScrollSpeed)
 	maxRounds := 500
 	commentDeadline := commentLoadDeadline(ctx)
@@ -396,11 +395,15 @@ func LoadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 		if batchCursor.CreatedAt.IsZero() {
 			batchCursor.CreatedAt = time.Now()
 		}
-		batchCursor.ReturnedIDs = append([]string(nil), cursor.ReturnedIDs...)
 		for _, id := range cursor.ReturnedIDs {
-			if id != "" {
-				returned[id] = struct{}{}
+			if id == "" || strings.HasPrefix(id, "idx_") {
+				continue
 			}
+			if _, ok := returned[id]; ok {
+				continue
+			}
+			returned[id] = struct{}{}
+			batchCursor.ReturnedIDs = append(batchCursor.ReturnedIDs, id)
 		}
 	}
 	if feedID == "" {
@@ -410,34 +413,22 @@ func LoadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 		}
 	}
 
-	// 0. 先将当前页面定位到评论区（仅首次进入时执行）
 	if batchCursor.Round == 0 {
 		if err := scrollToCommentsArea(page); err != nil {
-			logrus.Warnf("定位评论区失败: %v", err)
+			return nil, nil, false, fmt.Errorf("定位评论区失败: %w", err)
 		}
-		// 首次进入时，温柔滚动触发评论懒加载
 		if moved, err := scrollNoteScrollerMoved(page, 160); err != nil {
-			logrus.Warnf("初始滚动触发评论懒加载失败: %v", err)
+			return nil, nil, false, fmt.Errorf("初始滚动触发评论懒加载失败: %w", err)
 		} else if !moved {
 			logrus.Infof("初始评论滚动未推进，等待页面 end 状态确认")
 		}
 		batchCursor.Round++
 		if err := page.Sleep(await); err != nil {
-			return nil, batchCursor, true, err
+			return nil, nil, false, err
 		}
 		if err := page.Sleep(time.Second); err != nil {
-			return nil, batchCursor, true, err
+			return nil, nil, false, err
 		}
-	}
-
-	// 读取当前 DOM 评论基线（续批时从当前位置开始）
-	var baselineCount int
-	baselineKnown := false
-	if p, err := getCommentProgress(page); err == nil {
-		baselineCount = p.Count
-		baselineKnown = true
-	} else {
-		logrus.Warnf("获取评论 baseline 失败: %v", err)
 	}
 
 	collect := func(limit int) ([]Comment, bool, error) {
@@ -446,69 +437,53 @@ func LoadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 		}
 		comments, err := ExtractCommentsFromDOM(page, feedID)
 		if err != nil {
-			if stderrors.Is(err, errors.ErrNoFeedDetail) {
-				logrus.Info("collect_no_detail")
-				return nil, false, nil
-			}
-			logrus.Info("collect_error")
 			return nil, false, err
 		}
 		flat := flattenComments(comments)
 		var batch []Comment
-		keyless := 0
-		dedup := 0
 		for i, comment := range flat {
 			key := commentBatchKey(i, comment)
 			if key == "" {
-				keyless++
 				continue
 			}
 			if _, ok := returned[key]; ok {
-				dedup++
 				continue
 			}
 			if len(batch) >= limit {
-				logrus.Infof("collect_observed extracted=%d new=%d dedup=%d keyless=%d cursor_keys=%d round=%d", len(flat), len(batch), dedup, keyless, len(batchCursor.ReturnedIDs), batchCursor.Round)
 				return batch, true, nil
 			}
 			returned[key] = struct{}{}
 			batchCursor.ReturnedIDs = append(batchCursor.ReturnedIDs, key)
 			batch = append(batch, comment)
 		}
-		logrus.Infof("collect_observed extracted=%d new=%d dedup=%d keyless=%d cursor_keys=%d round=%d", len(flat), len(batch), dedup, keyless, len(batchCursor.ReturnedIDs), batchCursor.Round)
 		return batch, false, nil
 	}
 
 	var batch []Comment
+	replyClicksTotal := 0
+	replyStall := false
+	clickedParents := make(map[int]struct{})
 
-	// 初始 scroll 后根据进度决策（不无条件 collect）
+	more, moreVisible, collectErr := collect(maxItems)
+	if collectErr != nil {
+		return nil, nil, false, collectErr
+	}
+	batch = append(batch, more...)
+	if len(batch) >= maxItems {
+		return batch, batchCursor, true, nil
+	}
+
 	progress, progressErr := getCommentProgress(page)
-	if progressErr == nil && progress.NoComments {
-		return batch, batchCursor, false, nil
+	if progressErr != nil {
+		return nil, nil, false, fmt.Errorf("评论进度读取失败: %w", progressErr)
 	}
-
-	if progressErr == nil && progress.AtEnd {
-		more, moreVisible, collectErr := collect(maxItems)
-		if collectErr != nil {
-			return batch, batchCursor, false, collectErr
+	if progress.AtEnd {
+		done := len(batch) == 0 && !moreVisible && (progress.Total <= 0 || len(batchCursor.ReturnedIDs) >= progress.Total)
+		done = done && !(progress.NoComments && (progress.Total > 0 || len(batchCursor.ReturnedIDs) > 0))
+		if done {
+			return batch, batchCursor, false, nil
 		}
-		batch = append(batch, more...)
-		return batch, batchCursor, moreVisible, nil
-	}
-
-	if baselineKnown && progressErr == nil && progress.Count > baselineCount {
-		baselineCount = progress.Count
-		more, _, collectErr := collect(maxItems)
-		if collectErr != nil {
-			return batch, batchCursor, true, collectErr
-		}
-		batch = append(batch, more...)
-		if len(batch) >= maxItems {
-			return batch, batchCursor, true, nil
-		}
-	} else if !baselineKnown && progressErr == nil {
-		baselineCount = progress.Count
-		baselineKnown = true
+		return batch, batchCursor, true, nil
 	}
 
 	for i := 0; i < maxRounds && len(batch) < maxItems; i++ {
@@ -518,89 +493,90 @@ func LoadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 		}
 		moved, scrollErr := scrollNoteScrollerMoved(page, scrollDelta)
 		if scrollErr != nil {
-			if len(batch) > 0 {
-				logrus.Warnf("评论容器滚动失败，返回已有部分结果: %v", scrollErr)
-				return batch, batchCursor, true, nil
-			}
-			logrus.Warnf("评论容器滚动失败，继续下一轮: %v", scrollErr)
-			continue
+			return nil, nil, false, fmt.Errorf("评论容器滚动失败: %w", scrollErr)
 		}
 		batchCursor.Round++
 		if err := page.Sleep(await); err != nil {
-			return batch, batchCursor, true, err
+			return nil, nil, false, err
 		}
 
-		if config.ClickMoreReplies {
-			button, err := nextVisibleShowMoreButton(page, config.MaxRepliesThreshold)
-			if err != nil {
-				logrus.Warnf("检查可见子评论展开按钮失败: %v", err)
-			} else if button != nil {
+		if config.ClickMoreReplies && !replyStall {
+			roundClicks := 0
+			for roundClicks < 2 && replyClicksTotal < 8 && !replyStall {
+				button, err := nextVisibleShowMoreButton(page, config.MaxRepliesThreshold)
+				if err != nil {
+					return nil, nil, false, fmt.Errorf("查询展开按钮失败: %w", err)
+				}
+				if button == nil {
+					break
+				}
+				if _, clicked := clickedParents[button.ParentIndex]; clicked {
+					replyStall = true
+					break
+				}
 				before, countErr := countReplyItems(page, button.ParentIndex)
 				if countErr != nil {
-					before = -1
+					return nil, nil, false, fmt.Errorf("回复计数失败: %w", countErr)
 				}
-				logrus.Infof("分批加载中点击展开子评论: %s", button.Text)
 				if err := dispatchMouseClick(page, button.X, button.Y); err != nil {
-					logrus.Warnf("分批加载中展开子评论失败: %v", err)
-				} else {
-					batchCursor.ExpandRound++
-					if before >= 0 {
-						if err := waitReplyItemsChanged(page, button.ParentIndex, before, 7*time.Second); err != nil {
-							logrus.Debugf("等待子评论增长超时，继续滚动: %v", err)
-						}
-					}
+					return nil, nil, false, fmt.Errorf("回复展开点击失败: %w", err)
+				}
+				replyClicksTotal++
+				roundClicks++
+				batchCursor.ExpandRound++
+				clickedParents[button.ParentIndex] = struct{}{}
+				if waitErr := waitReplyItemsChanged(page, button.ParentIndex, before, 3*time.Second); waitErr != nil {
+					replyStall = true
 				}
 			}
 		}
 
-		progress, progressErr := getCommentProgress(page)
-		if progressErr != nil {
-			logrus.Warnf("评论进度检查失败: %v", progressErr)
-			continue
+		more, moreVisible, collectErr = collect(maxItems - len(batch))
+		if collectErr != nil {
+			return nil, nil, false, collectErr
 		}
-		if progress.NoComments {
-			return batch, batchCursor, false, nil
+		batch = append(batch, more...)
+		if len(batch) >= maxItems {
+			return batch, batchCursor, true, nil
+		}
+
+		progress, progressErr = getCommentProgress(page)
+		if progressErr != nil {
+			return nil, nil, false, fmt.Errorf("评论进度读取失败: %w", progressErr)
 		}
 		if progress.AtEnd {
-			more, moreVisible, collectErr := collect(maxItems - len(batch))
-			if collectErr != nil {
-				return batch, batchCursor, false, collectErr
+			done := len(batch) == 0 && !moreVisible && (progress.Total <= 0 || len(batchCursor.ReturnedIDs) >= progress.Total)
+			done = done && !(progress.NoComments && (progress.Total > 0 || len(batchCursor.ReturnedIDs) > 0))
+			if done {
+				return batch, batchCursor, false, nil
 			}
-			batch = append(batch, more...)
-			return batch, batchCursor, moreVisible, nil
+			return batch, batchCursor, true, nil
 		}
 		if !moved {
-			return batch, batchCursor, true, fmt.Errorf("评论容器未推进且尚未出现 end 标识")
-		}
-		if !baselineKnown {
-			baselineCount = progress.Count
-			baselineKnown = true
-			continue
-		}
-		if progress.Count > baselineCount {
-			baselineCount = progress.Count
-			more, _, collectErr := collect(maxItems - len(batch))
-			if collectErr != nil {
-				return batch, batchCursor, true, collectErr
-			}
-			batch = append(batch, more...)
+			return batch, batchCursor, true, nil
 		}
 	}
 
 	if ctx.Err() != nil {
-		return batch, batchCursor, false, ctx.Err()
+		return nil, nil, false, ctx.Err()
 	}
-	finalProgress, finalErr := getCommentProgress(page)
-	if finalErr == nil && finalProgress.AtEnd {
-		more, moreVisible, collectErr := collect(maxItems - len(batch))
-		if collectErr != nil {
-			return batch, batchCursor, true, collectErr
+	m, moreVis, collectErr := collect(maxItems - len(batch))
+	if collectErr != nil {
+		return nil, nil, false, collectErr
+	}
+	batch = append(batch, m...)
+	p, e := getCommentProgress(page)
+	if e != nil {
+		return nil, nil, false, fmt.Errorf("评论进度读取失败: %w", e)
+	}
+	if p.AtEnd {
+		done := len(batch) == 0 && !moreVis && (p.Total <= 0 || len(batchCursor.ReturnedIDs) >= p.Total)
+		done = done && !(p.NoComments && (p.Total > 0 || len(batchCursor.ReturnedIDs) > 0))
+		if done {
+			return batch, batchCursor, false, nil
 		}
-		batch = append(batch, more...)
-		return batch, batchCursor, moreVisible, nil
 	}
-	hasMore := true
-	return batch, batchCursor, hasMore, nil
+	return batch, batchCursor, true, nil
 }
 
 func handleScrollError(batch []Comment, batchCursor *CommentCursor, scrollErr error) ([]Comment, *CommentCursor, bool, error) {
@@ -611,14 +587,11 @@ func handleScrollError(batch []Comment, batchCursor *CommentCursor, scrollErr er
 	return batch, batchCursor, true, fmt.Errorf("评论容器滚动失败: %w", scrollErr)
 }
 
-func commentBatchKey(parentIndex int, comment Comment) string {
+func commentBatchKey(_ int, comment Comment) string {
 	if comment.ID != "" {
 		return comment.ID
 	}
-	if comment.Content == "" {
-		return ""
-	}
-	return fmt.Sprintf("idx_%d_%.30s", parentIndex, comment.Content)
+	return ""
 }
 
 func flattenComments(comments []Comment) []Comment {
