@@ -12,7 +12,7 @@ const (
 	SelectorSearchInputInSearchResult = `#search-input`
 	SelectorSearchInput               = SelectorSearchInputInFeeds + `, ` + SelectorSearchInputInSearchResult + `, input[placeholder*="搜索"]` // 兜底：匹配 placeholder 含"搜索"的输入框
 	SelectorMarkedSearchInput         = `[data-xhs-mcp-search-input="1"]`
-	SelectorSelectedSearchInput       = `[data-xhs-mcp-search-input="selected"]`
+	SelectorSelectedSearchInput       = `[data-xhs-mcp-search-input="selected"]:not([aria-hidden="true"])`
 	SelectorSearchButton              = `.search-icon, .search-btn, button[type="submit"]`
 	SelectorSearchResult              = `.feeds-container, .note-list, .search-layout, div[data-v-]`
 	SelectorFeedCard                  = `section.note-item, .note-item, .feeds-container section, .note-list section`
