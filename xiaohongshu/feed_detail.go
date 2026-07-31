@@ -515,7 +515,7 @@ func LoadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 			return nil, nil, false, err
 		}
 
-		if config.ClickMoreReplies && !replyStall && moved {
+		if config.ClickMoreReplies && !replyStall {
 			roundClicks := 0
 			for roundClicks < 2 && replyClicksTotal < 8 && !replyStall {
 				button, err := nextVisibleShowMoreButton(page, config.MaxRepliesThreshold)
