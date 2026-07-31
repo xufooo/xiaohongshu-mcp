@@ -105,7 +105,7 @@ func ClassifyRisk(page *hrod.Page) (RiskSignal, error) {
 			{
 				kind: "access_anomaly",
 				reason: "访问异常或操作频繁",
-				keywords: ["操作频繁", "访问太频繁", "账号异常", "风险提示"],
+				keywords: ["操作频繁", "访问太频繁", "账号异常"],
 				dom: []
 			},
 			{
@@ -202,8 +202,7 @@ func riskSignalFromReadyProbe(probe xhsReadyProbe) RiskSignal {
 		signal.Reason = "验证码或安全验证"
 	case strings.Contains(text, "操作频繁") ||
 		strings.Contains(text, "访问太频繁") ||
-		strings.Contains(text, "账号异常") ||
-		strings.Contains(text, "风险提示"):
+		strings.Contains(text, "账号异常"):
 		signal.Kind = RiskAccessAnomaly
 		signal.Reason = "访问异常或操作频繁"
 	}
