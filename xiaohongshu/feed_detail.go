@@ -460,7 +460,6 @@ func LoadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 	var batch []Comment
 	replyClicksTotal := 0
 	replyStall := false
-	clickedParents := make(map[int]struct{})
 
 	inputBase := len(batchCursor.ReturnedIDs)
 
@@ -478,91 +477,59 @@ func LoadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 		return nil, nil, false, fmt.Errorf("评论进度读取失败: %w", progressErr)
 	}
 
-	if len(batch) >= maxItems {
-		if progress.AtEnd && !moreVisible {
-			return batch, batchCursor, false, nil
-		}
-		return batch, batchCursor, true, nil
-	}
-
-	if progress.AtEnd {
-		if !moreVisible {
-			return batch, batchCursor, false, nil
-		}
-		return batch, batchCursor, true, nil
-	}
-
-	for i := 0; i < 500 && len(batch) < maxItems; i++ {
+	for i := 0; i < 500; i++ {
 		if rem := remaining(); rem < 15*time.Second {
 			logrus.Warnf("评论分批加载剩余时间不足(%s)，停止新操作", rem.Round(time.Second))
 			break
 		}
 
-		moved, scrollErr := scrollNoteScrollerMoved(page, scrollDelta)
-		if scrollErr != nil {
-			if len(batchCursor.ReturnedIDs) > inputBase && ctx.Err() == nil {
-				return batch, batchCursor, true, nil
+		if config.ClickMoreReplies {
+			button, err := nextShowMoreButton(page, config.MaxRepliesThreshold)
+			if err != nil {
+				if len(batchCursor.ReturnedIDs) > inputBase && ctx.Err() == nil {
+					return batch, batchCursor, true, nil
+				}
+				return nil, nil, false, fmt.Errorf("查询展开按钮失败: %w", err)
 			}
-			return nil, nil, false, fmt.Errorf("评论容器滚动失败: %w", scrollErr)
-		}
-		if moved {
-			batchCursor.Round++
-		}
-		if err := page.Sleep(await); err != nil {
-			if len(batchCursor.ReturnedIDs) > inputBase && ctx.Err() == nil {
-				return batch, batchCursor, true, nil
-			}
-			return nil, nil, false, err
-		}
-
-		if config.ClickMoreReplies && !replyStall {
-			roundClicks := 0
-			for roundClicks < 2 && replyClicksTotal < 8 && !replyStall {
-				button, err := nextVisibleShowMoreButton(page, config.MaxRepliesThreshold)
-				if err != nil {
-					if len(batchCursor.ReturnedIDs) > inputBase && ctx.Err() == nil {
-						return batch, batchCursor, true, nil
+			if button != nil {
+				if len(batch) >= maxItems {
+					return batch, batchCursor, true, nil
+				}
+				if !replyStall && replyClicksTotal < 8 {
+					before, countErr := countReplyItems(page, button.ParentIndex)
+					if countErr != nil {
+						if len(batchCursor.ReturnedIDs) > inputBase && ctx.Err() == nil {
+							return batch, batchCursor, true, nil
+						}
+						return nil, nil, false, fmt.Errorf("回复计数失败: %w", countErr)
 					}
-					return nil, nil, false, fmt.Errorf("查询展开按钮失败: %w", err)
-				}
-				if button == nil {
-					break
-				}
-				if _, clicked := clickedParents[button.ParentIndex]; clicked {
-					replyStall = true
-					break
-				}
-				before, countErr := countReplyItems(page, button.ParentIndex)
-				if countErr != nil {
-					if len(batchCursor.ReturnedIDs) > inputBase && ctx.Err() == nil {
-						return batch, batchCursor, true, nil
+					if err := dispatchMouseClick(page.Context(ctx), button.X, button.Y); err != nil {
+						if len(batchCursor.ReturnedIDs) > inputBase && ctx.Err() == nil {
+							return batch, batchCursor, true, nil
+						}
+						return nil, nil, false, fmt.Errorf("回复展开点击失败: %w", err)
 					}
-					return nil, nil, false, fmt.Errorf("回复计数失败: %w", countErr)
-				}
-				if err := dispatchMouseClick(page.Context(ctx), button.X, button.Y); err != nil {
-					if len(batchCursor.ReturnedIDs) > inputBase && ctx.Err() == nil {
-						return batch, batchCursor, true, nil
+					replyClicksTotal++
+					batchCursor.ExpandRound++
+					if waitErr := waitReplyItemsChanged(page, button.ParentIndex, before, 3*time.Second); waitErr != nil {
+						replyStall = true
 					}
-					return nil, nil, false, fmt.Errorf("回复展开点击失败: %w", err)
+					more, moreVisible, collectErr = collect(maxItems - len(batch))
+					if collectErr != nil {
+						if len(batchCursor.ReturnedIDs) > inputBase && ctx.Err() == nil {
+							return batch, batchCursor, true, nil
+						}
+						return nil, nil, false, collectErr
+					}
+					batch = append(batch, more...)
+					continue
 				}
-				replyClicksTotal++
-				roundClicks++
-				batchCursor.ExpandRound++
-				clickedParents[button.ParentIndex] = struct{}{}
-				if waitErr := waitReplyItemsChanged(page, button.ParentIndex, before, 3*time.Second); waitErr != nil {
-					replyStall = true
+				if len(batchCursor.ReturnedIDs) > inputBase && ctx.Err() == nil {
+					return batch, batchCursor, true, nil
 				}
+				return nil, nil, false, fmt.Errorf("评论滚动无进展，请重试")
 			}
 		}
-
-		more, moreVisible, collectErr = collect(maxItems - len(batch))
-		if collectErr != nil {
-			if len(batchCursor.ReturnedIDs) > inputBase && ctx.Err() == nil {
-				return batch, batchCursor, true, nil
-			}
-			return nil, nil, false, collectErr
-		}
-		batch = append(batch, more...)
 
 		progress, progressErr = getCommentProgress(page)
 		if progressErr != nil {
@@ -586,6 +553,32 @@ func LoadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 			return batch, batchCursor, true, nil
 		}
 
+		moved, scrollErr := scrollNoteScrollerMoved(page, scrollDelta)
+		if scrollErr != nil {
+			if len(batchCursor.ReturnedIDs) > inputBase && ctx.Err() == nil {
+				return batch, batchCursor, true, nil
+			}
+			return nil, nil, false, fmt.Errorf("评论容器滚动失败: %w", scrollErr)
+		}
+		if moved {
+			batchCursor.Round++
+		}
+		if err := page.Sleep(await); err != nil {
+			if len(batchCursor.ReturnedIDs) > inputBase && ctx.Err() == nil {
+				return batch, batchCursor, true, nil
+			}
+			return nil, nil, false, err
+		}
+
+		more, moreVisible, collectErr = collect(maxItems - len(batch))
+		if collectErr != nil {
+			if len(batchCursor.ReturnedIDs) > inputBase && ctx.Err() == nil {
+				return batch, batchCursor, true, nil
+			}
+			return nil, nil, false, collectErr
+		}
+		batch = append(batch, more...)
+
 		if !moved && len(more) == 0 {
 			if ctx.Err() != nil {
 				return nil, nil, false, ctx.Err()
@@ -593,7 +586,7 @@ func LoadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 			p, pe := getCommentProgress(page)
 			if pe == nil && p.AtEnd {
 				if !moreVisible {
-					return batch, batchCursor, false, nil
+					break
 				}
 				return batch, batchCursor, true, nil
 			}
@@ -618,6 +611,22 @@ func LoadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 	batch = append(batch, m...)
 
 	idsGrew := len(batchCursor.ReturnedIDs) > inputBase
+
+	if config.ClickMoreReplies {
+		button, err := nextShowMoreButton(page, config.MaxRepliesThreshold)
+		if err != nil {
+			if len(batchCursor.ReturnedIDs) > inputBase && ctx.Err() == nil {
+				return batch, batchCursor, true, nil
+			}
+			return nil, nil, false, fmt.Errorf("查询展开按钮失败: %w", err)
+		}
+		if button != nil {
+			if idsGrew {
+				return batch, batchCursor, true, nil
+			}
+			return nil, nil, false, fmt.Errorf("评论滚动无进展，请重试")
+		}
+	}
 
 	p, e := getCommentProgress(page)
 	if e != nil {
@@ -686,7 +695,7 @@ func currentFeedIDFromPage(page *hrod.Page) (string, error) {
 
 func commentScrollSettings(speed string) (time.Duration, float64) {
 	await := map[string]time.Duration{"slow": 1200 * time.Millisecond, "normal": time.Second, "fast": time.Second}[speed]
-	scrollDelta := map[string]float64{"slow": 100, "normal": 150, "fast": 150}[speed]
+	scrollDelta := map[string]float64{"slow": 50, "normal": 150, "fast": 250}[speed]
 	if await < time.Second {
 		await = time.Second
 	}
@@ -856,7 +865,6 @@ func nextShowMoreButton(page *hrod.Page, maxRepliesThreshold int) (*showMoreButt
 			if (match?.[2] === "万") count *= 10000;
 			if (match?.[2] === "千") count *= 1000;
 			count = Math.floor(count);
-			if (maxRepliesThreshold > 0 && count > maxRepliesThreshold) continue;
 			btn.scrollIntoView({ block: "center", inline: "nearest" });
 			rect = btn.getBoundingClientRect();
 			if (scroller) {
@@ -917,7 +925,6 @@ func nextVisibleShowMoreButton(page *hrod.Page, maxRepliesThreshold int) (*showM
 			if (match?.[2] === "万") count *= 10000;
 			if (match?.[2] === "千") count *= 1000;
 			count = Math.floor(count);
-			if (maxRepliesThreshold > 0 && count > maxRepliesThreshold) continue;
 			return JSON.stringify({
 				text,
 				x: rect.left + rect.width / 2,
