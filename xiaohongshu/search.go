@@ -466,7 +466,7 @@ func probeSearchResultsKeyword(page *hrod.Page, keyword string) (searchResultsKe
 			state_signature: stateSignature(feeds).slice(0, 500),
 			dom_signature: domSig.slice(0, 500),
 		});
-	}`, keyword, SelectorFeedCard, SelectorSearchInput, SelectorMarkedSearchInput)
+	}`, keyword, SelectorFeedCard, SelectorSearchInput, SelectorSelectedSearchInput)
 	if err != nil {
 		return searchResultsKeywordProbe{}, err
 	}
@@ -685,8 +685,7 @@ func waitForSearchInput(page *hrod.Page, timeout time.Duration, searchSelector s
 		} else {
 			last = probe
 			if probe.HasSearchInput && probe.SearchInputVisible {
-					// 优先用 marker 取回 probe 实际选中的元素
-					input, err := page.Element(SelectorMarkedSearchInput)
+				input, err := page.Element(SelectorSelectedSearchInput)
 				if err == nil {
 					return input, nil
 				}
@@ -732,7 +731,7 @@ func probeSearchInput(page *hrod.Page, searchSelector, primarySelector string) (
 			el.getAttribute("data-placeholder") || "",
 			(el.innerText || "").slice(0, 40),
 		].join(" ");
-		document.querySelectorAll('[data-xhs-mcp-search-input="1"]').forEach((el) => {
+		document.querySelectorAll('[data-xhs-mcp-search-input="1"], [data-xhs-mcp-search-input="selected"]').forEach((el) => {
 			el.removeAttribute("data-xhs-mcp-search-input");
 		});
 		// 优先查稳定 ID 选择器，查不到再查 placeholder 兜底
@@ -748,7 +747,7 @@ func probeSearchInput(page *hrod.Page, searchSelector, primarySelector string) (
 			searchInput = Array.from(document.querySelectorAll(searchSelector)).find((el) => visible(el) && clickHit(el));
 		}
 		if (searchInput) {
-			searchInput.setAttribute("data-xhs-mcp-search-input", "1");
+			searchInput.setAttribute("data-xhs-mcp-search-input", "selected");
 		}
 		const inputs = Array.from(document.querySelectorAll('input, textarea, [contenteditable="true"]'))
 			.slice(0, 8)

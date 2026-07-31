@@ -162,7 +162,7 @@ func probeXHSReady(page *hrod.Page, feedID string) (xhsReadyProbe, error) {
 		const riskKeywords = [
 			"登录已过期", "登录失效", "请先登录", "请登录", "扫码登录",
 			"验证码", "滑块", "安全验证", "请验证", "人机验证",
-			"操作频繁", "访问太频繁", "账号异常", "风险提示"
+			"操作频繁", "访问太频繁", "账号异常"
 		];
 		const risk = riskKeywords.find((keyword) => text.includes(keyword)) || "";
 		const riskIndex = risk ? text.indexOf(risk) : -1;
