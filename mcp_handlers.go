@@ -1051,9 +1051,6 @@ func (s *AppServer) handleSessionDetail(ctx context.Context, args SessionDetailA
 		if args.ClickMoreReplies != nil {
 			config.ClickMoreReplies = *args.ClickMoreReplies
 		}
-		if args.ReplyLimit > 0 {
-			config.MaxRepliesThreshold = args.ReplyLimit
-		}
 		if args.ScrollSpeed != "" {
 			config.ScrollSpeed = args.ScrollSpeed
 		}
