@@ -539,7 +539,7 @@ func LoadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 					}
 					return nil, nil, false, fmt.Errorf("回复计数失败: %w", countErr)
 				}
-				if err := dispatchMouseClick(page, button.X, button.Y); err != nil {
+				if err := dispatchMouseClick(page.Context(ctx), button.X, button.Y); err != nil {
 					if len(batchCursor.ReturnedIDs) > inputBase && ctx.Err() == nil {
 						return batch, batchCursor, true, nil
 					}
