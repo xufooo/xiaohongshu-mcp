@@ -347,15 +347,22 @@ func (m *Mouse) ScrollIntoView(el *rod.Element) error {
 	}
 	type probe struct {
 		found                         bool
-		target, visible              rect
-		scrollTop, scrollHeight      float64
-		clientHeight                 float64
+		target, visible               rect
+		centerHit                     bool
+		hitRect                       rect
+		scrollTop, scrollHeight       float64
+		clientHeight                  float64
 		viewportWidth, viewportHeight float64
 	}
 	readProbe := func() (probe, error) {
 		obj, err := el.Eval(`() => {
 			const r = this.getBoundingClientRect();
 			const target = {left: r.left, top: r.top, right: r.right, bottom: r.bottom};
+			const centerX = (r.left + r.right) / 2;
+			const centerY = (r.top + r.bottom) / 2;
+			const hit = document.elementFromPoint(centerX, centerY);
+			const centerHit = !!hit && (hit === this || this.contains(hit));
+			const hitRect = hit && !centerHit ? hit.getBoundingClientRect() : null;
 			let parent = this.parentElement;
 			while (parent) {
 				const style = getComputedStyle(parent);
@@ -369,11 +376,11 @@ func (m *Mouse) ScrollIntoView(el *rod.Element) error {
 					const top = Math.max(0, rawTop);
 					const right = Math.min(window.innerWidth, rawRight);
 					const bottom = Math.min(window.innerHeight, rawBottom);
-					return {found: true, target, visible: {left, top, right, bottom}, scrollTop: parent.scrollTop, scrollHeight: parent.scrollHeight, clientHeight: parent.clientHeight, viewportWidth: window.innerWidth, viewportHeight: window.innerHeight};
+					return {found: true, target, visible: {left, top, right, bottom}, centerHit, hitRect, scrollTop: parent.scrollTop, scrollHeight: parent.scrollHeight, clientHeight: parent.clientHeight, viewportWidth: window.innerWidth, viewportHeight: window.innerHeight};
 				}
 				parent = parent.parentElement;
 			}
-			return {found: false, target, viewportWidth: window.innerWidth, viewportHeight: window.innerHeight};
+			return {found: false, target, centerHit, hitRect, viewportWidth: window.innerWidth, viewportHeight: window.innerHeight};
 		}`)
 		if err != nil {
 			return probe{}, err
@@ -385,7 +392,8 @@ func (m *Mouse) ScrollIntoView(el *rod.Element) error {
 		readRect := func(value gson.JSON) rect {
 			return rect{left: value.Get("left").Num(), top: value.Get("top").Num(), right: value.Get("right").Num(), bottom: value.Get("bottom").Num()}
 		}
-		result := probe{found: value.Get("found").Bool(), target: readRect(value.Get("target")), viewportWidth: value.Get("viewportWidth").Num(), viewportHeight: value.Get("viewportHeight").Num()}
+		result := probe{found: value.Get("found").Bool(), target: readRect(value.Get("target")), centerHit: value.Get("centerHit").Bool(), viewportWidth: value.Get("viewportWidth").Num(), viewportHeight: value.Get("viewportHeight").Num()}
+		result.hitRect = readRect(value.Get("hitRect"))
 		if result.found {
 			result.visible = readRect(value.Get("visible"))
 			result.scrollTop = value.Get("scrollTop").Num()
@@ -438,10 +446,21 @@ func (m *Mouse) ScrollIntoView(el *rod.Element) error {
 		centerX := (before.target.left + before.target.right) / 2
 		centerY := (before.target.top + before.target.bottom) / 2
 		centerVisible := centerX >= before.visible.left && centerX <= before.visible.right && centerY >= before.visible.top && centerY <= before.visible.bottom
-		if centerVisible { return nil }
+		if centerVisible && before.centerHit { return nil }
 		if centerX < before.visible.left || centerX > before.visible.right { return errors.New("element center is outside scroll container horizontally") }
 		var deltaY float64
-		if centerY < before.visible.top+effectiveMargin { deltaY = centerY - before.visible.top - effectiveMargin } else if centerY > before.visible.bottom-effectiveMargin { deltaY = centerY - before.visible.bottom + effectiveMargin } else { return nil }
+		if centerVisible && !before.centerHit {
+			if before.hitRect.right-before.hitRect.left <= 0 || before.hitRect.bottom-before.hitRect.top <= 0 { return errors.New("element center is obscured by non-top overlay") }
+			if centerX < before.hitRect.left || centerX > before.hitRect.right || centerY < before.hitRect.top || centerY > before.hitRect.bottom { return errors.New("element center is obscured by non-top overlay") }
+			if before.hitRect.bottom+1 > before.visible.bottom { return errors.New("element center is obscured by non-top overlay") }
+			deltaY = centerY - before.hitRect.bottom - 1
+		} else if centerY < before.visible.top+effectiveMargin {
+			deltaY = centerY - before.visible.top - effectiveMargin
+		} else if centerY > before.visible.bottom-effectiveMargin {
+			deltaY = centerY - before.visible.bottom + effectiveMargin
+		} else {
+			return nil
+		}
 		if before.scrollTop <= 0 && deltaY < 0 || before.scrollTop >= before.scrollHeight-before.clientHeight-1 && deltaY > 0 { return errors.New("scroll container reached its boundary") }
 		wheelPoint := Point{X: (before.visible.left + before.visible.right) / 2, Y: (before.visible.top + before.visible.bottom) / 2}
 		if err := m.moveTo(wheelPoint, false); err != nil { return err }
@@ -451,7 +470,7 @@ func (m *Mouse) ScrollIntoView(el *rod.Element) error {
 		if err != nil { return err }
 		afterCenterX := (after.target.left + after.target.right) / 2
 		afterCenterY := (after.target.top + after.target.bottom) / 2
-		if after.found && afterCenterX >= after.visible.left && afterCenterX <= after.visible.right && afterCenterY >= after.visible.top && afterCenterY <= after.visible.bottom { return nil }
+		if after.found && afterCenterX >= after.visible.left && afterCenterX <= after.visible.right && afterCenterY >= after.visible.top && afterCenterY <= after.visible.bottom && after.centerHit { return nil }
 		if math.Abs(after.target.top-before.target.top) < 1 && math.Abs(after.scrollTop-before.scrollTop) < 1 { return errors.New("scroll made no progress") }
 	}
 	return errors.New("element did not become visible after maximum scroll attempts")
