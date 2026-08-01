@@ -218,10 +218,6 @@ func (s *AppServer) publishHandler(c *gin.Context) {
 	if s.requireHTTPWriteConfirmation(c, "api_publish_content", key, summary, req.ConfirmToken) {
 		return
 	}
-	if !s.checkRateLimit(c, ratelimit.ActionPublish) {
-		return
-	}
-
 	// 执行发布
 	result, err := s.xiaohongshuService.PublishContent(c.Request.Context(), &req)
 	if err != nil {
@@ -246,10 +242,6 @@ func (s *AppServer) publishVideoHandler(c *gin.Context) {
 	if s.requireHTTPWriteConfirmation(c, "api_publish_video", key, summary, req.ConfirmToken) {
 		return
 	}
-	if !s.checkRateLimit(c, ratelimit.ActionPublish) {
-		return
-	}
-
 	// 执行视频发布
 	result, err := s.xiaohongshuService.PublishVideo(c.Request.Context(), &req)
 	if err != nil {
@@ -263,9 +255,6 @@ func (s *AppServer) publishVideoHandler(c *gin.Context) {
 
 // listFeedsHandler 获取Feeds列表
 func (s *AppServer) listFeedsHandler(c *gin.Context) {
-	if !s.checkRateLimit(c, ratelimit.ActionBrowse) {
-		return
-	}
 	// 获取 Feeds 列表
 	result, err := s.xiaohongshuService.ListFeeds(c.Request.Context())
 	if err != nil {
@@ -280,9 +269,6 @@ func (s *AppServer) listFeedsHandler(c *gin.Context) {
 
 // searchFeedsHandler 搜索Feeds
 func (s *AppServer) searchFeedsHandler(c *gin.Context) {
-	if !s.checkRateLimit(c, ratelimit.ActionSearch) {
-		return
-	}
 	var keyword string
 	var filters xiaohongshu.FilterOption
 
@@ -321,9 +307,6 @@ func (s *AppServer) searchFeedsHandler(c *gin.Context) {
 
 // getFeedDetailHandler 获取Feed详情
 func (s *AppServer) getFeedDetailHandler(c *gin.Context) {
-	if !s.checkRateLimit(c, ratelimit.ActionOpenNote) {
-		return
-	}
 	var req FeedDetailRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		respondError(c, http.StatusBadRequest, "INVALID_REQUEST",
@@ -360,9 +343,6 @@ func (s *AppServer) getFeedDetailHandler(c *gin.Context) {
 
 // userProfileHandler 用户主页
 func (s *AppServer) userProfileHandler(c *gin.Context) {
-	if !s.checkRateLimit(c, ratelimit.ActionBrowse) {
-		return
-	}
 	var req UserProfileRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		respondError(c, http.StatusBadRequest, "INVALID_REQUEST",
@@ -395,10 +375,6 @@ func (s *AppServer) postCommentHandler(c *gin.Context) {
 	if s.requireHTTPWriteConfirmation(c, "api_post_comment", key, summary, req.ConfirmToken) {
 		return
 	}
-	if !s.checkRateLimit(c, ratelimit.ActionComment) {
-		return
-	}
-
 	// 发表评论
 	result, err := s.xiaohongshuService.PostCommentToFeed(c.Request.Context(), req.FeedID, req.XsecToken, req.Content)
 	if err != nil {
@@ -424,10 +400,6 @@ func (s *AppServer) replyCommentHandler(c *gin.Context) {
 	if s.requireHTTPWriteConfirmation(c, "api_reply_comment", key, summary, req.ConfirmToken) {
 		return
 	}
-	if !s.checkRateLimit(c, ratelimit.ActionReply) {
-		return
-	}
-
 	result, err := s.xiaohongshuService.ReplyCommentToFeed(c.Request.Context(), req.FeedID, req.XsecToken, req.CommentID, req.UserID, req.Content)
 	if err != nil {
 		respondServiceError(c, http.StatusInternalServerError, "REPLY_COMMENT_FAILED",
