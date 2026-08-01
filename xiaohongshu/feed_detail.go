@@ -865,6 +865,7 @@ func nextShowMoreButton(page *hrod.Page, maxRepliesThreshold int) (*showMoreButt
 			if (match?.[2] === "万") count *= 10000;
 			if (match?.[2] === "千") count *= 1000;
 			count = Math.floor(count);
+			if (maxRepliesThreshold > 0 && count > maxRepliesThreshold) continue;
 			btn.scrollIntoView({ block: "center", inline: "nearest" });
 			rect = btn.getBoundingClientRect();
 			if (scroller) {
@@ -925,6 +926,7 @@ func nextVisibleShowMoreButton(page *hrod.Page, maxRepliesThreshold int) (*showM
 			if (match?.[2] === "万") count *= 10000;
 			if (match?.[2] === "千") count *= 1000;
 			count = Math.floor(count);
+			if (maxRepliesThreshold > 0 && count > maxRepliesThreshold) continue;
 			return JSON.stringify({
 				text,
 				x: rect.left + rect.width / 2,
