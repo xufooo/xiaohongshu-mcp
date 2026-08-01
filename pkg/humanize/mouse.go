@@ -342,6 +342,7 @@ func (m *Mouse) Scroll(deltaX, deltaY float64) error {
 func (m *Mouse) ScrollIntoView(el *rod.Element) error {
 	const maxAttempts = 12
 	const margin = 80
+	const boundaryTolerance = 1.0
 	type rect struct {
 		left, top, right, bottom float64
 	}
@@ -451,9 +452,13 @@ func (m *Mouse) ScrollIntoView(el *rod.Element) error {
 		var deltaY float64
 		if centerVisible && !before.centerHit {
 			if before.hitRect.right-before.hitRect.left <= 0 || before.hitRect.bottom-before.hitRect.top <= 0 { return errors.New("element center is obscured by non-top overlay") }
-			if before.hitRect.bottom+1 > before.visible.bottom { return errors.New("element center is obscured by non-top overlay") }
-			deltaY = centerY - before.hitRect.bottom - 1
-			if deltaY >= 0 { deltaY = -effectiveMargin }
+			if before.hitRect.top <= before.visible.top+boundaryTolerance && before.hitRect.bottom >= before.visible.bottom-boundaryTolerance { return errors.New("element center is obscured by non-top overlay") }
+			if before.hitRect.bottom >= before.visible.bottom-boundaryTolerance {
+				deltaY = centerY - before.hitRect.top + boundaryTolerance
+			} else {
+				deltaY = centerY - before.hitRect.bottom - boundaryTolerance
+				if deltaY >= 0 { deltaY = -effectiveMargin }
+			}
 		} else if centerY < before.visible.top+effectiveMargin {
 			deltaY = centerY - before.visible.top - effectiveMargin
 		} else if centerY > before.visible.bottom-effectiveMargin {
