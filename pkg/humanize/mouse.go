@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/proto"
+	"github.com/ysmood/gson"
 )
 
 var debugMouse bool
@@ -341,67 +342,111 @@ func (m *Mouse) Scroll(deltaX, deltaY float64) error {
 func (m *Mouse) ScrollIntoView(el *rod.Element) error {
 	const maxAttempts = 12
 	const margin = 80
-	for i := 0; i < maxAttempts; i++ {
-		shape, err := el.Shape()
-		if err != nil {
-			return err
-		}
-		if len(shape.Quads) == 0 {
-			return errors.New("element has no content quads")
-		}
-
-		// CDP quads are viewport-relative, so no scroll offset is needed.
-		q := shape.Quads[0]
-		var minX, maxX, minY, maxY float64
-		for j := 0; j < q.Len(); j++ {
-			x := q[j*2]
-			y := q[j*2+1]
-			if j == 0 || x < minX {
-				minX = x
-			}
-			if j == 0 || x > maxX {
-				maxX = x
-			}
-			if j == 0 || y < minY {
-				minY = y
-			}
-			if j == 0 || y > maxY {
-				maxY = y
-			}
-		}
-
-		vp, err := m.viewport()
-		if err != nil {
-			return err
-		}
-
-		var deltaX, deltaY float64
-		// CDP wheel: positive delta scrolls down/right, negative scrolls up/left.
-		// Element above/left of viewport → scroll up/left (negative delta).
-		// Element below/right of viewport → scroll down/right (positive delta).
-		if maxX < margin {
-			deltaX = maxX - margin
-		} else if minX > vp.width-margin {
-			deltaX = minX - vp.width + margin
-		}
-		if maxY < margin {
-			deltaY = maxY - margin
-		} else if minY > vp.height-margin {
-			deltaY = minY - vp.height + margin
-		}
-
-		if deltaX == 0 && deltaY == 0 {
-			return nil
-		}
-
-		if err := m.Scroll(deltaX, deltaY); err != nil {
-			return err
-		}
-		if err := sleepWithContext(m.ctx, randDuration(80*time.Millisecond, 200*time.Millisecond)); err != nil {
-			return err
-		}
+	type rect struct {
+		left, top, right, bottom float64
 	}
-	return nil
+	type probe struct {
+		found                         bool
+		target, visible              rect
+		scrollTop, scrollHeight      float64
+		clientHeight                 float64
+		viewportWidth, viewportHeight float64
+	}
+	readProbe := func() (probe, error) {
+		obj, err := el.Eval(`() => {
+			const r = this.getBoundingClientRect();
+			const target = {left: r.left, top: r.top, right: r.right, bottom: r.bottom};
+			let parent = this.parentElement;
+			while (parent) {
+				const style = getComputedStyle(parent);
+				if (/^(auto|scroll|overlay)$/.test(style.overflowY) && parent.scrollHeight > parent.clientHeight + 1) {
+					const pr = parent.getBoundingClientRect();
+					const rawLeft = pr.left + parent.clientLeft;
+					const rawTop = pr.top + parent.clientTop;
+					const rawRight = rawLeft + parent.clientWidth;
+					const rawBottom = rawTop + parent.clientHeight;
+					const left = Math.max(0, rawLeft);
+					const top = Math.max(0, rawTop);
+					const right = Math.min(window.innerWidth, rawRight);
+					const bottom = Math.min(window.innerHeight, rawBottom);
+					return {found: true, target, visible: {left, top, right, bottom}, scrollTop: parent.scrollTop, scrollHeight: parent.scrollHeight, clientHeight: parent.clientHeight, viewportWidth: window.innerWidth, viewportHeight: window.innerHeight};
+				}
+				parent = parent.parentElement;
+			}
+			return {found: false, target, viewportWidth: window.innerWidth, viewportHeight: window.innerHeight};
+		}`)
+		if err != nil {
+			return probe{}, err
+		}
+		value, err := m.page.ObjectToJSON(obj)
+		if err != nil {
+			return probe{}, err
+		}
+		readRect := func(value gson.JSON) rect {
+			return rect{left: value.Get("left").Num(), top: value.Get("top").Num(), right: value.Get("right").Num(), bottom: value.Get("bottom").Num()}
+		}
+		result := probe{found: value.Get("found").Bool(), target: readRect(value.Get("target")), viewportWidth: value.Get("viewportWidth").Num(), viewportHeight: value.Get("viewportHeight").Num()}
+		if result.found {
+			result.visible = readRect(value.Get("visible"))
+			result.scrollTop = value.Get("scrollTop").Num()
+			result.scrollHeight = value.Get("scrollHeight").Num()
+			result.clientHeight = value.Get("clientHeight").Num()
+		}
+		return result, nil
+	}
+	windowScroll := func() error {
+		for i := 0; i < maxAttempts; i++ {
+			shape, err := el.Shape()
+			if err != nil {
+				return err
+			}
+			if len(shape.Quads) == 0 {
+				return errors.New("element has no content quads")
+			}
+			q := shape.Quads[0]
+			var minX, maxX, minY, maxY float64
+			for j := 0; j < q.Len(); j++ {
+				x, y := q[j*2], q[j*2+1]
+				if j == 0 || x < minX { minX = x }
+				if j == 0 || x > maxX { maxX = x }
+				if j == 0 || y < minY { minY = y }
+				if j == 0 || y > maxY { maxY = y }
+			}
+			vp, err := m.viewport()
+			if err != nil { return err }
+			var deltaX, deltaY float64
+			if maxX < margin { deltaX = maxX - margin } else if minX > vp.width-margin { deltaX = minX - vp.width + margin }
+			if maxY < margin { deltaY = maxY - margin } else if minY > vp.height-margin { deltaY = minY - vp.height + margin }
+			if deltaX == 0 && deltaY == 0 { return nil }
+			if err := m.Scroll(deltaX, deltaY); err != nil { return err }
+			if err := sleepWithContext(m.ctx, randDuration(80*time.Millisecond, 200*time.Millisecond)); err != nil { return err }
+		}
+		return errors.New("element did not become visible after maximum window scroll attempts")
+	}
+	for i := 0; i < maxAttempts; i++ {
+		before, err := readProbe()
+		if err != nil { return err }
+		if !before.found { return windowScroll() }
+		if before.visible.right-before.visible.left <= 1 || before.visible.bottom-before.visible.top <= 1 { return errors.New("scroll container has no visible area") }
+		effectiveMargin := math.Min(margin, (before.visible.bottom-before.visible.top)/4)
+		centerY := (before.target.top + before.target.bottom) / 2
+		centerVisible := centerY >= before.visible.top+effectiveMargin && centerY <= before.visible.bottom-effectiveMargin
+		if centerVisible { return nil }
+		var deltaY float64
+		if centerY < before.visible.top+effectiveMargin { deltaY = centerY - before.visible.top - effectiveMargin } else if centerY > before.visible.bottom-effectiveMargin { deltaY = centerY - before.visible.bottom + effectiveMargin } else { return nil }
+		if before.scrollTop <= 0 && deltaY < 0 || before.scrollTop >= before.scrollHeight-before.clientHeight-1 && deltaY > 0 { return errors.New("scroll container reached its boundary") }
+		wheelPoint := Point{X: (before.visible.left + before.visible.right) / 2, Y: (before.visible.top + before.visible.bottom) / 2}
+		if err := m.moveTo(wheelPoint, false); err != nil { return err }
+		if err := m.Scroll(0, deltaY); err != nil { return err }
+		if err := sleepWithContext(m.ctx, randDuration(80*time.Millisecond, 200*time.Millisecond)); err != nil { return err }
+		after, err := readProbe()
+		if err != nil { return err }
+		afterCenterY := (after.target.top + after.target.bottom) / 2
+		afterMargin := math.Min(margin, (after.visible.bottom-after.visible.top)/4)
+		if afterCenterY >= after.visible.top+afterMargin && afterCenterY <= after.visible.bottom-afterMargin { return nil }
+		if math.Abs(after.target.top-before.target.top) < 1 && math.Abs(after.scrollTop-before.scrollTop) < 1 { return errors.New("scroll made no progress") }
+	}
+	return errors.New("element did not become visible after maximum scroll attempts")
 }
 
 // Hover scrolls the element into view, moves to it, and pauses briefly.
