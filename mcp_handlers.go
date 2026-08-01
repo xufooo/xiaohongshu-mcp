@@ -1038,6 +1038,9 @@ func (s *AppServer) handleSessionDetail(ctx context.Context, args SessionDetailA
 	if args.SessionID == "" {
 		return sessionMCPErrorResult("session详情获取失败: 缺少session_id参数", sessionNextStepCreateSession())
 	}
+	if args.ReplyLimit != nil && *args.ReplyLimit < 0 {
+		return sessionMCPErrorResult("session分批加载评论失败: reply_limit不能为负数", sessionNextStepOpenNote())
+	}
 
 	if args.MaxItems > 0 || args.Cursor != "" {
 		maxItems := args.MaxItems
@@ -1050,6 +1053,9 @@ func (s *AppServer) handleSessionDetail(ctx context.Context, args SessionDetailA
 		config := xiaohongshu.DefaultCommentLoadConfig()
 		if args.ClickMoreReplies != nil {
 			config.ClickMoreReplies = *args.ClickMoreReplies
+		}
+		if args.ReplyLimit != nil {
+			config.MaxRepliesThreshold = *args.ReplyLimit
 		}
 		if args.ScrollSpeed != "" {
 			config.ScrollSpeed = args.ScrollSpeed
