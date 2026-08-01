@@ -9,7 +9,6 @@ import (
 
 	"github.com/sirupsen/logrus"
 	"github.com/xpzouying/xiaohongshu-mcp/cookies"
-	"github.com/xpzouying/xiaohongshu-mcp/pkg/ratelimit"
 	"github.com/xpzouying/xiaohongshu-mcp/xiaohongshu"
 )
 
@@ -45,26 +44,6 @@ func parseVisibility(args map[string]interface{}) string {
 		return s
 	}
 	return ""
-}
-
-// rateLimitMCP MCP handler 速率限制检查。
-func (s *AppServer) rateLimitMCP(ctx context.Context, name string, action ratelimit.Action) *MCPToolResult {
-	r := s.checkRateLimitInternal(ctx, action)
-	if !r.CanProceed {
-		msg := r.Info.Warning
-		if msg == "" {
-			msg = "操作频率过高，请稍后重试"
-		}
-		logrus.Warnf("[ratelimit] ⚠️ [%s] 操作超限：%s", name, msg)
-		return &MCPToolResult{
-			Content: []MCPContent{{
-				Type: "text",
-				Text: fmt.Sprintf("操作被限流: %s", msg),
-			}},
-			IsError: true,
-		}
-	}
-	return nil
 }
 
 func (s *AppServer) requireBrowserAvailableForMCP(name string) *MCPToolResult {
@@ -405,10 +384,6 @@ func (s *AppServer) handlePublishContent(ctx context.Context, args map[string]in
 	if confirm := s.requireWriteConfirmation("publish_content", key, summary, confirmToken); confirm != nil {
 		return confirm
 	}
-	if blocked := s.rateLimitMCP(ctx, "发布内容", ratelimit.ActionPublish); blocked != nil {
-		return blocked
-	}
-
 	// 执行发布
 	result, err := s.xiaohongshuService.PublishContent(ctx, req)
 	if err != nil {
@@ -490,10 +465,6 @@ func (s *AppServer) handlePublishVideo(ctx context.Context, args map[string]inte
 	if confirm := s.requireWriteConfirmation("publish_video", key, summary, confirmToken); confirm != nil {
 		return confirm
 	}
-	if blocked := s.rateLimitMCP(ctx, "发布视频", ratelimit.ActionPublish); blocked != nil {
-		return blocked
-	}
-
 	// 执行发布
 	result, err := s.xiaohongshuService.PublishVideo(ctx, req)
 	if err != nil {
@@ -519,9 +490,6 @@ func (s *AppServer) handlePublishVideo(ctx context.Context, args map[string]inte
 func (s *AppServer) handleListFeeds(ctx context.Context, args ListFeedsArgs) *MCPToolResult {
 	if args.SessionID == "" {
 		return sessionMCPErrorResult("获取Feeds列表失败: 缺少session_id参数", sessionNextStepCreateSession())
-	}
-	if blocked := s.rateLimitMCP(ctx, "获取Feeds列表", ratelimit.ActionBrowse); blocked != nil {
-		return blocked
 	}
 	logrus.Info("MCP: 获取Feeds列表", "session_id", args.SessionID)
 
@@ -571,10 +539,6 @@ func (s *AppServer) handleSearchFeeds(ctx context.Context, args SearchFeedsArgs)
 	if blocked := s.requireBrowserAvailableForMCP("搜索Feeds"); blocked != nil {
 		return blocked
 	}
-	if blocked := s.rateLimitMCP(ctx, "搜索Feeds", ratelimit.ActionSearch); blocked != nil {
-		return blocked
-	}
-
 	if args.Keyword == "" {
 		return &MCPToolResult{
 			Content: []MCPContent{{
@@ -630,9 +594,6 @@ func (s *AppServer) handleSearchFeeds(ctx context.Context, args SearchFeedsArgs)
 // handleUserProfile 获取用户主页
 func (s *AppServer) handleUserProfile(ctx context.Context, args map[string]any) *MCPToolResult {
 	if blocked := s.requireBrowserAvailableForMCP("获取用户主页"); blocked != nil {
-		return blocked
-	}
-	if blocked := s.rateLimitMCP(ctx, "获取用户主页", ratelimit.ActionBrowse); blocked != nil {
 		return blocked
 	}
 	logrus.Info("MCP: 获取用户主页")
@@ -720,10 +681,6 @@ func (s *AppServer) handleLikeFeed(ctx context.Context, args map[string]interfac
 	if confirm := s.requireWriteConfirmation("like_feed", key, summary, confirmToken); confirm != nil {
 		return confirm
 	}
-	if blocked := s.rateLimitMCP(ctx, action, ratelimit.ActionLike); blocked != nil {
-		return blocked
-	}
-
 	var res *ActionResult
 	var err error
 
@@ -767,10 +724,6 @@ func (s *AppServer) handleFavoriteFeed(ctx context.Context, args map[string]inte
 	if confirm := s.requireWriteConfirmation("favorite_feed", key, summary, confirmToken); confirm != nil {
 		return confirm
 	}
-	if blocked := s.rateLimitMCP(ctx, action, ratelimit.ActionFavorite); blocked != nil {
-		return blocked
-	}
-
 	var res *ActionResult
 	var err error
 
@@ -838,10 +791,6 @@ func (s *AppServer) handlePostComment(ctx context.Context, args map[string]inter
 	if confirm := s.requireWriteConfirmation("post_comment", key, summary, confirmToken); confirm != nil {
 		return confirm
 	}
-	if blocked := s.rateLimitMCP(ctx, "发表评论", ratelimit.ActionComment); blocked != nil {
-		return blocked
-	}
-
 	// 发表评论
 	result, err := s.xiaohongshuService.PostCommentToFeed(ctx, feedID, xsecToken, content)
 	if err != nil {
@@ -927,10 +876,6 @@ func (s *AppServer) handleReplyComment(ctx context.Context, args map[string]inte
 	if confirm := s.requireWriteConfirmation("reply_comment", key, summary, confirmToken); confirm != nil {
 		return confirm
 	}
-	if blocked := s.rateLimitMCP(ctx, "回复评论", ratelimit.ActionReply); blocked != nil {
-		return blocked
-	}
-
 	// 回复评论
 	result, err := s.xiaohongshuService.ReplyCommentToFeed(ctx, feedID, xsecToken, commentID, userID, content)
 	if err != nil {
@@ -993,9 +938,6 @@ func (s *AppServer) handleSessionSearch(ctx context.Context, args SessionSearchA
 	if args.Keyword == "" {
 		return sessionMCPErrorResult("session搜索失败: 缺少keyword参数", sessionNextStepSearchInput())
 	}
-	if blocked := s.rateLimitMCP(ctx, "session搜索", ratelimit.ActionSearch); blocked != nil {
-		return blocked
-	}
 	filter := xiaohongshu.FilterOption{
 		SortBy:      args.Filters.SortBy,
 		NoteType:    args.Filters.NoteType,
@@ -1022,9 +964,6 @@ func (s *AppServer) handleSessionOpenNote(ctx context.Context, args SessionOpenN
 	}
 	if args.ResultRef == "" {
 		return sessionMCPErrorResult("session打开笔记失败: 缺少result_ref参数", sessionNextStepState())
-	}
-	if blocked := s.rateLimitMCP(ctx, "session打开笔记", ratelimit.ActionOpenNote); blocked != nil {
-		return blocked
 	}
 	info, err := s.xiaohongshuService.SessionOpenNote(ctx, args.SessionID, args.ResultRef, args.XsecToken)
 	if err != nil {
@@ -1091,9 +1030,6 @@ func (s *AppServer) handleSessionLike(ctx context.Context, args SessionLikeArgs)
 	if confirm := s.requireWriteConfirmation("session_like", key, summary, args.ConfirmToken); confirm != nil {
 		return confirm
 	}
-	if blocked := s.rateLimitMCP(ctx, action, ratelimit.ActionLike); blocked != nil {
-		return blocked
-	}
 	result, err := s.xiaohongshuService.SessionLike(ctx, args.SessionID, args.Unlike)
 	if err != nil {
 		return sessionMCPErrorFromErr("session点赞失败", err, sessionNextStepState())
@@ -1112,9 +1048,6 @@ func (s *AppServer) handleSessionComment(ctx context.Context, args SessionCommen
 	summary := fmt.Sprintf("session评论: session_id=%s content=%q", args.SessionID, compactWriteSummary(args.Content))
 	if confirm := s.requireWriteConfirmation("session_comment", key, summary, args.ConfirmToken); confirm != nil {
 		return confirm
-	}
-	if blocked := s.rateLimitMCP(ctx, "session评论", ratelimit.ActionComment); blocked != nil {
-		return blocked
 	}
 	result, err := s.xiaohongshuService.SessionComment(ctx, args.SessionID, args.Content)
 	if err != nil {

@@ -1191,17 +1191,6 @@ func (s *XiaohongshuService) CreateBrowseSession(ctx context.Context, forceRecre
 		}
 	}
 
-	if s.rateLimitFunc != nil && !s.rateLimitFunc(ctx, "创建浏览会话", ratelimit.ActionBrowse) {
-		return &xiaohongshu.CreateBrowseSessionResult{
-			Outcome:           "blocked",
-			RecommendedAction: "retry",
-			Status: xiaohongshu.BrowseSessionStatusInfo{
-				Status:    xiaohongshu.SessionNotReady,
-				LastError: "操作频率过高，请稍后重试",
-			},
-		}, nil
-	}
-
 	s.browseSessions.CloseAll()
 
 	page, err := s.acquirePageFor(ctx, "session")
