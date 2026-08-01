@@ -451,9 +451,9 @@ func (m *Mouse) ScrollIntoView(el *rod.Element) error {
 		var deltaY float64
 		if centerVisible && !before.centerHit {
 			if before.hitRect.right-before.hitRect.left <= 0 || before.hitRect.bottom-before.hitRect.top <= 0 { return errors.New("element center is obscured by non-top overlay") }
-			if centerX < before.hitRect.left || centerX > before.hitRect.right || centerY < before.hitRect.top || centerY > before.hitRect.bottom { return errors.New("element center is obscured by non-top overlay") }
 			if before.hitRect.bottom+1 > before.visible.bottom { return errors.New("element center is obscured by non-top overlay") }
 			deltaY = centerY - before.hitRect.bottom - 1
+			if deltaY >= 0 { deltaY = -effectiveMargin }
 		} else if centerY < before.visible.top+effectiveMargin {
 			deltaY = centerY - before.visible.top - effectiveMargin
 		} else if centerY > before.visible.bottom-effectiveMargin {
