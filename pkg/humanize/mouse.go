@@ -414,12 +414,18 @@ func (m *Mouse) ScrollIntoView(el *rod.Element) error {
 			}
 			vp, err := m.viewport()
 			if err != nil { return err }
+			centerX, centerY := (minX+maxX)/2, (minY+maxY)/2
+			if centerX >= 0 && centerX <= vp.width && centerY >= 0 && centerY <= vp.height { return nil }
+			if centerX < 0 || centerX > vp.width { return errors.New("element center is outside viewport horizontally") }
 			var deltaX, deltaY float64
 			if maxX < margin { deltaX = maxX - margin } else if minX > vp.width-margin { deltaX = minX - vp.width + margin }
 			if maxY < margin { deltaY = maxY - margin } else if minY > vp.height-margin { deltaY = minY - vp.height + margin }
-			if deltaX == 0 && deltaY == 0 { return nil }
+			if deltaX == 0 && deltaY == 0 { return errors.New("element center is outside viewport") }
 			if err := m.Scroll(deltaX, deltaY); err != nil { return err }
 			if err := sleepWithContext(m.ctx, randDuration(80*time.Millisecond, 200*time.Millisecond)); err != nil { return err }
+			afterVP, err := m.viewport()
+			if err != nil { return err }
+			if math.Abs(afterVP.scrollX-vp.scrollX) < 1 && math.Abs(afterVP.scrollY-vp.scrollY) < 1 { return errors.New("window scroll made no progress") }
 		}
 		return errors.New("element did not become visible after maximum window scroll attempts")
 	}
@@ -429,9 +435,11 @@ func (m *Mouse) ScrollIntoView(el *rod.Element) error {
 		if !before.found { return windowScroll() }
 		if before.visible.right-before.visible.left <= 1 || before.visible.bottom-before.visible.top <= 1 { return errors.New("scroll container has no visible area") }
 		effectiveMargin := math.Min(margin, (before.visible.bottom-before.visible.top)/4)
+		centerX := (before.target.left + before.target.right) / 2
 		centerY := (before.target.top + before.target.bottom) / 2
-		centerVisible := centerY >= before.visible.top+effectiveMargin && centerY <= before.visible.bottom-effectiveMargin
+		centerVisible := centerX >= before.visible.left && centerX <= before.visible.right && centerY >= before.visible.top && centerY <= before.visible.bottom
 		if centerVisible { return nil }
+		if centerX < before.visible.left || centerX > before.visible.right { return errors.New("element center is outside scroll container horizontally") }
 		var deltaY float64
 		if centerY < before.visible.top+effectiveMargin { deltaY = centerY - before.visible.top - effectiveMargin } else if centerY > before.visible.bottom-effectiveMargin { deltaY = centerY - before.visible.bottom + effectiveMargin } else { return nil }
 		if before.scrollTop <= 0 && deltaY < 0 || before.scrollTop >= before.scrollHeight-before.clientHeight-1 && deltaY > 0 { return errors.New("scroll container reached its boundary") }
@@ -441,9 +449,9 @@ func (m *Mouse) ScrollIntoView(el *rod.Element) error {
 		if err := sleepWithContext(m.ctx, randDuration(80*time.Millisecond, 200*time.Millisecond)); err != nil { return err }
 		after, err := readProbe()
 		if err != nil { return err }
+		afterCenterX := (after.target.left + after.target.right) / 2
 		afterCenterY := (after.target.top + after.target.bottom) / 2
-		afterMargin := math.Min(margin, (after.visible.bottom-after.visible.top)/4)
-		if afterCenterY >= after.visible.top+afterMargin && afterCenterY <= after.visible.bottom-afterMargin { return nil }
+		if after.found && afterCenterX >= after.visible.left && afterCenterX <= after.visible.right && afterCenterY >= after.visible.top && afterCenterY <= after.visible.bottom { return nil }
 		if math.Abs(after.target.top-before.target.top) < 1 && math.Abs(after.scrollTop-before.scrollTop) < 1 { return errors.New("scroll made no progress") }
 	}
 	return errors.New("element did not become visible after maximum scroll attempts")
