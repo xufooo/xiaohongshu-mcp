@@ -457,9 +457,8 @@ func (m *Mouse) ScrollIntoView(el *rod.Element) error {
 				if err := sleepWithContext(m.ctx, randDuration(100*time.Millisecond, 300*time.Millisecond)); err != nil {
 					return err
 				}
-				continue
-			}
-			if before.hitRect.bottom >= before.visible.bottom-boundaryTolerance {
+				deltaY = centerY - (before.visible.top+before.visible.bottom)/2
+			} else if before.hitRect.bottom >= before.visible.bottom-boundaryTolerance {
 				deltaY = centerY - before.hitRect.top + boundaryTolerance
 			} else {
 				deltaY = centerY - before.hitRect.bottom - boundaryTolerance
