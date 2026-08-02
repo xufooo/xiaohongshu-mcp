@@ -70,7 +70,10 @@ func findFeedCardAnchor(page *hrod.Page, feedID string) (*hrod.Element, error) {
 		matched, err := anchor.Eval(`(feedID) => {
 			const href = this.getAttribute('href') || '';
 			const dataFeedID = this.dataset?.feedId || '';
-			return href.includes(feedID) || dataFeedID.includes(feedID) || this.outerHTML.includes(feedID);
+			const matched = href.includes(feedID) || dataFeedID.includes(feedID) || this.outerHTML.includes(feedID);
+			if (!matched) return false;
+			const rect = this.getBoundingClientRect();
+			return rect.width > 0 && rect.height > 0;
 		}`, feedID)
 		if err != nil {
 			continue
