@@ -454,13 +454,10 @@ func (m *Mouse) ScrollIntoView(el *rod.Element) error {
 			invalidHitRect := before.hitRect.right-before.hitRect.left <= 0 || before.hitRect.bottom-before.hitRect.top <= 0
 			fullHeightHit := before.hitRect.top <= before.visible.top+boundaryTolerance && before.hitRect.bottom >= before.visible.bottom-boundaryTolerance
 			if invalidHitRect || fullHeightHit {
-				if i == 0 {
-					if err := sleepWithContext(m.ctx, randDuration(100*time.Millisecond, 300*time.Millisecond)); err != nil {
-						return err
-					}
-					continue
+				if err := sleepWithContext(m.ctx, randDuration(100*time.Millisecond, 300*time.Millisecond)); err != nil {
+					return err
 				}
-				return errors.New("element center is obscured by non-top overlay")
+				continue
 			}
 			if before.hitRect.bottom >= before.visible.bottom-boundaryTolerance {
 				deltaY = centerY - before.hitRect.top + boundaryTolerance
