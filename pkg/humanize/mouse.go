@@ -451,8 +451,17 @@ func (m *Mouse) ScrollIntoView(el *rod.Element) error {
 		if centerX < before.visible.left || centerX > before.visible.right { return errors.New("element center is outside scroll container horizontally") }
 		var deltaY float64
 		if centerVisible && !before.centerHit {
-			if before.hitRect.right-before.hitRect.left <= 0 || before.hitRect.bottom-before.hitRect.top <= 0 { return errors.New("element center is obscured by non-top overlay") }
-			if before.hitRect.top <= before.visible.top+boundaryTolerance && before.hitRect.bottom >= before.visible.bottom-boundaryTolerance { return errors.New("element center is obscured by non-top overlay") }
+			invalidHitRect := before.hitRect.right-before.hitRect.left <= 0 || before.hitRect.bottom-before.hitRect.top <= 0
+			fullHeightHit := before.hitRect.top <= before.visible.top+boundaryTolerance && before.hitRect.bottom >= before.visible.bottom-boundaryTolerance
+			if invalidHitRect || fullHeightHit {
+				if i == 0 {
+					if err := sleepWithContext(m.ctx, randDuration(100*time.Millisecond, 300*time.Millisecond)); err != nil {
+						return err
+					}
+					continue
+				}
+				return errors.New("element center is obscured by non-top overlay")
+			}
 			if before.hitRect.bottom >= before.visible.bottom-boundaryTolerance {
 				deltaY = centerY - before.hitRect.top + boundaryTolerance
 			} else {
