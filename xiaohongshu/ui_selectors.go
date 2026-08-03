@@ -17,8 +17,8 @@ const (
 	SelectorSearchResult              = `.feeds-container, .note-list, .search-layout, div[data-v-]`
 	SelectorFeedCard                  = `section.note-item, .note-item, .feeds-container section, .note-list section`
 	SelectorFeedDetailReady           = `.note-detail-mask, .note-container, .interact-container, .comments-container`
-	SelectorCommentBox                = `div.input-box:not(.search-box-in-content) div.textarea-wrapper textarea.textarea`
-	SelectorCommentSubmitButton       = `div.input-box:not(.search-box-in-content) div.bottom-box-right-submit-button`
+	SelectorCommentBox                = `div.input-box div.content-edit p.content-input`
+	SelectorCommentSubmitButton       = `div.input-box .btn.submit`
 )
 
 type SelectorSpec struct {
