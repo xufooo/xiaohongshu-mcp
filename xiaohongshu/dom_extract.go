@@ -396,7 +396,17 @@ func ExtractInteractStateFromDOM(page *hrod.Page, feedID string) (bool, bool, er
 		const like = document.querySelector(likeSel);
 		const collect = document.querySelector(collectSel);
 		if (!like || !collect) return "";
-		const liked = like.classList.contains("like-active");
+		const likeUse = like.querySelector("use");
+		if (!likeUse) return "";
+		const likeHref = likeUse.getAttribute("xlink:href") || likeUse.getAttribute("href") || "";
+		let liked;
+		if (likeHref === "#liked") {
+			liked = true;
+		} else if (likeHref === "#like") {
+			liked = false;
+		} else {
+			return "";
+		}
 		const use = collect.querySelector("use");
 		if (!use) return "";
 		const href = use.getAttribute("xlink:href") || use.getAttribute("href") || "";
