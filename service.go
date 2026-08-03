@@ -400,7 +400,6 @@ type PublishResponse struct {
 	Content string `json:"content"`
 	Images  int    `json:"images"`
 	Status  string `json:"status"`
-	PostID  string `json:"post_id,omitempty"`
 }
 
 // PublishVideoRequest 发布视频请求（仅支持本地单个视频文件）
@@ -421,7 +420,6 @@ type PublishVideoResponse struct {
 	Content string `json:"content"`
 	Video   string `json:"video"`
 	Status  string `json:"status"`
-	PostID  string `json:"post_id,omitempty"`
 }
 
 // FeedsListResponse Feeds列表响应
