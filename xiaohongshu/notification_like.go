@@ -1,0 +1,127 @@
+package xiaohongshu
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"github.com/go-rod/rod/lib/proto"
+	hrod "github.com/xpzouying/xiaohongshu-mcp/pkg/humanize/rod"
+)
+
+// NotificationLikeResult like_notification 结果。
+type NotificationLikeResult struct {
+	Ref     string `json:"notification_ref"`
+	Liked   bool   `json:"liked"`
+	Skipped bool   `json:"skipped"`
+	Message string `json:"message,omitempty"`
+}
+
+// likeNotificationOnPage 对通知行点赞/取消点赞（幂等）。
+// 状态只以 svg use 的 href 判定（#liked/#like），禁止读取 like-active 类；
+// 点击使用 hrod 真实 Click；点击后轮询状态翻转确认，未确认报 state_unknown。
+func likeNotificationOnPage(ctx context.Context, page *hrod.Page, target notificationTarget, unlike bool) (*NotificationLikeResult, error) {
+	if err := verifyNotificationTargetInState(page, target); err != nil {
+		return nil, err
+	}
+	current, err := readNotificationLikeState(page, target)
+	if err != nil {
+		return nil, fmt.Errorf("读取点赞状态失败，取消点击: %w", err)
+	}
+	if unlike && !current {
+		return &NotificationLikeResult{Ref: target.Ref, Liked: false, Skipped: true, Message: "已处于未点赞状态，无需操作"}, nil
+	}
+	if !unlike && current {
+		return &NotificationLikeResult{Ref: target.Ref, Liked: true, Skipped: true, Message: "已处于点赞状态，无需操作"}, nil
+	}
+
+	row, _, err := findNotificationRowElement(page, target)
+	if err != nil {
+		return nil, err
+	}
+	likeBtn, err := row.Element(SelectorNotificationLikeButton)
+	if err != nil {
+		return nil, fmt.Errorf("通知行点赞按钮缺失: %w", err)
+	}
+	if err := page.SleepRandom(800*time.Millisecond, 1500*time.Millisecond); err != nil {
+		return nil, err
+	}
+	if err := likeBtn.Click(proto.InputMouseButtonLeft, 1); err != nil {
+		return nil, fmt.Errorf("点击点赞按钮失败: %w", err)
+	}
+
+	want := !unlike
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if err := page.SleepRandom(400*time.Millisecond, 800*time.Millisecond); err != nil {
+			return nil, err
+		}
+		got, readErr := readNotificationLikeState(page, target)
+		if readErr != nil {
+			continue
+		}
+		if got == want {
+			return &NotificationLikeResult{Ref: target.Ref, Liked: want, Message: "操作成功"}, nil
+		}
+	}
+	return nil, fmt.Errorf("state_unknown: 点击后点赞状态未确认，不自动二次点击，请重新 list_notifications 后核对")
+}
+
+// readNotificationLikeState 重新读取 DOM 快照，按指纹唯一匹配通知行并解析 svg use href。
+func readNotificationLikeState(page *hrod.Page, target notificationTarget) (bool, error) {
+	dom, err := readNotificationDOMSnapshot(page)
+	if err != nil {
+		return false, err
+	}
+	fp := notificationItemFingerprint(target.Item.From.UserID, target.Item.From.Nickname, target.Item.CommentText)
+	var matched *notificationDOMItem
+	for i := range dom.Items {
+		item := &dom.Items[i]
+		if notificationItemFingerprint(item.UserID, item.Nickname, item.Content) != fp {
+			continue
+		}
+		if matched != nil {
+			return false, fmt.Errorf("通知行指纹歧义，点赞状态不可判定")
+		}
+		matched = item
+	}
+	if matched == nil {
+		return false, fmt.Errorf("未找到匹配的通知行（可能已翻页或失效）")
+	}
+	return parseNotificationLikeHref(matched.LikeUseHref)
+}
+
+// findNotificationRowElement 按指纹唯一匹配当前通知列表中的 DOM 行元素。
+// 返回行元素与行号；歧义或未匹配报错。
+func findNotificationRowElement(page *hrod.Page, target notificationTarget) (*hrod.Element, int, error) {
+	dom, err := readNotificationDOMSnapshot(page)
+	if err != nil {
+		return nil, 0, err
+	}
+	fp := notificationItemFingerprint(target.Item.From.UserID, target.Item.From.Nickname, target.Item.CommentText)
+	index := -1
+	for i := range dom.Items {
+		item := &dom.Items[i]
+		if notificationItemFingerprint(item.UserID, item.Nickname, item.Content) != fp {
+			continue
+		}
+		if index >= 0 {
+			return nil, 0, fmt.Errorf("通知行指纹歧义，取消操作")
+		}
+		index = i
+	}
+	if index < 0 {
+		return nil, 0, fmt.Errorf("未找到匹配的通知行（可能已翻页或失效）")
+	}
+	rows, err := page.Elements(SelectorNotificationItem)
+	if err != nil {
+		return nil, 0, err
+	}
+	if index >= len(rows) {
+		return nil, 0, fmt.Errorf("通知行索引越界: %d/%d", index, len(rows))
+	}
+	return rows[index], index, nil
+}

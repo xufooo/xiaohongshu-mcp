@@ -2,11 +2,12 @@ package xiaohongshu
 
 import (
 	"context"
-	"crypto/rand"
+	crand "crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand"
 	"strconv"
 	"strings"
 	"sync"
@@ -92,9 +93,10 @@ type BrowseSessionPageState struct {
 	RecommendedAction *BrowseSessionAction    `json:"recommended_action,omitempty"`
 	Timeline          []BrowseSessionEvent    `json:"timeline,omitempty"`
 	StateFragment     string                  `json:"state_fragment,omitempty"`
-	ResultsCount      int                     `json:"results_count"`
-	SeenCount         int                     `json:"seen_count"`
-	AvailableActions  []string                `json:"available_actions,omitempty"`
+	ResultsCount      int                               `json:"results_count"`
+	SeenCount         int                               `json:"seen_count"`
+	AvailableActions  []string                          `json:"available_actions,omitempty"`
+	Notification      *BrowseSessionNotificationSurface `json:"notification,omitempty"`
 }
 
 type BrowseSessionCurrent struct {
@@ -118,13 +120,14 @@ type BrowseSessionResult struct {
 }
 
 type BrowseSessionAction struct {
-	Ref       string `json:"ref"`
-	Tool      string `json:"tool"`
-	Label     string `json:"label"`
-	ResultRef string `json:"result_ref,omitempty"`
-	FeedID    string `json:"feed_id,omitempty"`
-	Requires  string `json:"requires,omitempty"`
-	Confirm   bool   `json:"confirm,omitempty"`
+	Ref             string `json:"ref"`
+	Tool            string `json:"tool"`
+	Label           string `json:"label"`
+	ResultRef       string `json:"result_ref,omitempty"`
+	FeedID          string `json:"feed_id,omitempty"`
+	Requires        string `json:"requires,omitempty"`
+	Confirm         bool   `json:"confirm,omitempty"`
+	NotificationRef string `json:"notification_ref,omitempty"`
 }
 
 type BrowseSessionEvent struct {
@@ -133,6 +136,32 @@ type BrowseSessionEvent struct {
 	Status string    `json:"status"`
 	At     time.Time `json:"at"`
 	Note   string    `json:"note,omitempty"`
+}
+
+// BrowseSessionNotificationSurface 通知页面会话的对外状态。
+type BrowseSessionNotificationSurface struct {
+	Tab         NotificationTab     `json:"tab"`
+	Generation  uint64              `json:"generation"`
+	EnteredAt   time.Time           `json:"entered_at"`
+	ScrollCount int                 `json:"scroll_count"`
+	ResultCount int                 `json:"result_count"`
+	Items       []NotificationItem  `json:"items"`
+	Cursor      string              `json:"cursor,omitempty"`
+	HasMore     bool                `json:"has_more"`
+}
+
+// browseNotificationState 通知 surface 的会话内部状态。
+type browseNotificationState struct {
+	active      bool
+	tab         NotificationTab
+	generation  uint64
+	enteredAt   time.Time
+	scrollCount int
+	items       []NotificationItem
+	targets     map[string]notificationTarget
+	cursor      string
+	returnedIDs map[string]bool
+	hasMore     bool
 }
 
 type BrowseSessionPageCounts struct {
@@ -178,6 +207,7 @@ type BrowseSession struct {
 	expiresAt         time.Time
 	timeline          []BrowseSessionEvent
 	initialCommentIDs []string
+	notification      browseNotificationState
 }
 
 type BrowseSessionManager struct {
@@ -216,6 +246,10 @@ func (m *BrowseSessionManager) create(page *hrod.Page, state *ActionStateStore, 
 		onRemove:  m.remove,
 		seenNotes: make(map[string]bool),
 		results:   make(map[string]Feed),
+		notification: browseNotificationState{
+			targets:     make(map[string]notificationTarget),
+			returnedIDs: make(map[string]bool),
+		},
 	}
 	session.opToken <- struct{}{}
 
@@ -376,6 +410,7 @@ func (s *BrowseSession) PageState(ctx context.Context) (*BrowseSessionPageState,
 	current := s.currentStateLocked(kind, resultsCount, availableActions)
 	summary := browseSessionSummary(kind, ready, resultsCount, seenCount, current, recommendedAction)
 	timeline := s.timelineLocked()
+	notification := s.notificationSurfaceLocked()
 	s.mu.Unlock()
 
 	return &BrowseSessionPageState{
@@ -405,6 +440,7 @@ func (s *BrowseSession) PageState(ctx context.Context) (*BrowseSessionPageState,
 		ResultsCount:      resultsCount,
 		SeenCount:         seenCount,
 		AvailableActions:  availableActions,
+		Notification:      notification,
 	}, nil
 }
 
@@ -468,6 +504,7 @@ func (s *BrowseSession) ListFeedsBatch(ctx context.Context, cursor *FeedCursor, 
 		s.read = false
 		s.initialCommentIDs = nil
 		s.results = replaceSessionResults(feeds)
+		s.resetNotificationSurfaceLocked()
 	} else {
 		s.results = appendSessionResults(s.results, feeds)
 	}
@@ -549,6 +586,7 @@ func (s *BrowseSession) searchBatch(ctx context.Context, keyword string, filters
 		s.opened = false
 		s.read = false
 		s.results = replaceSessionResults(feeds)
+		s.resetNotificationSurfaceLocked()
 		s.recordTimelineLocked("search", keyword, "ok", time.Now(), fmt.Sprintf("results=%d", len(feeds)))
 		s.mu.Unlock()
 		s.probeWatchdogSelectorsForKind(opCtx, XHSReadySearch, "")
@@ -624,6 +662,7 @@ func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, xsecToken strin
 			}
 		}
 	}
+	s.resetNotificationSurfaceLocked()
 	s.recordTimelineLocked("open_note", feed.ID, "ok", time.Now(), "opened and content read from search result "+resultRef)
 	info := s.infoLocked()
 	s.mu.Unlock()
@@ -1130,9 +1169,534 @@ func (s *BrowseSession) Back(ctx context.Context) error {
 	s.currentXsecToken = ""
 	s.opened = false
 	s.read = false
+	s.resetNotificationSurfaceLocked()
 	s.recordTimelineLocked("back", feedID, "ok", time.Now(), "history.back()")
 	s.mu.Unlock()
 	return nil
+}
+
+// UnreadNotificationCount 从当前保留页面读取未读数，不点击入口，不清未读。
+func (s *BrowseSession) UnreadNotificationCount(ctx context.Context) (*NotificationCount, error) {
+	opCtx, err := s.beginLockedOperation(ctx, true)
+	if err != nil {
+		return nil, err
+	}
+	defer s.finishOperation()
+
+	s.mu.Lock()
+	page := s.page
+	s.mu.Unlock()
+	if page == nil {
+		return nil, fmt.Errorf("browse session 页面不存在: %s", s.id)
+	}
+	return readNotificationCount(page.Context(opCtx))
+}
+
+// ListNotifications 通过侧栏真实点击进入通知页/切换 tab 并分页读取。
+// 传空 cursor：进入通知页/切 tab/fresh 重新读取首批并建立新 generation；
+// 传有效 cursor：同 tab 续页；过期/无效 cursor 明确拒绝，不做静默 fresh list。
+func (s *BrowseSession) ListNotifications(ctx context.Context, rawTab string, cursor string, maxItems int) (*NotificationList, error) {
+	tab, err := ParseNotificationTab(rawTab)
+	if err != nil {
+		return nil, err
+	}
+	maxItems = normalizeNotificationPageSize(maxItems)
+
+	opCtx, err := s.beginLockedOperation(ctx, true)
+	if err != nil {
+		return nil, err
+	}
+	defer s.finishOperation()
+
+	s.mu.Lock()
+	page := s.page
+	s.mu.Unlock()
+	if page == nil {
+		return nil, fmt.Errorf("browse session 页面不存在: %s", s.id)
+	}
+	page = page.Context(opCtx)
+
+	s.mu.Lock()
+	notif := s.notification
+	s.mu.Unlock()
+
+	var list *NotificationList
+	switch {
+	case cursor == "":
+		list, err = s.startNotificationListLocked(opCtx, page, tab, maxItems)
+	case notif.active && notif.tab == tab && notif.cursor == cursor:
+		list, err = s.continueNotificationListLocked(opCtx, page, tab, maxItems)
+	default:
+		return nil, fmt.Errorf("cursor 已过期或无效（tab/generation 已变化），请传空 cursor 重新 list_notifications")
+	}
+	if err != nil {
+		return nil, err
+	}
+	return list, nil
+}
+
+// startNotificationListLocked 建立/刷新通知 surface generation，并读取首批。
+// 首次真实点击通知入口；跨 tab 真实切换 tab；同 tab fresh list 视为新 generation。
+func (s *BrowseSession) startNotificationListLocked(ctx context.Context, page *hrod.Page, tab NotificationTab, maxItems int) (*NotificationList, error) {
+	s.mu.Lock()
+	notif := s.notification
+	s.mu.Unlock()
+	if !notif.active {
+		if err := enterNotificationPage(ctx, page); err != nil {
+			return nil, err
+		}
+	} else if notif.tab != tab {
+		if err := switchNotificationTab(ctx, page, tab); err != nil {
+			return nil, err
+		}
+	}
+
+	s.mu.Lock()
+	s.beginNotificationSurfaceLocked(tab)
+	s.mu.Unlock()
+	return s.refreshNotificationListLocked(ctx, page, tab, maxItems)
+}
+
+// continueNotificationListLocked 同 tab 续页：逐轮拟人滚动并累计各轮 fresh 到本次最终结果（事务式）：
+// 每轮只把条目收集到局部 batch，任何中途错误都不提交 returned/items/targets（可原样重试）；
+// 只有最终响应组装成功后，才一次性提交并返回。提前停止条件照旧：已达 maxItems、hasMore=false 或连续两轮无新增。
+func (s *BrowseSession) continueNotificationListLocked(ctx context.Context, page *hrod.Page, tab NotificationTab, maxItems int) (*NotificationList, error) {
+	batch := make([]NotificationItem, 0, maxItems)
+	totalFiltered := 0
+	consecutiveNoNew := 0
+	lastHasMore := true
+	seen := make(map[string]bool)
+	emptySeen := 0
+	for round := 0; round < 6; round++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if err := page.SleepRandom(1500*time.Millisecond, 3500*time.Millisecond); err != nil {
+			return nil, err
+		}
+		delta := 350 + rand.Intn(351)
+		if err := page.Actor().Mouse.Scroll(0, float64(delta)); err != nil {
+			return nil, err
+		}
+		s.mu.Lock()
+		s.notification.scrollCount++
+		s.mu.Unlock()
+
+		budget := maxItems
+		if maxItems > 0 {
+			budget = maxItems - len(batch)
+		}
+		fresh, filteredNew, hasMore, err := s.collectNotificationItems(ctx, page, tab, budget, seen, &emptySeen)
+		if err != nil {
+			return nil, err
+		}
+		batch = append(batch, fresh...)
+		totalFiltered += filteredNew
+		lastHasMore = hasMore
+
+		if maxItems > 0 && len(batch) >= maxItems {
+			break
+		}
+		if !lastHasMore {
+			break
+		}
+		if len(fresh) == 0 {
+			consecutiveNoNew++
+			if consecutiveNoNew >= 2 {
+				break
+			}
+			continue
+		}
+		consecutiveNoNew = 0
+	}
+	// 组装成功，事务式提交：只在此处一次性写入 returned/items/targets。
+	return s.finishNotificationListLocked(ctx, tab, batch, totalFiltered, lastHasMore)
+}
+
+// finishNotificationListLocked 组装续页最终响应：事务式提交 batch 后更新 cursor/hasMore 并记录时间线。
+func (s *BrowseSession) finishNotificationListLocked(_ context.Context, tab NotificationTab, batch []NotificationItem, filtered int, hasMore bool) (*NotificationList, error) {
+	s.mu.Lock()
+	s.commitNotificationSelectionsLocked(tab, batch)
+	cursor := notificationOpaqueToken("nc")
+	s.notification.cursor = cursor
+	s.notification.hasMore = hasMore
+	s.recordTimelineLocked("list_notifications", string(tab), "ok", time.Now(),
+		fmt.Sprintf("items=%d filtered=%d has_more=%t", len(batch), filtered, hasMore))
+	s.mu.Unlock()
+
+	return &NotificationList{
+		Tab:          tab,
+		Items:        batch,
+		Filtered:     filtered,
+		Cursor:       cursor,
+		HasMore:      hasMore,
+		ClearsUnread: true,
+		ResultCount:  len(batch),
+	}, nil
+}
+
+// collectNotificationItems 依据当前 state+DOM，在已返回集合基础上挑选一批新条目（事务式，不写 session 状态）：
+// 候选集 = 会话 returnedIDs ∪ 本次调用已见集合（seen）。返回本批条目、本批新过滤数、hasMore；
+// 不标记 returned/不更新 items/targets，由调用方在最终响应组装成功后统一提交，中途错误可原样重试。
+// 超过正预算（budget>0）的不标记，留待下次续页（budget<=0 视为不设上限）。
+func (s *BrowseSession) collectNotificationItems(ctx context.Context, page *hrod.Page, tab NotificationTab, budget int, seen map[string]bool, emptySeen *int) (fresh []NotificationItem, filteredNew int, hasMore bool, err error) {
+	state, err := readNotificationTabState(page, tab)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	if !state.HasState {
+		return nil, 0, false, fmt.Errorf("notification state 缺失（结构漂移）")
+	}
+	dom, err := readNotificationDOMSnapshot(page)
+	if err != nil {
+		return nil, 0, false, err
+	}
+
+	s.mu.Lock()
+	refByID := make(map[string]string)
+	for ref, t := range s.notification.targets {
+		if t.Item.ID != "" {
+			refByID[t.Item.ID] = ref
+		}
+	}
+	returned := s.notification.returnedIDs
+	s.mu.Unlock()
+
+	items, _ := convertNotifications(state.Payload.MessageList, dom, tab, func(entry rawNotification, _ int) string {
+		if entry.ID != "" {
+			if saved, ok := refByID[entry.ID]; ok {
+				return saved
+			}
+		}
+		return notificationOpaqueToken("nr")
+	})
+
+	// 只统计本批「新过滤」条目：本次调用首次见到的不可见条目，以及超出已见数的空 ID 条目。
+	emptyInRound := 0
+	for _, r := range state.Payload.MessageList {
+		if r.ID == "" {
+			emptyInRound++
+			continue
+		}
+		if seen[r.ID] {
+			continue
+		}
+		if !r.visible() {
+			seen[r.ID] = true
+			filteredNew++
+		}
+	}
+	if emptyInRound > *emptySeen {
+		filteredNew += emptyInRound - *emptySeen
+		*emptySeen = emptyInRound
+	}
+
+	// 当前 state 中尚未返回且本次调用未挑选的条目数（预算截断后仍留在本地的缓冲）。
+	unreturned := 0
+	for _, it := range items {
+		if it.ID != "" && !returned[it.ID] && !seen[it.ID] {
+			unreturned++
+		}
+	}
+
+	fresh = make([]NotificationItem, 0, len(items))
+	for _, it := range items {
+		if it.ID == "" {
+			continue // 空 ID 无法去重/截断，fail-closed：不在结果中，已在 filteredNew 计入
+		}
+		if returned[it.ID] || seen[it.ID] {
+			continue
+		}
+		if budget > 0 && len(fresh) >= budget {
+			break // 达到预算上限，不选本批，留待下次续页返回
+		}
+		seen[it.ID] = true
+		fresh = append(fresh, it)
+	}
+	// has_more = 服务端还有更多，或本地仍有未返回的缓冲条目（避免截断后不可达）。
+	hasMore = state.Payload.HasMore || unreturned > len(fresh)
+	return fresh, filteredNew, hasMore, nil
+}
+
+// commitNotificationSelectionsLocked 在最终响应组装成功后，一次性提交本次调用选中的条目：
+// 标记 returned、合并 items、重建 targets。中途任何错误都不得调用它，保证重试可重新收集。
+func (s *BrowseSession) commitNotificationSelectionsLocked(tab NotificationTab, fresh []NotificationItem) {
+	generation := s.notification.generation
+	existing := s.notification.items
+	for _, it := range fresh {
+		if it.ID != "" {
+			s.notification.returnedIDs[it.ID] = true
+		}
+	}
+	// 同 generation 内累积已返回条目（按 ID 去重），surface 反映完整已返回列表。
+	s.notification.items = mergeNotificationItems(existing, fresh)
+	// 保留同 generation 内已有 target，再登记本批新 target，避免旧 notification_ref 失效。
+	nextTargets := make(map[string]notificationTarget)
+	for ref, t := range s.notification.targets {
+		if t.Generation == generation {
+			nextTargets[ref] = t
+		}
+	}
+	for _, it := range s.notification.items {
+		if it.Actionable && it.NotificationRef != "" {
+			nextTargets[it.NotificationRef] = notificationTarget{
+				Ref:         it.NotificationRef,
+				Tab:         tab,
+				Generation:  generation,
+				Item:        it,
+				Liked:       it.Liked,
+				CommentID:   it.CommentID,
+				UserID:      it.From.UserID,
+				Nickname:    it.From.Nickname,
+				CommentText: it.CommentText,
+			}
+		}
+	}
+	s.notification.targets = nextTargets
+}
+
+// refreshNotificationListLocked 单轮刷新（fresh 起始调用）：挑选首批，成功后再事务式提交并组装响应。
+func (s *BrowseSession) refreshNotificationListLocked(ctx context.Context, page *hrod.Page, tab NotificationTab, maxItems int) (*NotificationList, error) {
+	seen := make(map[string]bool)
+	emptySeen := 0
+	fresh, filtered, hasMore, err := s.collectNotificationItems(ctx, page, tab, maxItems, seen, &emptySeen)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	s.commitNotificationSelectionsLocked(tab, fresh)
+	cursor := notificationOpaqueToken("nc")
+	s.notification.cursor = cursor
+	s.notification.hasMore = hasMore
+	s.recordTimelineLocked("list_notifications", string(tab), "ok", time.Now(),
+		fmt.Sprintf("items=%d filtered=%d has_more=%t", len(fresh), filtered, hasMore))
+	s.mu.Unlock()
+
+	return &NotificationList{
+		Tab:          tab,
+		Items:        fresh,
+		Filtered:     filtered,
+		Cursor:       cursor,
+		HasMore:      hasMore,
+		ClearsUnread: true,
+		ResultCount:  len(fresh),
+	}, nil
+}
+
+// LikeNotification 点赞/取消点赞当前 notification surface 中的评论通知，幂等。
+func (s *BrowseSession) LikeNotification(ctx context.Context, notificationRef string, unlike bool) (*NotificationLikeResult, error) {
+	opCtx, err := s.beginLockedOperation(ctx, true)
+	if err != nil {
+		return nil, err
+	}
+	defer s.finishOperation()
+
+	s.mu.Lock()
+	page := s.page
+	active := s.notification.active
+	generation := s.notification.generation
+	target, ok := s.resolveNotificationTargetLocked(notificationRef)
+	s.mu.Unlock()
+	if !ok {
+		return nil, fmt.Errorf("notification_ref 引用已过期或不存在，请重新 list_notifications")
+	}
+	if !active || target.Tab != TabMentions || target.Generation != generation {
+		return nil, fmt.Errorf("notification_ref 已过期（tab/generation 已变化），请重新 list_notifications")
+	}
+	if page == nil {
+		return nil, fmt.Errorf("browse session 页面不存在: %s", s.id)
+	}
+	page = page.Context(opCtx)
+
+	if err := s.checkNotificationWritePreLocked(opCtx); err != nil {
+		return nil, err
+	}
+	signal, err := ClassifyRisk(page)
+	if err != nil {
+		return nil, err
+	}
+	if IsRisk(signal) {
+		return nil, fmt.Errorf("风控中止: %s", signal.Reason)
+	}
+	if err := page.SleepRandom(800*time.Millisecond, 1500*time.Millisecond); err != nil {
+		return nil, err
+	}
+
+	result, err := likeNotificationOnPage(ctx, page, target, unlike)
+	if err != nil {
+		return nil, err
+	}
+
+	s.mu.Lock()
+	if t, ok := s.notification.targets[target.Ref]; ok {
+		t.Liked = result.Liked
+		t.Item.Liked = result.Liked
+		s.notification.targets[target.Ref] = t
+	}
+	// 同步更新 items 中对应条目的点赞状态，保证后续 get_page_state 读到最新 liked。
+	for i := range s.notification.items {
+		if s.notification.items[i].NotificationRef == target.Ref {
+			s.notification.items[i].Liked = result.Liked
+		}
+	}
+	action := "like_notification"
+	if unlike {
+		action = "unlike_notification"
+	}
+	s.recordTimelineLocked(action, target.Ref, "ok", time.Now(), fmt.Sprintf("liked=%t skipped=%t", result.Liked, result.Skipped))
+	s.mu.Unlock()
+	if s.state != nil {
+		_ = s.state.RecordInteraction("", "like_notification")
+	}
+	return result, nil
+}
+
+// ReplyNotification 回复当前 notification surface 中的评论通知。
+func (s *BrowseSession) ReplyNotification(ctx context.Context, notificationRef, content string) (*NotificationReplyResult, error) {
+	if normalizeNotificationText(content) == "" {
+		return nil, fmt.Errorf("回复内容不能为空")
+	}
+	opCtx, err := s.beginLockedOperation(ctx, true)
+	if err != nil {
+		return nil, err
+	}
+	defer s.finishOperation()
+
+	s.mu.Lock()
+	page := s.page
+	active := s.notification.active
+	generation := s.notification.generation
+	target, ok := s.resolveNotificationTargetLocked(notificationRef)
+	s.mu.Unlock()
+	if !ok {
+		return nil, fmt.Errorf("notification_ref 引用已过期或不存在，请重新 list_notifications")
+	}
+	if !active || target.Tab != TabMentions || target.Generation != generation {
+		return nil, fmt.Errorf("notification_ref 已过期（tab/generation 已变化），请重新 list_notifications")
+	}
+	if page == nil {
+		return nil, fmt.Errorf("browse session 页面不存在: %s", s.id)
+	}
+	page = page.Context(opCtx)
+
+	if err := s.checkNotificationWritePreLocked(opCtx); err != nil {
+		return nil, err
+	}
+	signal, err := ClassifyRisk(page)
+	if err != nil {
+		return nil, err
+	}
+	if IsRisk(signal) {
+		return nil, fmt.Errorf("风控中止: %s", signal.Reason)
+	}
+	if err := page.SleepRandom(800*time.Millisecond, 1500*time.Millisecond); err != nil {
+		return nil, err
+	}
+
+	result, err := replyNotificationOnPage(ctx, page, target, content)
+	if err != nil {
+		return nil, err
+	}
+
+	s.mu.Lock()
+	s.recordTimelineLocked("reply_notification", target.Ref, "ok", time.Now(), compactTimelineNote(content))
+	s.mu.Unlock()
+	if s.state != nil {
+		_ = s.state.RecordInteraction("", "reply_notification")
+	}
+	return result, nil
+}
+
+// checkNotificationWritePreLocked 写操作前检查 ActionStateStore 风控冷却。
+func (s *BrowseSession) checkNotificationWritePreLocked(ctx context.Context) error {
+	if s.state == nil {
+		return nil
+	}
+	state, err := s.state.Load()
+	if err != nil {
+		return err
+	}
+	if state.RiskCooldownUntil.After(time.Now()) {
+		return fmt.Errorf("账号处于风控冷却中，冷却至 %s：%s",
+			state.RiskCooldownUntil.Format(time.RFC3339), state.LastRiskText)
+	}
+	return nil
+}
+
+// resolveNotificationTargetLocked 按 ref 查找当前 surface 中的写操作 target。
+// 必须在持锁时调用。
+func (s *BrowseSession) resolveNotificationTargetLocked(ref string) (notificationTarget, bool) {
+	if ref == "" || !s.notification.active {
+		return notificationTarget{}, false
+	}
+	t, ok := s.notification.targets[ref]
+	return t, ok
+}
+
+// beginNotificationSurfaceLocked 开启新 generation 并清空旧 ref/cursor。必须在持锁时调用。
+// 同时记录进入通知页前的 URL 到 sourceURL，并清除 feed 打开状态。
+func (s *BrowseSession) beginNotificationSurfaceLocked(tab NotificationTab) {
+	if !s.notification.active {
+		if s.currentURL != "" {
+			s.sourceURL = s.currentURL
+		}
+		s.currentFeedID = ""
+		s.currentXsecToken = ""
+		s.opened = false
+		s.read = false
+	}
+	s.notification.active = true
+	s.notification.generation++
+	s.notification.tab = tab
+	s.notification.enteredAt = time.Now()
+	s.notification.scrollCount = 0
+	s.notification.cursor = ""
+	s.notification.items = nil
+	s.notification.targets = make(map[string]notificationTarget)
+	s.notification.returnedIDs = make(map[string]bool)
+}
+
+// resetNotificationSurfaceLocked 清空通知 surface（进入首页/搜索/打开笔记/后退等导航失效点）。
+func (s *BrowseSession) resetNotificationSurfaceLocked() {
+	s.notification = browseNotificationState{
+		targets:     make(map[string]notificationTarget),
+		returnedIDs: make(map[string]bool),
+	}
+}
+
+// notificationSurfaceLocked 返回对外通知 surface 快照。必须在持锁时调用。
+func (s *BrowseSession) notificationSurfaceLocked() *BrowseSessionNotificationSurface {
+	if !s.notification.active {
+		return nil
+	}
+	return &BrowseSessionNotificationSurface{
+		Tab:         s.notification.tab,
+		Generation:  s.notification.generation,
+		EnteredAt:   s.notification.enteredAt,
+		ScrollCount: s.notification.scrollCount,
+		ResultCount: len(s.notification.items),
+		Items:       append([]NotificationItem(nil), s.notification.items...),
+		Cursor:      s.notification.cursor,
+		HasMore:     s.notification.hasMore,
+	}
+}
+
+func normalizeNotificationPageSize(maxItems int) int {
+	if maxItems <= 0 {
+		return 10
+	}
+	if maxItems > 20 {
+		return 20
+	}
+	return maxItems
+}
+
+func notificationOpaqueToken(prefix string) string {
+	var buf [8]byte
+	if _, err := crand.Read(buf[:]); err == nil {
+		return prefix + "_" + hex.EncodeToString(buf[:])
+	}
+	return prefix + "_" + strconv.FormatInt(time.Now().UnixNano(), 36)
 }
 
 func (s *BrowseSession) CheckReusable(ctx context.Context) ReuseCheck {
@@ -1560,6 +2124,8 @@ func (s *BrowseSession) nextHintLocked(resultsCount int) string {
 	switch {
 	case s.opened:
 		return "笔记已打开：首屏标题/正文/首页评论/作者/互动数据/图片列表已在 open_note 返回。可继续操作：get_note_detail(分批加载更多评论)、like_feed、favorite_feed、comment_feed、reply_comment_in_feed(回复当前笔记中的评论)。图片和视频浏览功能尚未实现"
+	case s.notification.active:
+		return "已进入通知页：可切换 tab 读取列表 (list_notifications)、对 mentions tab 条目点赞 (like_notification) 或回复 (reply_notification)，或 go_back 返回"
 	case resultsCount > 0:
 		return "可继续：搜索新关键词 (search_feeds)、打开其他笔记 (open_note)、或滚动浏览 feed"
 	case !s.opened && resultsCount == 0:
@@ -1606,7 +2172,15 @@ func (s *BrowseSession) semanticResultsLocked() []BrowseSessionResult {
 }
 
 func (s *BrowseSession) availableActionsLocked(resultsCount int) []string {
-	actions := []string{"get_page_state", "search_feeds", "close_page"}
+	// 通知页只暴露通知相关动作，不混入 feed 动作。
+	if s.notification.active {
+		actions := []string{"get_page_state", "get_unread_count", "list_notifications", "go_back", "close_page"}
+		if len(s.notification.targets) > 0 {
+			actions = append(actions, "like_notification", "reply_notification")
+		}
+		return actions
+	}
+	actions := []string{"get_page_state", "search_feeds", "close_page", "get_unread_count", "list_notifications"}
 	if resultsCount > 0 && !s.opened {
 		actions = append(actions, "open_note")
 	}
@@ -1619,8 +2193,42 @@ func (s *BrowseSession) availableActionsLocked(resultsCount int) []string {
 func (s *BrowseSession) semanticActionsLocked(resultsCount int) []BrowseSessionAction {
 	actions := []BrowseSessionAction{
 		{Ref: "get_page_state", Tool: "get_page_state", Label: "查看当前页面会话状态"},
-		{Ref: "search_feeds", Tool: "search_feeds", Label: "搜索笔记"},
 	}
+	// 通知页按通知条目生成语义动作。
+	if s.notification.active {
+		actions = append(actions, BrowseSessionAction{Ref: "list_notifications", Tool: "list_notifications", Label: "查看通知列表"})
+		for _, item := range s.notification.items {
+			if !item.Actionable || item.NotificationRef == "" {
+				continue
+			}
+			nick := item.From.Nickname
+			if nick == "" {
+				nick = item.From.UserID
+			}
+			actions = append(actions,
+				BrowseSessionAction{
+					Ref:             "like_notification:" + item.NotificationRef,
+					Tool:            "like_notification",
+					Label:           "点赞通知评论 " + nick,
+					NotificationRef: item.NotificationRef,
+					Confirm:         true,
+				},
+				BrowseSessionAction{
+					Ref:             "reply_notification:" + item.NotificationRef,
+					Tool:            "reply_notification",
+					Label:           "回复通知评论 " + nick,
+					NotificationRef: item.NotificationRef,
+					Confirm:         true,
+				},
+			)
+		}
+		actions = append(actions,
+			BrowseSessionAction{Ref: "go_back", Tool: "go_back", Label: "后退到上一页（返回通知入口之前页面）"},
+			BrowseSessionAction{Ref: "close_page", Tool: "close_page", Label: "关闭当前页面会话"},
+		)
+		return actions
+	}
+	actions = append(actions, BrowseSessionAction{Ref: "search_feeds", Tool: "search_feeds", Label: "搜索笔记"})
 	if resultsCount > 0 && !s.opened {
 		for index := 0; index < resultsCount; index++ {
 			ref := strconv.Itoa(index)
@@ -1698,6 +2306,30 @@ func (s *BrowseSession) recommendedActionLocked(ready bool, results []BrowseSess
 			Ref:   "get_page_state",
 			Tool:  "get_page_state",
 			Label: "重新读取页面会话状态",
+		}
+	}
+	// 通知页按通知上下文推荐：有 actionable 条目先推荐操作，否则刷新列表。
+	if s.notification.active {
+		for _, item := range s.notification.items {
+			if !item.Actionable || item.NotificationRef == "" {
+				continue
+			}
+			nick := item.From.Nickname
+			if nick == "" {
+				nick = item.From.UserID
+			}
+			return &BrowseSessionAction{
+				Ref:             "reply_notification:" + item.NotificationRef,
+				Tool:            "reply_notification",
+				Label:           "回复通知评论 " + nick,
+				NotificationRef: item.NotificationRef,
+				Confirm:         true,
+			}
+		}
+		return &BrowseSessionAction{
+			Ref:   "list_notifications",
+			Tool:  "list_notifications",
+			Label: "刷新通知列表",
 		}
 	}
 	if s.opened {
@@ -1860,7 +2492,7 @@ func inferXHSReadyKindFromSessionState(rawURL string, opened bool, feedID string
 
 func newBrowseSessionID() string {
 	var buf [8]byte
-	if _, err := rand.Read(buf[:]); err == nil {
+	if _, err := crand.Read(buf[:]); err == nil {
 		return hex.EncodeToString(buf[:])
 	}
 	return strconv.FormatInt(time.Now().UnixNano(), 36)

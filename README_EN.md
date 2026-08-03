@@ -783,6 +783,10 @@ After successful connection, you can use the following MCP tools:
 - `comment_feed` - Comment on the currently opened and read note in the session (required: session_id, content; optional: confirm_token)
 - `reply_comment_in_feed` - Reply to a target comment on the current session note (required: session_id, content, and at least one of comment_id or user_id; optional: confirm_token)
 - `user_profile` - Get user profile information (required: user_id, xsec_token)
+- `get_unread_count` - Read notification unread count, read-only without entering or clearing (required: session_id)
+- `list_notifications` - Enter the notification page and read the notification list, supports tab switching / cursor paging; entering or switching clears the corresponding unread (required: session_id; optional: tab=mentions|likes|connections, cursor, max_items=10~20)
+- `like_notification` - Like / unlike a comment in notifications, idempotent (required: session_id, notification_ref; optional: unlike, confirm_token)
+- `reply_notification` - Reply to a comment in notifications (required: session_id, notification_ref, content; optional: confirm_token)
 
 ### 2.4. Usage Examples
 

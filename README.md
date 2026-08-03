@@ -882,6 +882,10 @@ npx mcporter list xiaohongshu-mcp
 - `comment_feed` - 评论当前 session 已打开且已阅读的笔记（必需：session_id, content；可选：confirm_token）
 - `reply_comment_in_feed` - 回复当前 session 笔记中的目标评论（必需：session_id, content，以及 comment_id 或 user_id 至少一个；可选：confirm_token）
 - `user_profile` - 获取用户个人主页信息（必需：user_id, xsec_token）
+- `get_unread_count` - 读取通知未读数，只读不点入口不清未读（必需：session_id）
+- `list_notifications` - 进入通知页并读取通知列表，可切换 tab / cursor 续页；进入或切 tab 会使对应未读被清除（必需：session_id；可选：tab=mentions|likes|connections, cursor, max_items=10~20）
+- `like_notification` - 点赞/取消点赞通知中的评论，幂等（必需：session_id, notification_ref；可选：unlike, confirm_token）
+- `reply_notification` - 回复通知中的评论（必需：session_id, notification_ref, content；可选：confirm_token）
 
 ### 2.4. 使用示例
 

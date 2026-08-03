@@ -1614,6 +1614,62 @@ func (s *XiaohongshuService) SessionBack(ctx context.Context, id string) (*xiaoh
 	return &info, nil
 }
 
+// SessionUnreadNotificationCount 读取通知未读数，只读不点击入口。
+func (s *XiaohongshuService) SessionUnreadNotificationCount(ctx context.Context, id string) (*xiaohongshu.NotificationCount, error) {
+	session, err := s.browseSessions.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	count, err := session.UnreadNotificationCount(ctx)
+	if err != nil {
+		s.recordRiskFromSession(session, err)
+		return nil, err
+	}
+	return count, nil
+}
+
+// SessionListNotifications 在 session 中进入通知页并读取通知列表。
+func (s *XiaohongshuService) SessionListNotifications(ctx context.Context, id, tab, cursor string, maxItems int) (*xiaohongshu.NotificationList, error) {
+	session, err := s.browseSessions.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	list, err := session.ListNotifications(ctx, tab, cursor, maxItems)
+	if err != nil {
+		s.recordRiskFromSession(session, err)
+		return nil, err
+	}
+	return list, nil
+}
+
+// SessionLikeNotification 点赞/取消点赞通知中的评论。
+func (s *XiaohongshuService) SessionLikeNotification(ctx context.Context, id, notificationRef string, unlike bool) (*xiaohongshu.NotificationLikeResult, error) {
+	session, err := s.browseSessions.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	result, err := session.LikeNotification(ctx, notificationRef, unlike)
+	if err != nil {
+		s.recordRiskFromSession(session, err)
+		return nil, err
+	}
+	return result, nil
+}
+
+// SessionReplyNotification 回复通知中的评论。
+func (s *XiaohongshuService) SessionReplyNotification(ctx context.Context, id, notificationRef, content string) (*xiaohongshu.NotificationReplyResult, error) {
+	session, err := s.browseSessions.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	result, err := session.ReplyNotification(ctx, notificationRef, content)
+	if err != nil {
+		s.recordRiskFromSession(session, err)
+		return nil, err
+	}
+	return result, nil
+}
+
 func newBrowser(ctx context.Context) (*hrod.Browser, error) {
 	return browser.NewBrowser(
 		ctx,

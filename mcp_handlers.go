@@ -16,20 +16,27 @@ import (
 var sessionBaseTools = []string{"close_page"}
 var sessionCreateTools = []string{"start_page", "check_login_status"}
 
+// 通知只读工具（不点入口、不清未读）
+var notificationReadTools = []string{"get_unread_count", "list_notifications"}
+
 // session 不同状态下的可用工具
 var (
+	// 含通知只读：搜索/列表/返回后可读未读或进入通知
+	sessionToolsWithNotification = append([]string{"get_unread_count", "list_notifications"}, sessionBaseTools...)
+
 	afterCreateTools = append([]string{
 		"search_feeds", "list_feeds",
-	}, sessionBaseTools...)
+	}, sessionToolsWithNotification...)
 
 	afterFeedsTools = append([]string{
 		"open_note", "search_feeds", "list_feeds",
-	}, sessionBaseTools...)
+	}, sessionToolsWithNotification...)
 
 	afterSearchTools = append([]string{
 		"open_note", "search_feeds", "list_feeds",
-	}, sessionBaseTools...)
+	}, sessionToolsWithNotification...)
 
+	// 详情弹层内只读未读数，不推荐直接进入通知
 	afterOpenTools = append([]string{
 		"like_feed",
 		"favorite_feed",
@@ -37,11 +44,22 @@ var (
 		"reply_comment_in_feed",
 		"get_note_detail",
 		"go_back",
+		"get_unread_count",
 	}, sessionBaseTools...)
+
+	// 通知页基础可用工具（只读）
+	afterNotificationTools = []string{
+		"get_page_state", "get_unread_count", "list_notifications", "go_back", "close_page",
+	}
+
+	// mentions tab 存在 actionable 条目时追加写操作
+	afterNotificationMentionsTools = append([]string{
+		"like_notification", "reply_notification",
+	}, afterNotificationTools...)
 
 	afterBackTools = append([]string{
 		"search_feeds", "open_note", "list_feeds",
-	}, sessionBaseTools...)
+	}, sessionToolsWithNotification...)
 
 	afterCloseTools = sessionCreateTools
 )
@@ -809,6 +827,95 @@ func (s *AppServer) handleSessionBack(ctx context.Context, args BrowseSessionIDA
 		return sessionMCPErrorFromErr("返回上一页失败", err, sessionNextStepState())
 	}
 	return jsonMCPResultWithTools(info, afterBackTools)
+}
+
+func (s *AppServer) handleGetUnreadCount(ctx context.Context, args UnreadNotificationCountArgs) *MCPToolResult {
+	if args.SessionID == "" {
+		return sessionMCPErrorResult("获取通知未读失败: 缺少session_id参数", sessionNextStepCreateSession())
+	}
+	count, err := s.xiaohongshuService.SessionUnreadNotificationCount(ctx, args.SessionID)
+	if err != nil {
+		return sessionMCPErrorFromErr("获取通知未读失败", err, sessionNextStepState())
+	}
+	return jsonMCPResultWithTools(count, sessionToolsWithNotification)
+}
+
+func (s *AppServer) handleListNotifications(ctx context.Context, args ListNotificationsArgs) *MCPToolResult {
+	args.SessionID = strings.TrimSpace(args.SessionID)
+	args.Tab = strings.TrimSpace(args.Tab)
+	args.Cursor = strings.TrimSpace(args.Cursor)
+	if args.SessionID == "" {
+		return sessionMCPErrorResult("通知列表失败: 缺少session_id参数", sessionNextStepCreateSession())
+	}
+	if args.MaxItems <= 0 {
+		args.MaxItems = 10
+	}
+	if args.MaxItems > 20 {
+		args.MaxItems = 20
+	}
+	list, err := s.xiaohongshuService.SessionListNotifications(ctx, args.SessionID, args.Tab, args.Cursor, args.MaxItems)
+	if err != nil {
+		return sessionMCPErrorFromErr("通知列表失败", err, sessionNextStepState())
+	}
+	tools := afterNotificationTools
+	for _, it := range list.Items {
+		if it.Actionable {
+			tools = afterNotificationMentionsTools
+			break
+		}
+	}
+	return jsonMCPResultWithTools(list, tools)
+}
+
+func (s *AppServer) handleLikeNotification(ctx context.Context, args LikeNotificationArgs) *MCPToolResult {
+	args.SessionID = strings.TrimSpace(args.SessionID)
+	args.NotificationRef = strings.TrimSpace(args.NotificationRef)
+	if args.SessionID == "" {
+		return sessionMCPErrorResult("点赞通知失败: 缺少session_id参数", sessionNextStepCreateSession())
+	}
+	if args.NotificationRef == "" {
+		return sessionMCPErrorResult("点赞通知失败: 缺少notification_ref参数", sessionNextStepState())
+	}
+	action := "点赞通知评论"
+	if args.Unlike {
+		action = "取消点赞通知评论"
+	}
+	key := writeConfirmationKey("like_notification", args.SessionID, args.NotificationRef, args.Unlike)
+	summary := fmt.Sprintf("%s: session_id=%s notification_ref=%s", action, args.SessionID, args.NotificationRef)
+	if confirm := s.requireWriteConfirmation("like_notification", key, summary, args.ConfirmToken); confirm != nil {
+		return confirm
+	}
+	result, err := s.xiaohongshuService.SessionLikeNotification(ctx, args.SessionID, args.NotificationRef, args.Unlike)
+	if err != nil {
+		return sessionMCPErrorFromErr("点赞通知失败", err, sessionNextStepState())
+	}
+	return jsonMCPResultWithTools(result, afterNotificationMentionsTools)
+}
+
+func (s *AppServer) handleReplyNotification(ctx context.Context, args ReplyNotificationArgs) *MCPToolResult {
+	args.SessionID = strings.TrimSpace(args.SessionID)
+	args.NotificationRef = strings.TrimSpace(args.NotificationRef)
+	args.Content = strings.TrimSpace(args.Content)
+	if args.SessionID == "" {
+		return sessionMCPErrorResult("回复通知失败: 缺少session_id参数", sessionNextStepCreateSession())
+	}
+	if args.NotificationRef == "" {
+		return sessionMCPErrorResult("回复通知失败: 缺少notification_ref参数", sessionNextStepState())
+	}
+	if args.Content == "" {
+		return sessionMCPErrorResult("回复通知失败: 缺少content参数", sessionNextStepState())
+	}
+	key := writeConfirmationKey("reply_notification", args.SessionID, args.NotificationRef, args.Content)
+	summary := fmt.Sprintf("回复通知评论: session_id=%s notification_ref=%s content=%q",
+		args.SessionID, args.NotificationRef, compactWriteSummary(args.Content))
+	if confirm := s.requireWriteConfirmation("reply_notification", key, summary, args.ConfirmToken); confirm != nil {
+		return confirm
+	}
+	result, err := s.xiaohongshuService.SessionReplyNotification(ctx, args.SessionID, args.NotificationRef, args.Content)
+	if err != nil {
+		return sessionMCPErrorFromErr("回复通知失败", err, sessionNextStepState())
+	}
+	return jsonMCPResultWithTools(result, afterNotificationMentionsTools)
 }
 
 func jsonMCPResult(value any, fallback string) *MCPToolResult {
