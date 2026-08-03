@@ -764,20 +764,24 @@ After successful connection, you can use the following MCP tools:
   - `tags`: Topic tags list (optional), e.g. `["food", "travel", "lifestyle"]`
   - `schedule_at`: Scheduled publish time (optional), ISO8601 format, supports 1 hour to 14 days ahead
   - `visibility`: Visibility scope (optional), supports `public` (default), `self-only`, `friends-only`
-- `list_feeds` - Get RedNote homepage recommendation list (no parameters)
-- `search_feeds` - Search RedNote content (required: keyword)
+- `start_page` - Create a page session that retains the same browser page, returns `session_id`; all subsequent page operations require `session_id` (optional: force_recreate)
+- `get_page_state` - Get the compact state of the page session (required: session_id)
+- `close_page` - Close the page session and release the browser page (required: session_id)
+- `list_feeds` - Get the recommendation list within the retained page (required: session_id; optional: cursor, max_items)
+- `search_feeds` - Search RedNote content via real UI in the retained page (required: session_id, keyword; optional: filters, cursor, max_items)
   - `filters`: Filter options (optional)
     - `sort_by`: Sort by - `comprehensive` (default) | `latest` | `most liked` | `most comments` | `most saved`
     - `note_type`: Note type - `unlimited` (default) | `video` | `image-text`
     - `publish_time`: Publish time - `unlimited` (default) | `last day` | `last week` | `last 6 months`
     - `search_scope`: Search scope - `unlimited` (default) | `viewed` | `not viewed` | `followed`
     - `location`: Location - `unlimited` (default) | `same city` | `nearby`
-- `post_comment_to_feed` - Post comments to RedNote posts (required: feed_id, xsec_token, content)
-- `reply_comment_in_feed` - Reply to a specific comment under a note (required: feed_id, xsec_token, content, and at least one of comment_id or user_id)
-- `like_feed` - Like / unlike a note (required: feed_id, xsec_token)
-  - `unlike`: Whether to unlike (optional), true to unlike, default is like
-- `favorite_feed` - Favorite / unfavorite a note (required: feed_id, xsec_token)
-  - `unfavorite`: Whether to unfavorite (optional), true to unfavorite, default is favorite
+- `open_note` - Click to open a note from search result cards, returns first-screen title and content (required: session_id, result_ref; optional: xsec_token)
+- `get_note_detail` - Read comments of the currently opened note, supports batched loading (required: session_id; optional: max_items, cursor, click_more_replies, reply_limit, scroll_speed)
+- `go_back` - Go back to the previous page within the page session (required: session_id)
+- `like_feed` - Like / unlike the current session note (required: session_id; optional: unlike, confirm_token)
+- `favorite_feed` - Favorite / unfavorite the current session note (required: session_id; optional: unfavorite, confirm_token)
+- `comment_feed` - Comment on the currently opened and read note in the session (required: session_id, content; optional: confirm_token)
+- `reply_comment_in_feed` - Reply to a target comment on the current session note (required: session_id, content, and at least one of comment_id or user_id; optional: confirm_token)
 - `user_profile` - Get user profile information (required: user_id, xsec_token)
 
 ### 2.4. Usage Examples

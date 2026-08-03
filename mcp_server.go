@@ -17,33 +17,27 @@ func boolPtr(b bool) *bool { return &b }
 
 // PublishContentArgs 发布内容的参数
 type PublishContentArgs struct {
-	Title      string   `json:"title" jsonschema:"内容标题（小红书限制：最多20个中文字或英文单词）"`
-	Content    string   `json:"content" jsonschema:"正文内容，不包含以#开头的标签内容，所有话题标签都用tags参数来生成和提供即可"`
-	Images     []string `json:"images" jsonschema:"图片路径列表（至少需要1张图片）。支持两种方式：1. HTTP/HTTPS图片链接（自动下载）；2. 本地图片绝对路径（推荐，如:/Users/user/image.jpg）"`
-	Tags       []string `json:"tags,omitempty" jsonschema:"话题标签列表（可选参数），如 [美食, 旅行, 生活]"`
-	ScheduleAt string   `json:"schedule_at,omitempty" jsonschema:"定时发布时间（可选），ISO8601格式如 2024-01-20T10:30:00+08:00，支持1小时至14天内。不填则立即发布"`
-	IsOriginal bool     `json:"is_original,omitempty" jsonschema:"是否声明原创（可选），true为声明原创，false或不填则不声明"`
-	Visibility string   `json:"visibility,omitempty" jsonschema:"可见范围（可选），支持: 公开可见(默认)、仅自己可见、仅互关好友可见。不填则默认公开可见"`
+	Title        string   `json:"title" jsonschema:"内容标题（小红书限制：最多20个中文字或英文单词）"`
+	Content      string   `json:"content" jsonschema:"正文内容，不包含以#开头的标签内容，所有话题标签都用tags参数来生成和提供即可"`
+	Images       []string `json:"images" jsonschema:"图片路径列表（至少需要1张图片）。支持两种方式：1. HTTP/HTTPS图片链接（自动下载）；2. 本地图片绝对路径（推荐，如:/Users/user/image.jpg）"`
+	Tags         []string `json:"tags,omitempty" jsonschema:"话题标签列表（可选参数），如 [美食, 旅行, 生活]"`
+	ScheduleAt   string   `json:"schedule_at,omitempty" jsonschema:"定时发布时间（可选），ISO8601格式如 2024-01-20T10:30:00+08:00，支持1小时至14天内。不填则立即发布"`
+	IsOriginal   bool     `json:"is_original,omitempty" jsonschema:"是否声明原创（可选），true为声明原创，false或不填则不声明"`
+	Visibility   string   `json:"visibility,omitempty" jsonschema:"可见范围（可选），支持: 公开可见(默认)、仅自己可见、仅互关好友可见。不填则默认公开可见"`
 	Products     []string `json:"products,omitempty" jsonschema:"商品关键词列表（可选），用于绑定带货商品。填写商品名称或商品ID，系统会自动搜索并选择第一个匹配结果。需账号已开通商品功能。示例: [面膜, 防晒霜SPF50]"`
-	ConfirmToken string `json:"confirm_token,omitempty" jsonschema:"写操作确认令牌。启用XHS_WRITE_CONFIRM时，首次调用会返回该令牌，使用相同参数二次调用时传入"`
+	ConfirmToken string   `json:"confirm_token,omitempty" jsonschema:"写操作确认令牌。启用XHS_WRITE_CONFIRM时，首次调用会返回该令牌，使用相同参数二次调用时传入"`
 }
 
 // PublishVideoArgs 发布视频的参数（仅支持本地单个视频文件）
 type PublishVideoArgs struct {
-	Title      string   `json:"title" jsonschema:"内容标题（小红书限制：最多20个中文字或英文单词）"`
-	Content    string   `json:"content" jsonschema:"正文内容，不包含以#开头的标签内容，所有话题标签都用tags参数来生成和提供即可"`
-	Video      string   `json:"video" jsonschema:"本地视频绝对路径（仅支持单个视频文件，如:/Users/user/video.mp4）"`
-	Tags       []string `json:"tags,omitempty" jsonschema:"话题标签列表（可选参数），如 [美食, 旅行, 生活]"`
-	ScheduleAt string   `json:"schedule_at,omitempty" jsonschema:"定时发布时间（可选），ISO8601格式如 2024-01-20T10:30:00+08:00，支持1小时至14天内。不填则立即发布"`
-	Visibility string   `json:"visibility,omitempty" jsonschema:"可见范围（可选），支持: 公开可见(默认)、仅自己可见、仅互关好友可见。不填则默认公开可见"`
+	Title        string   `json:"title" jsonschema:"内容标题（小红书限制：最多20个中文字或英文单词）"`
+	Content      string   `json:"content" jsonschema:"正文内容，不包含以#开头的标签内容，所有话题标签都用tags参数来生成和提供即可"`
+	Video        string   `json:"video" jsonschema:"本地视频绝对路径（仅支持单个视频文件，如:/Users/user/video.mp4）"`
+	Tags         []string `json:"tags,omitempty" jsonschema:"话题标签列表（可选参数），如 [美食, 旅行, 生活]"`
+	ScheduleAt   string   `json:"schedule_at,omitempty" jsonschema:"定时发布时间（可选），ISO8601格式如 2024-01-20T10:30:00+08:00，支持1小时至14天内。不填则立即发布"`
+	Visibility   string   `json:"visibility,omitempty" jsonschema:"可见范围（可选），支持: 公开可见(默认)、仅自己可见、仅互关好友可见。不填则默认公开可见"`
 	Products     []string `json:"products,omitempty" jsonschema:"商品关键词列表（可选），用于绑定带货商品。填写商品名称或商品ID，系统会自动搜索并选择第一个匹配结果。需账号已开通商品功能。示例: [面膜, 防晒霜SPF50]"`
-	ConfirmToken string `json:"confirm_token,omitempty" jsonschema:"写操作确认令牌。启用XHS_WRITE_CONFIRM时，首次调用会返回该令牌，使用相同参数二次调用时传入"`
-}
-
-// SearchFeedsArgs 搜索内容的参数
-type SearchFeedsArgs struct {
-	Keyword string       `json:"keyword" jsonschema:"搜索关键词"`
-	Filters FilterOption `json:"filters,omitempty" jsonschema:"筛选选项"`
+	ConfirmToken string   `json:"confirm_token,omitempty" jsonschema:"写操作确认令牌。启用XHS_WRITE_CONFIRM时，首次调用会返回该令牌，使用相同参数二次调用时传入"`
 }
 
 // FilterOption 筛选选项结构体
@@ -54,48 +48,31 @@ type FilterOption struct {
 	SearchScope string `json:"search_scope,omitempty" jsonschema:"搜索范围: 不限|已看过|未看过|已关注,默认为'不限'"`
 	Location    string `json:"location,omitempty" jsonschema:"位置距离: 不限|同城|附近,默认为'不限'"`
 }
+
 // UserProfileArgs 获取用户主页的参数
 type UserProfileArgs struct {
 	UserID    string `json:"user_id" jsonschema:"小红书用户ID，从Feed列表获取"`
 	XsecToken string `json:"xsec_token" jsonschema:"访问令牌，从Feed列表的xsecToken字段获取"`
 }
 
-// PostCommentArgs 发表评论的参数
-type PostCommentArgs struct {
-	FeedID    string `json:"feed_id" jsonschema:"小红书笔记ID，从Feed列表获取"`
-	XsecToken string `json:"xsec_token" jsonschema:"访问令牌，从Feed列表的xsecToken字段获取"`
-	Content      string `json:"content" jsonschema:"评论内容"`
-	ConfirmToken string `json:"confirm_token,omitempty" jsonschema:"写操作确认令牌。启用XHS_WRITE_CONFIRM时，首次调用会返回该令牌，使用相同参数二次调用时传入"`
-}
-
 // ReplyCommentArgs 回复评论的参数
 type ReplyCommentArgs struct {
-	FeedID    string `json:"feed_id" jsonschema:"小红书笔记ID，从Feed列表获取"`
-	XsecToken string `json:"xsec_token" jsonschema:"访问令牌，从Feed列表的xsecToken字段获取"`
-	CommentID string `json:"comment_id,omitempty" jsonschema:"目标评论ID，从评论列表获取"`
-	UserID    string `json:"user_id,omitempty" jsonschema:"目标评论用户ID，从评论列表获取"`
+	SessionID    string `json:"session_id" jsonschema:"浏览会话ID，由start_page返回"`
+	CommentID    string `json:"comment_id,omitempty" jsonschema:"目标评论ID，从评论列表获取"`
+	UserID       string `json:"user_id,omitempty" jsonschema:"目标评论用户ID，从评论列表获取"`
 	Content      string `json:"content" jsonschema:"回复内容"`
-	ConfirmToken string `json:"confirm_token,omitempty" jsonschema:"写操作确认令牌。启用XHS_WRITE_CONFIRM时，首次调用会返回该令牌，使用相同参数二次调用时传入"`
-}
-
-// LikeFeedArgs 点赞参数
-type LikeFeedArgs struct {
-	FeedID    string `json:"feed_id" jsonschema:"小红书笔记ID，从Feed列表获取"`
-	XsecToken string `json:"xsec_token" jsonschema:"访问令牌，从Feed列表的xsecToken字段获取"`
-	Unlike       bool   `json:"unlike,omitempty" jsonschema:"是否取消点赞，true为取消点赞，false或未设置则为点赞"`
 	ConfirmToken string `json:"confirm_token,omitempty" jsonschema:"写操作确认令牌。启用XHS_WRITE_CONFIRM时，首次调用会返回该令牌，使用相同参数二次调用时传入"`
 }
 
 // FavoriteFeedArgs 收藏参数
 type FavoriteFeedArgs struct {
-	FeedID     string `json:"feed_id" jsonschema:"小红书笔记ID，从Feed列表获取"`
-	XsecToken  string `json:"xsec_token" jsonschema:"访问令牌，从Feed列表的xsecToken字段获取"`
+	SessionID    string `json:"session_id" jsonschema:"浏览会话ID，由start_page返回"`
 	Unfavorite   bool   `json:"unfavorite,omitempty" jsonschema:"是否取消收藏，true为取消收藏，false或未设置则为收藏"`
 	ConfirmToken string `json:"confirm_token,omitempty" jsonschema:"写操作确认令牌。启用XHS_WRITE_CONFIRM时，首次调用会返回该令牌，使用相同参数二次调用时传入"`
 }
 
 type BrowseSessionIDArgs struct {
-	SessionID string `json:"session_id" jsonschema:"浏览会话ID，由create_browse_session返回"`
+	SessionID string `json:"session_id" jsonschema:"浏览会话ID，由start_page返回"`
 }
 
 type CreateBrowseSessionArgs struct {
@@ -103,42 +80,42 @@ type CreateBrowseSessionArgs struct {
 }
 
 type ListFeedsArgs struct {
-	SessionID string `json:"session_id" jsonschema:"浏览会话ID，由create_browse_session返回"`
+	SessionID string `json:"session_id" jsonschema:"浏览会话ID，由start_page返回"`
 	MaxItems  int    `json:"max_items,omitempty" jsonschema:"可选，本批最多返回数量，默认20，最大50"`
 	Cursor    string `json:"cursor,omitempty" jsonschema:"可选，继续滚动时传上次 list_feeds 返回的 cursor"`
 }
 
 type SessionDetailArgs struct {
-	SessionID       string `json:"session_id" jsonschema:"浏览会话ID，由create_browse_session返回"`
-	MaxItems        int    `json:"max_items,omitempty" jsonschema:"可选，分批加载每批最多返回数量，默认20，最大50；不传或传0则仅返回当前可见评论"`
-	Cursor          string `json:"cursor,omitempty" jsonschema:"可选，分批加载游标，由上次 session_detail 返回的 cursor 字段提供"`
+	SessionID        string `json:"session_id" jsonschema:"浏览会话ID，由start_page返回"`
+	MaxItems         int    `json:"max_items,omitempty" jsonschema:"可选，分批加载每批最多返回数量，默认20，最大50；不传或传0则仅返回当前可见评论"`
+	Cursor           string `json:"cursor,omitempty" jsonschema:"可选，分批加载游标，由上次 get_note_detail 返回的 cursor 字段提供"`
 	ClickMoreReplies *bool  `json:"click_more_replies,omitempty" jsonschema:"可选，是否自动点击展开子评论（二级回复），默认false"`
 	ReplyLimit       *int   `json:"reply_limit,omitempty" jsonschema:"可选，子评论展开阈值，默认10；0表示不限制，正数表示回复数超过此值的评论不展开"`
-	ScrollSpeed     string `json:"scroll_speed,omitempty" jsonschema:"可选，滚动速度: slow|normal|fast，默认fast"`
+	ScrollSpeed      string `json:"scroll_speed,omitempty" jsonschema:"可选，滚动速度: slow|normal|fast，默认fast"`
 }
 
 type SessionSearchArgs struct {
-	SessionID string       `json:"session_id" jsonschema:"浏览会话ID，由create_browse_session返回"`
+	SessionID string       `json:"session_id" jsonschema:"浏览会话ID，由start_page返回"`
 	Keyword   string       `json:"keyword" jsonschema:"搜索关键词；续页时必须与首次调用相同"`
 	Filters   FilterOption `json:"filters,omitempty" jsonschema:"筛选选项；续页时必须与首次调用相同"`
 	MaxItems  int          `json:"max_items,omitempty" jsonschema:"可选，本批最多返回数量，默认20，最大50"`
-	Cursor    string       `json:"cursor,omitempty" jsonschema:"可选，继续滚动时传上次 session_search 返回的 cursor"`
+	Cursor    string       `json:"cursor,omitempty" jsonschema:"可选，继续滚动时传上次 search_feeds 返回的 cursor"`
 }
 
 type SessionOpenNoteArgs struct {
-	SessionID string `json:"session_id" jsonschema:"浏览会话ID，由create_browse_session返回"`
+	SessionID string `json:"session_id" jsonschema:"浏览会话ID，由start_page返回"`
 	ResultRef string `json:"result_ref" jsonschema:"搜索结果引用。可传搜索结果的index或feed_id"`
 	XsecToken string `json:"xsec_token,omitempty" jsonschema:"访问令牌。通常可省略，session会使用搜索结果里的xsecToken"`
 }
 
 type SessionLikeArgs struct {
-	SessionID string `json:"session_id" jsonschema:"浏览会话ID，由create_browse_session返回"`
+	SessionID    string `json:"session_id" jsonschema:"浏览会话ID，由start_page返回"`
 	Unlike       bool   `json:"unlike,omitempty" jsonschema:"是否取消点赞，true为取消点赞，false或未设置则为点赞"`
 	ConfirmToken string `json:"confirm_token,omitempty" jsonschema:"写操作确认令牌。启用XHS_WRITE_CONFIRM时，首次调用会返回该令牌，使用相同参数二次调用时传入"`
 }
 
 type SessionCommentArgs struct {
-	SessionID string `json:"session_id" jsonschema:"浏览会话ID，由create_browse_session返回"`
+	SessionID    string `json:"session_id" jsonschema:"浏览会话ID，由start_page返回"`
 	Content      string `json:"content" jsonschema:"评论内容"`
 	ConfirmToken string `json:"confirm_token,omitempty" jsonschema:"写操作确认令牌。启用XHS_WRITE_CONFIRM时，首次调用会返回该令牌，使用相同参数二次调用时传入"`
 }
@@ -292,14 +269,14 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 	mcp.AddTool(server,
 		&mcp.Tool{
 			Name:        "search_feeds",
-			Description: "搜索小红书内容（需要已登录）",
+			Description: "在保留页面中通过真实UI搜索小红书内容（需要 session_id），返回的 result_ref 可供 open_note 使用",
 			Annotations: &mcp.ToolAnnotations{
 				Title:        "Search Feeds",
 				ReadOnlyHint: true,
 			},
 		},
-		withPanicRecovery("search_feeds", func(ctx context.Context, req *mcp.CallToolRequest, args SearchFeedsArgs) (*mcp.CallToolResult, any, error) {
-			result := appServer.handleSearchFeeds(ctx, args)
+		withPanicRecovery("search_feeds", func(ctx context.Context, req *mcp.CallToolRequest, args SessionSearchArgs) (*mcp.CallToolResult, any, error) {
+			result := appServer.handleSessionSearch(ctx, args)
 			return convertToMCPResult(result), nil, nil
 		}),
 	)
@@ -327,21 +304,15 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 	// 工具 9: 发表评论
 	mcp.AddTool(server,
 		&mcp.Tool{
-			Name:        "post_comment_to_feed",
-			Description: "发表评论到小红书笔记",
+			Name:        "comment_feed",
+			Description: "评论当前 session 已打开且已阅读的笔记",
 			Annotations: &mcp.ToolAnnotations{
-				Title:           "Post Comment",
+				Title:           "Comment Feed",
 				DestructiveHint: boolPtr(true),
 			},
 		},
-		withPanicRecovery("post_comment_to_feed", func(ctx context.Context, req *mcp.CallToolRequest, args PostCommentArgs) (*mcp.CallToolResult, any, error) {
-			argsMap := map[string]interface{}{
-				"feed_id":       args.FeedID,
-				"xsec_token":    args.XsecToken,
-				"content":       args.Content,
-				"confirm_token": args.ConfirmToken,
-			}
-			result := appServer.handlePostComment(ctx, argsMap)
+		withPanicRecovery("comment_feed", func(ctx context.Context, req *mcp.CallToolRequest, args SessionCommentArgs) (*mcp.CallToolResult, any, error) {
+			result := appServer.handleSessionComment(ctx, args)
 			return convertToMCPResult(result), nil, nil
 		}),
 	)
@@ -350,29 +321,14 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 	mcp.AddTool(server,
 		&mcp.Tool{
 			Name:        "reply_comment_in_feed",
-			Description: "回复小红书笔记下的指定评论",
+			Description: "回复当前 session 笔记中的目标评论",
 			Annotations: &mcp.ToolAnnotations{
 				Title:           "Reply Comment",
 				DestructiveHint: boolPtr(true),
 			},
 		},
 		withPanicRecovery("reply_comment_in_feed", func(ctx context.Context, req *mcp.CallToolRequest, args ReplyCommentArgs) (*mcp.CallToolResult, any, error) {
-			if args.CommentID == "" && args.UserID == "" {
-				return &mcp.CallToolResult{
-					IsError: true,
-					Content: []mcp.Content{&mcp.TextContent{Text: "缺少 comment_id 或 user_id"}},
-				}, nil, nil
-			}
-
-			argsMap := map[string]interface{}{
-				"feed_id":       args.FeedID,
-				"xsec_token":    args.XsecToken,
-				"comment_id":    args.CommentID,
-				"user_id":       args.UserID,
-				"content":       args.Content,
-				"confirm_token": args.ConfirmToken,
-			}
-			result := appServer.handleReplyComment(ctx, argsMap)
+			result := appServer.handleReplyComment(ctx, args)
 			return convertToMCPResult(result), nil, nil
 		}),
 	)
@@ -407,20 +363,14 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 	mcp.AddTool(server,
 		&mcp.Tool{
 			Name:        "like_feed",
-			Description: "为指定笔记点赞或取消点赞（如已点赞将跳过点赞，如未点赞将跳过取消点赞）",
+			Description: "点赞或取消点赞当前 session 笔记（如已点赞将跳过点赞，如未点赞将跳过取消点赞）",
 			Annotations: &mcp.ToolAnnotations{
 				Title:           "Like Feed",
 				DestructiveHint: boolPtr(true),
 			},
 		},
-		withPanicRecovery("like_feed", func(ctx context.Context, req *mcp.CallToolRequest, args LikeFeedArgs) (*mcp.CallToolResult, any, error) {
-			argsMap := map[string]interface{}{
-				"feed_id":       args.FeedID,
-				"xsec_token":    args.XsecToken,
-				"unlike":        args.Unlike,
-				"confirm_token": args.ConfirmToken,
-			}
-			result := appServer.handleLikeFeed(ctx, argsMap)
+		withPanicRecovery("like_feed", func(ctx context.Context, req *mcp.CallToolRequest, args SessionLikeArgs) (*mcp.CallToolResult, any, error) {
+			result := appServer.handleSessionLike(ctx, args)
 			return convertToMCPResult(result), nil, nil
 		}),
 	)
@@ -429,169 +379,115 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 	mcp.AddTool(server,
 		&mcp.Tool{
 			Name:        "favorite_feed",
-			Description: "收藏指定笔记或取消收藏（如已收藏将跳过收藏，如未收藏将跳过取消收藏）",
+			Description: "收藏或取消收藏当前 session 笔记（如已收藏将跳过收藏，如未收藏将跳过取消收藏）",
 			Annotations: &mcp.ToolAnnotations{
 				Title:           "Favorite Feed",
 				DestructiveHint: boolPtr(true),
 			},
 		},
 		withPanicRecovery("favorite_feed", func(ctx context.Context, req *mcp.CallToolRequest, args FavoriteFeedArgs) (*mcp.CallToolResult, any, error) {
-			argsMap := map[string]interface{}{
-				"feed_id":       args.FeedID,
-				"xsec_token":    args.XsecToken,
-				"unfavorite":    args.Unfavorite,
-				"confirm_token": args.ConfirmToken,
-			}
-			result := appServer.handleFavoriteFeed(ctx, argsMap)
+			result := appServer.handleFavoriteFeed(ctx, args)
 			return convertToMCPResult(result), nil, nil
 		}),
 	)
 
-	// 工具 14: 创建浏览会话
+	// 工具 14: 创建页面会话
 	mcp.AddTool(server,
 		&mcp.Tool{
-			Name:        "create_browse_session",
-			Description: "创建一个保留同一浏览器页面的浏览会话，用于连续执行搜索、打开、阅读、互动和返回",
+			Name:        "start_page",
+			Description: "创建一个保留同一浏览器页面的页面会话（start_page），用于连续执行搜索、打开、阅读、互动和返回",
 			Annotations: &mcp.ToolAnnotations{
-				Title:        "Create Browse Session",
+				Title:        "Start Page",
 				ReadOnlyHint: true,
 			},
 		},
-		withPanicRecovery("create_browse_session", func(ctx context.Context, req *mcp.CallToolRequest, args CreateBrowseSessionArgs) (*mcp.CallToolResult, any, error) {
+		withPanicRecovery("start_page", func(ctx context.Context, req *mcp.CallToolRequest, args CreateBrowseSessionArgs) (*mcp.CallToolResult, any, error) {
 			result := appServer.handleCreateBrowseSession(ctx, args)
 			return convertToMCPResult(result), nil, nil
 		}),
 	)
 
-	// 工具 15: session 状态
+	// 工具 15: 页面状态
 	mcp.AddTool(server,
 		&mcp.Tool{
-			Name:        "session_state",
-			Description: "获取浏览会话的紧凑页面状态，包括当前URL、页面类型、就绪状态、风险信号和可执行的下一步动作",
+			Name:        "get_page_state",
+			Description: "获取页面会话的紧凑页面状态，包括当前URL、页面类型、就绪状态、风险信号和可执行的下一步动作",
 			Annotations: &mcp.ToolAnnotations{
-				Title:        "Session State",
+				Title:        "Get Page State",
 				ReadOnlyHint: true,
 			},
 		},
-		withPanicRecovery("session_state", func(ctx context.Context, req *mcp.CallToolRequest, args BrowseSessionIDArgs) (*mcp.CallToolResult, any, error) {
+		withPanicRecovery("get_page_state", func(ctx context.Context, req *mcp.CallToolRequest, args BrowseSessionIDArgs) (*mcp.CallToolResult, any, error) {
 			result := appServer.handleSessionState(ctx, args)
 			return convertToMCPResult(result), nil, nil
 		}),
 	)
 
-	// 工具 16: session 搜索
+	// 工具 17: 打开笔记
 	mcp.AddTool(server,
 		&mcp.Tool{
-			Name:        "session_search",
-			Description: "在浏览会话内通过真实UI搜索内容，并返回可用于session_open_note的结果引用",
+			Name:        "open_note",
+			Description: "在页面会话内从搜索结果卡片点击打开笔记，并直接返回首屏标题和正文。result_ref可传搜索结果index或feed_id，xsec_token可选",
 			Annotations: &mcp.ToolAnnotations{
-				Title:        "Session Search",
+				Title:        "Open Note",
 				ReadOnlyHint: true,
 			},
 		},
-		withPanicRecovery("session_search", func(ctx context.Context, req *mcp.CallToolRequest, args SessionSearchArgs) (*mcp.CallToolResult, any, error) {
-			result := appServer.handleSessionSearch(ctx, args)
-			return convertToMCPResult(result), nil, nil
-		}),
-	)
-
-	// 工具 17: session 打开笔记
-	mcp.AddTool(server,
-		&mcp.Tool{
-			Name:        "session_open_note",
-			Description: "在浏览会话内从搜索结果卡片点击打开笔记，并直接返回首屏标题和正文。result_ref可传搜索结果index或feed_id",
-			Annotations: &mcp.ToolAnnotations{
-				Title:        "Session Open Note",
-				ReadOnlyHint: true,
-			},
-		},
-		withPanicRecovery("session_open_note", func(ctx context.Context, req *mcp.CallToolRequest, args SessionOpenNoteArgs) (*mcp.CallToolResult, any, error) {
+		withPanicRecovery("open_note", func(ctx context.Context, req *mcp.CallToolRequest, args SessionOpenNoteArgs) (*mcp.CallToolResult, any, error) {
 			result := appServer.handleSessionOpenNote(ctx, args)
 			return convertToMCPResult(result), nil, nil
 		}),
 	)
 
-	// 工具 18: session 详情
+	// 工具 18: 笔记详情
 	mcp.AddTool(server,
 		&mcp.Tool{
-			Name:        "session_detail",
-			Description: "在浏览会话当前已打开的笔记页面上继续读取当前可见评论。传 max_items 和 cursor 可分批加载更多评论（去重、支持子评论展开）。笔记首屏标题和正文已由 session_open_note 返回；图片、视频读取暂未实现。",
+			Name:        "get_note_detail",
+			Description: "在页面会话当前已打开的笔记页面上继续读取当前可见评论。传 max_items 和 cursor 可分批加载更多评论（去重、支持子评论展开）。笔记首屏标题和正文已由 open_note 返回；图片、视频读取暂未实现。",
 			Annotations: &mcp.ToolAnnotations{
-				Title:        "Session Detail",
+				Title:        "Get Note Detail",
 				ReadOnlyHint: true,
 			},
 		},
-		withPanicRecovery("session_detail", func(ctx context.Context, req *mcp.CallToolRequest, args SessionDetailArgs) (*mcp.CallToolResult, any, error) {
+		withPanicRecovery("get_note_detail", func(ctx context.Context, req *mcp.CallToolRequest, args SessionDetailArgs) (*mcp.CallToolResult, any, error) {
 			result := appServer.handleSessionDetail(ctx, args)
 			return convertToMCPResult(result), nil, nil
 		}),
 	)
 
-	// 工具 20: session 点赞
+	// 工具 22: 后退（通用）
 	mcp.AddTool(server,
 		&mcp.Tool{
-			Name:        "session_like",
-			Description: "在浏览会话内点赞或取消点赞当前已打开且已阅读的笔记",
+			Name:        "go_back",
+			Description: "在页面会话内后退到上一页（支持任意页面：笔记详情、作者主页等）",
 			Annotations: &mcp.ToolAnnotations{
-				Title:           "Session Like",
-				DestructiveHint: boolPtr(true),
-			},
-		},
-		withPanicRecovery("session_like", func(ctx context.Context, req *mcp.CallToolRequest, args SessionLikeArgs) (*mcp.CallToolResult, any, error) {
-			result := appServer.handleSessionLike(ctx, args)
-			return convertToMCPResult(result), nil, nil
-		}),
-	)
-
-	// 工具 21: session 评论
-	mcp.AddTool(server,
-		&mcp.Tool{
-			Name:        "session_comment",
-			Description: "在浏览会话内评论当前已打开且已阅读的笔记",
-			Annotations: &mcp.ToolAnnotations{
-				Title:           "Session Comment",
-				DestructiveHint: boolPtr(true),
-			},
-		},
-		withPanicRecovery("session_comment", func(ctx context.Context, req *mcp.CallToolRequest, args SessionCommentArgs) (*mcp.CallToolResult, any, error) {
-			result := appServer.handleSessionComment(ctx, args)
-			return convertToMCPResult(result), nil, nil
-		}),
-	)
-
-	// 工具 22: session 后退（通用）
-	mcp.AddTool(server,
-		&mcp.Tool{
-			Name:        "session_back",
-			Description: "在浏览会话内后退到上一页（支持任意页面：笔记详情、作者主页等）",
-			Annotations: &mcp.ToolAnnotations{
-				Title:        "Session Back",
+				Title:        "Go Back",
 				ReadOnlyHint: true,
 			},
 		},
-		withPanicRecovery("session_back", func(ctx context.Context, req *mcp.CallToolRequest, args BrowseSessionIDArgs) (*mcp.CallToolResult, any, error) {
+		withPanicRecovery("go_back", func(ctx context.Context, req *mcp.CallToolRequest, args BrowseSessionIDArgs) (*mcp.CallToolResult, any, error) {
 			result := appServer.handleSessionBack(ctx, args)
 			return convertToMCPResult(result), nil, nil
 		}),
 	)
 
-	// 工具 23: 关闭浏览会话
+	// 工具 23: 关闭页面会话
 	mcp.AddTool(server,
 		&mcp.Tool{
-			Name:        "close_browse_session",
-			Description: "关闭浏览会话并释放浏览器页面",
+			Name:        "close_page",
+			Description: "关闭页面会话并释放浏览器页面",
 			Annotations: &mcp.ToolAnnotations{
-				Title:           "Close Browse Session",
+				Title:           "Close Page",
 				DestructiveHint: boolPtr(true),
 			},
 		},
-		withPanicRecovery("close_browse_session", func(ctx context.Context, req *mcp.CallToolRequest, args BrowseSessionIDArgs) (*mcp.CallToolResult, any, error) {
+		withPanicRecovery("close_page", func(ctx context.Context, req *mcp.CallToolRequest, args BrowseSessionIDArgs) (*mcp.CallToolResult, any, error) {
 			result := appServer.handleCloseBrowseSession(ctx, args)
 			return convertToMCPResult(result), nil, nil
 		}),
 	)
 
-	logrus.Infof("Registered %d MCP tools", 23)
+	logrus.Infof("Registered %d MCP tools", 18)
 }
 
 // convertToMCPResult 将自定义的 MCPToolResult 转换为官方 SDK 的格式
