@@ -18,7 +18,7 @@ const (
 	SelectorFeedCard                  = `section.note-item, .note-item, .feeds-container section, .note-list section`
 	SelectorFeedDetailReady           = `.note-detail-mask, .note-container, .interact-container, .comments-container`
 	SelectorCommentBox                = `div.input-box div.content-edit p.content-input`
-	SelectorCommentSubmitButton       = `div.input-box .btn.submit`
+	SelectorCommentSubmitButton       = `.btn.submit`
 )
 
 type SelectorSpec struct {
