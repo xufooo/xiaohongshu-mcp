@@ -50,7 +50,7 @@ func (f *CommentFeedAction) PostComment(ctx context.Context, feedID, xsecToken, 
 			return err
 		}
 		reader := NewReadStageAction(page, f.state)
-		if err := reader.ReadMin(ctx, feedID, 45*time.Second); err != nil {
+		if err := reader.ReadMin(ctx, feedID, 20*time.Second); err != nil {
 			return fmt.Errorf("评论前阅读阶段失败: %w", err)
 		}
 		page, err = f.preparePage(ctx, feedID, xsecToken, "comment", 120*time.Second)

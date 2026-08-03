@@ -216,8 +216,8 @@ func (s *ActionStateStore) ValidateInteraction(feedID, action string) error {
 			return fmt.Errorf("点赞或收藏前阅读时长至少需要 20 秒")
 		}
 	case "comment":
-		if state.ReadDuration < 45*time.Second || state.FeedScrollCount < 1 {
-			return fmt.Errorf("评论前阅读至少 45 秒且需要正文或图片区域滚动")
+		if state.ReadDuration < 20*time.Second || state.FeedScrollCount < 1 {
+			return fmt.Errorf("评论前阅读至少 20 秒且需要正文或图片区域滚动")
 		}
 	case "reply":
 		if state.CommentDwellTime < 60*time.Second || state.CommentScrollCount < 1 {
