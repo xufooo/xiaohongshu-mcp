@@ -180,7 +180,7 @@ func waitNotificationReplyInput(ctx context.Context, page *hrod.Page, row *hrod.
 
 // countNotificationReplyText 提交前统计列表中出现回复内容的叶子节点数，识别页面错误提示。
 func countNotificationReplyText(page *hrod.Page, content string) (int, error) {
-	_, err := notificationReplySubmissionState(page, content)
+	_, _, err := notificationReplySubmissionState(page, content)
 	if err != nil {
 		return 0, err
 	}
