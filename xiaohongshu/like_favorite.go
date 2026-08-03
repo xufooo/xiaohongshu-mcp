@@ -2,14 +2,11 @@ package xiaohongshu
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"time"
 
 	"github.com/go-rod/rod/lib/proto"
-	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
-	myerrors "github.com/xpzouying/xiaohongshu-mcp/errors"
 	hrod "github.com/xpzouying/xiaohongshu-mcp/pkg/humanize/rod"
 )
 
@@ -22,8 +19,8 @@ type ActionResult struct {
 
 // 选择器常量
 const (
-	SelectorLikeButton    = ".interact-container .left .like-lottie"
-	SelectorCollectButton = ".interact-container .left .reds-icon.collect-icon"
+	SelectorLikeButton    = ".interact-container .left .like-wrapper"
+	SelectorCollectButton = ".interact-container .left .collect-wrapper"
 )
 
 // interactActionType 交互动作类型
@@ -282,47 +279,7 @@ func (a *FavoriteAction) toggleFavorite(page *hrod.Page, feedID string, targetCo
 	return fmt.Errorf("state_unknown: %s后状态未确认，取消立即二次点击", actionType)
 }
 
-// getInteractState 优先从渲染后的按钮状态读取，失败时降级到 __INITIAL_STATE__。
-func (a *interactAction) getInteractState(page *hrod.Page, feedID string) (liked bool, collected bool, err error) {
-	if liked, collected, err := ExtractInteractStateFromDOM(page, feedID); err == nil {
-		return liked, collected, nil
-	}
-
-	resultObj, err := page.Eval(`() => {
-		if (window.__INITIAL_STATE__ &&
-		    window.__INITIAL_STATE__.note &&
-		    window.__INITIAL_STATE__.note.noteDetailMap) {
-			return JSON.stringify(window.__INITIAL_STATE__.note.noteDetailMap);
-		}
-		return "";
-	}`)
-	if err != nil {
-		return false, false, fmt.Errorf("读取 noteDetailMap 失败: %w", err)
-	}
-	result := ""
-	if resultObj != nil {
-		result = resultObj.Value.Str()
-	}
-	if result == "" {
-		return false, false, myerrors.ErrNoFeedDetail
-	}
-
-	// 直接解析为 noteDetailMap
-	var noteDetailMap map[string]struct {
-		Note struct {
-			InteractInfo struct {
-				Liked     bool `json:"liked"`
-				Collected bool `json:"collected"`
-			} `json:"interactInfo"`
-		} `json:"note"`
-	}
-	if err := json.Unmarshal([]byte(result), &noteDetailMap); err != nil {
-		return false, false, errors.Wrap(err, "unmarshal noteDetailMap failed")
-	}
-
-	detail, ok := noteDetailMap[feedID]
-	if !ok {
-		return false, false, fmt.Errorf("feed %s not in noteDetailMap", feedID)
-	}
-	return detail.Note.InteractInfo.Liked, detail.Note.InteractInfo.Collected, nil
+// getInteractState 仅从渲染后的互动按钮读取状态；无法确认时返回错误。
+func (a *interactAction) getInteractState(page *hrod.Page, feedID string) (bool, bool, error) {
+	return ExtractInteractStateFromDOM(page, feedID)
 }
