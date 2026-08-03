@@ -87,6 +87,10 @@ func (w *SelectorWatchdog) RegisterAll() {
 	w.Register(FeedDetailReadySpec)
 	w.Register(CommentBoxSpec)
 	w.Register(LikeButtonSpec)
+	w.Register(NotificationEntrySpec)
+	w.Register(NotificationPageSpec)
+	w.Register(NotificationTabSpec)
+	w.Register(NotificationItemSpec)
 }
 
 // selectorsForKind 获取指定页面上下文中需要探测的选择器名称列表
@@ -98,6 +102,8 @@ func selectorsForKind(kind XHSReadyKind) []string {
 		return []string{"feed_detail_ready", "like_button", "comment_box"}
 	case XHSReadyCommentBox:
 		return []string{"comment_box"}
+	case XHSReadyNotification:
+		return []string{"notification_page", "notification_tab", "notification_item"}
 	case XHSReadyHome:
 		// 首页没有注册的 spec，暂不探测
 		return nil
@@ -135,7 +141,7 @@ func (w *SelectorWatchdog) ProbeForKind(page *hrod.Page, kind XHSReadyKind) (war
 					Name:        entry.Name,
 					Selector:    entry.Selector,
 					Required:    entry.Required,
-					VisibleOnly: entry.Name == "search_input" || entry.Name == "comment_box" || entry.Name == "like_button",
+					VisibleOnly: selectorUsesVisibleCount(entry.Name),
 				})
 			}
 		}
@@ -181,7 +187,7 @@ func (w *SelectorWatchdog) ProbeForKind(page *hrod.Page, kind XHSReadyKind) (war
 
 		// 用 visible count 判断可见性要求的选择器，否则用原始 count
 		checkCount := r.Count
-		if entry.Name == "search_input" || entry.Name == "comment_box" || entry.Name == "like_button" {
+		if selectorUsesVisibleCount(entry.Name) {
 			checkCount = r.VisibleCount
 		}
 
@@ -211,6 +217,16 @@ func (w *SelectorWatchdog) ProbeForKind(page *hrod.Page, kind XHSReadyKind) (war
 		}
 	}
 	return warnings
+}
+
+// selectorUsesVisibleCount 判断该选择器以可见命中数作为健康判定依据。
+func selectorUsesVisibleCount(name string) bool {
+	switch name {
+	case "search_input", "comment_box", "like_button", "notification_page", "notification_tab", "notification_item":
+		return true
+	default:
+		return false
+	}
 }
 
 func selectorHealthWarning(status SelectorHealthKind, name, purpose string) string {

@@ -19,6 +19,23 @@ const (
 	SelectorFeedDetailReady           = `.note-detail-mask, .note-container, .interact-container, .comments-container`
 	SelectorCommentBox                = `div.input-box div.content-edit p.content-input`
 	SelectorCommentSubmitButton       = `.btn.submit`
+
+	// 通知页选择器
+	SelectorNotificationEntry          = `a[href="/notification"]`                              // 侧栏通知入口
+	SelectorNotificationBadge          = `a[href="/notification"] .badge-container`              // 通知入口未读 badge
+	SelectorNotificationPage           = `.notification-page`                                    // 通知页容器
+	SelectorNotificationTab            = `.notification-page .reds-tab-item.tab-item`            // 通知 tab（3 个）
+	SelectorNotificationItem           = `.notification-page .tabs-content-container .container` // 通知 item
+	SelectorNotificationUserAvatar     = `.user-avatar`                                          // item 内头像链接
+	SelectorNotificationNickname       = `.user-info a`                                          // item 内昵称链接
+	SelectorNotificationHint           = `.interaction-hint span`                                // item 内互动提示
+	SelectorNotificationTime           = `.interaction-time`                                     // item 内时间
+	SelectorNotificationContent        = `.interaction-content`                                  // item 内评论内容(仅 mentions)
+	SelectorNotificationReplyButton    = `.action-reply`                                         // 回复按钮(仅 mentions)
+	SelectorNotificationLikeButton     = `.action-like`                                          // 点赞按钮(仅 mentions)
+	SelectorNotificationLikeUse        = `.action-like svg use`                                  // 点赞状态 svg use
+	SelectorNotificationReplyInput     = `textarea.comment-input`                                // 回复输入框
+	SelectorNotificationReplySubmit    = `.input-buttons .submit`                                // 发送按钮
 )
 
 type SelectorSpec struct {
@@ -75,6 +92,37 @@ var (
 		Purpose:     "点赞按钮",
 		VisibleOnly: true,
 		MaxMatches:  2,
+	}
+	NotificationEntrySpec = SelectorSpec{
+		Name:        "notification_entry",
+		Selector:    SelectorNotificationEntry,
+		Purpose:     "侧栏通知入口",
+		Required:    true,
+		VisibleOnly: true,
+		MaxMatches:  2,
+	}
+	NotificationPageSpec = SelectorSpec{
+		Name:        "notification_page",
+		Selector:    SelectorNotificationPage,
+		Purpose:     "通知页容器",
+		Required:    true,
+		VisibleOnly: true,
+		MaxMatches:  1,
+	}
+	NotificationTabSpec = SelectorSpec{
+		Name:        "notification_tab",
+		Selector:    SelectorNotificationTab,
+		Purpose:     "通知 tab",
+		Required:    true,
+		VisibleOnly: true,
+		MaxMatches:  3,
+	}
+	NotificationItemSpec = SelectorSpec{
+		Name:        "notification_item",
+		Selector:    SelectorNotificationItem,
+		Purpose:     "通知 item",
+		VisibleOnly: true,
+		MaxMatches:  20,
 	}
 )
 

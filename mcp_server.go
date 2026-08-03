@@ -120,6 +120,31 @@ type SessionCommentArgs struct {
 	ConfirmToken string `json:"confirm_token,omitempty" jsonschema:"写操作确认令牌。启用XHS_WRITE_CONFIRM时，首次调用会返回该令牌，使用相同参数二次调用时传入"`
 }
 
+type UnreadNotificationCountArgs struct {
+	SessionID string `json:"session_id" jsonschema:"浏览会话ID，由start_page返回"`
+}
+
+type ListNotificationsArgs struct {
+	SessionID string `json:"session_id" jsonschema:"浏览会话ID，由start_page返回"`
+	Tab       string `json:"tab,omitempty" jsonschema:"可选，通知tab: mentions(评论和@，默认)|likes(赞和收藏)|connections(新增关注)"`
+	Cursor    string `json:"cursor,omitempty" jsonschema:"可选，续页时传上次 list_notifications 返回的 cursor；切 tab 或传空则重新读取首批"`
+	MaxItems  int    `json:"max_items,omitempty" jsonschema:"可选，本批最多返回数量，默认10，最大20"`
+}
+
+type LikeNotificationArgs struct {
+	SessionID       string `json:"session_id" jsonschema:"浏览会话ID，由start_page返回"`
+	NotificationRef string `json:"notification_ref" jsonschema:"通知条目引用，由 list_notifications 返回的 notification_ref 提供"`
+	Unlike          bool   `json:"unlike,omitempty" jsonschema:"是否取消点赞，true为取消点赞，false或未设置则为点赞"`
+	ConfirmToken    string `json:"confirm_token,omitempty" jsonschema:"写操作确认令牌。启用XHS_WRITE_CONFIRM时，首次调用会返回该令牌，使用相同参数二次调用时传入"`
+}
+
+type ReplyNotificationArgs struct {
+	SessionID       string `json:"session_id" jsonschema:"浏览会话ID，由start_page返回"`
+	NotificationRef string `json:"notification_ref" jsonschema:"通知条目引用，由 list_notifications 返回的 notification_ref 提供"`
+	Content         string `json:"content" jsonschema:"回复内容"`
+	ConfirmToken    string `json:"confirm_token,omitempty" jsonschema:"写操作确认令牌。启用XHS_WRITE_CONFIRM时，首次调用会返回该令牌，使用相同参数二次调用时传入"`
+}
+
 // InitMCPServer 初始化 MCP Server
 func InitMCPServer(appServer *AppServer) *mcp.Server {
 	// 创建 MCP Server
@@ -487,7 +512,70 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 		}),
 	)
 
-	logrus.Infof("Registered %d MCP tools", 18)
+	// 工具 24: 通知未读数
+	mcp.AddTool(server,
+		&mcp.Tool{
+			Name:        "get_unread_count",
+			Description: "读取通知未读数（只读，不点击通知入口，不清除未读）",
+			Annotations: &mcp.ToolAnnotations{
+				Title:        "Get Unread Count",
+				ReadOnlyHint: true,
+			},
+		},
+		withPanicRecovery("get_unread_count", func(ctx context.Context, req *mcp.CallToolRequest, args UnreadNotificationCountArgs) (*mcp.CallToolResult, any, error) {
+			result := appServer.handleGetUnreadCount(ctx, args)
+			return convertToMCPResult(result), nil, nil
+		}),
+	)
+
+	// 工具 25: 通知列表
+	mcp.AddTool(server,
+		&mcp.Tool{
+			Name:        "list_notifications",
+			Description: "在页面会话中通过侧栏通知入口进入通知页并读取通知列表（可切换tab、cursor续页）。进入通知页或切tab会使对应未读被小红书清除。返回的 notification_ref 供 like_notification/reply_notification 使用。仅 mentions tab 的条目可写。",
+			Annotations: &mcp.ToolAnnotations{
+				Title: "List Notifications",
+			},
+		},
+		withPanicRecovery("list_notifications", func(ctx context.Context, req *mcp.CallToolRequest, args ListNotificationsArgs) (*mcp.CallToolResult, any, error) {
+			result := appServer.handleListNotifications(ctx, args)
+			return convertToMCPResult(result), nil, nil
+		}),
+	)
+
+	// 工具 26: 点赞通知
+	mcp.AddTool(server,
+		&mcp.Tool{
+			Name:        "like_notification",
+			Description: "点赞或取消点赞通知中的评论（幂等，如已点赞将跳过点赞，如未点赞将跳过取消点赞）。仅支持 list_notifications 中 mentions tab 的条目，且必须使用其 notification_ref。",
+			Annotations: &mcp.ToolAnnotations{
+				Title:           "Like Notification",
+				DestructiveHint: boolPtr(true),
+			},
+		},
+		withPanicRecovery("like_notification", func(ctx context.Context, req *mcp.CallToolRequest, args LikeNotificationArgs) (*mcp.CallToolResult, any, error) {
+			result := appServer.handleLikeNotification(ctx, args)
+			return convertToMCPResult(result), nil, nil
+		}),
+	)
+
+	// 工具 27: 回复通知
+	mcp.AddTool(server,
+		&mcp.Tool{
+			Name:        "reply_notification",
+			Description: "回复通知中的评论。仅支持 list_notifications 中 mentions tab 的条目，且必须使用其 notification_ref。",
+			Annotations: &mcp.ToolAnnotations{
+				Title:           "Reply Notification",
+				DestructiveHint: boolPtr(true),
+			},
+		},
+		withPanicRecovery("reply_notification", func(ctx context.Context, req *mcp.CallToolRequest, args ReplyNotificationArgs) (*mcp.CallToolResult, any, error) {
+			result := appServer.handleReplyNotification(ctx, args)
+			return convertToMCPResult(result), nil, nil
+		}),
+	)
+
+	logrus.Infof("Registered %d MCP tools", 22)
 }
 
 // convertToMCPResult 将自定义的 MCPToolResult 转换为官方 SDK 的格式

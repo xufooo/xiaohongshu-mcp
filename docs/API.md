@@ -10,7 +10,7 @@
 
 ## MCP 工具目录
 
-本期注册以下 18 个真实工具：
+本期注册以下 22 个真实工具：
 
 ```
 check_login_status
@@ -31,14 +31,18 @@ favorite_feed
 comment_feed
 reply_comment_in_feed
 user_profile
+get_unread_count
+list_notifications
+like_notification
+reply_notification
 ```
 
 要点：
 
 - `start_page` 返回 `session_id`，所有页面操作都需要传入 `session_id`。
-- 写操作（点赞、收藏、评论、回复）使用 `confirm_token` 进行二次确认。
+- 写操作（点赞、收藏、评论、回复、通知点赞、通知回复）使用 `confirm_token` 进行二次确认。
 - `open_note` 保留可选参数 `xsec_token`。
-- 通知类 4 个工具将在 P2 注册，本期不列为可用工具。
+- 通知类工具：`get_unread_count`（只读未读数，不点入口不清未读）、`list_notifications`（进入通知页/切换 tab 读取列表，进入或切换会使对应未读被清除）、`like_notification`/`reply_notification`（仅对 `list_notifications` 中 `mentions` tab 的条目，且需使用其 `notification_ref`）。
 
 最小调用链：
 
@@ -47,6 +51,13 @@ start_page
 → list_feeds / search_feeds
 → open_note
 → get_note_detail / like_feed / favorite_feed / comment_feed
+→ go_back
+→ close_page
+
+通知链：
+start_page
+→ get_unread_count / list_notifications
+→ like_notification / reply_notification
 → go_back
 → close_page
 ```

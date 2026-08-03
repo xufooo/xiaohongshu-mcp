@@ -13,13 +13,14 @@ import (
 type XHSReadyKind string
 
 const (
-	XHSReadyHome       XHSReadyKind = "home"
-	XHSReadyHomeSearch XHSReadyKind = "home_search"
-	XHSReadySearch     XHSReadyKind = "search"
-	XHSReadyDetail     XHSReadyKind = "detail"
-	XHSReadyProfile    XHSReadyKind = "profile"
-	XHSReadyPublish    XHSReadyKind = "publish"
-	XHSReadyCommentBox XHSReadyKind = "comment_box"
+	XHSReadyHome        XHSReadyKind = "home"
+	XHSReadyHomeSearch  XHSReadyKind = "home_search"
+	XHSReadySearch      XHSReadyKind = "search"
+	XHSReadyDetail      XHSReadyKind = "detail"
+	XHSReadyProfile     XHSReadyKind = "profile"
+	XHSReadyPublish     XHSReadyKind = "publish"
+	XHSReadyCommentBox  XHSReadyKind = "comment_box"
+	XHSReadyNotification XHSReadyKind = "notification"
 )
 
 type XHSReadyOptions struct {
@@ -46,11 +47,13 @@ type xhsReadyProbe struct {
 	ProfileState       bool   `json:"profile_state"`
 	DetailState        bool   `json:"detail_state"`
 	DetailFeedMatched  bool   `json:"detail_feed_matched"`
-	DetailURLMatched   bool   `json:"detail_url_matched"`
+	DetailURLMatched      bool   `json:"detail_url_matched"`
 	PublishSignalCount    int    `json:"publish_signal_count"`
-	SearchInputInFeedsReady bool  `json:"search_input_in_feeds_ready"`
-	StateFragment          string `json:"state_fragment,omitempty"`
-	RiskText               string `json:"risk_text,omitempty"`
+	SearchInputInFeedsReady bool `json:"search_input_in_feeds_ready"`
+	NotificationPageCount int    `json:"notification_page_count"`
+	NotificationTabCount  int    `json:"notification_tab_count"`
+	StateFragment         string `json:"state_fragment,omitempty"`
+	RiskText              string `json:"risk_text,omitempty"`
 }
 
 // WaitForXHSReady 等待页面就绪，按 kind 判断条件。
@@ -122,7 +125,7 @@ func probeWatchdogSelectors(page *hrod.Page, opts XHSReadyOptions) {
 }
 
 func probeXHSReady(page *hrod.Page, feedID string) (xhsReadyProbe, error) {
-	probeJS := `(feedID, searchInputSelector, searchResultSelector, feedCardSelector, detailSelector, commentBoxSelector, likeButtonSelector, searchInputInFeedsSelector) => {` + xhsProbeVisibleJS + xhsProbeFeedMatchJS + `
+	probeJS := `(feedID, searchInputSelector, searchResultSelector, feedCardSelector, detailSelector, commentBoxSelector, likeButtonSelector, searchInputInFeedsSelector, notificationPageSelector, notificationTabSelector) => {` + xhsProbeVisibleJS + xhsProbeFeedMatchJS + `
 			const count = (selector) => {
 				try { return document.querySelectorAll(selector).length; } catch (_) { return 0; }
 			};
@@ -213,11 +216,13 @@ func probeXHSReady(page *hrod.Page, feedID string) (xhsReadyProbe, error) {
 			detail_url_matched: detailURLMatched,
 			publish_signal_count: count("input[type='file'], .upload-input, .publish-container, .creator-container"),
 			search_input_in_feeds_ready: searchInputInFeedsReady,
+			notification_page_count: count(notificationPageSelector),
+			notification_tab_count: count(notificationTabSelector),
 			state_fragment: stateFragment.slice(0, 220),
 			risk_text: riskText.slice(0, 180),
 		});
 	}`
-	obj, err := page.Eval(probeJS, feedID, SelectorSearchInput, SelectorSearchResult, SelectorFeedCard, SelectorFeedDetailReady, SelectorCommentBox, SelectorLikeButton, SelectorSearchInput)
+	obj, err := page.Eval(probeJS, feedID, SelectorSearchInput, SelectorSearchResult, SelectorFeedCard, SelectorFeedDetailReady, SelectorCommentBox, SelectorLikeButton, SelectorSearchInput, SelectorNotificationPage, SelectorNotificationTab)
 	if err != nil {
 		return xhsReadyProbe{}, err
 	}
@@ -268,6 +273,15 @@ func isXHSReady(probe xhsReadyProbe, kind XHSReadyKind, feedID string, allowURLF
 			(probe.AppCount > 0 && strings.Contains(probe.URL, "publish"))
 	case XHSReadyCommentBox:
 		return detailReady(probe, feedID) && probe.CommentBoxCount > 0
+	case XHSReadyNotification:
+		if probe.NotificationPageCount > 0 && probe.NotificationTabCount >= 3 {
+			return true
+		}
+		return allowURLFallback &&
+			probe.AppCount > 0 &&
+			strings.Contains(probe.URL, "/notification") &&
+			probe.NotificationPageCount > 0 &&
+			probe.NotificationTabCount >= 3
 	default:
 		return probe.AppCount > 0
 	}
@@ -285,6 +299,7 @@ func isHomeURL(rawURL string) bool {
 		!strings.Contains(rawURL, "search") &&
 		!strings.Contains(rawURL, "/user/profile/") &&
 		!strings.Contains(rawURL, "publish") &&
+		!strings.Contains(rawURL, "/notification") &&
 		!isDetailURL(rawURL)
 }
 
@@ -307,6 +322,8 @@ func isDetailURL(rawURL string) bool {
 
 func inferXHSReadyKindFromURL(rawURL string) XHSReadyKind {
 	switch {
+	case strings.Contains(rawURL, "/notification"):
+		return XHSReadyNotification
 	case strings.Contains(rawURL, "search"):
 		return XHSReadySearch
 	case strings.Contains(rawURL, "/user/profile/"):
