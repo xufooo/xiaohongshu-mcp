@@ -71,7 +71,7 @@ func (f *CommentFeedAction) PostComment(ctx context.Context, feedID, xsecToken, 
 		}
 	}
 
-	elem, err := page.Element("div.input-box div.content-edit span")
+	elem, err := page.Element(SelectorCommentBox)
 	if err != nil {
 		logrus.Warnf("Failed to find comment input box: %v", err)
 		return fmt.Errorf("未找到评论输入框，该帖子可能不支持评论或网页端不可访问: %w", err)
@@ -82,13 +82,7 @@ func (f *CommentFeedAction) PostComment(ctx context.Context, feedID, xsecToken, 
 		return fmt.Errorf("无法点击评论输入框: %w", err)
 	}
 
-	elem2, err := page.Element("div.input-box div.content-edit p.content-input")
-	if err != nil {
-		logrus.Warnf("Failed to find comment input field: %v", err)
-		return fmt.Errorf("未找到评论输入区域: %w", err)
-	}
-
-	if err := elem2.Input(content); err != nil {
+	if err := elem.Input(content); err != nil {
 		logrus.Warnf("Failed to input comment content: %v", err)
 		return fmt.Errorf("无法输入评论内容: %w", err)
 	}
@@ -101,7 +95,7 @@ func (f *CommentFeedAction) PostComment(ctx context.Context, feedID, xsecToken, 
 		return fmt.Errorf("提交前检查评论区失败: %w", err)
 	}
 
-	submitButton, err := page.Element("div.bottom button.submit")
+	submitButton, err := page.Element(SelectorCommentSubmitButton)
 	if err != nil {
 		logrus.Warnf("Failed to find submit button: %v", err)
 		return fmt.Errorf("未找到提交按钮: %w", err)

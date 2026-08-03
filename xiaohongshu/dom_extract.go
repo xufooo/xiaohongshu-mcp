@@ -392,31 +392,18 @@ func ExtractCommentsFromDOM(page *hrod.Page, feedID string) ([]Comment, error) {
 
 // ExtractInteractStateFromDOM 从详情页可见按钮状态读取点赞/收藏状态。
 func ExtractInteractStateFromDOM(page *hrod.Page, feedID string) (bool, bool, error) {
-	result, err := page.Eval(`() => {
-		const find = (selectors) => {
-			for (const selector of selectors) {
-				const el = document.querySelector(selector);
-				if (el) return el;
-			}
-			return null;
-		};
-		const active = (el) => {
-			if (!el) return false;
-			const value = [
-				el.getAttribute("aria-pressed"),
-				el.getAttribute("aria-checked"),
-				el.getAttribute("data-active"),
-				el.className,
-				el.getAttribute("class"),
-				el.getAttribute("style"),
-			].join(" ").toLowerCase();
-			return /\btrue\b|active|selected|liked|collected|--active|fill|color:\s*rgb/.test(value);
-		};
-		const like = find([".interact-container .like-lottie", ".interact-container .like-wrapper", ".interact-container [class*='like']"]);
-		const collect = find([".interact-container .collect-icon", ".interact-container .collect-wrapper", ".interact-container [class*='collect']"]);
-		if (!like && !collect) return "";
-		return JSON.stringify({ liked: active(like), collected: active(collect) });
-	}`)
+	result, err := page.Eval(`(likeSel, collectSel) => {
+		const like = document.querySelector(likeSel);
+		const collect = document.querySelector(collectSel);
+		if (!like || !collect) return "";
+		const liked = like.classList.contains("like-active");
+		const use = collect.querySelector("use");
+		if (!use) return "";
+		const href = use.getAttribute("xlink:href") || use.getAttribute("href") || "";
+		if (href === "#collected") return JSON.stringify({ liked, collected: true });
+		if (href === "#collect") return JSON.stringify({ liked, collected: false });
+		return "";
+	}`, SelectorLikeButton, SelectorCollectButton)
 	if err != nil {
 		return false, false, err
 	}
