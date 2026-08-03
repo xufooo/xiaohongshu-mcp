@@ -90,6 +90,13 @@ func (f *CommentFeedAction) PostComment(ctx context.Context, feedID, xsecToken, 
 	if err := sleepForCommentStep(page, 500*time.Millisecond, 1500*time.Millisecond); err != nil {
 		return err
 	}
+	entered, err := elem.Text()
+	if err != nil {
+		return fmt.Errorf("无法确认评论内容是否写入: %w", err)
+	}
+	if strings.Join(strings.Fields(entered), " ") != strings.Join(strings.Fields(content), " ") {
+		return fmt.Errorf("评论内容未成功写入输入框")
+	}
 	initialMatchCount, err := countCommentContent(page, content)
 	if err != nil {
 		return fmt.Errorf("提交前检查评论区失败: %w", err)
