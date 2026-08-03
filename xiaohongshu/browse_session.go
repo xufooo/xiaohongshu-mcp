@@ -18,41 +18,41 @@ import (
 )
 
 const (
-	DefaultBrowseSessionTimeout       = 10 * time.Minute
-	browseSessionRefreshTimeout       = 2 * time.Second
-	maxBrowseSessionTimelineEntries   = 10
-	browseSessionBackTimeout          = 15 * time.Second
-	healthCheckTimeout                = 30 * time.Second
+	DefaultBrowseSessionTimeout     = 10 * time.Minute
+	browseSessionRefreshTimeout     = 2 * time.Second
+	maxBrowseSessionTimelineEntries = 10
+	browseSessionBackTimeout        = 15 * time.Second
+	healthCheckTimeout              = 30 * time.Second
 )
 
 type BrowseSessionStatus string
 
 const (
-	SessionReady        BrowseSessionStatus = "ready"
-	SessionBusy         BrowseSessionStatus = "busy"
-	SessionNotReady     BrowseSessionStatus = "not_ready"
-	SessionExpired      BrowseSessionStatus = "expired"
-	SessionUnhealthy    BrowseSessionStatus = "unhealthy"
+	SessionReady     BrowseSessionStatus = "ready"
+	SessionBusy      BrowseSessionStatus = "busy"
+	SessionNotReady  BrowseSessionStatus = "not_ready"
+	SessionExpired   BrowseSessionStatus = "expired"
+	SessionUnhealthy BrowseSessionStatus = "unhealthy"
 )
 
 type BrowseSessionInfo struct {
-	ID            string         `json:"id"`
-	CurrentURL    string         `json:"current_url,omitempty"`
-	SourceURL     string         `json:"source_url,omitempty"`
-	ScrollY       int            `json:"scroll_y,omitempty"`
-	CurrentFeedID string         `json:"current_feed_id,omitempty"`
-	Opened        bool           `json:"opened"`
-	Read          bool           `json:"read"`
+	ID            string          `json:"id"`
+	CurrentURL    string          `json:"current_url,omitempty"`
+	SourceURL     string          `json:"source_url,omitempty"`
+	ScrollY       int             `json:"scroll_y,omitempty"`
+	CurrentFeedID string          `json:"current_feed_id,omitempty"`
+	Opened        bool            `json:"opened"`
+	Read          bool            `json:"read"`
 	SeenNotes     map[string]bool `json:"seen_notes,omitempty"`
-	ExpiresAt     time.Time      `json:"expires_at"`
+	ExpiresAt     time.Time       `json:"expires_at"`
 }
 
 // SessionOpenNoteResponse 在打开笔记后直接返回首屏标题和正文。
 type SessionOpenNoteResponse struct {
 	BrowseSessionInfo
-	Note     OpenedNoteContent              `json:"note"`
-	Comments []Comment                      `json:"comments"`
-	Media    SessionMediaReadStatus         `json:"media"`
+	Note     OpenedNoteContent      `json:"note"`
+	Comments []Comment              `json:"comments"`
+	Media    SessionMediaReadStatus `json:"media"`
 }
 
 type CreateBrowseSessionResult struct {
@@ -80,21 +80,21 @@ type ReuseCheck struct {
 }
 
 type BrowseSessionPageState struct {
-	Session           BrowseSessionInfo        `json:"session"`
-	Summary           string                   `json:"summary,omitempty"`
-	Kind              XHSReadyKind             `json:"kind"`
-	Ready             bool                     `json:"ready"`
-	Risk              RiskSignal               `json:"risk"`
-	Counts            BrowseSessionPageCounts  `json:"counts"`
-	Current           BrowseSessionCurrent     `json:"current"`
-	Results           []BrowseSessionResult    `json:"results,omitempty"`
-	Actions           []BrowseSessionAction    `json:"actions,omitempty"`
-	RecommendedAction *BrowseSessionAction     `json:"recommended_action,omitempty"`
-	Timeline          []BrowseSessionEvent     `json:"timeline,omitempty"`
-	StateFragment     string                   `json:"state_fragment,omitempty"`
-	ResultsCount      int                      `json:"results_count"`
-	SeenCount         int                      `json:"seen_count"`
-	AvailableActions  []string                 `json:"available_actions,omitempty"`
+	Session           BrowseSessionInfo       `json:"session"`
+	Summary           string                  `json:"summary,omitempty"`
+	Kind              XHSReadyKind            `json:"kind"`
+	Ready             bool                    `json:"ready"`
+	Risk              RiskSignal              `json:"risk"`
+	Counts            BrowseSessionPageCounts `json:"counts"`
+	Current           BrowseSessionCurrent    `json:"current"`
+	Results           []BrowseSessionResult   `json:"results,omitempty"`
+	Actions           []BrowseSessionAction   `json:"actions,omitempty"`
+	RecommendedAction *BrowseSessionAction    `json:"recommended_action,omitempty"`
+	Timeline          []BrowseSessionEvent    `json:"timeline,omitempty"`
+	StateFragment     string                  `json:"state_fragment,omitempty"`
+	ResultsCount      int                     `json:"results_count"`
+	SeenCount         int                     `json:"seen_count"`
+	AvailableActions  []string                `json:"available_actions,omitempty"`
 }
 
 type BrowseSessionCurrent struct {
@@ -106,7 +106,7 @@ type BrowseSessionCurrent struct {
 	ScrollY        int          `json:"scroll_y,omitempty"`
 	NextHint       string       `json:"next_hint,omitempty"`
 	ResultsCount   int          `json:"results_count"`
-	AvailableTools []string    `json:"available_tools,omitempty"`
+	AvailableTools []string     `json:"available_tools,omitempty"`
 }
 
 type BrowseSessionResult struct {
@@ -163,27 +163,27 @@ type BrowseSession struct {
 	onClose  func(*hrod.Page)
 	onRemove func(*BrowseSession)
 
-	touchOnFinish  bool
+	touchOnFinish bool
 
-	currentURL       string
-	sourceURL        string
-	scrollY          int
-	seenNotes        map[string]bool
-	results          map[string]Feed
-	currentFeedID    string
-	currentXsecToken string
-	opened           bool
-	read             bool
-	closed           bool
-	expiresAt          time.Time
-	timeline           []BrowseSessionEvent
-	initialCommentIDs  []string
+	currentURL        string
+	sourceURL         string
+	scrollY           int
+	seenNotes         map[string]bool
+	results           map[string]Feed
+	currentFeedID     string
+	currentXsecToken  string
+	opened            bool
+	read              bool
+	closed            bool
+	expiresAt         time.Time
+	timeline          []BrowseSessionEvent
+	initialCommentIDs []string
 }
 
 type BrowseSessionManager struct {
-	mu            sync.Mutex
-	timeout       time.Duration
-	sessions      map[string]*BrowseSession
+	mu       sync.Mutex
+	timeout  time.Duration
+	sessions map[string]*BrowseSession
 }
 
 func NewBrowseSessionManager(timeout time.Duration) *BrowseSessionManager {
@@ -612,7 +612,7 @@ func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, xsecToken strin
 	s.opened = true
 	s.read = true
 	s.seenNotes[feed.ID] = true
-	// 储存首屏评论 ID 作为初始 cursor，让 session_detail 从后续评论开始加载
+	// 储存首屏评论 ID 作为初始 cursor，让 get_note_detail 从后续评论开始加载
 	s.initialCommentIDs = s.initialCommentIDs[:0]
 	for i, c := range comments {
 		if key := commentBatchKey(i, c); key != "" {
@@ -632,7 +632,7 @@ func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, xsecToken strin
 		BrowseSessionInfo: info,
 		Note:              *content,
 		Comments:          comments,
-		Media:             SessionMediaReadStatus{Implemented: false, Message: "图片和视频阅读功能尚未实现，后续由 session_detail 支持"},
+		Media:             SessionMediaReadStatus{Implemented: false, Message: "图片和视频阅读功能尚未实现，后续由 get_note_detail 支持"},
 	}, nil
 }
 
@@ -1186,8 +1186,8 @@ func (s *BrowseSession) CheckReusable(ctx context.Context) ReuseCheck {
 	}
 
 	var pageState struct {
-		URL         string `json:"url"`
-		ReadyState  string `json:"readyState"`
+		URL        string `json:"url"`
+		ReadyState string `json:"readyState"`
 	}
 	if err := json.Unmarshal([]byte(result.Value.Str()), &pageState); err != nil || pageState.URL == "" || pageState.ReadyState == "" {
 		return ReuseCheck{
@@ -1559,13 +1559,13 @@ func (s *BrowseSession) currentStateLocked(kind XHSReadyKind, resultsCount int, 
 func (s *BrowseSession) nextHintLocked(resultsCount int) string {
 	switch {
 	case s.opened:
-		return "笔记已打开：首屏标题/正文/首页评论/作者/互动数据/图片列表已在 session_open_note 返回。可继续操作：session_detail(分批加载更多评论)、session_like、session_comment、user_profile(看作者主页)。图片和视频浏览功能尚未实现"
+		return "笔记已打开：首屏标题/正文/首页评论/作者/互动数据/图片列表已在 open_note 返回。可继续操作：get_note_detail(分批加载更多评论)、like_feed、favorite_feed、comment_feed、reply_comment_in_feed(回复当前笔记中的评论)。图片和视频浏览功能尚未实现"
 	case resultsCount > 0:
-		return "可继续：搜索新关键词 (session_search)、打开其他笔记 (session_open_note)、或滚动浏览 feed"
+		return "可继续：搜索新关键词 (search_feeds)、打开其他笔记 (open_note)、或滚动浏览 feed"
 	case !s.opened && resultsCount == 0:
-		return "可搜索关键词 (session_search) 查找笔记"
+		return "可搜索关键词 (search_feeds) 查找笔记"
 	default:
-		return "可搜索关键词 (session_search) 查找笔记"
+		return "可搜索关键词 (search_feeds) 查找笔记"
 	}
 }
 
@@ -1606,20 +1606,20 @@ func (s *BrowseSession) semanticResultsLocked() []BrowseSessionResult {
 }
 
 func (s *BrowseSession) availableActionsLocked(resultsCount int) []string {
-	actions := []string{"session_state", "session_search", "close_browse_session"}
+	actions := []string{"get_page_state", "search_feeds", "close_page"}
 	if resultsCount > 0 && !s.opened {
-		actions = append(actions, "session_open_note")
+		actions = append(actions, "open_note")
 	}
 	if s.opened {
-		actions = append(actions, "session_detail", "session_like", "session_comment", "session_back")
+		actions = append(actions, "get_note_detail", "like_feed", "favorite_feed", "comment_feed", "reply_comment_in_feed", "go_back")
 	}
 	return actions
 }
 
 func (s *BrowseSession) semanticActionsLocked(resultsCount int) []BrowseSessionAction {
 	actions := []BrowseSessionAction{
-		{Ref: "session_state", Tool: "session_state", Label: "查看当前 session 状态"},
-		{Ref: "session_search", Tool: "session_search", Label: "搜索笔记"},
+		{Ref: "get_page_state", Tool: "get_page_state", Label: "查看当前页面会话状态"},
+		{Ref: "search_feeds", Tool: "search_feeds", Label: "搜索笔记"},
 	}
 	if resultsCount > 0 && !s.opened {
 		for index := 0; index < resultsCount; index++ {
@@ -1630,7 +1630,7 @@ func (s *BrowseSession) semanticActionsLocked(resultsCount int) []BrowseSessionA
 			}
 			actions = append(actions, BrowseSessionAction{
 				Ref:       "open_note:" + ref,
-				Tool:      "session_open_note",
+				Tool:      "open_note",
 				Label:     "打开搜索结果 " + ref,
 				ResultRef: ref,
 				FeedID:    feed.ID,
@@ -1640,54 +1640,70 @@ func (s *BrowseSession) semanticActionsLocked(resultsCount int) []BrowseSessionA
 	if s.opened {
 		actions = append(actions,
 			BrowseSessionAction{
-				Ref:      "detail_current",
-				Tool:     "session_detail",
-				Label:    "继续读取当前笔记媒体或评论",
+				Ref:      "get_note_detail",
+				Tool:     "get_note_detail",
+				Label:    "继续读取当前笔记评论",
 				FeedID:   s.currentFeedID,
 				Requires: "opened",
 			},
 			BrowseSessionAction{
-				Ref:      "like_current",
-				Tool:     "session_like",
+				Ref:      "like_feed",
+				Tool:     "like_feed",
 				Label:    "点赞当前笔记",
 				FeedID:   s.currentFeedID,
 				Requires: "opened",
 				Confirm:  true,
 			},
 			BrowseSessionAction{
-				Ref:      "comment_current",
-				Tool:     "session_comment",
+				Ref:      "favorite_feed",
+				Tool:     "favorite_feed",
+				Label:    "收藏当前笔记",
+				FeedID:   s.currentFeedID,
+				Requires: "opened",
+				Confirm:  true,
+			},
+			BrowseSessionAction{
+				Ref:      "comment_feed",
+				Tool:     "comment_feed",
 				Label:    "评论当前笔记",
 				FeedID:   s.currentFeedID,
 				Requires: "opened",
+				Confirm:  true,
+			},
+			BrowseSessionAction{
+				Ref:      "reply_comment_in_feed",
+				Tool:     "reply_comment_in_feed",
+				Label:    "回复当前笔记中的评论",
+				FeedID:   s.currentFeedID,
+				Requires: "opened + comment_id/user_id",
 				Confirm:  true,
 			},
 		)
 	}
 	if s.opened {
 		actions = append(actions, BrowseSessionAction{
-			Ref:    "back",
-			Tool:   "session_back",
+			Ref:    "go_back",
+			Tool:   "go_back",
 			Label:  "后退到上一页（关闭笔记/返回）",
 			FeedID: s.currentFeedID,
 		})
 	}
-	actions = append(actions, BrowseSessionAction{Ref: "close_session", Tool: "close_browse_session", Label: "关闭当前 session"})
+	actions = append(actions, BrowseSessionAction{Ref: "close_page", Tool: "close_page", Label: "关闭当前页面会话"})
 	return actions
 }
 
 func (s *BrowseSession) recommendedActionLocked(ready bool, results []BrowseSessionResult) *BrowseSessionAction {
 	if !ready {
 		return &BrowseSessionAction{
-			Ref:   "refresh_state",
-			Tool:  "session_state",
-			Label: "重新读取 session 状态",
+			Ref:   "get_page_state",
+			Tool:  "get_page_state",
+			Label: "重新读取页面会话状态",
 		}
 	}
 	if s.opened {
 		return &BrowseSessionAction{
-			Ref:    "back",
-			Tool:   "session_back",
+			Ref:    "go_back",
+			Tool:   "go_back",
 			Label:  "后退到上一页",
 			FeedID: s.currentFeedID,
 		}
@@ -1699,7 +1715,7 @@ func (s *BrowseSession) recommendedActionLocked(ready bool, results []BrowseSess
 			}
 			return &BrowseSessionAction{
 				Ref:       "open_note:" + result.Ref,
-				Tool:      "session_open_note",
+				Tool:      "open_note",
 				Label:     "打开下一张未读笔记",
 				ResultRef: result.Ref,
 				FeedID:    result.FeedID,
@@ -1709,7 +1725,7 @@ func (s *BrowseSession) recommendedActionLocked(ready bool, results []BrowseSess
 			result := results[0]
 			return &BrowseSessionAction{
 				Ref:       "open_note:" + result.Ref,
-				Tool:      "session_open_note",
+				Tool:      "open_note",
 				Label:     "打开搜索结果 " + result.Ref,
 				ResultRef: result.Ref,
 				FeedID:    result.FeedID,
@@ -1717,8 +1733,8 @@ func (s *BrowseSession) recommendedActionLocked(ready bool, results []BrowseSess
 		}
 	}
 	return &BrowseSessionAction{
-		Ref:   "session_search",
-		Tool:  "session_search",
+		Ref:   "search_feeds",
+		Tool:  "search_feeds",
 		Label: "搜索笔记",
 	}
 }

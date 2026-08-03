@@ -8,6 +8,49 @@
 
 **注意**: 以下响应示例仅展示主要字段结构，完整的字段信息请通过实际API调用查看。
 
+## MCP 工具目录
+
+本期注册以下 18 个真实工具：
+
+```
+check_login_status
+get_login_qrcode
+delete_cookies
+publish_content
+publish_with_video
+start_page
+get_page_state
+close_page
+list_feeds
+search_feeds
+open_note
+get_note_detail
+go_back
+like_feed
+favorite_feed
+comment_feed
+reply_comment_in_feed
+user_profile
+```
+
+要点：
+
+- `start_page` 返回 `session_id`，所有页面操作都需要传入 `session_id`。
+- 写操作（点赞、收藏、评论、回复）使用 `confirm_token` 进行二次确认。
+- `open_note` 保留可选参数 `xsec_token`。
+- 通知类 4 个工具将在 P2 注册，本期不列为可用工具。
+
+最小调用链：
+
+```text
+start_page
+→ list_feeds / search_feeds
+→ open_note
+→ get_note_detail / like_feed / favorite_feed / comment_feed
+→ go_back
+→ close_page
+```
+
 ## 通用响应格式
 
 所有 API 响应都使用统一的 JSON 格式：

@@ -13,17 +13,37 @@ import (
 )
 
 // session 基础工具
-var sessionBaseTools = []string{"close_browse_session"}
-var sessionCreateTools = []string{"create_browse_session", "list_feeds", "check_login_status", "search_feeds"}
+var sessionBaseTools = []string{"close_page"}
+var sessionCreateTools = []string{"start_page", "check_login_status"}
 
 // session 不同状态下的可用工具
 var (
-	afterCreateTools = append([]string{"session_search", "list_feeds"}, sessionBaseTools...)
-	afterFeedsTools  = append([]string{"session_open_note", "session_search", "list_feeds"}, sessionBaseTools...)
-	afterSearchTools = append([]string{"session_open_note", "session_search", "list_feeds"}, sessionBaseTools...)
-	afterOpenTools   = append([]string{"session_like", "session_comment", "session_detail", "session_back"}, sessionBaseTools...)
-	afterBackTools   = append([]string{"session_search", "session_open_note", "list_feeds"}, sessionBaseTools...)
-	afterCloseTools  = sessionCreateTools
+	afterCreateTools = append([]string{
+		"search_feeds", "list_feeds",
+	}, sessionBaseTools...)
+
+	afterFeedsTools = append([]string{
+		"open_note", "search_feeds", "list_feeds",
+	}, sessionBaseTools...)
+
+	afterSearchTools = append([]string{
+		"open_note", "search_feeds", "list_feeds",
+	}, sessionBaseTools...)
+
+	afterOpenTools = append([]string{
+		"like_feed",
+		"favorite_feed",
+		"comment_feed",
+		"reply_comment_in_feed",
+		"get_note_detail",
+		"go_back",
+	}, sessionBaseTools...)
+
+	afterBackTools = append([]string{
+		"search_feeds", "open_note", "list_feeds",
+	}, sessionBaseTools...)
+
+	afterCloseTools = sessionCreateTools
 )
 
 // toolResult 包装响应数据，附上下一步可用工具列表
@@ -54,31 +74,9 @@ func (s *AppServer) requireBrowserAvailableForMCP(name string) *MCPToolResult {
 	if !ok {
 		return nil
 	}
-	msg := fmt.Sprintf("browser busy - session active: session_id=%s expires_at=%s. Use session_* tools or close_browse_session first.",
+	msg := fmt.Sprintf("browser busy - session active: session_id=%s expires_at=%s. Use get_page_state or close_page first.",
 		info.ID, info.ExpiresAt.Format(time.RFC3339))
 	logrus.Warnf("MCP: %s blocked because browse session is active: %s", name, info.ID)
-	return &MCPToolResult{
-		Content: []MCPContent{{Type: "text", Text: msg}},
-		IsError: true,
-	}
-}
-
-// requireBrowserForMCPWithFeed 检查浏览器可用性，但允许 feedID 匹配活跃 session 时通过
-//（P2: 旧工具委托 session 式行为链）。
-func (s *AppServer) requireBrowserForMCPWithFeed(name, feedID string) *MCPToolResult {
-	if s.xiaohongshuService == nil {
-		return nil
-	}
-	info, ok := s.xiaohongshuService.ActiveBrowseSessionInfo()
-	if !ok {
-		return nil
-	}
-	if info.CurrentFeedID != "" && info.CurrentFeedID == feedID {
-		return nil
-	}
-	msg := fmt.Sprintf("browser busy - session active on different note: session_id=%s current_feed=%s. Use session tools or close_browse_session first.",
-		info.ID, info.CurrentFeedID)
-	logrus.Warnf("MCP: %s blocked (feed mismatch) session=%s target=%s", name, info.CurrentFeedID, feedID)
 	return &MCPToolResult{
 		Content: []MCPContent{{Type: "text", Text: msg}},
 		IsError: true,
@@ -174,23 +172,23 @@ func sessionNextStepForError(errText string, fallback mcpSessionNextStep) mcpSes
 
 func sessionNextStepCreateSession() mcpSessionNextStep {
 	return mcpSessionNextStep{
-		Tool:   "create_browse_session",
-		Reason: "当前 session 不可用或缺少 session_id",
-		Hint:   "先创建新的浏览会话，拿到 session_id 后继续使用 session_* 工具",
+		Tool:   "start_page",
+		Reason: "当前页面会话不可用或缺少 session_id",
+		Hint:   "先调用 start_page 获取 session_id",
 	}
 }
 
 func sessionNextStepState() mcpSessionNextStep {
 	return mcpSessionNextStep{
-		Tool:   "session_state",
-		Reason: "需要重新确认当前 session 页面和可执行动作",
+		Tool:   "get_page_state",
+		Reason: "需要重新确认当前页面会话状态和可执行动作",
 		Hint:   "读取 current、results、actions 和 timeline 后再决定下一步",
 	}
 }
 
 func sessionNextStepSearch() mcpSessionNextStep {
 	return mcpSessionNextStep{
-		Tool:   "session_search",
+		Tool:   "search_feeds",
 		Reason: "搜索结果引用不可用或已失效",
 		Hint:   "重新搜索后使用 results 中最新的 result_ref 打开笔记",
 	}
@@ -198,7 +196,7 @@ func sessionNextStepSearch() mcpSessionNextStep {
 
 func sessionNextStepSearchInput() mcpSessionNextStep {
 	return mcpSessionNextStep{
-		Tool:   "session_search",
+		Tool:   "search_feeds",
 		Reason: "缺少搜索关键词",
 		Hint:   "提供 session_id 和 keyword 后重新搜索",
 	}
@@ -206,17 +204,17 @@ func sessionNextStepSearchInput() mcpSessionNextStep {
 
 func sessionNextStepOpenNote() mcpSessionNextStep {
 	return mcpSessionNextStep{
-		Tool:   "session_open_note",
-		Reason: "当前 session 还没有打开可操作的笔记",
-		Hint:   "先从 session_state.results 中选择 result_ref 打开笔记",
+		Tool:   "open_note",
+		Reason: "当前页面会话还没有打开可操作的笔记",
+		Hint:   "先从 get_page_state.results 中选择 result_ref 打开笔记",
 	}
 }
 
 func sessionNextStepCommentInput() mcpSessionNextStep {
 	return mcpSessionNextStep{
-		Tool:   "session_comment",
+		Tool:   "comment_feed",
 		Reason: "缺少评论内容",
-		Hint:   "提供 content 后重新调用 session_comment",
+		Hint:   "提供 content 后重新调用 comment_feed",
 	}
 }
 
@@ -532,65 +530,6 @@ func (s *AppServer) handleListFeeds(ctx context.Context, args ListFeedsArgs) *MC
 	return jsonMCPResultWithTools(raw, afterFeedsTools)
 }
 
-// handleSearchFeeds 处理搜索Feeds
-func (s *AppServer) handleSearchFeeds(ctx context.Context, args SearchFeedsArgs) *MCPToolResult {
-	logrus.Info("MCP: 搜索Feeds")
-
-	if blocked := s.requireBrowserAvailableForMCP("搜索Feeds"); blocked != nil {
-		return blocked
-	}
-	if args.Keyword == "" {
-		return &MCPToolResult{
-			Content: []MCPContent{{
-				Type: "text",
-				Text: "搜索Feeds失败: 缺少关键词参数",
-			}},
-			IsError: true,
-		}
-	}
-
-	logrus.Infof("MCP: 搜索Feeds - 关键词: %s", args.Keyword)
-
-	// 将 MCP 的 FilterOption 转换为 xiaohongshu.FilterOption
-	filter := xiaohongshu.FilterOption{
-		SortBy:      args.Filters.SortBy,
-		NoteType:    args.Filters.NoteType,
-		PublishTime: args.Filters.PublishTime,
-		SearchScope: args.Filters.SearchScope,
-		Location:    args.Filters.Location,
-	}
-
-	result, err := s.xiaohongshuService.SearchFeeds(ctx, args.Keyword, filter)
-	if err != nil {
-		return &MCPToolResult{
-			Content: []MCPContent{{
-				Type: "text",
-				Text: "搜索Feeds失败: " + err.Error(),
-			}},
-			IsError: true,
-		}
-	}
-
-	// 格式化输出，转换为JSON字符串
-	jsonData, err := json.MarshalIndent(result, "", "  ")
-	if err != nil {
-		return &MCPToolResult{
-			Content: []MCPContent{{
-				Type: "text",
-				Text: fmt.Sprintf("搜索Feeds成功，但序列化失败: %v", err),
-			}},
-			IsError: true,
-		}
-	}
-
-	return &MCPToolResult{
-		Content: []MCPContent{{
-			Type: "text",
-			Text: string(jsonData),
-		}},
-	}
-}
-
 // handleUserProfile 获取用户主页
 func (s *AppServer) handleUserProfile(ctx context.Context, args map[string]any) *MCPToolResult {
 	if blocked := s.requireBrowserAvailableForMCP("获取用户主页"); blocked != nil {
@@ -654,256 +593,61 @@ func (s *AppServer) handleUserProfile(ctx context.Context, args map[string]any) 
 	}
 }
 
-// handleLikeFeed 处理点赞/取消点赞
-func (s *AppServer) handleLikeFeed(ctx context.Context, args map[string]interface{}) *MCPToolResult {
-	feedID, ok := args["feed_id"].(string)
-	if !ok || strings.TrimSpace(feedID) == "" {
-		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "操作失败: 缺少feed_id参数"}}, IsError: true}
+// handleFavoriteFeed 处理收藏/取消收藏（session 语义）
+func (s *AppServer) handleFavoriteFeed(ctx context.Context, args FavoriteFeedArgs) *MCPToolResult {
+	args.SessionID = strings.TrimSpace(args.SessionID)
+	if args.SessionID == "" {
+		return sessionMCPErrorResult("收藏失败: 缺少session_id参数", sessionNextStepCreateSession())
 	}
-	feedID = strings.TrimSpace(feedID)
-	xsecToken, ok := args["xsec_token"].(string)
-	if !ok || strings.TrimSpace(xsecToken) == "" {
-		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "操作失败: 缺少xsec_token参数"}}, IsError: true}
-	}
-	xsecToken = strings.TrimSpace(xsecToken)
-	unlike, _ := args["unlike"].(bool)
-	action := "点赞"
-	if unlike {
-		action = "取消点赞"
-	}
-
-	confirmToken, _ := args["confirm_token"].(string)
-	key := writeConfirmationKey("like_feed", feedID, xsecToken, unlike)
-	summary := fmt.Sprintf("%s: feed_id=%s", action, feedID)
-	if blocked := s.requireBrowserForMCPWithFeed(action, feedID); blocked != nil {
-		return blocked
-	}
-	if confirm := s.requireWriteConfirmation("like_feed", key, summary, confirmToken); confirm != nil {
-		return confirm
-	}
-	var res *ActionResult
-	var err error
-
-	if unlike {
-		res, err = s.xiaohongshuService.UnlikeFeed(ctx, feedID, xsecToken)
-	} else {
-		res, err = s.xiaohongshuService.LikeFeed(ctx, feedID, xsecToken)
-	}
-
-	if err != nil {
-		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: action + "失败: " + err.Error()}}, IsError: true}
-	}
-
-	return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: fmt.Sprintf("%s成功 - Feed ID: %s", action, res.FeedID)}}}
-}
-
-// handleFavoriteFeed 处理收藏/取消收藏
-func (s *AppServer) handleFavoriteFeed(ctx context.Context, args map[string]interface{}) *MCPToolResult {
-	feedID, ok := args["feed_id"].(string)
-	if !ok || strings.TrimSpace(feedID) == "" {
-		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "操作失败: 缺少feed_id参数"}}, IsError: true}
-	}
-	feedID = strings.TrimSpace(feedID)
-	xsecToken, ok := args["xsec_token"].(string)
-	if !ok || strings.TrimSpace(xsecToken) == "" {
-		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "操作失败: 缺少xsec_token参数"}}, IsError: true}
-	}
-	xsecToken = strings.TrimSpace(xsecToken)
-	unfavorite, _ := args["unfavorite"].(bool)
 	action := "收藏"
-	if unfavorite {
+	if args.Unfavorite {
 		action = "取消收藏"
 	}
-
-	confirmToken, _ := args["confirm_token"].(string)
-	key := writeConfirmationKey("favorite_feed", feedID, xsecToken, unfavorite)
-	summary := fmt.Sprintf("%s: feed_id=%s", action, feedID)
-	if blocked := s.requireBrowserForMCPWithFeed(action, feedID); blocked != nil {
-		return blocked
-	}
-	if confirm := s.requireWriteConfirmation("favorite_feed", key, summary, confirmToken); confirm != nil {
+	key := writeConfirmationKey("favorite_feed", args.SessionID, args.Unfavorite)
+	summary := fmt.Sprintf("%s: session_id=%s", action, args.SessionID)
+	if confirm := s.requireWriteConfirmation("favorite_feed", key, summary, args.ConfirmToken); confirm != nil {
 		return confirm
 	}
-	var res *ActionResult
-	var err error
-
-	if unfavorite {
-		res, err = s.xiaohongshuService.UnfavoriteFeed(ctx, feedID, xsecToken)
-	} else {
-		res, err = s.xiaohongshuService.FavoriteFeed(ctx, feedID, xsecToken)
-	}
-
+	result, err := s.xiaohongshuService.SessionFavorite(ctx, args.SessionID, args.Unfavorite)
 	if err != nil {
-		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: action + "失败: " + err.Error()}}, IsError: true}
+		return sessionMCPErrorFromErr(action+"失败", err, sessionNextStepState())
 	}
-
-	return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: fmt.Sprintf("%s成功 - Feed ID: %s", action, res.FeedID)}}}
+	return jsonMCPResultWithTools(result, afterOpenTools)
 }
 
-// handlePostComment 处理发表评论到Feed
-func (s *AppServer) handlePostComment(ctx context.Context, args map[string]interface{}) *MCPToolResult {
-	logrus.Info("MCP: 发表评论到Feed")
-
-	// 解析参数
-	feedID, ok := args["feed_id"].(string)
-	if !ok || strings.TrimSpace(feedID) == "" {
-		return &MCPToolResult{
-			Content: []MCPContent{{
-				Type: "text",
-				Text: "发表评论失败: 缺少feed_id参数",
-			}},
-			IsError: true,
-		}
+// handleReplyComment 处理回复评论（session 语义）
+func (s *AppServer) handleReplyComment(ctx context.Context, args ReplyCommentArgs) *MCPToolResult {
+	args.SessionID = strings.TrimSpace(args.SessionID)
+	if args.SessionID == "" {
+		return sessionMCPErrorResult("回复评论失败: 缺少session_id参数", sessionNextStepCreateSession())
 	}
-	feedID = strings.TrimSpace(feedID)
-
-	xsecToken, ok := args["xsec_token"].(string)
-	if !ok || strings.TrimSpace(xsecToken) == "" {
-		return &MCPToolResult{
-			Content: []MCPContent{{
-				Type: "text",
-				Text: "发表评论失败: 缺少xsec_token参数",
-			}},
-			IsError: true,
-		}
+	args.CommentID = strings.TrimSpace(args.CommentID)
+	args.UserID = strings.TrimSpace(args.UserID)
+	args.Content = strings.TrimSpace(args.Content)
+	if args.CommentID == "" && args.UserID == "" {
+		return sessionMCPErrorResult("回复评论失败: 缺少comment_id或user_id参数", sessionNextStepState())
 	}
-	xsecToken = strings.TrimSpace(xsecToken)
-
-	content, ok := args["content"].(string)
-	if !ok || strings.TrimSpace(content) == "" {
-		return &MCPToolResult{
-			Content: []MCPContent{{
-				Type: "text",
-				Text: "发表评论失败: 缺少content参数",
-			}},
-			IsError: true,
-		}
+	if args.Content == "" {
+		return sessionMCPErrorResult("回复评论失败: 缺少content参数", sessionNextStepState())
 	}
-
-	logrus.Infof("MCP: 发表评论 - Feed ID: %s, 内容长度: %d", feedID, len(content))
-
-	confirmToken, _ := args["confirm_token"].(string)
-	key := writeConfirmationKey("post_comment", feedID, xsecToken, content)
-	summary := fmt.Sprintf("发表评论: feed_id=%s content=%q", feedID, compactWriteSummary(content))
-	if blocked := s.requireBrowserForMCPWithFeed("发表评论", feedID); blocked != nil {
-		return blocked
-	}
-	if confirm := s.requireWriteConfirmation("post_comment", key, summary, confirmToken); confirm != nil {
+	key := writeConfirmationKey("reply_comment_in_feed", args.SessionID, args.CommentID, args.UserID, args.Content)
+	summary := fmt.Sprintf("回复评论: session_id=%s comment_id=%s user_id=%s content=%q", args.SessionID, args.CommentID, args.UserID, compactWriteSummary(args.Content))
+	if confirm := s.requireWriteConfirmation("reply_comment_in_feed", key, summary, args.ConfirmToken); confirm != nil {
 		return confirm
 	}
-	// 发表评论
-	result, err := s.xiaohongshuService.PostCommentToFeed(ctx, feedID, xsecToken, content)
+	result, err := s.xiaohongshuService.SessionReply(ctx, args.SessionID, args.CommentID, args.UserID, args.Content)
 	if err != nil {
-		return &MCPToolResult{
-			Content: []MCPContent{{
-				Type: "text",
-				Text: "发表评论失败: " + err.Error(),
-			}},
-			IsError: true,
-		}
+		return sessionMCPErrorFromErr("回复评论失败", err, sessionNextStepState())
 	}
-
-	// 返回成功结果，只包含feed_id
-	resultText := fmt.Sprintf("评论发表成功 - Feed ID: %s", result.FeedID)
-	return &MCPToolResult{
-		Content: []MCPContent{{
-			Type: "text",
-			Text: resultText,
-		}},
-	}
-}
-
-// handleReplyComment 处理回复评论
-func (s *AppServer) handleReplyComment(ctx context.Context, args map[string]interface{}) *MCPToolResult {
-	logrus.Info("MCP: 回复评论")
-
-	// 解析参数
-	feedID, ok := args["feed_id"].(string)
-	if !ok || strings.TrimSpace(feedID) == "" {
-		return &MCPToolResult{
-			Content: []MCPContent{{
-				Type: "text",
-				Text: "回复评论失败: 缺少feed_id参数",
-			}},
-			IsError: true,
-		}
-	}
-	feedID = strings.TrimSpace(feedID)
-
-	xsecToken, ok := args["xsec_token"].(string)
-	if !ok || strings.TrimSpace(xsecToken) == "" {
-		return &MCPToolResult{
-			Content: []MCPContent{{
-				Type: "text",
-				Text: "回复评论失败: 缺少xsec_token参数",
-			}},
-			IsError: true,
-		}
-	}
-	xsecToken = strings.TrimSpace(xsecToken)
-
-	commentID, _ := args["comment_id"].(string)
-	userID, _ := args["user_id"].(string)
-	if commentID == "" && userID == "" {
-		return &MCPToolResult{
-			Content: []MCPContent{{
-				Type: "text",
-				Text: "回复评论失败: 缺少comment_id或user_id参数",
-			}},
-			IsError: true,
-		}
-	}
-
-	content, ok := args["content"].(string)
-	if !ok || strings.TrimSpace(content) == "" {
-		return &MCPToolResult{
-			Content: []MCPContent{{
-				Type: "text",
-				Text: "回复评论失败: 缺少content参数",
-			}},
-			IsError: true,
-		}
-	}
-
-	logrus.Infof("MCP: 回复评论 - Feed ID: %s, Comment ID: %s, User ID: %s, 内容长度: %d", feedID, commentID, userID, len(content))
-
-	confirmToken, _ := args["confirm_token"].(string)
-	key := writeConfirmationKey("reply_comment", feedID, xsecToken, commentID, userID, content)
-	summary := fmt.Sprintf("回复评论: feed_id=%s comment_id=%s user_id=%s content=%q", feedID, commentID, userID, compactWriteSummary(content))
-	if blocked := s.requireBrowserForMCPWithFeed("回复评论", feedID); blocked != nil {
-		return blocked
-	}
-	if confirm := s.requireWriteConfirmation("reply_comment", key, summary, confirmToken); confirm != nil {
-		return confirm
-	}
-	// 回复评论
-	result, err := s.xiaohongshuService.ReplyCommentToFeed(ctx, feedID, xsecToken, commentID, userID, content)
-	if err != nil {
-		return &MCPToolResult{
-			Content: []MCPContent{{
-				Type: "text",
-				Text: "回复评论失败: " + err.Error(),
-			}},
-			IsError: true,
-		}
-	}
-
-	// 返回成功结果
-	responseText := fmt.Sprintf("评论回复成功 - Feed ID: %s, Comment ID: %s, User ID: %s", result.FeedID, result.TargetCommentID, result.TargetUserID)
-	return &MCPToolResult{
-		Content: []MCPContent{{
-			Type: "text",
-			Text: responseText,
-		}},
-	}
+	return jsonMCPResultWithTools(result, afterOpenTools)
 }
 
 func (s *AppServer) handleCreateBrowseSession(ctx context.Context, args CreateBrowseSessionArgs) *MCPToolResult {
-	logrus.Info("MCP: 创建浏览会话")
+	logrus.Info("MCP: 创建页面会话 (start_page)")
 	info, err := s.xiaohongshuService.CreateBrowseSession(ctx, args.ForceRecreate)
 	if err != nil {
 		return &MCPToolResult{
-			Content: []MCPContent{{Type: "text", Text: "创建浏览会话失败: " + err.Error()}},
+			Content: []MCPContent{{Type: "text", Text: "创建页面会话失败 (start_page): " + err.Error()}},
 			IsError: true,
 		}
 	}
@@ -922,21 +666,21 @@ func (s *AppServer) handleCloseBrowseSession(ctx context.Context, args BrowseSes
 
 func (s *AppServer) handleSessionState(ctx context.Context, args BrowseSessionIDArgs) *MCPToolResult {
 	if args.SessionID == "" {
-		return sessionMCPErrorResult("session状态获取失败: 缺少session_id参数", sessionNextStepCreateSession())
+		return sessionMCPErrorResult("页面状态获取失败: 缺少session_id参数", sessionNextStepCreateSession())
 	}
 	state, err := s.xiaohongshuService.SessionState(ctx, args.SessionID)
 	if err != nil {
-		return sessionMCPErrorFromErr("session状态获取失败", err, sessionNextStepCreateSession())
+		return sessionMCPErrorFromErr("页面状态获取失败", err, sessionNextStepCreateSession())
 	}
-	return jsonMCPResult(state, "session状态获取成功")
+	return jsonMCPResult(state, "页面状态获取成功")
 }
 
 func (s *AppServer) handleSessionSearch(ctx context.Context, args SessionSearchArgs) *MCPToolResult {
 	if args.SessionID == "" {
-		return sessionMCPErrorResult("session搜索失败: 缺少session_id参数", sessionNextStepCreateSession())
+		return sessionMCPErrorResult("搜索失败: 缺少session_id参数", sessionNextStepCreateSession())
 	}
 	if args.Keyword == "" {
-		return sessionMCPErrorResult("session搜索失败: 缺少keyword参数", sessionNextStepSearchInput())
+		return sessionMCPErrorResult("搜索失败: 缺少keyword参数", sessionNextStepSearchInput())
 	}
 	filter := xiaohongshu.FilterOption{
 		SortBy:      args.Filters.SortBy,
@@ -950,7 +694,7 @@ func (s *AppServer) handleSessionSearch(ctx context.Context, args SessionSearchA
 	}
 	result, err := s.xiaohongshuService.SessionSearch(ctx, args.SessionID, args.Keyword, args.Cursor, args.MaxItems, filter)
 	if err != nil {
-		return sessionMCPErrorFromErr("session搜索失败", err, sessionNextStepState())
+		return sessionMCPErrorFromErr("搜索失败", err, sessionNextStepState())
 	}
 	return jsonMCPResultWithTools(result, afterSearchTools)
 }
@@ -960,14 +704,14 @@ func (s *AppServer) handleSessionOpenNote(ctx context.Context, args SessionOpenN
 	args.ResultRef = strings.TrimSpace(args.ResultRef)
 	args.XsecToken = strings.TrimSpace(args.XsecToken)
 	if args.SessionID == "" {
-		return sessionMCPErrorResult("session打开笔记失败: 缺少session_id参数", sessionNextStepCreateSession())
+		return sessionMCPErrorResult("打开笔记失败: 缺少session_id参数", sessionNextStepCreateSession())
 	}
 	if args.ResultRef == "" {
-		return sessionMCPErrorResult("session打开笔记失败: 缺少result_ref参数", sessionNextStepState())
+		return sessionMCPErrorResult("打开笔记失败: 缺少result_ref参数", sessionNextStepState())
 	}
 	info, err := s.xiaohongshuService.SessionOpenNote(ctx, args.SessionID, args.ResultRef, args.XsecToken)
 	if err != nil {
-		return sessionMCPErrorFromErr("session打开笔记失败", err, sessionNextStepState())
+		return sessionMCPErrorFromErr("打开笔记失败", err, sessionNextStepState())
 	}
 	return jsonMCPResultWithTools(info, afterOpenTools)
 }
@@ -975,10 +719,10 @@ func (s *AppServer) handleSessionOpenNote(ctx context.Context, args SessionOpenN
 func (s *AppServer) handleSessionDetail(ctx context.Context, args SessionDetailArgs) *MCPToolResult {
 	args.SessionID = strings.TrimSpace(args.SessionID)
 	if args.SessionID == "" {
-		return sessionMCPErrorResult("session详情获取失败: 缺少session_id参数", sessionNextStepCreateSession())
+		return sessionMCPErrorResult("笔记详情获取失败: 缺少session_id参数", sessionNextStepCreateSession())
 	}
 	if args.ReplyLimit != nil && *args.ReplyLimit < 0 {
-		return sessionMCPErrorResult("session分批加载评论失败: reply_limit不能为负数", sessionNextStepOpenNote())
+		return sessionMCPErrorResult("分批加载评论失败: reply_limit不能为负数", sessionNextStepOpenNote())
 	}
 
 	if args.MaxItems > 0 || args.Cursor != "" {
@@ -1001,14 +745,14 @@ func (s *AppServer) handleSessionDetail(ctx context.Context, args SessionDetailA
 		}
 		result, err := s.xiaohongshuService.SessionDetailBatch(ctx, args.SessionID, args.Cursor, maxItems, config)
 		if err != nil {
-			return sessionMCPErrorFromErr("session分批加载评论失败", err, sessionNextStepOpenNote())
+			return sessionMCPErrorFromErr("分批加载评论失败", err, sessionNextStepOpenNote())
 		}
 		return jsonMCPResultWithTools(result, afterOpenTools)
 	}
 
 	detail, err := s.xiaohongshuService.SessionDetail(ctx, args.SessionID, false, 0)
 	if err != nil {
-		return sessionMCPErrorFromErr("session详情获取失败", err, sessionNextStepOpenNote())
+		return sessionMCPErrorFromErr("笔记详情获取失败", err, sessionNextStepOpenNote())
 	}
 	// 确保 list 不为 null
 	if detail.Comments == nil {
@@ -1019,50 +763,50 @@ func (s *AppServer) handleSessionDetail(ctx context.Context, args SessionDetailA
 
 func (s *AppServer) handleSessionLike(ctx context.Context, args SessionLikeArgs) *MCPToolResult {
 	if args.SessionID == "" {
-		return sessionMCPErrorResult("session点赞失败: 缺少session_id参数", sessionNextStepCreateSession())
+		return sessionMCPErrorResult("点赞失败: 缺少session_id参数", sessionNextStepCreateSession())
 	}
-	action := "session点赞"
+	action := "点赞"
 	if args.Unlike {
-		action = "session取消点赞"
+		action = "取消点赞"
 	}
-	key := writeConfirmationKey("session_like", args.SessionID, args.Unlike)
+	key := writeConfirmationKey("like_feed", args.SessionID, args.Unlike)
 	summary := fmt.Sprintf("%s: session_id=%s", action, args.SessionID)
-	if confirm := s.requireWriteConfirmation("session_like", key, summary, args.ConfirmToken); confirm != nil {
+	if confirm := s.requireWriteConfirmation("like_feed", key, summary, args.ConfirmToken); confirm != nil {
 		return confirm
 	}
 	result, err := s.xiaohongshuService.SessionLike(ctx, args.SessionID, args.Unlike)
 	if err != nil {
-		return sessionMCPErrorFromErr("session点赞失败", err, sessionNextStepState())
+		return sessionMCPErrorFromErr("点赞失败", err, sessionNextStepState())
 	}
 	return jsonMCPResultWithTools(result, afterOpenTools)
 }
 
 func (s *AppServer) handleSessionComment(ctx context.Context, args SessionCommentArgs) *MCPToolResult {
 	if args.SessionID == "" {
-		return sessionMCPErrorResult("session评论失败: 缺少session_id参数", sessionNextStepCreateSession())
+		return sessionMCPErrorResult("评论失败: 缺少session_id参数", sessionNextStepCreateSession())
 	}
 	if args.Content == "" {
-		return sessionMCPErrorResult("session评论失败: 缺少content参数", sessionNextStepCommentInput())
+		return sessionMCPErrorResult("评论失败: 缺少content参数", sessionNextStepCommentInput())
 	}
-	key := writeConfirmationKey("session_comment", args.SessionID, args.Content)
-	summary := fmt.Sprintf("session评论: session_id=%s content=%q", args.SessionID, compactWriteSummary(args.Content))
-	if confirm := s.requireWriteConfirmation("session_comment", key, summary, args.ConfirmToken); confirm != nil {
+	key := writeConfirmationKey("comment_feed", args.SessionID, args.Content)
+	summary := fmt.Sprintf("评论当前笔记: session_id=%s content=%q", args.SessionID, compactWriteSummary(args.Content))
+	if confirm := s.requireWriteConfirmation("comment_feed", key, summary, args.ConfirmToken); confirm != nil {
 		return confirm
 	}
 	result, err := s.xiaohongshuService.SessionComment(ctx, args.SessionID, args.Content)
 	if err != nil {
-		return sessionMCPErrorFromErr("session评论失败", err, sessionNextStepState())
+		return sessionMCPErrorFromErr("评论失败", err, sessionNextStepState())
 	}
 	return jsonMCPResultWithTools(result, afterOpenTools)
 }
 
 func (s *AppServer) handleSessionBack(ctx context.Context, args BrowseSessionIDArgs) *MCPToolResult {
 	if args.SessionID == "" {
-		return sessionMCPErrorResult("session返回失败: 缺少session_id参数", sessionNextStepCreateSession())
+		return sessionMCPErrorResult("返回上一页失败: 缺少session_id参数", sessionNextStepCreateSession())
 	}
 	info, err := s.xiaohongshuService.SessionBack(ctx, args.SessionID)
 	if err != nil {
-		return sessionMCPErrorFromErr("session返回失败", err, sessionNextStepState())
+		return sessionMCPErrorFromErr("返回上一页失败", err, sessionNextStepState())
 	}
 	return jsonMCPResultWithTools(info, afterBackTools)
 }
