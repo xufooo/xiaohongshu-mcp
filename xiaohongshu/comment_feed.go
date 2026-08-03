@@ -71,6 +71,8 @@ func (f *CommentFeedAction) PostComment(ctx context.Context, feedID, xsecToken, 
 		}
 	}
 
+	page = f.page.Context(ctx).Timeout(120 * time.Second)
+
 	editor, err := page.Element("div.input-box div.content-edit")
 	if err != nil {
 		logrus.Warnf("Failed to find comment editor area: %v", err)
