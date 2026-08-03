@@ -71,15 +71,20 @@ func (f *CommentFeedAction) PostComment(ctx context.Context, feedID, xsecToken, 
 		}
 	}
 
+	editor, err := page.Element("div.input-box div.content-edit")
+	if err != nil {
+		logrus.Warnf("Failed to find comment editor area: %v", err)
+		return fmt.Errorf("未找到评论输入区域: %w", err)
+	}
+	if err := editor.Click(proto.InputMouseButtonLeft, 1); err != nil {
+		logrus.Warnf("Failed to focus comment editor: %v", err)
+		return fmt.Errorf("无法聚焦评论输入框: %w", err)
+	}
+
 	elem, err := page.Element(SelectorCommentBox)
 	if err != nil {
 		logrus.Warnf("Failed to find comment input box: %v", err)
 		return fmt.Errorf("未找到评论输入框，该帖子可能不支持评论或网页端不可访问: %w", err)
-	}
-
-	if err := elem.Click(proto.InputMouseButtonLeft, 1); err != nil {
-		logrus.Warnf("Failed to click comment input box: %v", err)
-		return fmt.Errorf("无法点击评论输入框: %w", err)
 	}
 
 	if err := elem.Input(content); err != nil {
