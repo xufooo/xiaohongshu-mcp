@@ -34,6 +34,75 @@ const interactStateJS = `
 	return { liked, collected };
 `
 
+// domCleanJS 只定义 clean（供三个 DOM 提取器共用）。
+const domCleanJS = `
+	const clean = (value) => (value || "").replace(/\s+/g, " ").trim();
+`
+
+// domNoteHelpersJS 只包含 pickText/pickAttr/countNear（依赖 domCleanJS 的 clean）。
+const domNoteHelpersJS = `
+	const pickText = (selectors) => {
+		for (const selector of selectors) {
+			const el = document.querySelector(selector);
+			const text = clean(el?.innerText || el?.textContent);
+			if (text) return text;
+		}
+		return "";
+	};
+	const pickAttr = (selectors, attr) => {
+		for (const selector of selectors) {
+			const el = document.querySelector(selector);
+			const value = el?.getAttribute(attr) || "";
+			if (value) return value;
+		}
+		return "";
+	};
+	const countNear = (selectors) => {
+		for (const selector of selectors) {
+			const el = document.querySelector(selector);
+			if (!el) continue;
+			const text = clean(el.innerText || el.textContent || el.parentElement?.innerText);
+			const match = text.match(/([\d.万wWkK]+)/);
+			if (match) return match[1];
+		}
+		return "";
+	};
+`
+
+// domCommentExtractorJS 定义 extractComments(feedID)，内容逐字符源自三处相同评论遍历逻辑。
+const domCommentExtractorJS = `
+	const extractComments = (feedID) => Array.from(document.querySelectorAll(".parent-comment")).map((parent) => {
+		const top = parent.querySelector(":scope > .comment-item") || parent;
+		const content = clean(top.querySelector(".content, .note-text, [class*='content']")?.innerText || top.innerText);
+		const user = clean(top.querySelector(".author-wrapper .name, .name, .nickname, [class*='name']")?.innerText);
+		const likeText = clean(top.querySelector(".interactions .like, .like, [class*='like']")?.innerText);
+		const subComments = Array.from(parent.querySelectorAll(":scope > .reply-container > .list-container > .comment-item")).map((sub) => {
+			const subContent = clean(sub.querySelector(".content, .note-text, [class*='content']")?.innerText || sub.innerText);
+			const subUser = clean(sub.querySelector(".author-wrapper .name, .name, .nickname, [class*='name']")?.innerText);
+			const subLikeText = clean(sub.querySelector(".interactions .like, .like, [class*='like']")?.innerText);
+			return {
+				id: sub.getAttribute("id") || sub.dataset?.id || sub.getAttribute("data-comment-id") || "",
+				noteId: feedID,
+				content: subContent,
+				likeCount: (subLikeText.match(/([\d.万wWkK]+)/) || ["", ""])[1],
+				userInfo: { nickname: subUser, nickName: subUser },
+				subComments: [],
+				showTags: []
+			};
+		}).filter((subComment) => subComment.content);
+		return {
+			id: top.getAttribute("id") || parent.dataset?.id || parent.getAttribute("data-comment-id") || top.dataset?.id || top.getAttribute("data-comment-id") || "",
+			noteId: feedID,
+			content,
+			likeCount: (likeText.match(/([\d.万wWkK]+)/) || ["", ""])[1],
+			userInfo: { nickname: user, nickName: user },
+			subCommentCount: subComments.length ? String(subComments.length) : "",
+			subComments,
+			showTags: []
+		};
+	}).filter((comment) => comment.content);
+`
+
 // OpenedNoteSnapshot 是打开笔记后的一次 DOM 快照：正文、图片、href 互动状态和当前首屏评论。
 type OpenedNoteSnapshot struct {
 	Note     OpenedNoteContent `json:"note"`
@@ -42,34 +111,7 @@ type OpenedNoteSnapshot struct {
 
 // ExtractOpenedNoteSnapshotFromDOM 单次 Eval 返回打开笔记的完整首屏快照。
 func ExtractOpenedNoteSnapshotFromDOM(page *hrod.Page, feedID string) (*OpenedNoteSnapshot, error) {
-	result, err := page.Eval(`(feedID, likeSel, collectSel) => {
-		const clean = (value) => (value || "").replace(/\s+/g, " ").trim();
-		const pickText = (selectors) => {
-			for (const selector of selectors) {
-				const el = document.querySelector(selector);
-				const text = clean(el?.innerText || el?.textContent);
-				if (text) return text;
-			}
-			return "";
-		};
-		const pickAttr = (selectors, attr) => {
-			for (const selector of selectors) {
-				const el = document.querySelector(selector);
-				const value = el?.getAttribute(attr) || "";
-				if (value) return value;
-			}
-			return "";
-		};
-		const countNear = (selectors) => {
-			for (const selector of selectors) {
-				const el = document.querySelector(selector);
-				if (!el) continue;
-				const text = clean(el.innerText || el.textContent || el.parentElement?.innerText);
-				const match = text.match(/([\d.万wWkK]+)/);
-				if (match) return match[1];
-			}
-			return "";
-		};
+	result, err := page.Eval(`(feedID, likeSel, collectSel) => {` + domCleanJS + domNoteHelpersJS + domCommentExtractorJS + `
 		const interact = (() => {` + interactStateJS + `})();
 		if (!interact) return "";
 
@@ -80,36 +122,7 @@ func ExtractOpenedNoteSnapshotFromDOM(page *hrod.Page, feedID string) (*OpenedNo
 		const images = Array.from(document.querySelectorAll(".swiper img, .note-content img, .media-container img"))
 			.map((img) => ({ width: img.naturalWidth || 0, height: img.naturalHeight || 0, urlDefault: img.src || "", urlPre: img.src || "" }))
 			.filter((img) => img.urlDefault);
-		const comments = Array.from(document.querySelectorAll(".parent-comment")).map((parent) => {
-			const top = parent.querySelector(":scope > .comment-item") || parent;
-			const content = clean(top.querySelector(".content, .note-text, [class*='content']")?.innerText || top.innerText);
-			const user = clean(top.querySelector(".author-wrapper .name, .name, .nickname, [class*='name']")?.innerText);
-			const likeText = clean(top.querySelector(".interactions .like, .like, [class*='like']")?.innerText);
-			const subComments = Array.from(parent.querySelectorAll(":scope > .reply-container > .list-container > .comment-item")).map((sub) => {
-				const subContent = clean(sub.querySelector(".content, .note-text, [class*='content']")?.innerText || sub.innerText);
-				const subUser = clean(sub.querySelector(".author-wrapper .name, .name, .nickname, [class*='name']")?.innerText);
-				const subLikeText = clean(sub.querySelector(".interactions .like, .like, [class*='like']")?.innerText);
-				return {
-					id: sub.getAttribute("id") || sub.dataset?.id || sub.getAttribute("data-comment-id") || "",
-					noteId: feedID,
-					content: subContent,
-					likeCount: (subLikeText.match(/([\d.万wWkK]+)/) || ["", ""])[1],
-					userInfo: { nickname: subUser, nickName: subUser },
-					subComments: [],
-					showTags: []
-				};
-			}).filter((subComment) => subComment.content);
-			return {
-				id: top.getAttribute("id") || parent.dataset?.id || parent.getAttribute("data-comment-id") || top.dataset?.id || top.getAttribute("data-comment-id") || "",
-				noteId: feedID,
-				content,
-				likeCount: (likeText.match(/([\d.万wWkK]+)/) || ["", ""])[1],
-				userInfo: { nickname: user, nickName: user },
-				subCommentCount: subComments.length ? String(subComments.length) : "",
-				subComments,
-				showTags: []
-			};
-		}).filter((comment) => comment.content);
+		const comments = extractComments(feedID);
 
 		if (!title && !desc && comments.length === 0) return "";
 		return JSON.stringify({
@@ -273,36 +286,9 @@ func ExtractSearchFeedsFromDOM(page *hrod.Page) ([]Feed, error) {
 
 // ExtractFeedDetailFromDOM 从当前详情页可见 DOM 提取笔记、作者、评论和互动状态。
 func ExtractFeedDetailFromDOM(page *hrod.Page, feedID string) (*FeedDetailResponse, error) {
-	result, err := page.Eval(`(feedID, likeSel, collectSel) => {
-		const clean = (value) => (value || "").replace(/\s+/g, " ").trim();
-		const pickText = (selectors) => {
-			for (const selector of selectors) {
-				const el = document.querySelector(selector);
-				const text = clean(el?.innerText || el?.textContent);
-				if (text) return text;
-			}
-			return "";
-		};
-		const pickAttr = (selectors, attr) => {
-			for (const selector of selectors) {
-				const el = document.querySelector(selector);
-				const value = el?.getAttribute(attr) || "";
-				if (value) return value;
-			}
-			return "";
-		};
+	result, err := page.Eval(`(feedID, likeSel, collectSel) => {` + domCleanJS + domNoteHelpersJS + domCommentExtractorJS + `
 		const interact = (() => {` + interactStateJS + `})();
 		if (!interact) return "";
-		const countNear = (selectors) => {
-			for (const selector of selectors) {
-				const el = document.querySelector(selector);
-				if (!el) continue;
-				const text = clean(el.innerText || el.textContent || el.parentElement?.innerText);
-				const match = text.match(/([\d.万wWkK]+)/);
-				if (match) return match[1];
-			}
-			return "";
-		};
 
 		const title = pickText(["#detail-title", ".note-content .title", ".title", "[class*='title']"]);
 		const desc = pickText(["#detail-desc", ".note-content .desc", ".note-text", ".desc", "[class*='desc']"]);
@@ -311,36 +297,7 @@ func ExtractFeedDetailFromDOM(page *hrod.Page, feedID string) (*FeedDetailRespon
 		const images = Array.from(document.querySelectorAll(".swiper img, .note-content img, .media-container img"))
 			.map((img) => ({ width: img.naturalWidth || 0, height: img.naturalHeight || 0, urlDefault: img.src || "", urlPre: img.src || "" }))
 			.filter((img) => img.urlDefault);
-		const comments = Array.from(document.querySelectorAll(".parent-comment")).map((parent) => {
-			const top = parent.querySelector(":scope > .comment-item") || parent;
-			const content = clean(top.querySelector(".content, .note-text, [class*='content']")?.innerText || top.innerText);
-			const user = clean(top.querySelector(".author-wrapper .name, .name, .nickname, [class*='name']")?.innerText);
-			const likeText = clean(top.querySelector(".interactions .like, .like, [class*='like']")?.innerText);
-			const subComments = Array.from(parent.querySelectorAll(":scope > .reply-container > .list-container > .comment-item")).map((sub) => {
-				const subContent = clean(sub.querySelector(".content, .note-text, [class*='content']")?.innerText || sub.innerText);
-				const subUser = clean(sub.querySelector(".author-wrapper .name, .name, .nickname, [class*='name']")?.innerText);
-				const subLikeText = clean(sub.querySelector(".interactions .like, .like, [class*='like']")?.innerText);
-				return {
-					id: sub.getAttribute("id") || sub.dataset?.id || sub.getAttribute("data-comment-id") || "",
-					noteId: feedID,
-					content: subContent,
-					likeCount: (subLikeText.match(/([\d.万wWkK]+)/) || ["", ""])[1],
-					userInfo: { nickname: subUser, nickName: subUser },
-					subComments: [],
-					showTags: []
-				};
-			}).filter((subComment) => subComment.content);
-			return {
-				id: top.getAttribute("id") || parent.dataset?.id || parent.getAttribute("data-comment-id") || top.dataset?.id || top.getAttribute("data-comment-id") || "",
-				noteId: feedID,
-				content,
-				likeCount: (likeText.match(/([\d.万wWkK]+)/) || ["", ""])[1],
-				userInfo: { nickname: user, nickName: user },
-				subCommentCount: subComments.length ? String(subComments.length) : "",
-				subComments,
-				showTags: []
-			};
-		}).filter((comment) => comment.content);
+		const comments = extractComments(feedID);
 
 		const detail = {
 			note: {
@@ -389,38 +346,8 @@ func ExtractOpenedNoteContentFromDOM(page *hrod.Page, feedID string) (*OpenedNot
 }
 
 func ExtractCommentsFromDOM(page *hrod.Page, feedID string) ([]Comment, error) {
-	result, err := page.Eval(`(feedID) => {
-		const clean = (value) => (value || "").replace(/\s+/g, " ").trim();
-		const comments = Array.from(document.querySelectorAll(".parent-comment")).map((parent) => {
-			const top = parent.querySelector(":scope > .comment-item") || parent;
-			const content = clean(top.querySelector(".content, .note-text, [class*='content']")?.innerText || top.innerText);
-			const user = clean(top.querySelector(".author-wrapper .name, .name, .nickname, [class*='name']")?.innerText);
-			const likeText = clean(top.querySelector(".interactions .like, .like, [class*='like']")?.innerText);
-			const subComments = Array.from(parent.querySelectorAll(":scope > .reply-container > .list-container > .comment-item")).map((sub) => {
-				const subContent = clean(sub.querySelector(".content, .note-text, [class*='content']")?.innerText || sub.innerText);
-				const subUser = clean(sub.querySelector(".author-wrapper .name, .name, .nickname, [class*='name']")?.innerText);
-				const subLikeText = clean(sub.querySelector(".interactions .like, .like, [class*='like']")?.innerText);
-				return {
-					id: sub.getAttribute("id") || sub.dataset?.id || sub.getAttribute("data-comment-id") || "",
-					noteId: feedID,
-					content: subContent,
-					likeCount: (subLikeText.match(/([\d.万wWkK]+)/) || ["", ""])[1],
-					userInfo: { nickname: subUser, nickName: subUser },
-					subComments: [],
-					showTags: []
-				};
-			}).filter((subComment) => subComment.content);
-			return {
-				id: top.getAttribute("id") || parent.dataset?.id || parent.getAttribute("data-comment-id") || top.dataset?.id || top.getAttribute("data-comment-id") || "",
-				noteId: feedID,
-				content,
-				likeCount: (likeText.match(/([\d.万wWkK]+)/) || ["", ""])[1],
-				userInfo: { nickname: user, nickName: user },
-				subCommentCount: subComments.length ? String(subComments.length) : "",
-				subComments,
-				showTags: []
-			};
-		}).filter((comment) => comment.content);
+	result, err := page.Eval(`(feedID) => {` + domCleanJS + domCommentExtractorJS + `
+		const comments = extractComments(feedID);
 		return JSON.stringify(comments);
 	}`, feedID)
 	if err != nil {

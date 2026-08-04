@@ -4,10 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"sync"
 	"time"
 
+	"github.com/sirupsen/logrus"
 	"github.com/xpzouying/xiaohongshu-mcp/configs"
 	hrod "github.com/xpzouying/xiaohongshu-mcp/humanize/rod"
 )
@@ -342,7 +342,7 @@ func newPage(browser *hrod.Browser) (page *hrod.Page, err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			err = fmt.Errorf("create browser page failed: %v", recovered)
-			fmt.Fprintf(os.Stderr, "[DEBUG] newPage panicked: %v\n", recovered)
+			logrus.WithError(fmt.Errorf("%v", recovered)).Debug("newPage panicked")
 		}
 	}()
 	return browser.Page()

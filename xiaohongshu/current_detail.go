@@ -52,6 +52,65 @@ const xhsProbeFeedMatchJS = `
 			};
 `
 
+
+const xhsProbeCollectionJS = `
+			const count = (selector) => {
+				try { return document.querySelectorAll(selector).length; } catch (_) { return 0; }
+			};
+			const visibleCount = (selector) => {
+				try {
+					return Array.from(document.querySelectorAll(selector)).filter(visible).length;
+				} catch (_) {
+					return 0;
+				}
+			};
+		const unwrap = (value) => {
+			if (value && typeof value === "object") {
+				if ("value" in value) return value.value;
+				if ("_value" in value) return value._value;
+			}
+			return value;
+		};
+		const sizeOf = (value) => {
+			value = unwrap(value);
+			if (Array.isArray(value)) return value.length;
+			if (value && typeof value === "object") return Object.keys(value).length;
+			return value ? 1 : 0;
+		};
+`
+
+const xhsProbeRiskJS = `
+		const riskOf = (text) => {
+			const riskKeywords = [
+				"登录已过期", "登录失效", "请先登录", "请登录", "扫码登录",
+				"验证码", "滑块", "安全验证", "请验证", "人机验证",
+				"操作频繁", "访问太频繁", "账号异常"
+			];
+			const risk = riskKeywords.find((keyword) => text.includes(keyword)) || "";
+			const riskIndex = risk ? text.indexOf(risk) : -1;
+			return risk
+				? text.slice(Math.max(0, riskIndex - 40), Math.min(text.length, riskIndex + 100))
+				: "";
+		};
+`
+
+const xhsSearchInputReadyJS = `
+		const searchInputReady = (selector) => {
+			const candidates = Array.from(document.querySelectorAll(selector));
+			return candidates.some(el => {
+				if (!el || !el.isConnected) return false;
+				if (!visible(el)) return false;
+				if (el.disabled || el.readOnly) return false;
+				const r = el.getBoundingClientRect();
+				if (r.top >= window.innerHeight || r.bottom <= 0 ||
+					r.left >= window.innerWidth || r.right <= 0) return false;
+				const cx = r.left + r.width / 2;
+				const cy = r.top + r.height / 2;
+				const hit = document.elementFromPoint(cx, cy);
+				return hit && (el === hit || el.contains(hit));
+			});
+		};
+`
 var errPermanentCurrentDetailProbe = errors.New("permanent current detail probe error")
 
 type currentFeedDetailProbe struct {

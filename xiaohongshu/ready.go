@@ -132,43 +132,11 @@ func probeWatchdogSelectors(page *hrod.Page, opts XHSReadyOptions) {
 // probeXHSReady 按 kind 缩小范围的 scoped probe：只计算当前 kind 需要的信号，
 // 公共字段（URL/title/readyState/scrollY/app/risk）始终计算。
 func probeXHSReady(page *hrod.Page, kind XHSReadyKind, feedID string) (xhsReadyProbe, error) {
-	probeJS := `(kind, feedID, searchInputSelector, searchResultSelector, feedCardSelector, detailSelector, commentBoxSelector, likeButtonSelector, searchInputInFeedsSelector, notificationPageSelector, notificationTabSelector) => {` + xhsProbeVisibleJS + xhsProbeFeedMatchJS + `
-			const count = (selector) => {
-				try { return document.querySelectorAll(selector).length; } catch (_) { return 0; }
-			};
-			const visibleCount = (selector) => {
-				try {
-					return Array.from(document.querySelectorAll(selector)).filter(visible).length;
-				} catch (_) {
-					return 0;
-				}
-			};
-		const unwrap = (value) => {
-			if (value && typeof value === "object") {
-				if ("value" in value) return value.value;
-				if ("_value" in value) return value._value;
-			}
-			return value;
-		};
-		const sizeOf = (value) => {
-			value = unwrap(value);
-			if (Array.isArray(value)) return value.length;
-			if (value && typeof value === "object") return Object.keys(value).length;
-			return value ? 1 : 0;
-		};
+	probeJS := `(kind, feedID, searchInputSelector, searchResultSelector, feedCardSelector, detailSelector, commentBoxSelector, likeButtonSelector, searchInputInFeedsSelector, notificationPageSelector, notificationTabSelector) => {` + xhsProbeVisibleJS + xhsProbeFeedMatchJS + xhsProbeCollectionJS + xhsProbeRiskJS + xhsSearchInputReadyJS + `
 		const state = window.__INITIAL_STATE__ || {};
 		const detailURLMatched = detailURLMatchesFeedID(location.href);
 		const text = (document.body?.innerText || "").replace(/\s+/g, " ").slice(0, 1500);
-		const riskKeywords = [
-			"登录已过期", "登录失效", "请先登录", "请登录", "扫码登录",
-			"验证码", "滑块", "安全验证", "请验证", "人机验证",
-			"操作频繁", "访问太频繁", "账号异常"
-		];
-		const risk = riskKeywords.find((keyword) => text.includes(keyword)) || "";
-		const riskIndex = risk ? text.indexOf(risk) : -1;
-		const riskText = risk
-			? text.slice(Math.max(0, riskIndex - 40), Math.min(text.length, riskIndex + 100))
-			: "";
+		const riskText = riskOf(text);
 		const out = {
 			url: location.href.slice(0, 300),
 			title: document.title.slice(0, 120),
@@ -182,19 +150,7 @@ func probeXHSReady(page *hrod.Page, kind XHSReadyKind, feedID string) (xhsReadyP
 			out.feed_card_count = count(feedCardSelector);
 			out.detail_count = count(detailSelector);
 			if (kind === "home_search") {
-				const candidates = Array.from(document.querySelectorAll(searchInputInFeedsSelector));
-				out.search_input_in_feeds_ready = candidates.some(el => {
-					if (!el || !el.isConnected) return false;
-					if (!visible(el)) return false;
-					if (el.disabled || el.readOnly) return false;
-					const r = el.getBoundingClientRect();
-					if (r.top >= window.innerHeight || r.bottom <= 0 ||
-						r.left >= window.innerWidth || r.right <= 0) return false;
-					const cx = r.left + r.width / 2;
-					const cy = r.top + r.height / 2;
-					const hit = document.elementFromPoint(cx, cy);
-					return hit && (el === hit || el.contains(hit));
-				});
+				out.search_input_in_feeds_ready = searchInputReady(searchInputInFeedsSelector);
 			}
 		} else if (kind === "search") {
 			out.search_feed_count = sizeOf(unwrap(state.search?.feeds));
@@ -227,6 +183,11 @@ func probeXHSReady(page *hrod.Page, kind XHSReadyKind, feedID string) (xhsReadyP
 		return JSON.stringify(out);
 	}`
 	obj, err := page.Eval(probeJS, string(kind), feedID, SelectorSearchInput, SelectorSearchResult, SelectorFeedCard, SelectorFeedDetailReady, SelectorCommentBox, SelectorLikeButton, SelectorSearchInputInFeeds, SelectorNotificationPage, SelectorNotificationTab)
+	return decodeXHSReadyProbe(obj, err)
+}
+
+// decodeXHSReadyProbe 统一 ready probe 的 nil 检查与 JSON 解码。
+func decodeXHSReadyProbe(obj *rod.Value, err error) (xhsReadyProbe, error) {
 	if err != nil {
 		return xhsReadyProbe{}, err
 	}
@@ -243,30 +204,7 @@ func probeXHSReady(page *hrod.Page, kind XHSReadyKind, feedID string) (xhsReadyP
 
 // probeXHSReadyFull 完整 probe：查询全部页面选择器并汇总状态，供推断页面种类使用。
 func probeXHSReadyFull(page *hrod.Page, feedID string) (xhsReadyProbe, error) {
-	probeJS := `(feedID, searchInputSelector, searchResultSelector, feedCardSelector, detailSelector, commentBoxSelector, likeButtonSelector, searchInputInFeedsSelector, notificationPageSelector, notificationTabSelector) => {` + xhsProbeVisibleJS + xhsProbeFeedMatchJS + `
-			const count = (selector) => {
-				try { return document.querySelectorAll(selector).length; } catch (_) { return 0; }
-			};
-			const visibleCount = (selector) => {
-				try {
-					return Array.from(document.querySelectorAll(selector)).filter(visible).length;
-				} catch (_) {
-					return 0;
-				}
-			};
-		const unwrap = (value) => {
-			if (value && typeof value === "object") {
-				if ("value" in value) return value.value;
-				if ("_value" in value) return value._value;
-			}
-			return value;
-		};
-		const sizeOf = (value) => {
-			value = unwrap(value);
-			if (Array.isArray(value)) return value.length;
-			if (value && typeof value === "object") return Object.keys(value).length;
-			return value ? 1 : 0;
-		};
+	probeJS := `(feedID, searchInputSelector, searchResultSelector, feedCardSelector, detailSelector, commentBoxSelector, likeButtonSelector, searchInputInFeedsSelector, notificationPageSelector, notificationTabSelector) => {` + xhsProbeVisibleJS + xhsProbeFeedMatchJS + xhsProbeCollectionJS + xhsProbeRiskJS + xhsSearchInputReadyJS + `
 		const state = window.__INITIAL_STATE__ || {};
 		const homeFeeds = unwrap(state.feed?.feeds);
 		const searchFeeds = unwrap(state.search?.feeds);
@@ -280,31 +218,8 @@ func probeXHSReadyFull(page *hrod.Page, feedID string) (xhsReadyProbe, error) {
 		const profileData = unwrap(state.user?.userPageData);
 		const detailCount = count(detailSelector);
 		const text = (document.body?.innerText || "").replace(/\s+/g, " ").slice(0, 1500);
-		const riskKeywords = [
-			"登录已过期", "登录失效", "请先登录", "请登录", "扫码登录",
-			"验证码", "滑块", "安全验证", "请验证", "人机验证",
-			"操作频繁", "访问太频繁", "账号异常"
-		];
-		const risk = riskKeywords.find((keyword) => text.includes(keyword)) || "";
-		const riskIndex = risk ? text.indexOf(risk) : -1;
-		const riskText = risk
-			? text.slice(Math.max(0, riskIndex - 40), Math.min(text.length, riskIndex + 100))
-			: "";
-		const searchInputInFeedsReady = (() => {
-			const candidates = Array.from(document.querySelectorAll(searchInputInFeedsSelector));
-			return candidates.some(el => {
-				if (!el || !el.isConnected) return false;
-				if (!visible(el)) return false;
-				if (el.disabled || el.readOnly) return false;
-				const r = el.getBoundingClientRect();
-				if (r.top >= window.innerHeight || r.bottom <= 0 ||
-					r.left >= window.innerWidth || r.right <= 0) return false;
-				const cx = r.left + r.width / 2;
-				const cy = r.top + r.height / 2;
-				const hit = document.elementFromPoint(cx, cy);
-				return hit && (el === hit || el.contains(hit));
-			});
-		})();
+		const riskText = riskOf(text);
+		const searchInputInFeedsReady = searchInputReady(searchInputInFeedsSelector);
 		const homeFeedCount = sizeOf(homeFeeds);
 		const searchFeedCount = sizeOf(searchFeeds);
 		const stateFragment = JSON.stringify({
@@ -341,18 +256,7 @@ func probeXHSReadyFull(page *hrod.Page, feedID string) (xhsReadyProbe, error) {
 		});
 	}`
 	obj, err := page.Eval(probeJS, feedID, SelectorSearchInput, SelectorSearchResult, SelectorFeedCard, SelectorFeedDetailReady, SelectorCommentBox, SelectorLikeButton, SelectorSearchInputInFeeds, SelectorNotificationPage, SelectorNotificationTab)
-	if err != nil {
-		return xhsReadyProbe{}, err
-	}
-	if obj == nil {
-		return xhsReadyProbe{}, fmt.Errorf("ready probe returned nil")
-	}
-
-	var probe xhsReadyProbe
-	if err := json.Unmarshal([]byte(obj.Value.Str()), &probe); err != nil {
-		return xhsReadyProbe{}, err
-	}
-	return probe, nil
+	return decodeXHSReadyProbe(obj, err)
 }
 
 func isXHSReady(probe xhsReadyProbe, kind XHSReadyKind, feedID string, allowURLFallback bool) bool {
