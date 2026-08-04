@@ -16,9 +16,6 @@ import (
 var sessionBaseTools = []string{"close_page"}
 var sessionCreateTools = []string{"start_page", "check_login_status"}
 
-// 通知只读工具（不点入口、不清未读）
-var notificationReadTools = []string{"get_unread_count", "list_notifications"}
-
 // session 不同状态下的可用工具
 var (
 	// 含通知只读：搜索/列表/返回后可读未读或进入通知

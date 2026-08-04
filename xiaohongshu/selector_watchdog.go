@@ -87,7 +87,6 @@ func (w *SelectorWatchdog) RegisterAll() {
 	w.Register(FeedDetailReadySpec)
 	w.Register(CommentBoxSpec)
 	w.Register(LikeButtonSpec)
-	w.Register(NotificationEntrySpec)
 	w.Register(NotificationPageSpec)
 	w.Register(NotificationTabSpec)
 	w.Register(NotificationItemSpec)

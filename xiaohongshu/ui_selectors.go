@@ -22,14 +22,11 @@ const (
 
 	// 通知页选择器
 	SelectorNotificationEntry          = `a[href="/notification"]`                              // 侧栏通知入口
-	SelectorNotificationBadge          = `a[href="/notification"] .badge-container`              // 通知入口未读 badge
 	SelectorNotificationPage           = `.notification-page`                                    // 通知页容器
 	SelectorNotificationTab            = `.notification-page .reds-tab-item.tab-item`            // 通知 tab（3 个）
 	SelectorNotificationItem           = `.notification-page .tabs-content-container .container` // 通知 item
 	SelectorNotificationUserAvatar     = `.user-avatar`                                          // item 内头像链接
 	SelectorNotificationNickname       = `.user-info a`                                          // item 内昵称链接
-	SelectorNotificationHint           = `.interaction-hint span`                                // item 内互动提示
-	SelectorNotificationTime           = `.interaction-time`                                     // item 内时间
 	SelectorNotificationContent        = `.interaction-content`                                  // item 内评论内容(仅 mentions)
 	SelectorNotificationReplyButton    = `.action-reply`                                         // 回复按钮(仅 mentions)
 	SelectorNotificationLikeButton     = `.action-like`                                          // 点赞按钮(仅 mentions)
@@ -90,14 +87,6 @@ var (
 		Name:        "like_button",
 		Selector:    SelectorLikeButton,
 		Purpose:     "点赞按钮",
-		VisibleOnly: true,
-		MaxMatches:  2,
-	}
-	NotificationEntrySpec = SelectorSpec{
-		Name:        "notification_entry",
-		Selector:    SelectorNotificationEntry,
-		Purpose:     "侧栏通知入口",
-		Required:    true,
 		VisibleOnly: true,
 		MaxMatches:  2,
 	}

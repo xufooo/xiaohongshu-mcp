@@ -192,15 +192,3 @@ func TestConvertNotifications(t *testing.T) {
 		t.Errorf("time 应为 int64 时间戳: %+v", it)
 	}
 }
-
-func TestMergeNotificationItems(t *testing.T) {
-	existing := []NotificationItem{{ID: "a", NotificationRef: "r1"}, {ID: "b", NotificationRef: "r2"}}
-	fresh := []NotificationItem{{ID: "b", NotificationRef: "r2"}, {ID: "c", NotificationRef: "r3"}}
-	merged := mergeNotificationItems(existing, fresh)
-	if len(merged) != 3 {
-		t.Fatalf("应去重累积为 3, 实际 %d", len(merged))
-	}
-	if merged[2].ID != "c" {
-		t.Errorf("新增条目应追加在尾部: %+v", merged)
-	}
-}

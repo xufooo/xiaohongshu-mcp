@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"math/rand"
 	"strings"
 	"time"
 
@@ -98,17 +97,12 @@ type NotificationList struct {
 	ResultCount  int                `json:"result_count"`
 }
 
-// notificationTarget 会话内解析出的通知写操作目标。
+// notificationTarget 会话内解析出的通知写操作目标。校验统一从 Item 读取。
 type notificationTarget struct {
-	Ref         string
-	Tab         NotificationTab
-	Generation  uint64
-	Item        NotificationItem
-	Liked       bool
-	CommentID   string
-	UserID      string
-	Nickname    string
-	CommentText string
+	Ref        string
+	Tab        NotificationTab
+	Generation uint64
+	Item       NotificationItem
 }
 
 // notificationPayload 通知分区在 __INITIAL_STATE__.notification.notificationMap[tab] 中的真实结构。
@@ -173,20 +167,11 @@ func (r rawNotification) visible() bool {
 	return true
 }
 
-// notificationStateResult 一次读取得到的通知 state 原文与元信息。
-type notificationStateResult struct {
-	HasState bool
-	Tab      NotificationTab
-	Payload  notificationPayload
-}
-
 // notificationDOMItem 通知 DOM 行的快照（readNotificationDOMSnapshot 产出）。
 type notificationDOMItem struct {
-	Index       int    `json:"index"`
 	UserID      string `json:"user_id"`
 	Nickname    string `json:"nickname"`
 	Content     string `json:"content"`
-	Time        string `json:"time"`
 	XsecToken   string `json:"xsec_token"`
 	HasLike     bool   `json:"has_like"`
 	HasReply    bool   `json:"has_reply"`
@@ -369,9 +354,9 @@ func waitNotificationTabActive(ctx context.Context, page *hrod.Page, tab Notific
 	return fmt.Errorf("等待 tab %q 激活超时", label)
 }
 
-// readNotificationTabState 读取指定 tab 的真实 state 原始数据：notificationMap[tab].messageList。
-// 兼容 Vue value/_value 包装；noti 缺失返回 HasState=false，分区缺失报错（不掩盖结构漂移）。
-func readNotificationTabState(page *hrod.Page, tab NotificationTab) (*notificationStateResult, error) {
+// readNotificationTabState 读取指定 tab 的真实 state：notificationMap[tab].messageList。
+// 兼容 Vue value/_value 包装；notification state 缺失或分区缺失都直接报错（fail-closed，不掩盖漂移）。
+func readNotificationTabState(page *hrod.Page, tab NotificationTab) (*notificationPayload, error) {
 	obj, err := page.Eval(`(tab) => {
 		const unwrap = (v) => {
 			if (v && typeof v === "object") {
@@ -381,11 +366,11 @@ func readNotificationTabState(page *hrod.Page, tab NotificationTab) (*notificati
 			return v;
 		};
 		const noti = window.__INITIAL_STATE__ && window.__INITIAL_STATE__.notification;
-		if (!noti) return JSON.stringify({ has_state: false });
+		if (!noti) return JSON.stringify({ status: "no_state" });
 		const m = unwrap(noti.notificationMap) || noti.notificationMap;
 		const p = m && m[tab] ? unwrap(m[tab]) : null;
-		if (!p) return JSON.stringify({ has_state: true, payload: null });
-		return JSON.stringify({ has_state: true, payload: p });
+		if (!p) return JSON.stringify({ status: "no_tab" });
+		return JSON.stringify({ status: "ok", payload: p });
 	}`, string(tab))
 	if err != nil {
 		return nil, err
@@ -394,26 +379,29 @@ func readNotificationTabState(page *hrod.Page, tab NotificationTab) (*notificati
 		return nil, fmt.Errorf("通知 state 探测无返回")
 	}
 	var raw struct {
-		HasState bool                 `json:"has_state"`
-		Payload  *notificationPayload `json:"payload"`
+		Status  string               `json:"status"`
+		Payload *notificationPayload `json:"payload"`
 	}
 	if err := json.Unmarshal([]byte(obj.Value.Str()), &raw); err != nil {
 		return nil, fmt.Errorf("解析通知 state 失败: %w", err)
 	}
-	if raw.Payload == nil {
-		if raw.HasState {
-			// 请求的分区在页面状态里不存在，属结构漂移，fail-closed。
+	switch raw.Status {
+	case "no_state":
+		return nil, fmt.Errorf("notification state 缺失（结构漂移）")
+	case "ok":
+		if raw.Payload == nil {
 			return nil, fmt.Errorf("页面状态里没有通知分区 %q，可能未登录或页面结构已变化", tab)
 		}
-		raw.Payload = &notificationPayload{}
+		return raw.Payload, nil
+	default:
+		return nil, fmt.Errorf("页面状态里没有通知分区 %q，可能未登录或页面结构已变化", tab)
 	}
-	return &notificationStateResult{HasState: raw.HasState, Tab: tab, Payload: *raw.Payload}, nil
 }
 
 // readNotificationDOMSnapshot 读取当前通知 surface 的 DOM 行快照。
 // 头像链接解析用户 ID 与 xsec_token；点赞状态仅读取 svg use 的 href。
 func readNotificationDOMSnapshot(page *hrod.Page) (notificationDOMSnapshot, error) {
-	obj, err := page.Eval(`(itemSelector, avatarSel, nickSel, hintSel, timeSel, contentSel, likeSel, replySel, likeUseSel) => {
+	obj, err := page.Eval(`(itemSelector, avatarSel, nickSel, contentSel, likeSel, replySel, likeUseSel) => {
 		const normalize = (s) => String(s || "").replace(/\s+/g, " ").trim();
 		const hrefUserID = (a) => {
 			const href = a ? String(a.getAttribute("href") || "") : "";
@@ -431,18 +419,14 @@ func readNotificationDOMSnapshot(page *hrod.Page) (notificationDOMSnapshot, erro
 			return String(use.getAttribute("xlink:href") || use.getAttribute("href") || "").trim();
 		};
 		const items = Array.from(document.querySelectorAll(itemSelector));
-		return JSON.stringify(items.map((item, i) => {
+		return JSON.stringify(items.map((item) => {
 			const avatar = item.querySelector(avatarSel);
 			const nick = item.querySelector(nickSel);
-			const hint = item.querySelector(hintSel);
-			const timeEl = item.querySelector(timeSel);
 			const contentEl = item.querySelector(contentSel);
 			return {
-				index: i,
 				user_id: hrefUserID(avatar),
 				nickname: normalize(nick ? nick.textContent : ""),
 				content: normalize(contentEl ? contentEl.textContent : ""),
-				time: normalize(timeEl ? timeEl.textContent : ""),
 				xsec_token: hrefXsec(avatar),
 				has_like: Boolean(item.querySelector(likeSel)),
 				has_reply: Boolean(item.querySelector(replySel)),
@@ -450,7 +434,7 @@ func readNotificationDOMSnapshot(page *hrod.Page) (notificationDOMSnapshot, erro
 			};
 		}));
 	}`, SelectorNotificationItem, SelectorNotificationUserAvatar, SelectorNotificationNickname,
-		SelectorNotificationHint, SelectorNotificationTime, SelectorNotificationContent,
+		SelectorNotificationContent,
 		SelectorNotificationLikeButton, SelectorNotificationReplyButton, SelectorNotificationLikeUse)
 	if err != nil {
 		return notificationDOMSnapshot{}, err
@@ -533,14 +517,11 @@ func verifyNotificationTargetInState(page *hrod.Page, target notificationTarget)
 	if err != nil {
 		return fmt.Errorf("读取通知 state 复核失败: %w", err)
 	}
-	if !state.HasState {
-		return fmt.Errorf("notification state 缺失（结构漂移）")
-	}
-	for _, r := range state.Payload.MessageList {
-		if r.Comment.ID != target.CommentID {
+	for _, r := range state.MessageList {
+		if r.Comment.ID != target.Item.CommentID {
 			continue
 		}
-		if u := r.from(); target.UserID != "" && u.UserID != target.UserID {
+		if u := r.from(); target.Item.From.UserID != "" && u.UserID != target.Item.From.UserID {
 			continue
 		}
 		if !r.visible() {
@@ -549,47 +530,4 @@ func verifyNotificationTargetInState(page *hrod.Page, target notificationTarget)
 		return nil
 	}
 	return fmt.Errorf("通知条目 state 复核失败：comment/user 目标已不在当前列表，请重新 list_notifications")
-}
-
-// scrollNotificationPage 真实鼠标滚动通知列表，每轮约 350–700px，最多 6 轮。
-// 每轮之间 SleepRandom(1.5s, 3.5s)，随时响应 ctx 取消。
-func scrollNotificationPage(ctx context.Context, page *hrod.Page) error {
-	for round := 0; round < 6; round++ {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if err := page.SleepRandom(1500*time.Millisecond, 3500*time.Millisecond); err != nil {
-			return err
-		}
-		delta := 350 + rand.Intn(351)
-		if err := page.Actor().Mouse.Scroll(0, float64(delta)); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// mergeNotificationItems 合并同一 generation 内已返回的条目，按 ID 去重累积。
-func mergeNotificationItems(existing, fresh []NotificationItem) []NotificationItem {
-	if len(fresh) == 0 {
-		return existing
-	}
-	seen := make(map[string]bool, len(existing))
-	merged := make([]NotificationItem, 0, len(existing)+len(fresh))
-	for _, it := range existing {
-		if it.ID != "" {
-			seen[it.ID] = true
-		}
-		merged = append(merged, it)
-	}
-	for _, it := range fresh {
-		if it.ID != "" {
-			if seen[it.ID] {
-				continue
-			}
-			seen[it.ID] = true
-		}
-		merged = append(merged, it)
-	}
-	return merged
 }

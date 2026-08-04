@@ -19,12 +19,17 @@ type NotificationLikeResult struct {
 
 // likeNotificationOnPage 对通知行点赞/取消点赞（幂等）。
 // 状态只以 svg use 的 href 判定（#liked/#like），禁止读取 like-active 类；
-// 点击使用 hrod 真实 Click；点击后轮询状态翻转确认，未确认报 state_unknown。
+// 初始状态直接复用 findNotificationRowElement 返回的 DOM 快照，避免重复读取完整 snapshot；
+// 点击使用 hrod 真实 Click；点击后轮询重新读取 snapshot 确认翻转，未确认报 state_unknown。
 func likeNotificationOnPage(ctx context.Context, page *hrod.Page, target notificationTarget, unlike bool) (*NotificationLikeResult, error) {
 	if err := verifyNotificationTargetInState(page, target); err != nil {
 		return nil, err
 	}
-	current, err := readNotificationLikeState(page, target)
+	row, matched, err := findNotificationRowElement(page, target)
+	if err != nil {
+		return nil, err
+	}
+	current, err := parseNotificationLikeHref(matched.LikeUseHref)
 	if err != nil {
 		return nil, fmt.Errorf("读取点赞状态失败，取消点击: %w", err)
 	}
@@ -35,10 +40,6 @@ func likeNotificationOnPage(ctx context.Context, page *hrod.Page, target notific
 		return &NotificationLikeResult{Ref: target.Ref, Liked: true, Skipped: true, Message: "已处于点赞状态，无需操作"}, nil
 	}
 
-	row, _, err := findNotificationRowElement(page, target)
-	if err != nil {
-		return nil, err
-	}
 	likeBtn, err := row.Element(SelectorNotificationLikeButton)
 	if err != nil {
 		return nil, fmt.Errorf("通知行点赞按钮缺失: %w", err)
@@ -71,6 +72,7 @@ func likeNotificationOnPage(ctx context.Context, page *hrod.Page, target notific
 }
 
 // readNotificationLikeState 重新读取 DOM 快照，按指纹唯一匹配通知行并解析 svg use href。
+// 点击后的轮询继续使用，以兼容前端重新渲染。
 func readNotificationLikeState(page *hrod.Page, target notificationTarget) (bool, error) {
 	dom, err := readNotificationDOMSnapshot(page)
 	if err != nil {
@@ -94,34 +96,36 @@ func readNotificationLikeState(page *hrod.Page, target notificationTarget) (bool
 	return parseNotificationLikeHref(matched.LikeUseHref)
 }
 
-// findNotificationRowElement 按指纹唯一匹配当前通知列表中的 DOM 行元素。
-// 返回行元素与行号；歧义或未匹配报错。
-func findNotificationRowElement(page *hrod.Page, target notificationTarget) (*hrod.Element, int, error) {
+// findNotificationRowElement 按指纹唯一匹配当前通知列表中的 DOM 行元素，并返回该行的快照条目。
+// 返回行元素、匹配快照；歧义或未匹配报错。
+func findNotificationRowElement(page *hrod.Page, target notificationTarget) (*hrod.Element, *notificationDOMItem, error) {
 	dom, err := readNotificationDOMSnapshot(page)
 	if err != nil {
-		return nil, 0, err
+		return nil, nil, err
 	}
 	fp := notificationItemFingerprint(target.Item.From.UserID, target.Item.From.Nickname, target.Item.CommentText)
 	index := -1
+	var matched *notificationDOMItem
 	for i := range dom.Items {
 		item := &dom.Items[i]
 		if notificationItemFingerprint(item.UserID, item.Nickname, item.Content) != fp {
 			continue
 		}
 		if index >= 0 {
-			return nil, 0, fmt.Errorf("通知行指纹歧义，取消操作")
+			return nil, nil, fmt.Errorf("通知行指纹歧义，取消操作")
 		}
 		index = i
+		matched = item
 	}
 	if index < 0 {
-		return nil, 0, fmt.Errorf("未找到匹配的通知行（可能已翻页或失效）")
+		return nil, nil, fmt.Errorf("未找到匹配的通知行（可能已翻页或失效）")
 	}
 	rows, err := page.Elements(SelectorNotificationItem)
 	if err != nil {
-		return nil, 0, err
+		return nil, nil, err
 	}
 	if index >= len(rows) {
-		return nil, 0, fmt.Errorf("通知行索引越界: %d/%d", index, len(rows))
+		return nil, nil, fmt.Errorf("通知行索引越界: %d/%d", index, len(rows))
 	}
-	return rows[index], index, nil
+	return rows[index], matched, nil
 }
