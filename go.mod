@@ -2,8 +2,7 @@ module github.com/xpzouying/xiaohongshu-mcp
 
 go 1.24.0
 
-// v0.3.0 waits forever in Launcher.Cleanup when Chrome stops responding.
-// Keep the small upstream wrapper local so browser shutdown can be bounded.
+// 官方 v0.4.0 Cleanup 仍无期限，保留本地 bounded wrapper。
 replace github.com/xpzouying/headless_browser => ./third_party/headless_browser
 
 require (
@@ -16,7 +15,7 @@ require (
 	github.com/sirupsen/logrus v1.9.3
 	github.com/stretchr/testify v1.11.1
 	github.com/ulikunitz/xz v0.5.15
-	github.com/xpzouying/headless_browser v0.3.0
+	github.com/xpzouying/headless_browser v0.4.0
 )
 
 require (

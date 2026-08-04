@@ -462,6 +462,19 @@ go run .
 go run . -headless=false
 ```
 
+**Configure CloakBrowser Fingerprint (Optional):**
+
+When running with `XHS_BROWSER_MODE=cloak` and no `XHS_BROWSER_USER_AGENT`, a consistent source-level fingerprint (`fingerprint`/`fingerprint-platform`/`fingerprint-brand`) is enabled by default, so every launch presents the same profile.
+
+- `XHS_FP_SEED`: Fixed fingerprint seed (positive integer). When unset, reuse the seed already stored in the cookies session file, or generate and persist one so the fingerprint stays stable across restarts.
+- `XHS_BROWSER_LANG`: Browser language (e.g. `zh-CN`). Defaults to `zh-CN`.
+- If `XHS_BROWSER_USER_AGENT` is set, the explicit UA wins and fingerprint + UA override are skipped (avoiding UA/Client-Hints conflicts), with a warning logged at startup.
+
+```bash
+# Example: Cloak mode + fixed seed + Chinese language
+XHS_BROWSER_MODE=cloak XHS_FP_SEED=12345 go run .
+```
+
 ## 1.4. Verify MCP
 
 ```bash

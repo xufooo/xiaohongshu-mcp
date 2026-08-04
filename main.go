@@ -7,6 +7,7 @@ import (
 
 	"github.com/sirupsen/logrus"
 	"github.com/xpzouying/xiaohongshu-mcp/configs"
+	"github.com/xpzouying/xiaohongshu-mcp/cookies"
 )
 
 func main() {
@@ -57,6 +58,14 @@ func main() {
 	logrus.Infof("browser idle timeout: %s", idleTimeout)
 	if configs.UseCloakBrowser() {
 		logrus.Info("using CloakBrowser mode")
+		// 仅在未配置显式 UA 时解析并固定 fingerprint seed（fingerprint 跳过时不得落盘），
+		// 且必须在创建服务前完成，保证登录/服务同一画像。
+		if configs.GetBrowserUserAgent() == "" {
+			cookieLoader := cookies.NewLoadCookie(cookies.GetCookiesFilePath())
+			seed := configs.ResolveFingerprintSeed(cookieLoader)
+			configs.SetFingerprintSeed(seed)
+			logrus.Infof("CloakBrowser fingerprint seed: %d", seed)
+		}
 	}
 
 	// 初始化服务
