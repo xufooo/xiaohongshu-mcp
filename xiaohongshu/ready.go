@@ -57,8 +57,8 @@ type xhsReadyProbe struct {
 }
 
 // WaitForXHSReady 等待页面就绪，按 kind 判断条件。
-// 每 300-500ms 轮询一次 JS probe，超时返回最后一次 probe 摘要。
-// 同时检测风险信号（登录失效/验证码/滑块等），发现风险立即返回。
+// 每 300-500ms 轮询一次按 kind 缩小的 scoped probe；超时后额外执行一次 full probe，
+// 用于 URL fallback 与最终诊断。同时检测风险信号，发现风险立即返回。
 func WaitForXHSReady(page *hrod.Page, opts XHSReadyOptions) error {
 	if opts.Kind == "" {
 		opts.Kind = XHSReadyHome
@@ -76,7 +76,7 @@ func WaitForXHSReady(page *hrod.Page, opts XHSReadyOptions) error {
 			return err
 		}
 
-		probe, err := probeXHSReady(page, opts.FeedID)
+		probe, err := probeXHSReady(page, opts.Kind, opts.FeedID)
 		if err != nil {
 			lastErr = err
 		} else {
@@ -92,6 +92,11 @@ func WaitForXHSReady(page *hrod.Page, opts XHSReadyOptions) error {
 		}
 
 		if !time.Now().Before(deadline) {
+			// 超时后额外执行一次 full probe，用于 URL fallback 与最终诊断。
+			if full, probeErr := probeXHSReadyFull(page, opts.FeedID); probeErr == nil {
+				last = full
+				lastErr = nil
+			}
 			if lastErr == nil && isXHSReady(last, opts.Kind, opts.FeedID, true) {
 				probeWatchdogSelectors(page, opts)
 				return nil
@@ -124,7 +129,120 @@ func probeWatchdogSelectors(page *hrod.Page, opts XHSReadyOptions) {
 	wd.ProbeForKind(page, opts.Kind)
 }
 
-func probeXHSReady(page *hrod.Page, feedID string) (xhsReadyProbe, error) {
+// probeXHSReady 按 kind 缩小范围的 scoped probe：只计算当前 kind 需要的信号，
+// 公共字段（URL/title/readyState/scrollY/app/risk）始终计算。
+func probeXHSReady(page *hrod.Page, kind XHSReadyKind, feedID string) (xhsReadyProbe, error) {
+	probeJS := `(kind, feedID, searchInputSelector, searchResultSelector, feedCardSelector, detailSelector, commentBoxSelector, likeButtonSelector, searchInputInFeedsSelector, notificationPageSelector, notificationTabSelector) => {` + xhsProbeVisibleJS + xhsProbeFeedMatchJS + `
+			const count = (selector) => {
+				try { return document.querySelectorAll(selector).length; } catch (_) { return 0; }
+			};
+			const visibleCount = (selector) => {
+				try {
+					return Array.from(document.querySelectorAll(selector)).filter(visible).length;
+				} catch (_) {
+					return 0;
+				}
+			};
+		const unwrap = (value) => {
+			if (value && typeof value === "object") {
+				if ("value" in value) return value.value;
+				if ("_value" in value) return value._value;
+			}
+			return value;
+		};
+		const sizeOf = (value) => {
+			value = unwrap(value);
+			if (Array.isArray(value)) return value.length;
+			if (value && typeof value === "object") return Object.keys(value).length;
+			return value ? 1 : 0;
+		};
+		const state = window.__INITIAL_STATE__ || {};
+		const detailURLMatched = detailURLMatchesFeedID(location.href);
+		const text = (document.body?.innerText || "").replace(/\s+/g, " ").slice(0, 1500);
+		const riskKeywords = [
+			"登录已过期", "登录失效", "请先登录", "请登录", "扫码登录",
+			"验证码", "滑块", "安全验证", "请验证", "人机验证",
+			"操作频繁", "访问太频繁", "账号异常"
+		];
+		const risk = riskKeywords.find((keyword) => text.includes(keyword)) || "";
+		const riskIndex = risk ? text.indexOf(risk) : -1;
+		const riskText = risk
+			? text.slice(Math.max(0, riskIndex - 40), Math.min(text.length, riskIndex + 100))
+			: "";
+		const out = {
+			url: location.href.slice(0, 300),
+			title: document.title.slice(0, 120),
+			ready_state: document.readyState,
+			scroll_y: Math.round(window.scrollY || document.scrollingElement?.scrollTop || 0),
+			app_count: count("#app"),
+			risk_text: riskText.slice(0, 180),
+		};
+		if (kind === "home" || kind === "home_search") {
+			out.home_feed_count = sizeOf(unwrap(state.feed?.feeds));
+			out.feed_card_count = count(feedCardSelector);
+			out.detail_count = count(detailSelector);
+			if (kind === "home_search") {
+				const candidates = Array.from(document.querySelectorAll(searchInputInFeedsSelector));
+				out.search_input_in_feeds_ready = candidates.some(el => {
+					if (!el || !el.isConnected) return false;
+					if (!visible(el)) return false;
+					if (el.disabled || el.readOnly) return false;
+					const r = el.getBoundingClientRect();
+					if (r.top >= window.innerHeight || r.bottom <= 0 ||
+						r.left >= window.innerWidth || r.right <= 0) return false;
+					const cx = r.left + r.width / 2;
+					const cy = r.top + r.height / 2;
+					const hit = document.elementFromPoint(cx, cy);
+					return hit && (el === hit || el.contains(hit));
+				});
+			}
+		} else if (kind === "search") {
+			out.search_feed_count = sizeOf(unwrap(state.search?.feeds));
+			out.search_result_count = count(searchResultSelector);
+			out.feed_card_count = count(feedCardSelector);
+		} else if (kind === "detail" || kind === "comment_box") {
+			const detailMap = unwrap(state.note?.noteDetailMap);
+			const detail = feedID && detailMap && Object.prototype.hasOwnProperty.call(detailMap, feedID)
+				? unwrap(detailMap[feedID])
+				: null;
+			const detailCount = count(detailSelector);
+			const visibleDetails = Array.from(document.querySelectorAll(detailSelector)).filter(visible);
+			const visibleDetailMatched = Boolean(feedID && visibleDetails.some(elementMatchesFeedID));
+			out.detail_count = detailCount;
+			out.detail_url_matched = detailURLMatched;
+			out.detail_state = feedID ? Boolean(detail) : sizeOf(detailMap) > 0;
+			out.detail_feed_matched = feedID ? ((detailURLMatched && visibleDetails.length > 0) || visibleDetailMatched) : detailCount > 0;
+			out.like_button_count = visibleCount(likeButtonSelector);
+			if (kind === "comment_box") {
+				out.comment_box_count = visibleCount(commentBoxSelector);
+			}
+		} else if (kind === "profile") {
+			out.profile_state = Boolean(unwrap(state.user?.userPageData));
+		} else if (kind === "publish") {
+			out.publish_signal_count = count("input[type='file'], .upload-input, .publish-container, .creator-container");
+		} else if (kind === "notification") {
+			out.notification_page_count = count(notificationPageSelector);
+			out.notification_tab_count = count(notificationTabSelector);
+		}
+		return JSON.stringify(out);
+	}`
+	obj, err := page.Eval(probeJS, string(kind), feedID, SelectorSearchInput, SelectorSearchResult, SelectorFeedCard, SelectorFeedDetailReady, SelectorCommentBox, SelectorLikeButton, SelectorSearchInput, SelectorNotificationPage, SelectorNotificationTab)
+	if err != nil {
+		return xhsReadyProbe{}, err
+	}
+	if obj == nil {
+		return xhsReadyProbe{}, fmt.Errorf("ready probe returned nil")
+	}
+
+	var probe xhsReadyProbe
+	if err := json.Unmarshal([]byte(obj.Value.Str()), &probe); err != nil {
+		return xhsReadyProbe{}, err
+	}
+	return probe, nil
+}
+
+// probeXHSReadyFull 完整 probe：查询全部页面选择器并汇总状态，供推断页面种类使用。
+func probeXHSReadyFull(page *hrod.Page, feedID string) (xhsReadyProbe, error) {
 	probeJS := `(feedID, searchInputSelector, searchResultSelector, feedCardSelector, detailSelector, commentBoxSelector, likeButtonSelector, searchInputInFeedsSelector, notificationPageSelector, notificationTabSelector) => {` + xhsProbeVisibleJS + xhsProbeFeedMatchJS + `
 			const count = (selector) => {
 				try { return document.querySelectorAll(selector).length; } catch (_) { return 0; }
