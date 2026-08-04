@@ -667,7 +667,7 @@ func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, xsecToken strin
 	s.probeWatchdogSelectorsForKind(opCtx, XHSReadyDetail, feed.ID)
 	return &SessionOpenNoteResponse{
 		BrowseSessionInfo: info,
-		Note:              *content,
+		Note:              content,
 		Comments:          comments,
 		Media:             SessionMediaReadStatus{Implemented: false, Message: "图片和视频阅读功能尚未实现，后续由 get_note_detail 支持"},
 	}, nil
