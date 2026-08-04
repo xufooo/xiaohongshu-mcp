@@ -226,7 +226,7 @@ func probeXHSReady(page *hrod.Page, kind XHSReadyKind, feedID string) (xhsReadyP
 		}
 		return JSON.stringify(out);
 	}`
-	obj, err := page.Eval(probeJS, string(kind), feedID, SelectorSearchInput, SelectorSearchResult, SelectorFeedCard, SelectorFeedDetailReady, SelectorCommentBox, SelectorLikeButton, SelectorSearchInput, SelectorNotificationPage, SelectorNotificationTab)
+	obj, err := page.Eval(probeJS, string(kind), feedID, SelectorSearchInput, SelectorSearchResult, SelectorFeedCard, SelectorFeedDetailReady, SelectorCommentBox, SelectorLikeButton, SelectorSearchInputInFeeds, SelectorNotificationPage, SelectorNotificationTab)
 	if err != nil {
 		return xhsReadyProbe{}, err
 	}
@@ -340,7 +340,7 @@ func probeXHSReadyFull(page *hrod.Page, feedID string) (xhsReadyProbe, error) {
 			risk_text: riskText.slice(0, 180),
 		});
 	}`
-	obj, err := page.Eval(probeJS, feedID, SelectorSearchInput, SelectorSearchResult, SelectorFeedCard, SelectorFeedDetailReady, SelectorCommentBox, SelectorLikeButton, SelectorSearchInput, SelectorNotificationPage, SelectorNotificationTab)
+	obj, err := page.Eval(probeJS, feedID, SelectorSearchInput, SelectorSearchResult, SelectorFeedCard, SelectorFeedDetailReady, SelectorCommentBox, SelectorLikeButton, SelectorSearchInputInFeeds, SelectorNotificationPage, SelectorNotificationTab)
 	if err != nil {
 		return xhsReadyProbe{}, err
 	}

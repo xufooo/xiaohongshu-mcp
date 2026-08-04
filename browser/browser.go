@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/url"
 	"os"
+	"strings"
 
 	"github.com/sirupsen/logrus"
 	"github.com/xpzouying/headless_browser"
@@ -98,15 +99,29 @@ func cloakFingerprintOptions(seed int, language string) []headless_browser.Optio
 // maskProxyCredentials masks username and password in proxy URL for safe logging.
 func maskProxyCredentials(proxyURL string) string {
 	u, err := url.Parse(proxyURL)
-	if err != nil || u.User == nil {
+	if err != nil {
+		return "[invalid-proxy]"
+	}
+	if u.User == nil {
 		return proxyURL
 	}
-	if _, hasPassword := u.User.Password(); hasPassword {
-		u.User = url.UserPassword("***", "***")
-	} else {
-		u.User = url.User("***")
+	masked := "***"
+	if _, hasPwd := u.User.Password(); hasPwd {
+		masked = "***:***"
 	}
-	return u.String()
+	// 定位 authority 的 userinfo 段并替换，避免 url.User 再次百分号编码。
+	// 使用最后一个 @ 作为边界：userinfo 内的 @ 会以 %40 转义，不参与匹配。
+	idx := strings.Index(proxyURL, "://")
+	if idx < 0 {
+		return proxyURL
+	}
+	start := idx + 3
+	at := strings.LastIndex(proxyURL[start:], "@")
+	if at < 0 {
+		return proxyURL
+	}
+	end := start + at // @ 的位置
+	return proxyURL[:start] + masked + proxyURL[end:]
 }
 
 func NewBrowser(ctx context.Context, headless bool, options ...Option) (*hrod.Browser, error) {

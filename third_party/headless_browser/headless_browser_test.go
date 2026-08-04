@@ -109,3 +109,13 @@ func TestAutoFingerprintPlatform(t *testing.T) {
 		t.Fatalf("autoFingerprintPlatform() = %q, 应为 windows 或 macos", platform)
 	}
 }
+func TestWithFingerprintSeedConfig(t *testing.T) {
+	c := newDefaultConfig()
+	WithFingerprintSeed(20260804)(c)
+	if c.FingerprintSeed != 20260804 {
+		t.Fatalf("FingerprintSeed 未写入 Config: %d", c.FingerprintSeed)
+	}
+	if c.FingerprintSeed == 0 {
+		t.Fatalf("显式 seed 不应为 0（0 表示随机）")
+	}
+}

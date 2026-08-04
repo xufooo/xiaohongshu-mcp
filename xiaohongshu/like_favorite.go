@@ -67,7 +67,7 @@ func (a *interactAction) preparePage(ctx context.Context, actionType interactAct
 	}
 
 	url := makeFeedDetailURL(feedID, xsecToken)
-	logrus.Infof("Opening feed detail page for %s: %s", actionType, url)
+	logrus.Infof("Opening feed detail page for %s: %s", actionType, redactSensitiveURL(url))
 
 	if err := page.Navigate(url); err != nil {
 		return nil, fmt.Errorf("%s打开 feed 详情页失败: %w", actionType, err)

@@ -354,7 +354,7 @@ func (s *BrowseSession) Info() BrowseSessionInfo {
 func (s *BrowseSession) GetInitialCommentIDs() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.initialCommentIDs
+	return append([]string(nil), s.initialCommentIDs...)
 }
 
 func (s *BrowseSession) Renew() BrowseSessionInfo {

@@ -64,7 +64,7 @@ func main() {
 			cookieLoader := cookies.NewLoadCookie(cookies.GetCookiesFilePath())
 			seed := configs.ResolveFingerprintSeed(cookieLoader)
 			configs.SetFingerprintSeed(seed)
-			logrus.Infof("CloakBrowser fingerprint seed: %d", seed)
+			logrus.Info("CloakBrowser fingerprint seed pinned")
 		}
 	}
 
