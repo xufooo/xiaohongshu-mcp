@@ -1310,11 +1310,12 @@ func (s *BrowseSession) continueNotificationListLocked(ctx context.Context, page
 		consecutiveNoNew = 0
 	}
 	// 组装成功，事务式提交：只在此处一次性写入 returned/items/targets。
-	return s.finishNotificationListLocked(ctx, tab, batch, totalFiltered, lastHasMore)
+	return s.commitNotificationListLocked(ctx, tab, batch, totalFiltered, lastHasMore)
 }
 
-// finishNotificationListLocked 组装续页最终响应：事务式提交 batch 后更新 cursor/hasMore 并记录时间线。
-func (s *BrowseSession) finishNotificationListLocked(_ context.Context, tab NotificationTab, batch []NotificationItem, filtered int, hasMore bool) (*NotificationList, error) {
+// commitNotificationListLocked 通用的最终响应组装：事务式提交 batch 后更新 cursor/hasMore 并记录时间线。
+// fresh（refreshNotificationListLocked）与续页（continueNotificationListLocked）共用。
+func (s *BrowseSession) commitNotificationListLocked(_ context.Context, tab NotificationTab, batch []NotificationItem, filtered int, hasMore bool) (*NotificationList, error) {
 	s.mu.Lock()
 	s.commitNotificationSelectionsLocked(tab, batch)
 	cursor := notificationOpaqueToken("nc")
@@ -1344,9 +1345,6 @@ func (s *BrowseSession) collectNotificationItems(ctx context.Context, page *hrod
 	if err != nil {
 		return nil, 0, false, err
 	}
-	if !state.HasState {
-		return nil, 0, false, fmt.Errorf("notification state 缺失（结构漂移）")
-	}
 	dom, err := readNotificationDOMSnapshot(page)
 	if err != nil {
 		return nil, 0, false, err
@@ -1362,7 +1360,7 @@ func (s *BrowseSession) collectNotificationItems(ctx context.Context, page *hrod
 	returned := s.notification.returnedIDs
 	s.mu.Unlock()
 
-	items, _ := convertNotifications(state.Payload.MessageList, dom, tab, func(entry rawNotification, _ int) string {
+	items, _ := convertNotifications(state.MessageList, dom, tab, func(entry rawNotification, _ int) string {
 		if entry.ID != "" {
 			if saved, ok := refByID[entry.ID]; ok {
 				return saved
@@ -1373,7 +1371,7 @@ func (s *BrowseSession) collectNotificationItems(ctx context.Context, page *hrod
 
 	// 只统计本批「新过滤」条目：本次调用首次见到的不可见条目，以及超出已见数的空 ID 条目。
 	emptyInRound := 0
-	for _, r := range state.Payload.MessageList {
+	for _, r := range state.MessageList {
 		if r.ID == "" {
 			emptyInRound++
 			continue
@@ -1414,48 +1412,43 @@ func (s *BrowseSession) collectNotificationItems(ctx context.Context, page *hrod
 		fresh = append(fresh, it)
 	}
 	// has_more = 服务端还有更多，或本地仍有未返回的缓冲条目（避免截断后不可达）。
-	hasMore = state.Payload.HasMore || unreturned > len(fresh)
+	hasMore = state.HasMore || unreturned > len(fresh)
 	return fresh, filteredNew, hasMore, nil
 }
 
-// commitNotificationSelectionsLocked 在最终响应组装成功后，一次性提交本次调用选中的条目：
-// 标记 returned、合并 items、重建 targets。中途任何错误都不得调用它，保证重试可重新收集。
+// commitNotificationSelectionsLocked 在最终响应组装成功后一次性提交本次调用选中的条目：
+// 标记 returned、surface 只保存最近一次成功返回的 batch、重建 targets（保留本 generation 全部已签发 ref）。
+// 中途任何错误都不得调用它，保证重试可重新收集。
 func (s *BrowseSession) commitNotificationSelectionsLocked(tab NotificationTab, fresh []NotificationItem) {
 	generation := s.notification.generation
-	existing := s.notification.items
 	for _, it := range fresh {
 		if it.ID != "" {
 			s.notification.returnedIDs[it.ID] = true
 		}
 	}
-	// 同 generation 内累积已返回条目（按 ID 去重），surface 反映完整已返回列表。
-	s.notification.items = mergeNotificationItems(existing, fresh)
-	// 保留同 generation 内已有 target，再登记本批新 target，避免旧 notification_ref 失效。
+	// surface 只保存最近一次成功返回的 batch，避免状态与语义动作无限膨胀；
+	// 复制一份再保存，避免与返回响应共享底层 slice（并发写 liked 不影响响应）。
+	s.notification.items = append([]NotificationItem(nil), fresh...)
 	nextTargets := make(map[string]notificationTarget)
 	for ref, t := range s.notification.targets {
 		if t.Generation == generation {
 			nextTargets[ref] = t
 		}
 	}
-	for _, it := range s.notification.items {
+	for _, it := range fresh {
 		if it.Actionable && it.NotificationRef != "" {
 			nextTargets[it.NotificationRef] = notificationTarget{
-				Ref:         it.NotificationRef,
-				Tab:         tab,
-				Generation:  generation,
-				Item:        it,
-				Liked:       it.Liked,
-				CommentID:   it.CommentID,
-				UserID:      it.From.UserID,
-				Nickname:    it.From.Nickname,
-				CommentText: it.CommentText,
+				Ref:        it.NotificationRef,
+				Tab:        tab,
+				Generation: generation,
+				Item:       it,
 			}
 		}
 	}
 	s.notification.targets = nextTargets
 }
 
-// refreshNotificationListLocked 单轮刷新（fresh 起始调用）：挑选首批，成功后再事务式提交并组装响应。
+// refreshNotificationListLocked 单轮刷新（fresh 起始调用）：挑选首批，成功后再统一提交并组装响应。
 func (s *BrowseSession) refreshNotificationListLocked(ctx context.Context, page *hrod.Page, tab NotificationTab, maxItems int) (*NotificationList, error) {
 	seen := make(map[string]bool)
 	emptySeen := 0
@@ -1463,24 +1456,7 @@ func (s *BrowseSession) refreshNotificationListLocked(ctx context.Context, page 
 	if err != nil {
 		return nil, err
 	}
-	s.mu.Lock()
-	s.commitNotificationSelectionsLocked(tab, fresh)
-	cursor := notificationOpaqueToken("nc")
-	s.notification.cursor = cursor
-	s.notification.hasMore = hasMore
-	s.recordTimelineLocked("list_notifications", string(tab), "ok", time.Now(),
-		fmt.Sprintf("items=%d filtered=%d has_more=%t", len(fresh), filtered, hasMore))
-	s.mu.Unlock()
-
-	return &NotificationList{
-		Tab:          tab,
-		Items:        fresh,
-		Filtered:     filtered,
-		Cursor:       cursor,
-		HasMore:      hasMore,
-		ClearsUnread: true,
-		ResultCount:  len(fresh),
-	}, nil
+	return s.commitNotificationListLocked(ctx, tab, fresh, filtered, hasMore)
 }
 
 // LikeNotification 点赞/取消点赞当前 notification surface 中的评论通知，幂等。
@@ -1491,34 +1467,8 @@ func (s *BrowseSession) LikeNotification(ctx context.Context, notificationRef st
 	}
 	defer s.finishOperation()
 
-	s.mu.Lock()
-	page := s.page
-	active := s.notification.active
-	generation := s.notification.generation
-	target, ok := s.resolveNotificationTargetLocked(notificationRef)
-	s.mu.Unlock()
-	if !ok {
-		return nil, fmt.Errorf("notification_ref 引用已过期或不存在，请重新 list_notifications")
-	}
-	if !active || target.Tab != TabMentions || target.Generation != generation {
-		return nil, fmt.Errorf("notification_ref 已过期（tab/generation 已变化），请重新 list_notifications")
-	}
-	if page == nil {
-		return nil, fmt.Errorf("browse session 页面不存在: %s", s.id)
-	}
-	page = page.Context(opCtx)
-
-	if err := s.checkNotificationWritePreLocked(opCtx); err != nil {
-		return nil, err
-	}
-	signal, err := ClassifyRisk(page)
+	page, target, err := s.resolveNotificationWriteTarget(opCtx, notificationRef)
 	if err != nil {
-		return nil, err
-	}
-	if IsRisk(signal) {
-		return nil, fmt.Errorf("风控中止: %s", signal.Reason)
-	}
-	if err := page.SleepRandom(800*time.Millisecond, 1500*time.Millisecond); err != nil {
 		return nil, err
 	}
 
@@ -1529,7 +1479,6 @@ func (s *BrowseSession) LikeNotification(ctx context.Context, notificationRef st
 
 	s.mu.Lock()
 	if t, ok := s.notification.targets[target.Ref]; ok {
-		t.Liked = result.Liked
 		t.Item.Liked = result.Liked
 		s.notification.targets[target.Ref] = t
 	}
@@ -1562,34 +1511,8 @@ func (s *BrowseSession) ReplyNotification(ctx context.Context, notificationRef, 
 	}
 	defer s.finishOperation()
 
-	s.mu.Lock()
-	page := s.page
-	active := s.notification.active
-	generation := s.notification.generation
-	target, ok := s.resolveNotificationTargetLocked(notificationRef)
-	s.mu.Unlock()
-	if !ok {
-		return nil, fmt.Errorf("notification_ref 引用已过期或不存在，请重新 list_notifications")
-	}
-	if !active || target.Tab != TabMentions || target.Generation != generation {
-		return nil, fmt.Errorf("notification_ref 已过期（tab/generation 已变化），请重新 list_notifications")
-	}
-	if page == nil {
-		return nil, fmt.Errorf("browse session 页面不存在: %s", s.id)
-	}
-	page = page.Context(opCtx)
-
-	if err := s.checkNotificationWritePreLocked(opCtx); err != nil {
-		return nil, err
-	}
-	signal, err := ClassifyRisk(page)
+	page, target, err := s.resolveNotificationWriteTarget(opCtx, notificationRef)
 	if err != nil {
-		return nil, err
-	}
-	if IsRisk(signal) {
-		return nil, fmt.Errorf("风控中止: %s", signal.Reason)
-	}
-	if err := page.SleepRandom(800*time.Millisecond, 1500*time.Millisecond); err != nil {
 		return nil, err
 	}
 
@@ -1605,6 +1528,38 @@ func (s *BrowseSession) ReplyNotification(ctx context.Context, notificationRef, 
 		_ = s.state.RecordInteraction("", "reply_notification")
 	}
 	return result, nil
+}
+
+// resolveNotificationWriteTarget 在 operation 已取得后解析当前写 target 并校验 notification surface 与风控。
+// beginLockedOperation/defer finishOperation 仍由公开方法管理，此 helper 不持有或释放 session operation。
+func (s *BrowseSession) resolveNotificationWriteTarget(opCtx context.Context, notificationRef string) (*hrod.Page, notificationTarget, error) {
+	s.mu.Lock()
+	page := s.page
+	active := s.notification.active
+	generation := s.notification.generation
+	target, ok := s.resolveNotificationTargetLocked(notificationRef)
+	s.mu.Unlock()
+	if !ok {
+		return nil, notificationTarget{}, fmt.Errorf("notification_ref 引用已过期或不存在，请重新 list_notifications")
+	}
+	if !active || target.Tab != TabMentions || target.Generation != generation {
+		return nil, notificationTarget{}, fmt.Errorf("notification_ref 已过期（tab/generation 已变化），请重新 list_notifications")
+	}
+	if page == nil {
+		return nil, notificationTarget{}, fmt.Errorf("browse session 页面不存在: %s", s.id)
+	}
+	page = page.Context(opCtx)
+	if err := s.checkNotificationWritePreLocked(opCtx); err != nil {
+		return nil, notificationTarget{}, err
+	}
+	signal, err := ClassifyRisk(page)
+	if err != nil {
+		return nil, notificationTarget{}, err
+	}
+	if IsRisk(signal) {
+		return nil, notificationTarget{}, fmt.Errorf("风控中止: %s", signal.Reason)
+	}
+	return page, target, nil
 }
 
 // checkNotificationWritePreLocked 写操作前检查 ActionStateStore 风控冷却。

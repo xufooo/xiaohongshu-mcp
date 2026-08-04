@@ -274,14 +274,8 @@ func isXHSReady(probe xhsReadyProbe, kind XHSReadyKind, feedID string, allowURLF
 	case XHSReadyCommentBox:
 		return detailReady(probe, feedID) && probe.CommentBoxCount > 0
 	case XHSReadyNotification:
-		if probe.NotificationPageCount > 0 && probe.NotificationTabCount >= 3 {
-			return true
-		}
-		return allowURLFallback &&
-			probe.AppCount > 0 &&
-			strings.Contains(probe.URL, "/notification") &&
-			probe.NotificationPageCount > 0 &&
-			probe.NotificationTabCount >= 3
+		// URL fallback 与首个判断等价：都要 page 且 3 个 tab，直接返回。
+		return probe.NotificationPageCount > 0 && probe.NotificationTabCount >= 3
 	default:
 		return probe.AppCount > 0
 	}
