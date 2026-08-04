@@ -1,6 +1,7 @@
 package cookies
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -56,12 +57,12 @@ func TestSeedAndCookiesMutuallyPreserved(t *testing.T) {
 	if got := c.LoadSeed(); got != 7 {
 		t.Fatalf("SaveCookies 后 seed 丢失: %d", got)
 	}
-	// cookies 保留
+	// cookies 保留（JSON 语义相等；落盘时 MarshalIndent 会重排格式）
 	loaded, err := c.LoadCookies()
 	if err != nil {
 		t.Fatalf("LoadCookies 失败: %v", err)
 	}
-	if string(loaded) != string(cks) {
+	if !jsonEqual(t, loaded, cks) {
 		t.Fatalf("cookies 内容变化: %s", loaded)
 	}
 	// 再写 seed，cookies 仍保留
@@ -75,9 +76,24 @@ func TestSeedAndCookiesMutuallyPreserved(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadCookies 失败: %v", err)
 	}
-	if string(loaded2) != string(cks) {
+	if !jsonEqual(t, loaded2, cks) {
 		t.Fatalf("SaveSeed 后 cookies 丢失: %s", loaded2)
 	}
+}
+
+// jsonEqual 比较两段 JSON 的语义（忽略空白/格式差异）。
+func jsonEqual(t *testing.T, a, b []byte) bool {
+	t.Helper()
+	var va, vb interface{}
+	if err := json.Unmarshal(a, &va); err != nil {
+		t.Fatalf("解析 JSON 失败: %v", err)
+	}
+	if err := json.Unmarshal(b, &vb); err != nil {
+		t.Fatalf("解析 JSON 失败: %v", err)
+	}
+	as, _ := json.Marshal(va)
+	bs, _ := json.Marshal(vb)
+	return string(as) == string(bs)
 }
 
 func TestV1BareArrayStillReadable(t *testing.T) {

@@ -49,7 +49,10 @@ func TestElementContextIsolation(t *testing.T) {
 	if err := longEl.Sleep(time.Second); err != context.Canceled {
 		t.Fatalf("long clone 应返回 Canceled, 实际 %v", err)
 	}
-	if err := shortEl.Sleep(time.Second); err != context.Canceled {
+	// shortEl 的 30ms 超时在 cancel 前已过期（返回 deadline exceeded 是正确行为），
+	// 用一个未过期的派生超时 clone 验证取消传播。
+	shortEl2 := longEl.Timeout(5 * time.Second)
+	if err := shortEl2.Sleep(time.Second); err != context.Canceled {
 		t.Fatalf("派生超时 clone 应随 longCtx 取消返回 Canceled, 实际 %v", err)
 	}
 	// base clone 不受 longCtx 取消影响
