@@ -109,6 +109,76 @@ func (a *interactAction) performClick(page *hrod.Page, selector string) error {
 	return element.Click(proto.InputMouseButtonLeft, 1)
 }
 
+// interactActionSpec 描述一次读写交互动作所需的差异化信息；公共流程只依赖这些字段。
+type interactActionSpec struct {
+	actionType interactActionType
+	selector   string
+	// target 表示点击后期望达到的布尔状态。
+	target bool
+	// stateOf 从实时互动状态中选择本动作关注的字段。
+	stateOf func(liked, collected bool) bool
+}
+
+// performInteraction 统一执行"阅读 -> 准备页面 -> 读取状态 -> 幂等跳过/至多一次点击并校验"。
+func (a *interactAction) performInteraction(ctx context.Context, spec interactActionSpec, feedID, xsecToken string) error {
+	var page *hrod.Page
+	var err error
+	if a.state != nil {
+		page = a.page.Context(ctx).Timeout(60 * time.Second)
+		reader := NewReadStageAction(page, a.state)
+		if err := reader.ReadMin(ctx, feedID, 20*time.Second); err != nil {
+			return fmt.Errorf("%s前阅读阶段失败: %w", spec.actionType, err)
+		}
+		page, err = a.preparePage(ctx, spec.actionType, feedID, xsecToken)
+	} else {
+		page, err = a.preparePage(ctx, spec.actionType, feedID, xsecToken)
+	}
+	if err != nil {
+		return err
+	}
+
+	liked, collected, err := a.getInteractState(page, feedID)
+	if err != nil {
+		return fmt.Errorf("读取%s状态失败，取消点击: %w", spec.actionType, err)
+	}
+	current := spec.stateOf(liked, collected)
+	if spec.target && current {
+		logrus.Infof("feed %s 已处于目标状态，跳过点击", feedID)
+		return nil
+	}
+	if !spec.target && !current {
+		logrus.Infof("feed %s 未处于目标状态，跳过点击", feedID)
+		return nil
+	}
+
+	return a.toggleInteractionOnce(page, feedID, spec)
+}
+
+// toggleInteractionOnce 统一执行至多一次点击：点击 -> 拟人停留 -> 校验进入目标状态。
+// 状态未确认时返回 state_unknown，取消立即二次点击。
+func (a *interactAction) toggleInteractionOnce(page *hrod.Page, feedID string, spec interactActionSpec) error {
+	if err := a.performClick(page, spec.selector); err != nil {
+		return fmt.Errorf("%s点击按钮失败: %w", spec.actionType, err)
+	}
+	if err := page.SleepRandom(2*time.Second, 5*time.Second); err != nil {
+		return err
+	}
+
+	liked, collected, err := a.getInteractState(page, feedID)
+	if err != nil {
+		return fmt.Errorf("state_unknown: 验证%s状态失败，取消立即二次点击: %w", spec.actionType, err)
+	}
+	if spec.stateOf(liked, collected) == spec.target {
+		logrus.Infof("feed %s %s成功", feedID, spec.actionType)
+		if a.state != nil {
+			_ = a.state.RecordInteraction(feedID, interactionValidationAction(spec.actionType))
+		}
+		return nil
+	}
+
+	return fmt.Errorf("state_unknown: %s后状态未确认，取消立即二次点击", spec.actionType)
+}
+
 // LikeAction 负责处理点赞相关交互
 type LikeAction struct {
 	*interactAction
@@ -133,65 +203,16 @@ func (a *LikeAction) Unlike(ctx context.Context, feedID, xsecToken string) error
 }
 
 func (a *LikeAction) perform(ctx context.Context, feedID, xsecToken string, targetLiked bool) error {
-	actionType := actionLike
+	spec := interactActionSpec{
+		actionType: actionLike,
+		selector:   SelectorLikeButton,
+		target:     targetLiked,
+		stateOf:    func(liked, _ bool) bool { return liked },
+	}
 	if !targetLiked {
-		actionType = actionUnlike
+		spec.actionType = actionUnlike
 	}
-
-	var page *hrod.Page
-	var err error
-	if a.state != nil {
-		page = a.page.Context(ctx).Timeout(60 * time.Second)
-		reader := NewReadStageAction(page, a.state)
-		if err := reader.ReadMin(ctx, feedID, 20*time.Second); err != nil {
-			return fmt.Errorf("%s前阅读阶段失败: %w", actionType, err)
-		}
-		page, err = a.preparePage(ctx, actionType, feedID, xsecToken)
-	} else {
-		page, err = a.preparePage(ctx, actionType, feedID, xsecToken)
-	}
-	if err != nil {
-		return err
-	}
-
-	liked, _, err := a.getInteractState(page, feedID)
-	if err != nil {
-		return fmt.Errorf("读取点赞状态失败，取消点击: %w", err)
-	}
-
-	if targetLiked && liked {
-		logrus.Infof("feed %s already liked, skip clicking", feedID)
-		return nil
-	}
-	if !targetLiked && !liked {
-		logrus.Infof("feed %s not liked yet, skip clicking", feedID)
-		return nil
-	}
-
-	return a.toggleLike(page, feedID, targetLiked, actionType)
-}
-
-func (a *LikeAction) toggleLike(page *hrod.Page, feedID string, targetLiked bool, actionType interactActionType) error {
-	if err := a.performClick(page, SelectorLikeButton); err != nil {
-		return fmt.Errorf("%s点击按钮失败: %w", actionType, err)
-	}
-	if err := page.SleepRandom(2*time.Second, 5*time.Second); err != nil {
-		return err
-	}
-
-	liked, _, err := a.getInteractState(page, feedID)
-	if err != nil {
-		return fmt.Errorf("state_unknown: 验证%s状态失败，取消立即二次点击: %w", actionType, err)
-	}
-	if liked == targetLiked {
-		logrus.Infof("feed %s %s成功", feedID, actionType)
-		if a.state != nil {
-			_ = a.state.RecordInteraction(feedID, interactionValidationAction(actionType))
-		}
-		return nil
-	}
-
-	return fmt.Errorf("state_unknown: %s后状态未确认，取消立即二次点击", actionType)
+	return a.performInteraction(ctx, spec, feedID, xsecToken)
 }
 
 // FavoriteAction 负责处理收藏相关交互
@@ -218,65 +239,16 @@ func (a *FavoriteAction) Unfavorite(ctx context.Context, feedID, xsecToken strin
 }
 
 func (a *FavoriteAction) perform(ctx context.Context, feedID, xsecToken string, targetCollected bool) error {
-	actionType := actionFavorite
+	spec := interactActionSpec{
+		actionType: actionFavorite,
+		selector:   SelectorCollectButton,
+		target:     targetCollected,
+		stateOf:    func(_, collected bool) bool { return collected },
+	}
 	if !targetCollected {
-		actionType = actionUnfavorite
+		spec.actionType = actionUnfavorite
 	}
-
-	var page *hrod.Page
-	var err error
-	if a.state != nil {
-		page = a.page.Context(ctx).Timeout(60 * time.Second)
-		reader := NewReadStageAction(page, a.state)
-		if err := reader.ReadMin(ctx, feedID, 20*time.Second); err != nil {
-			return fmt.Errorf("%s前阅读阶段失败: %w", actionType, err)
-		}
-		page, err = a.preparePage(ctx, actionType, feedID, xsecToken)
-	} else {
-		page, err = a.preparePage(ctx, actionType, feedID, xsecToken)
-	}
-	if err != nil {
-		return err
-	}
-
-	_, collected, err := a.getInteractState(page, feedID)
-	if err != nil {
-		return fmt.Errorf("读取收藏状态失败，取消点击: %w", err)
-	}
-
-	if targetCollected && collected {
-		logrus.Infof("feed %s already favorited, skip clicking", feedID)
-		return nil
-	}
-	if !targetCollected && !collected {
-		logrus.Infof("feed %s not favorited yet, skip clicking", feedID)
-		return nil
-	}
-
-	return a.toggleFavorite(page, feedID, targetCollected, actionType)
-}
-
-func (a *FavoriteAction) toggleFavorite(page *hrod.Page, feedID string, targetCollected bool, actionType interactActionType) error {
-	if err := a.performClick(page, SelectorCollectButton); err != nil {
-		return fmt.Errorf("%s点击按钮失败: %w", actionType, err)
-	}
-	if err := page.SleepRandom(2*time.Second, 5*time.Second); err != nil {
-		return err
-	}
-
-	_, collected, err := a.getInteractState(page, feedID)
-	if err != nil {
-		return fmt.Errorf("state_unknown: 验证%s状态失败，取消立即二次点击: %w", actionType, err)
-	}
-	if collected == targetCollected {
-		logrus.Infof("feed %s %s成功", feedID, actionType)
-		if a.state != nil {
-			_ = a.state.RecordInteraction(feedID, interactionValidationAction(actionType))
-		}
-		return nil
-	}
-
-	return fmt.Errorf("state_unknown: %s后状态未确认，取消立即二次点击", actionType)
+	return a.performInteraction(ctx, spec, feedID, xsecToken)
 }
 
 // getInteractState 仅从渲染后的互动按钮读取状态；无法确认时返回错误。

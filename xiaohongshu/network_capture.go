@@ -17,6 +17,7 @@ const (
 	maxNetworkCaptureSummaryRunes   = 512
 	networkCaptureStopWait         = 800 * time.Millisecond
 	networkCaptureBodyFetchTimeout = 1500 * time.Millisecond
+	networkCaptureMaxBodyFetches   = 3 // body fetch 并发上限
 )
 
 type NetworkCaptureOptions struct {
@@ -41,7 +42,8 @@ type NetworkCapture struct {
 	limit   int
 	entries []NetworkCaptureEntry
 
-	bodyWG sync.WaitGroup
+	bodyWG   sync.WaitGroup
+	bodySlots chan struct{} // buffered semaphore 限制 body fetch 并发
 }
 
 func StartNetworkCapture(page *hrod.Page, opts NetworkCaptureOptions) *NetworkCapture {
@@ -55,10 +57,11 @@ func StartNetworkCapture(page *hrod.Page, opts NetworkCaptureOptions) *NetworkCa
 
 	ctx, cancel := context.WithCancel(context.Background())
 	capture := &NetworkCapture{
-		page:   page,
-		cancel: cancel,
-		done:   make(chan struct{}),
-		limit:  limit,
+		page:      page,
+		cancel:    cancel,
+		done:      make(chan struct{}),
+		limit:     limit,
+		bodySlots: make(chan struct{}, networkCaptureMaxBodyFetches),
 	}
 	eventPage := page.Rod.Context(ctx)
 
@@ -138,9 +141,17 @@ func (c *NetworkCapture) onLoadingFinished(e *proto.NetworkLoadingFinished) {
 		return
 	}
 
+	select {
+	case c.bodySlots <- struct{}{}: // 获取槽位成功才启动 goroutine
+	default:
+		// 满载：跳过 body summary，只保留 response metadata，不阻塞 CDP 事件回调
+		return
+	}
+
 	c.bodyWG.Add(1)
 	go func(requestID proto.NetworkRequestID) {
 		defer c.bodyWG.Done()
+		defer func() { <-c.bodySlots }() // 退出时释放槽位
 		ctx, cancel := context.WithTimeout(context.Background(), networkCaptureBodyFetchTimeout)
 		defer cancel()
 

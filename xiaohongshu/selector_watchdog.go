@@ -14,6 +14,9 @@ import (
 // 为 nil 时不进行探测。
 var DefaultSelectorWatchdog *SelectorWatchdog
 
+// selectorProbeTTL 已确认选择器健康后重新探测的间隔。
+const selectorProbeTTL = 24 * time.Hour
+
 // SelectorHealthKind 选择器健康状态
 type SelectorHealthKind string
 
@@ -30,6 +33,7 @@ type SelectorHealthEntry struct {
 	Selector    string             `json:"selector"`
 	Purpose     string             `json:"purpose"`
 	Required    bool               `json:"required"`
+	VisibleOnly bool               `json:"visible_only,omitempty"`
 	LastChecked time.Time          `json:"last_checked"`
 	LastCount   int                `json:"last_count"`
 	LastVisible int                `json:"last_visible"`
@@ -72,11 +76,12 @@ func (w *SelectorWatchdog) Register(spec SelectorSpec) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.entries[spec.Name] = &SelectorHealthEntry{
-		Name:     spec.Name,
-		Selector: spec.Selector,
-		Purpose:  spec.Purpose,
-		Required: spec.Required,
-		Status:   SelectorHealthUnknown,
+		Name:        spec.Name,
+		Selector:    spec.Selector,
+		Purpose:     spec.Purpose,
+		Required:    spec.Required,
+		VisibleOnly: spec.VisibleOnly,
+		Status:      SelectorHealthUnknown,
 	}
 }
 
@@ -120,7 +125,8 @@ func (w *SelectorWatchdog) ProbeForKind(page *hrod.Page, kind XHSReadyKind) (war
 		return nil
 	}
 
-	// 过滤出需要重新探测的选择器（unknown、非healthy、或距上次probe超过24h）。
+	// 过滤出需要重新探测的选择器：
+	// unknown 立即探测；degraded(required) 下次导航重探；healthy/suspicious 按 TTL 重探。
 	// 同一选择器已有探测进行中时跳过，避免多个就绪点或后台 goroutine 重复 eval。
 	w.mu.Lock()
 	if w.probing == nil {
@@ -133,14 +139,14 @@ func (w *SelectorWatchdog) ProbeForKind(page *hrod.Page, kind XHSReadyKind) (war
 			if w.probing[name] {
 				continue
 			}
-			if entry.Status != SelectorHealthHealthy || time.Since(entry.LastChecked) >= 24*time.Hour {
+			if shouldProbeSelector(entry) {
 				w.probing[name] = true
 				probeNames = append(probeNames, name)
 				specs = append(specs, SelectorSpec{
 					Name:        entry.Name,
 					Selector:    entry.Selector,
 					Required:    entry.Required,
-					VisibleOnly: selectorUsesVisibleCount(entry.Name),
+					VisibleOnly: entry.VisibleOnly,
 				})
 			}
 		}
@@ -184,9 +190,9 @@ func (w *SelectorWatchdog) ProbeForKind(page *hrod.Page, kind XHSReadyKind) (war
 		entry.LastVisible = r.VisibleCount
 		entry.Samples = r.Samples
 
-		// 用 visible count 判断可见性要求的选择器，否则用原始 count
+		// VisibleOnly 的选择器以可见命中数判定健康，否则用原始 count
 		checkCount := r.Count
-		if selectorUsesVisibleCount(entry.Name) {
+		if entry.VisibleOnly {
 			checkCount = r.VisibleCount
 		}
 
@@ -218,13 +224,15 @@ func (w *SelectorWatchdog) ProbeForKind(page *hrod.Page, kind XHSReadyKind) (war
 	return warnings
 }
 
-// selectorUsesVisibleCount 判断该选择器以可见命中数作为健康判定依据。
-func selectorUsesVisibleCount(name string) bool {
-	switch name {
-	case "search_input", "comment_box", "like_button", "notification_page", "notification_tab", "notification_item":
+// shouldProbeSelector 判断该选择器本次是否值得重新探测。
+func shouldProbeSelector(entry *SelectorHealthEntry) bool {
+	switch entry.Status {
+	case SelectorHealthUnknown: // 未检测，立即探测
 		return true
-	default:
-		return false
+	case SelectorHealthDegraded: // required 退化，下次导航持续重探
+		return true
+	default: // healthy / suspicious 均按 TTL，避免每次操作重复 Eval
+		return time.Since(entry.LastChecked) >= selectorProbeTTL
 	}
 }
 

@@ -71,6 +71,31 @@ func likeNotificationOnPage(ctx context.Context, page *hrod.Page, target notific
 	return nil, fmt.Errorf("state_unknown: 点击后点赞状态未确认，不自动二次点击，请重新 list_notifications 后核对")
 }
 
+// matchNotificationDOMItem 在 DOM 快照中按指纹唯一匹配通知写操作目标。
+// readNotificationLikeState 与 findNotificationRowElement 共用，保证匹配逻辑单一来源。
+// 保留指纹唯一性、歧义拒绝；未匹配或歧义均报错，禁止据此操作。
+// 返回匹配项与在 Items 中的索引（供元素重定位）。
+func matchNotificationDOMItem(dom *notificationDOMSnapshot, target notificationTarget) (*notificationDOMItem, int, error) {
+	fp := notificationItemFingerprint(target.Item.From.UserID, target.Item.From.Nickname, target.Item.CommentText)
+	index := -1
+	var matched *notificationDOMItem
+	for i := range dom.Items {
+		item := &dom.Items[i]
+		if notificationItemFingerprint(item.UserID, item.Nickname, item.Content) != fp {
+			continue
+		}
+		if index >= 0 {
+			return nil, -1, fmt.Errorf("通知行指纹歧义，无法唯一匹配")
+		}
+		index = i
+		matched = item
+	}
+	if index < 0 {
+		return nil, -1, fmt.Errorf("未找到匹配的通知行（可能已翻页或失效）")
+	}
+	return matched, index, nil
+}
+
 // readNotificationLikeState 重新读取 DOM 快照，按指纹唯一匹配通知行并解析 svg use href。
 // 点击后的轮询继续使用，以兼容前端重新渲染。
 func readNotificationLikeState(page *hrod.Page, target notificationTarget) (bool, error) {
@@ -78,20 +103,9 @@ func readNotificationLikeState(page *hrod.Page, target notificationTarget) (bool
 	if err != nil {
 		return false, err
 	}
-	fp := notificationItemFingerprint(target.Item.From.UserID, target.Item.From.Nickname, target.Item.CommentText)
-	var matched *notificationDOMItem
-	for i := range dom.Items {
-		item := &dom.Items[i]
-		if notificationItemFingerprint(item.UserID, item.Nickname, item.Content) != fp {
-			continue
-		}
-		if matched != nil {
-			return false, fmt.Errorf("通知行指纹歧义，点赞状态不可判定")
-		}
-		matched = item
-	}
-	if matched == nil {
-		return false, fmt.Errorf("未找到匹配的通知行（可能已翻页或失效）")
+	matched, _, err := matchNotificationDOMItem(&dom, target)
+	if err != nil {
+		return false, err
 	}
 	return parseNotificationLikeHref(matched.LikeUseHref)
 }
@@ -103,22 +117,9 @@ func findNotificationRowElement(page *hrod.Page, target notificationTarget) (*hr
 	if err != nil {
 		return nil, nil, err
 	}
-	fp := notificationItemFingerprint(target.Item.From.UserID, target.Item.From.Nickname, target.Item.CommentText)
-	index := -1
-	var matched *notificationDOMItem
-	for i := range dom.Items {
-		item := &dom.Items[i]
-		if notificationItemFingerprint(item.UserID, item.Nickname, item.Content) != fp {
-			continue
-		}
-		if index >= 0 {
-			return nil, nil, fmt.Errorf("通知行指纹歧义，取消操作")
-		}
-		index = i
-		matched = item
-	}
-	if index < 0 {
-		return nil, nil, fmt.Errorf("未找到匹配的通知行（可能已翻页或失效）")
+	matched, index, err := matchNotificationDOMItem(&dom, target)
+	if err != nil {
+		return nil, nil, err
 	}
 	rows, err := page.Elements(SelectorNotificationItem)
 	if err != nil {

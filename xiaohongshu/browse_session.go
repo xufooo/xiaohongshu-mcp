@@ -958,16 +958,6 @@ func loadSessionCommentsForDetailWithConfig(config CommentLoadConfig, ops sessio
 	return nil
 }
 
-func shouldStopSessionCommentPaging(progress commentProgress) bool {
-	if progress.NoComments {
-		return true
-	}
-	if progress.AtEnd {
-		return true
-	}
-	return progress.Total > 0 && progress.Count >= progress.Total
-}
-
 func (s *BrowseSession) Like(ctx context.Context, unlike bool) error {
 	return s.like(ctx, "", unlike)
 }
