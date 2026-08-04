@@ -42,22 +42,3 @@ jobs:
         name: xiaohongshu-mcp-${{ matrix.goos }}-${{ matrix.goarch }}
         path: dist/xiaohongshu-mcp-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.goos == 'windows' && '.exe' || '' }}
         if-no-files-found: error
-
-  generate-gosum:
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v4
-    - name: Set up Go
-      uses: actions/setup-go@v4
-      with:
-        go-version: "1.24"
-    - name: Tidy
-      run: go mod tidy
-    - name: Upload mod files
-      uses: actions/upload-artifact@v4
-      with:
-        name: modfiles
-        path: |
-          go.mod
-          go.sum
-        if-no-files-found: error
