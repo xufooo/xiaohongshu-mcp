@@ -13,11 +13,11 @@
     "interactions": [
       {
         "name": "notes",
-        "count": 15
+        "count": "15"
       },
       {
         "name": "fans",
-        "count": 100
+        "count": "100"
       }
     ],
     "tags": [],
