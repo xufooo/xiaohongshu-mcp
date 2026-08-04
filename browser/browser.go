@@ -19,6 +19,8 @@ type browserConfig struct {
 	cloakLauncherProfile bool
 	extraArgs            []string
 	userAgent            string
+	fingerprintSeed      int
+	language             string
 }
 
 type Option func(*browserConfig)
@@ -63,6 +65,36 @@ func WithUserAgent(userAgent string) Option {
 	}
 }
 
+// WithFingerprintSeed 设置 CloakBrowser fingerprint 的持久 seed。
+func WithFingerprintSeed(seed int) Option {
+	return func(c *browserConfig) {
+		c.fingerprintSeed = seed
+	}
+}
+
+// WithLanguage 设置浏览器语言（如 zh-CN），仅在 Cloak fingerprint 启用时生效。
+func WithLanguage(language string) Option {
+	return func(c *browserConfig) {
+		c.language = language
+	}
+}
+
+// cloakFingerprintEnabled 判断 Cloak 模式下是否启用 fingerprint。
+// 显式 UA 优先：一旦配置 XHS_BROWSER_USER_AGENT，跳过 fingerprint 和 UA override。
+func cloakFingerprintEnabled(cloakBrowser bool, userAgent string) bool {
+	return cloakBrowser && userAgent == ""
+}
+
+// cloakFingerprintOptions 构建 Cloak 模式的 fingerprint/language 启动选项。
+func cloakFingerprintOptions(seed int, language string) []headless_browser.Option {
+	return []headless_browser.Option{
+		headless_browser.WithFingerprint(""),
+		headless_browser.WithFingerprintSeed(seed),
+		headless_browser.WithLanguage(language),
+		headless_browser.WithExtraFlags(map[string]string{"fingerprint-brand": "Chrome"}),
+	}
+}
+
 // maskProxyCredentials masks username and password in proxy URL for safe logging.
 func maskProxyCredentials(proxyURL string) string {
 	u, err := url.Parse(proxyURL)
@@ -101,6 +133,12 @@ func NewBrowser(ctx context.Context, headless bool, options ...Option) (*hrod.Br
 	if cfg.cloakBrowser {
 		opts = append(opts, headless_browser.WithStealth(false))
 		logrus.Info("using CloakBrowser without go-rod stealth injection")
+		if cloakFingerprintEnabled(cfg.cloakBrowser, cfg.userAgent) {
+			opts = append(opts, cloakFingerprintOptions(cfg.fingerprintSeed, cfg.language)...)
+			logrus.Info("CloakBrowser fingerprint enabled (no explicit UA)")
+		} else {
+			logrus.Warn("CloakBrowser 配置了 XHS_BROWSER_USER_AGENT，跳过 fingerprint/UA override，显式 UA 优先")
+		}
 	}
 	if cfg.cloakBrowser || cfg.cloakLauncherProfile {
 		opts = append(opts, headless_browser.CloakLauncherProfile())

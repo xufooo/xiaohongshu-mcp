@@ -20,6 +20,8 @@ var (
 	browserExtraArgs []string
 
 	browserUserAgent = ""
+
+	fingerprintSeed = 0
 )
 
 func InitHeadless(h bool) {
@@ -113,6 +115,24 @@ func GetBrowserUserAgent() string {
 		return browserUserAgent
 	}
 	return strings.TrimSpace(os.Getenv("XHS_BROWSER_USER_AGENT"))
+}
+
+// SetFingerprintSeed 设置 CloakBrowser fingerprint 的持久 seed。
+func SetFingerprintSeed(seed int) {
+	fingerprintSeed = seed
+}
+
+// FingerprintSeed 返回当前配置的 fingerprint seed。
+func FingerprintSeed() int {
+	return fingerprintSeed
+}
+
+// BrowserLanguage 返回浏览器语言；读取 XHS_BROWSER_LANG，空时默认 zh-CN。
+func BrowserLanguage() string {
+	if lang := strings.TrimSpace(os.Getenv("XHS_BROWSER_LANG")); lang != "" {
+		return lang
+	}
+	return "zh-CN"
 }
 
 func UseFixedIdentity() bool {

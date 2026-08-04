@@ -1680,6 +1680,8 @@ func newBrowser(ctx context.Context) (*hrod.Browser, error) {
 		browser.WithCloakBrowser(configs.UseCloakBrowser()),
 		browser.WithCloakLauncherProfile(configs.CloakLauncherProfile()),
 		browser.WithExtraArgs(configs.GetBrowserExtraArgs()),
+		browser.WithFingerprintSeed(configs.FingerprintSeed()),
+		browser.WithLanguage(configs.BrowserLanguage()),
 	)
 }
 

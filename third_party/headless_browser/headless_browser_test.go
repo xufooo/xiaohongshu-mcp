@@ -52,3 +52,60 @@ func TestApplyCloakLauncherProfile(t *testing.T) {
 		t.Fatalf("disable-features = %v, want unchanged %v", after, before)
 	}
 }
+
+// TestWithStealthAlias 验证 WithStealth 与 WithStealthJS 控制同一字段。
+func TestWithStealthAlias(t *testing.T) {
+	cfg := newDefaultConfig()
+	WithStealthJS(false)(cfg)
+	if cfg.StealthJS {
+		t.Fatal("WithStealthJS(false) 应设置 StealthJS=false")
+	}
+
+	cfg2 := newDefaultConfig()
+	WithStealth(false)(cfg2)
+	if cfg2.StealthJS {
+		t.Fatal("WithStealth(false) 应控制同一字段 StealthJS=false")
+	}
+}
+
+// TestWithExtraFlagsDefensiveCopy 验证 WithExtraFlags 防御性复制 map。
+func TestWithExtraFlagsDefensiveCopy(t *testing.T) {
+	flagsMap := map[string]string{"fingerprint-brand": "Chrome"}
+	cfg := newDefaultConfig()
+	WithExtraFlags(flagsMap)(cfg)
+	flagsMap["fingerprint-brand"] = "Mutated"
+	if cfg.ExtraFlags["fingerprint-brand"] != "Chrome" {
+		t.Fatal("WithExtraFlags 必须复制 map，调用方后续修改不能影响配置")
+	}
+}
+
+// TestWithExtraArgsDefensiveCopy 验证 WithExtraArgs 防御性复制 slice。
+func TestWithExtraArgsDefensiveCopy(t *testing.T) {
+	args := []string{"--lang=zh-CN"}
+	cfg := newDefaultConfig()
+	WithExtraArgs(args)(cfg)
+	args[0] = "--mutated"
+	if cfg.ExtraArgs[0] != "--lang=zh-CN" {
+		t.Fatal("WithExtraArgs 必须复制 slice，调用方后续修改不能影响配置")
+	}
+}
+
+func TestPrimaryLang(t *testing.T) {
+	if primaryLang("zh-CN") != "zh" {
+		t.Fatalf("primaryLang(zh-CN) = %q, want zh", primaryLang("zh-CN"))
+	}
+	if primaryLang("en-US") != "en" {
+		t.Fatalf("primaryLang(en-US) = %q, want en", primaryLang("en-US"))
+	}
+	if primaryLang("en") != "en" {
+		t.Fatalf("primaryLang(en) = %q, want en", primaryLang("en"))
+	}
+}
+
+// TestAutoFingerprintPlatform 验证按运行 OS 返回合法平台值。
+func TestAutoFingerprintPlatform(t *testing.T) {
+	platform := autoFingerprintPlatform()
+	if platform != "windows" && platform != "macos" {
+		t.Fatalf("autoFingerprintPlatform() = %q, 应为 windows 或 macos", platform)
+	}
+}

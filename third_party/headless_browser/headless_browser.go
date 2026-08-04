@@ -5,7 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"os"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -22,9 +25,15 @@ type Browser struct {
 	browser       *rod.Browser
 	browserCancel context.CancelFunc
 	launcher      *launcher.Launcher
-	stealth       bool
-	closeOnce     sync.Once
-	closeErr      error
+	stealthJS     bool // 是否注入 go-rod/stealth 的 JS 补丁
+
+	// uaOverride：每个新页面套用的一致 UA/Client-Hints 覆盖。
+	// 用浏览器实读的真实版本 + 平台补丁实读的 platform 三项拼出自洽元数据补回。
+	// nil = 不覆盖。
+	uaOverride *proto.NetworkSetUserAgentOverride
+
+	closeOnce sync.Once
+	closeErr  error
 }
 
 // Config holds browser options.
@@ -36,9 +45,23 @@ type Config struct {
 	UserDataDir   string
 	Proxy         string
 	Trace         bool
-	Stealth       bool
+	StealthJS     bool
 	ExtraArgs     []string
 	CloakProfile  bool
+
+	// Fingerprint 为 true 时，传入 CloakBrowser 的源码级指纹参数
+	// （--fingerprint={seed} 与 --fingerprint-platform={platform}），激活其一致指纹引擎。
+	Fingerprint         bool
+	FingerprintPlatform string // 空 = 按运行 OS 自动：linux/windows→windows，darwin→macos
+	FingerprintSeed     int    // 0 = 每次启动随机 seed
+
+	// Language 覆盖 Accept-Language 与 navigator.languages（如 "zh-CN"）。空 = 不覆盖。
+	// 仅在启用 Fingerprint 的一致 UA 覆盖时生效。
+	Language string
+
+	// ExtraFlags 透传任意浏览器启动 flag（如 fingerprint-chromium 的
+	// "fingerprint-brand":"Chrome"）。键不带前导 "--"。
+	ExtraFlags map[string]string
 }
 
 // Option configures a Browser.
@@ -46,8 +69,8 @@ type Option func(*Config)
 
 func newDefaultConfig() *Config {
 	return &Config{
-		Headless: true,
-		Stealth:  true,
+		Headless:  true,
+		StealthJS: true,
 	}
 }
 
@@ -58,17 +81,75 @@ func WithChromeBinPath(path string) Option  { return func(c *Config) { c.ChromeB
 func WithUserDataDir(path string) Option    { return func(c *Config) { c.UserDataDir = path } }
 func WithProxy(proxy string) Option         { return func(c *Config) { c.Proxy = proxy } }
 func WithTrace() Option                     { return func(c *Config) { c.Trace = true } }
-func WithStealth(enabled bool) Option       { return func(c *Config) { c.Stealth = enabled } }
+
+// WithStealthJS 控制是否注入 go-rod/stealth 的 JS 补丁。用 CloakBrowser 时应传 false。
+func WithStealthJS(enabled bool) Option {
+	return func(c *Config) { c.StealthJS = enabled }
+}
+
+// WithStealth 是 WithStealthJS 的别名，两者控制同一字段。
+func WithStealth(enabled bool) Option {
+	return WithStealthJS(enabled)
+}
+
 func WithCloakLauncherProfile(enabled bool) Option {
 	return func(c *Config) { c.CloakProfile = enabled }
 }
 
 func CloakLauncherProfile() Option { return WithCloakLauncherProfile(true) }
 
+// WithExtraArgs 设置附加浏览器启动参数。防御性复制，避免调用方后续修改。
 func WithExtraArgs(args []string) Option {
 	return func(c *Config) {
 		c.ExtraArgs = append([]string(nil), args...)
 	}
+}
+
+// WithFingerprint 启用 CloakBrowser 源码级指纹引擎。
+// platform 传空则按运行 OS 自动选择（Linux 服务器呈现 Windows 画像，mac 呈现 macOS）。
+func WithFingerprint(platform string) Option {
+	return func(c *Config) {
+		c.Fingerprint = true
+		c.FingerprintPlatform = platform
+	}
+}
+
+// WithFingerprintSeed 固定指纹 seed（0 表示每次随机）。同一 seed 产出同一套一致指纹。
+func WithFingerprintSeed(seed int) Option {
+	return func(c *Config) {
+		c.FingerprintSeed = seed
+	}
+}
+
+// WithLanguage 覆盖 Accept-Language 与 navigator.languages（如 "zh-CN"）。仅在启用 Fingerprint 时生效。
+func WithLanguage(lang string) Option {
+	return func(c *Config) {
+		c.Language = lang
+	}
+}
+
+// WithExtraFlags 透传任意浏览器启动 flag（键不带前导 "--"）。防御性复制 map。
+func WithExtraFlags(flagsMap map[string]string) Option {
+	return func(c *Config) {
+		if flagsMap == nil {
+			c.ExtraFlags = nil
+			return
+		}
+		cp := make(map[string]string, len(flagsMap))
+		for k, v := range flagsMap {
+			cp[k] = v
+		}
+		c.ExtraFlags = cp
+	}
+}
+
+// autoFingerprintPlatform 按运行 OS 返回 CloakBrowser 的指纹平台。
+// Linux 服务器上呈现 Windows 画像（最常见的真实用户画像，且避免 Linux 桌面的稀有特征）。
+func autoFingerprintPlatform() string {
+	if runtime.GOOS == "darwin" {
+		return "macos"
+	}
+	return "windows"
 }
 
 // New creates a browser with stealth enabled.
@@ -81,6 +162,11 @@ func New(ctx context.Context, options ...Option) (*Browser, error) {
 		ctx = context.Background()
 	}
 
+	// Fingerprint 与显式 UA 互斥：会制造 UA/Client-Hints 冲突，直接拒绝。
+	if cfg.Fingerprint && cfg.UserAgent != "" {
+		return nil, fmt.Errorf("headless_browser: Fingerprint 与 UserAgent 互斥，禁止同时设置")
+	}
+
 	l := launcher.New().
 		Headless(cfg.Headless).
 		Set("--no-sandbox")
@@ -89,6 +175,22 @@ func New(ctx context.Context, options ...Option) (*Browser, error) {
 	}
 	if cfg.UserAgent != "" {
 		l = l.Set("user-agent", cfg.UserAgent)
+	}
+	if cfg.Fingerprint {
+		platform := cfg.FingerprintPlatform
+		if platform == "" {
+			platform = autoFingerprintPlatform()
+		}
+		seed := cfg.FingerprintSeed
+		if seed == 0 {
+			seed = rand.Intn(89999) + 10000 // 10000-99999
+		}
+		l = l.Set("fingerprint", strconv.Itoa(seed)).
+			Set("fingerprint-platform", platform)
+		logrus.Infof("fingerprint enabled: platform=%s seed=%d", platform, seed)
+	}
+	for k, v := range cfg.ExtraFlags {
+		l = l.Set(flags.Flag(k), v)
 	}
 	if cfg.ChromeBinPath != "" {
 		l = l.Bin(cfg.ChromeBinPath)
@@ -157,7 +259,22 @@ func New(ctx context.Context, options ...Option) (*Browser, error) {
 		}
 	}
 
-	return &Browser{browser: browser, browserCancel: browserCancel, launcher: l, stealth: cfg.Stealth}, nil
+	hb := &Browser{browser: browser, browserCancel: browserCancel, launcher: l, stealthJS: cfg.StealthJS}
+
+	// 启用指纹时，构建一致 UA 覆盖，补回 go-rod 建页面丢失的 UA 版本保真度。
+	// 构建失败必须终止启动，不能无声降级。
+	if cfg.Fingerprint {
+		ov, err := buildUAOverride(browser, cfg.Language)
+		if err != nil {
+			browserCancel()
+			l.Kill()
+			go l.Cleanup()
+			return nil, fmt.Errorf("build UA override: %w", err)
+		}
+		hb.uaOverride = ov
+	}
+
+	return hb, nil
 }
 
 func setBrowserCookies(browser *rod.Browser, cookies []*proto.NetworkCookie) (err error) {
@@ -177,6 +294,57 @@ func applyCloakLauncherProfile(l *launcher.Launcher) {
 	// 不动 disable-features：rod 默认 site-per-process,TranslateUI，
 	// 整体替换会静默覆盖未来 rod 新增的默认值，维护风险高。
 	l.Delete("enable-automation")
+}
+
+// buildUAOverride 用浏览器实读的真实版本补回 go-rod 建页面丢失的 UA 版本保真度。
+//
+// 分工：版本相关字段（UA 串、brands、fullVersionList、uaFullVersion）由本覆盖负责，
+// 版本随 Browser.getVersion 实读、零硬编码；
+// platform/platformVersion/architecture 等平台字段留空，交给 CloakBrowser「始终生效」的
+// 源码级补丁在真实页面上填充。
+func buildUAOverride(browser *rod.Browser, language string) (*proto.NetworkSetUserAgentOverride, error) {
+	ver, err := proto.BrowserGetVersion{}.Call(browser)
+	if err != nil {
+		return nil, err
+	}
+	fullVersion := strings.TrimPrefix(ver.Product, "Chrome/") // 如 145.0.7632.109
+	major := fullVersion
+	if i := strings.IndexByte(fullVersion, '.'); i > 0 {
+		major = fullVersion[:i]
+	}
+
+	ov := &proto.NetworkSetUserAgentOverride{
+		UserAgent: ver.UserAgent, // 浏览器真实 UA（正确平台+版本）
+		UserAgentMetadata: &proto.EmulationUserAgentMetadata{
+			Brands: []*proto.EmulationUserAgentBrandVersion{
+				{Brand: "Not:A-Brand", Version: "99"},
+				{Brand: "Google Chrome", Version: major},
+				{Brand: "Chromium", Version: major},
+			},
+			FullVersionList: []*proto.EmulationUserAgentBrandVersion{
+				{Brand: "Not:A-Brand", Version: "99.0.0.0"},
+				{Brand: "Google Chrome", Version: fullVersion},
+				{Brand: "Chromium", Version: fullVersion},
+			},
+			FullVersion: fullVersion,
+			// 平台字段留空：交给 CloakBrowser 始终生效的补丁填充
+		},
+	}
+	// Accept-Language 传不带 q 值的形式，否则 navigator.languages 会混入 "zh;q=0.9"
+	if language != "" {
+		ov.AcceptLanguage = language + "," + primaryLang(language)
+	}
+
+	logrus.Infof("UA coherence: version=%s", ver.Product)
+	return ov, nil
+}
+
+// primaryLang 取语言主标签，如 "zh-CN" → "zh"。
+func primaryLang(lang string) string {
+	if i := strings.IndexByte(lang, '-'); i > 0 {
+		return lang[:i]
+	}
+	return lang
 }
 
 // Close preserves the upstream API. Callers that need to handle a failed CDP
@@ -230,21 +398,29 @@ func (b *Browser) close(ctx context.Context) error {
 }
 
 // Page 创建页面。CloakBrowser 已在浏览器层处理指纹，不能再叠加 stealth 注入。
+// 若配置了一致 UA 覆盖，则在返回前套用，补回 UA 版本保真度。
 func (b *Browser) Page() (page *rod.Page, err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			err = fmt.Errorf("create page: %v", recovered)
-			fmt.Fprintf(os.Stderr, "[DEBUG] headless_browser.Page panicked: %v (stealth=%v, browser=%v)\n", recovered, b.stealth, b.browser)
+			fmt.Fprintf(os.Stderr, "[DEBUG] headless_browser.Page panicked: %v (stealth=%v, browser=%v)\n", recovered, b.stealthJS, b.browser)
 		}
 	}()
-	if b.stealth {
-		return stealth.Page(b.browser)
+	if b.stealthJS {
+		page, err = stealth.Page(b.browser)
+	} else {
+		page, err = b.browser.Page(proto.TargetCreateTarget{})
 	}
-	page, err = b.browser.Page(proto.TargetCreateTarget{})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[DEBUG] rod.Browser.Page returned error: %v\n", err)
+		return nil, err
 	}
-	return
+	if b.uaOverride != nil {
+		if err := b.uaOverride.Call(page); err != nil {
+			return nil, fmt.Errorf("apply UA override: %w", err)
+		}
+	}
+	return page, nil
 }
 
 // NewPage preserves the upstream convenience API.

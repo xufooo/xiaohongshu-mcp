@@ -29,6 +29,13 @@ func main() {
 	configs.SetBrowserUserAgent(os.Getenv("XHS_BROWSER_USER_AGENT"))
 	configs.SetBrowserExtraArgs(configs.BrowserExtraArgsFromEnv())
 
+	// 登录浏览器与服务浏览器使用同一 seed 解析规则，避免登录时一种画像、正式运行另一种。
+	// 仅在 Cloak 且未配置显式 UA 时解析并持久化（fingerprint 跳过时不得落盘）。
+	if configs.UseCloakBrowser() && configs.GetBrowserUserAgent() == "" {
+		cookieLoader := cookies.NewLoadCookie(cookies.GetCookiesFilePath())
+		configs.SetFingerprintSeed(configs.ResolveFingerprintSeed(cookieLoader))
+	}
+
 	// 登录的时候，需要界面，所以不能无头模式
 	b, err := browser.NewBrowser(
 		context.Background(),
@@ -39,6 +46,8 @@ func main() {
 		browser.WithCloakBrowser(configs.UseCloakBrowser()),
 		browser.WithCloakLauncherProfile(configs.CloakLauncherProfile()),
 		browser.WithExtraArgs(configs.GetBrowserExtraArgs()),
+		browser.WithFingerprintSeed(configs.FingerprintSeed()),
+		browser.WithLanguage(configs.BrowserLanguage()),
 	)
 	if err != nil {
 		logrus.Fatalf("failed to start browser: %v", err)

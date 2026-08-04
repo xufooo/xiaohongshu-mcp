@@ -493,6 +493,19 @@ XHS_PROXY=http://proxy:port go run .
 
 支持 HTTP/HTTPS/SOCKS5 代理，日志中会自动隐藏代理的认证信息。
 
+**配置 CloakBrowser 指纹（可选）**：
+
+使用 `XHS_BROWSER_MODE=cloak` 且未设置 `XHS_BROWSER_USER_AGENT` 时，默认启用 CloakBrowser 源码级一致指纹（`fingerprint`/`fingerprint-platform`/`fingerprint-brand`），让每次启动呈现同一画像。
+
+- `XHS_FP_SEED`：固定指纹 seed（正整数）。未配置时优先复用 cookies 会话文件里已保存的 seed，再没有则自动生成并持久化，保证重启后指纹不变。
+- `XHS_BROWSER_LANG`：浏览器语言（如 `zh-CN`），默认 `zh-CN`。
+- 若设置了 `XHS_BROWSER_USER_AGENT`，显式 UA 优先，自动跳过 fingerprint 与 UA override（避免 UA 与 Client Hints 冲突），启动日志会输出 warning。
+
+```bash
+# 示例：Cloak 模式 + 固定 seed + 中文
+XHS_BROWSER_MODE=cloak XHS_FP_SEED=12345 go run .
+```
+
 ## 1.4. 验证 MCP
 
 ```bash
