@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/rand"
-	"os"
 	"runtime"
 	"strconv"
 	"strings"
@@ -403,7 +402,7 @@ func (b *Browser) Page() (page *rod.Page, err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			err = fmt.Errorf("create page: %v", recovered)
-			fmt.Fprintf(os.Stderr, "[DEBUG] headless_browser.Page panicked: %v (stealth=%v, browser=%v)\n", recovered, b.stealthJS, b.browser)
+			logrus.WithError(fmt.Errorf("%v", recovered)).Debugf("headless_browser.Page panicked (stealth=%v, browser=%v)", b.stealthJS, b.browser)
 		}
 	}()
 	if b.stealthJS {
@@ -412,7 +411,7 @@ func (b *Browser) Page() (page *rod.Page, err error) {
 		page, err = b.browser.Page(proto.TargetCreateTarget{})
 	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[DEBUG] rod.Browser.Page returned error: %v\n", err)
+		logrus.WithError(err).Debug("rod.Browser.Page returned error")
 		return nil, err
 	}
 	if b.uaOverride != nil {
