@@ -1,0 +1,87 @@
+{
+  "userPageData": {
+    "result": {},
+    "basicInfo": {
+      "nickname": "用户A",
+      "images": "",
+      "redId": "1234567890",
+      "gender": 2,
+      "ipLocation": "",
+      "desc": "",
+      "imageb": ""
+    },
+    "interactions": [
+      {
+        "name": "notes",
+        "count": 15
+      },
+      {
+        "name": "fans",
+        "count": 100
+      }
+    ],
+    "tags": [],
+    "tabPublic": {
+      "collection": true,
+      "collectionNote": {
+        "display": true,
+        "lock": false,
+        "count": 2
+      }
+    }
+  },
+  "notes": [
+    [
+      {
+        "id": "note-placeholder-1",
+        "noteCard": {
+          "displayTitle": "笔记占位 1",
+          "type": "normal",
+          "user": {
+            "nickname": "用户A",
+            "userId": "placeholder-user"
+          }
+        },
+        "index": 0,
+        "xsecToken": ""
+      },
+      {
+        "id": "note-placeholder-2",
+        "noteCard": {
+          "displayTitle": "笔记占位 2",
+          "type": "normal"
+        },
+        "index": 1,
+        "xsecToken": ""
+      }
+    ],
+    [
+      {
+        "id": "fav-placeholder-1",
+        "noteCard": {
+          "displayTitle": "收藏占位",
+          "type": "normal"
+        },
+        "index": 0,
+        "xsecToken": ""
+      }
+    ],
+    [
+      {
+        "id": "liked-placeholder-1",
+        "noteCard": {
+          "displayTitle": "点赞占位",
+          "type": "normal"
+        },
+        "index": 0,
+        "xsecToken": ""
+      }
+    ],
+    [],
+    []
+  ],
+  "activeTab": {
+    "index": 0,
+    "query": "note"
+  }
+}

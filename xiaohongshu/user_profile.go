@@ -40,84 +40,122 @@ func (u *UserProfileAction) extractUserProfileData(page *hrod.Page) (*UserProfil
 		return nil, fmt.Errorf("wait for profile state failed: %w", err)
 	}
 
-	userDataObj, err := page.Eval(`() => {
-		if (window.__INITIAL_STATE__ &&
-		    window.__INITIAL_STATE__.user &&
-		    window.__INITIAL_STATE__.user.userPageData) {
-			const userPageData = window.__INITIAL_STATE__.user.userPageData;
-			const data = userPageData.value !== undefined ? userPageData.value : userPageData._value;
-			if (data) {
-				return JSON.stringify(data);
-			}
-		}
-		return "";
+	raw, err := page.Eval(`() => {
+		const s = window.__INITIAL_STATE__;
+		if (!s || !s.user) return "";
+		const ud = s.user.userPageData;
+		const notes = s.user.notes;
+		const at = s.user.activeTab;
+		if (!ud) return "NO_USERPAGEDATA";
+		if (!notes) return "NO_NOTES";
+		return JSON.stringify({
+			userPageData: ud,
+			notes: notes,
+			activeTab: at
+		});
 	}`)
 	if err != nil {
-		return nil, fmt.Errorf("extract userPageData failed: %w", err)
+		return nil, fmt.Errorf("extract profile state failed: %w", err)
 	}
-	userDataResult := ""
-	if userDataObj != nil {
-		userDataResult = userDataObj.Value.Str()
+	rawStr := ""
+	if raw != nil {
+		rawStr = raw.Value.Str()
 	}
+	switch rawStr {
+	case "":
+		return nil, fmt.Errorf("__INITIAL_STATE__.user not found")
+	case "NO_USERPAGEDATA":
+		return nil, fmt.Errorf("user.userPageData.value not found in __INITIAL_STATE__")
+	case "NO_NOTES":
+		return nil, fmt.Errorf("user.notes.value not found in __INITIAL_STATE__")
+	}
+	return parseUserProfileState(rawStr)
+}
 
-	if userDataResult == "" {
+// userProfileStateSnapshot 一次 Eval 提取的个人主页状态 envelope。
+type userProfileStateSnapshot struct {
+	UserPageData *struct {
+		Interactions []UserInteractions `json:"interactions"`
+		BasicInfo    UserBasicInfo      `json:"basicInfo"`
+	} `json:"userPageData"`
+	Notes [][]Feed `json:"notes"`
+	Index int      `json:"index"`
+	Query string   `json:"query"`
+}
+
+// unwrapProfileField 兼容 Vue ref 的 value/_value 双形态。
+// JSON.stringify(ref) 通常经 toJSON 展开为 value；若保留 _value 包装则在此展开。
+func unwrapProfileField(rm json.RawMessage) json.RawMessage {
+	if len(rm) == 0 || rm[0] != '{' {
+		return rm
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(rm, &m); err != nil {
+		return rm
+	}
+	if v, ok := m["value"]; ok {
+		return v
+	}
+	if v, ok := m["_value"]; ok {
+		return v
+	}
+	return rm
+}
+
+// parseUserProfileState 解析个人主页状态，只返回 active 笔记分区。
+func parseUserProfileState(raw string) (*UserProfileResponse, error) {
+	var rawSnap struct {
+		UserPageData json.RawMessage `json:"userPageData"`
+		Notes        json.RawMessage `json:"notes"`
+		ActiveTab    json.RawMessage `json:"activeTab"`
+	}
+	if err := json.Unmarshal([]byte(raw), &rawSnap); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal userPageData: %w", err)
+	}
+	if len(rawSnap.UserPageData) == 0 {
 		return nil, fmt.Errorf("user.userPageData.value not found in __INITIAL_STATE__")
 	}
-
-	// 2. 获取用户帖子：window.__INITIAL_STATE__.user.notes.value
-	notesObj, err := page.Eval(`() => {
-		if (window.__INITIAL_STATE__ &&
-		    window.__INITIAL_STATE__.user &&
-		    window.__INITIAL_STATE__.user.notes) {
-			const notes = window.__INITIAL_STATE__.user.notes;
-			// 优先使用 value（getter），如果不存在则使用 _value（内部字段）
-			const data = notes.value !== undefined ? notes.value : notes._value;
-			if (data) {
-				return JSON.stringify(data);
-			}
-		}
-		return "";
-	}`)
-	if err != nil {
-		return nil, fmt.Errorf("extract user notes failed: %w", err)
-	}
-	notesResult := ""
-	if notesObj != nil {
-		notesResult = notesObj.Value.Str()
-	}
-
-	if notesResult == "" {
+	if len(rawSnap.Notes) == 0 {
 		return nil, fmt.Errorf("user.notes.value not found in __INITIAL_STATE__")
 	}
 
-	// 解析用户信息
-	var userPageData struct {
-		Interactions []UserInteractions `json:"interactions"`
-		BasicInfo    UserBasicInfo      `json:"basicInfo"`
-	}
-	if err := json.Unmarshal([]byte(userDataResult), &userPageData); err != nil {
+	var snap userProfileStateSnapshot
+	if err := json.Unmarshal(unwrapProfileField(rawSnap.UserPageData), &snap.UserPageData); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal userPageData: %w", err)
 	}
-
-	// 解析帖子数据（帖子为双重数组）
-	var notesFeeds [][]Feed
-	if err := json.Unmarshal([]byte(notesResult), &notesFeeds); err != nil {
+	if snap.UserPageData == nil {
+		return nil, fmt.Errorf("user.userPageData.value not found in __INITIAL_STATE__")
+	}
+	if err := json.Unmarshal(unwrapProfileField(rawSnap.Notes), &snap.Notes); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal notes: %w", err)
 	}
-
-	// 组装响应
-	response := &UserProfileResponse{
-		UserBasicInfo: userPageData.BasicInfo,
-		Interactions:  userPageData.Interactions,
-	}
-
-	// 添加用户帖子（展平双重数组）
-	for _, feeds := range notesFeeds {
-		if len(feeds) != 0 {
-			response.Feeds = append(response.Feeds, feeds...)
+	// activeTab 走同一 unwrap 规则，wrapper 形态不再静默降级
+	if len(rawSnap.ActiveTab) != 0 {
+		var at struct {
+			Index int    `json:"index"`
+			Query string `json:"query"`
 		}
+		if err := json.Unmarshal(unwrapProfileField(rawSnap.ActiveTab), &at); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal activeTab: %w", err)
+		}
+		snap.Index = at.Index
+		snap.Query = at.Query
 	}
 
+	// query 非空且不是默认 note 时 fail-closed（不展平其他分区）
+	if snap.Query != "" && snap.Query != "note" {
+		return nil, fmt.Errorf("unsupported profile tab: %s", snap.Query)
+	}
+	// index 越界时明确报错，不展平 fallback
+	if snap.Index < 0 || snap.Index >= len(snap.Notes) {
+		return nil, fmt.Errorf("profile tab index out of range: %d", snap.Index)
+	}
+
+	response := &UserProfileResponse{
+		UserBasicInfo: snap.UserPageData.BasicInfo,
+		Interactions:  snap.UserPageData.Interactions,
+	}
+	response.Feeds = append(response.Feeds, snap.Notes[snap.Index]...)
 	return response, nil
 }
 
