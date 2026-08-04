@@ -230,7 +230,6 @@ func (s *ActionStateStore) ValidateInteraction(feedID, action string) error {
 	if err := validateInteractionState(state, feedID); err != nil {
 		return err
 	}
-	now := time.Now()
 	if state.InteractionsOnFeed > 0 && state.LastActionAt.After(state.LastReadAt) {
 		return fmt.Errorf("同一篇笔记连续互动前必须再次阅读或滚动")
 	}
