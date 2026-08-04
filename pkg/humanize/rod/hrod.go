@@ -120,8 +120,16 @@ type Page struct {
 }
 
 // Actor exposes the underlying humanize actor for advanced use.
+// 真实操作前先绑定本页 ctx，避免 clone 创建时污染共享 actor。
 func (p *Page) Actor() *humanize.Actor {
+	p.bindActorContext()
 	return p.actor
+}
+
+// bindActorContext 将本 page 的 ctx 绑定到共享 actor（含 Mouse/Keyboard）。
+// 只在真实操作开始前调用，clone 创建不再改写共享 actor。
+func (p *Page) bindActorContext() {
+	p.actor.SetContext(p.ctx)
 }
 
 // Browser returns the wrapping humanized browser.
@@ -150,18 +158,18 @@ func (p *Page) Close() error {
 }
 
 // Context returns a humanized clone with the specified context.
+// clone 只保存自己的 ctx，不再改写共享 actor；真实操作前才绑定。
 func (p *Page) Context(ctx context.Context) *Page {
 	page := p.wrapPage(p.Rod.Context(ctx))
 	page.ctx = ctx
-	page.actor.SetContext(ctx)
 	return page
 }
 
 // Timeout returns a humanized clone with the specified timeout.
+// ctx 从本 page 的 ctx 派生（继承外部 deadline），clone 不改写共享 actor。
 func (p *Page) Timeout(d time.Duration) *Page {
 	page := p.wrapPage(p.Rod.Timeout(d))
 	page.ctx, _ = context.WithTimeout(p.ctx, d)
-	page.actor.SetContext(page.ctx)
 	return page
 }
 
@@ -353,6 +361,7 @@ func (p *Page) MustInput(selector string, text string) *Page {
 // MustScroll scrolls vertically by the given amount in a human-like way.
 // It panics if the scroll cannot be performed.
 func (p *Page) MustScroll(vertical float64) *Page {
+	p.bindActorContext()
 	if err := p.actor.Mouse.Scroll(0, vertical); err != nil {
 		panic(err)
 	}
@@ -363,19 +372,20 @@ func (p *Page) wrapElement(el *rod.Element) *Element {
 	if el == nil {
 		return nil
 	}
-	return newElement(el, p.actor, p.browser)
+	return newElement(el, p.actor, p.browser, p.ctx)
 }
 
 // NewElement creates a humanized element from a raw *rod.Element.
+// ctx 取传入 actor 当前 ctx，保持公开签名不变。
 func NewElement(el *rod.Element, actor *humanize.Actor) *Element {
-	return newElement(el, actor, nil)
+	return newElement(el, actor, nil, actor.Ctx())
 }
 
-func newElement(el *rod.Element, actor *humanize.Actor, browser *Browser) *Element {
+func newElement(el *rod.Element, actor *humanize.Actor, browser *Browser, ctx context.Context) *Element {
 	if el == nil {
 		return nil
 	}
-	return &Element{Rod: el, actor: actor, browser: browser}
+	return &Element{Rod: el, actor: actor, browser: browser, ctx: ctx}
 }
 
 // Element wraps a *rod.Element and adds humanized Click/Input methods.
@@ -385,15 +395,25 @@ type Element struct {
 	Rod     *rod.Element
 	actor   *humanize.Actor
 	browser *Browser
+	ctx     context.Context
+}
+
+// bindActorContext 将本 element 的 ctx 绑定到共享 actor（含 Mouse/Keyboard）。
+// 只在真实操作开始前调用，clone 创建不再改写共享 actor。
+func (el *Element) bindActorContext() {
+	el.actor.SetContext(el.ctx)
 }
 
 // Actor exposes the underlying humanize actor for advanced use.
+// 真实操作前先绑定本元素 ctx。
 func (el *Element) Actor() *humanize.Actor {
+	el.bindActorContext()
 	return el.actor
 }
 
-// Sleep waits for d, or returns immediately when the element's actor context is cancelled.
+// Sleep waits for d, or returns immediately when the element's context is cancelled.
 func (el *Element) Sleep(d time.Duration) error {
+	el.bindActorContext()
 	return el.actor.Sleep(d)
 }
 
@@ -407,12 +427,13 @@ func (el *Element) Page() *Page {
 		actor:    el.actor,
 		browser:  el.browser,
 		cfg:      el.actor.Config(),
-		ctx:      el.actor.Ctx(),
+		ctx:      el.ctx,
 	}
 }
 
 // Click performs a human-like click.
 func (el *Element) Click(button proto.InputMouseButton, clickCount int) error {
+	el.bindActorContext()
 	if err := el.waitInteractable(5*time.Second, true); err != nil {
 		return err
 	}
@@ -422,6 +443,7 @@ func (el *Element) Click(button proto.InputMouseButton, clickCount int) error {
 // ClickNoScroll performs a human-like click without scrolling the element into
 // view first. Useful for sticky/fixed elements that are already visible.
 func (el *Element) ClickNoScroll() error {
+	el.bindActorContext()
 	if err := el.waitInteractable(5*time.Second, false); err != nil {
 		return err
 	}
@@ -430,11 +452,13 @@ func (el *Element) ClickNoScroll() error {
 
 // ClickPoint moves to a viewport-relative point and clicks there.
 func (p *Page) ClickPoint(point proto.Point) error {
+	p.bindActorContext()
 	return p.actor.Mouse.ClickPoint(point)
 }
 
 // MovePoint moves to a viewport-relative point.
 func (p *Page) MovePoint(point proto.Point) error {
+	p.bindActorContext()
 	return p.actor.Mouse.MovePoint(point)
 }
 
@@ -449,6 +473,7 @@ func (el *Element) MustClick() *Element {
 
 // Input performs human-like typing.
 func (el *Element) Input(text string) error {
+	el.bindActorContext()
 	return el.actor.Keyboard.Type(el.Rod, text)
 }
 
@@ -463,6 +488,7 @@ func (el *Element) MustInput(text string) *Element {
 
 // Hover moves the cursor over the element in a human-like way.
 func (el *Element) Hover() error {
+	el.bindActorContext()
 	return el.actor.Mouse.Hover(el.Rod)
 }
 
@@ -478,6 +504,7 @@ func (el *Element) MustHover() *Element {
 // ScrollIntoView scrolls the element into view in a human-like way by
 // dispatching wheel events until the element is centered in the viewport.
 func (el *Element) ScrollIntoView() error {
+	el.bindActorContext()
 	return el.actor.Mouse.ScrollIntoView(el.Rod)
 }
 
@@ -526,6 +553,7 @@ func (el *Element) WaitInteractable(timeout time.Duration) error {
 }
 
 func (el *Element) waitInteractable(timeout time.Duration, scroll bool) error {
+	el.bindActorContext()
 	if timeout <= 0 {
 		timeout = 5 * time.Second
 	}
@@ -768,12 +796,12 @@ func (el *Element) Element(selector string) (*Element, error) {
 	if err != nil {
 		return nil, err
 	}
-	return newElement(child, el.actor, el.browser), nil
+	return newElement(child, el.actor, el.browser, el.ctx), nil
 }
 
 // MustElement finds a child element and returns a humanized wrapper.
 func (el *Element) MustElement(selector string) *Element {
-	return newElement(el.Rod.MustElement(selector), el.actor, el.browser)
+	return newElement(el.Rod.MustElement(selector), el.actor, el.browser, el.ctx)
 }
 
 // ElementR finds a child element by regex and returns a humanized wrapper.
@@ -782,12 +810,12 @@ func (el *Element) ElementR(selector, regex string) (*Element, error) {
 	if err != nil {
 		return nil, err
 	}
-	return newElement(child, el.actor, el.browser), nil
+	return newElement(child, el.actor, el.browser, el.ctx), nil
 }
 
 // MustElementR finds a child element by regex and returns a humanized wrapper.
 func (el *Element) MustElementR(selector, regex string) *Element {
-	return newElement(el.Rod.MustElementR(selector, regex), el.actor, el.browser)
+	return newElement(el.Rod.MustElementR(selector, regex), el.actor, el.browser, el.ctx)
 }
 
 // ElementX finds a child element by XPath and returns a humanized wrapper.
@@ -796,12 +824,12 @@ func (el *Element) ElementX(xpath string) (*Element, error) {
 	if err != nil {
 		return nil, err
 	}
-	return newElement(child, el.actor, el.browser), nil
+	return newElement(child, el.actor, el.browser, el.ctx), nil
 }
 
 // MustElementX finds a child element by XPath and returns a humanized wrapper.
 func (el *Element) MustElementX(xpath string) *Element {
-	return newElement(el.Rod.MustElementX(xpath), el.actor, el.browser)
+	return newElement(el.Rod.MustElementX(xpath), el.actor, el.browser, el.ctx)
 }
 
 // Elements returns humanized child elements.
@@ -812,7 +840,7 @@ func (el *Element) Elements(selector string) ([]*Element, error) {
 	}
 	result := make([]*Element, len(children))
 	for i, child := range children {
-		result[i] = newElement(child, el.actor, el.browser)
+		result[i] = newElement(child, el.actor, el.browser, el.ctx)
 	}
 	return result, nil
 }
@@ -822,7 +850,7 @@ func (el *Element) MustElements(selector string) []*Element {
 	children := el.Rod.MustElements(selector)
 	result := make([]*Element, len(children))
 	for i, child := range children {
-		result[i] = newElement(child, el.actor, el.browser)
+		result[i] = newElement(child, el.actor, el.browser, el.ctx)
 	}
 	return result
 }
@@ -833,7 +861,7 @@ func (el *Element) Parent() (*Element, error) {
 	if err != nil {
 		return nil, err
 	}
-	return newElement(p, el.actor, el.browser), nil
+	return newElement(p, el.actor, el.browser, el.ctx), nil
 }
 
 // Next returns the humanized next sibling element.
@@ -842,7 +870,7 @@ func (el *Element) Next() (*Element, error) {
 	if err != nil {
 		return nil, err
 	}
-	return newElement(next, el.actor, el.browser), nil
+	return newElement(next, el.actor, el.browser, el.ctx), nil
 }
 
 // Previous returns the humanized previous sibling element.
@@ -851,7 +879,7 @@ func (el *Element) Previous() (*Element, error) {
 	if err != nil {
 		return nil, err
 	}
-	return newElement(prev, el.actor, el.browser), nil
+	return newElement(prev, el.actor, el.browser, el.ctx), nil
 }
 
 // Attribute returns the value of an attribute.
@@ -943,11 +971,14 @@ func (el *Element) MustRemove() *Element {
 }
 
 // Timeout returns a humanized clone with the specified timeout.
+// clone 只更新自己的 ctx，不改写共享 actor。
 func (el *Element) Timeout(d time.Duration) *Element {
-	return newElement(el.Rod.Timeout(d), el.actor, el.browser)
+	cloneCtx, _ := context.WithTimeout(el.ctx, d)
+	return newElement(el.Rod.Timeout(d), el.actor, el.browser, cloneCtx)
 }
 
 // Context returns a humanized clone with the specified context.
+// clone 只更新自己的 ctx，不改写共享 actor。
 func (el *Element) Context(ctx context.Context) *Element {
-	return newElement(el.Rod.Context(ctx), el.actor, el.browser)
+	return newElement(el.Rod.Context(ctx), el.actor, el.browser, ctx)
 }

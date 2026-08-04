@@ -131,7 +131,9 @@ func (f *CommentFeedAction) PostComment(ctx context.Context, feedID, xsecToken, 
 	return nil
 }
 
-// ReplyToComment 回复指定评论
+// ReplyToComment 回复指定评论。
+// 累计评论阅读由 get_note_detail(max_items/cursor) 等调用记录到 ActionState，
+// 本流程不再固定等待 45s/60s；定位目标后按实际耗时/滚动累计，点击回复按钮前做完整校验。
 func (f *CommentFeedAction) ReplyToComment(ctx context.Context, feedID, xsecToken, commentID, userID, content string) error {
 	if err := validateFeedAccessArgs(feedID, xsecToken); err != nil {
 		return err
@@ -147,16 +149,10 @@ func (f *CommentFeedAction) ReplyToComment(ctx context.Context, feedID, xsecToke
 	var page *hrod.Page
 	var err error
 	if f.state != nil {
+		// 开始时只确认页面和基本风控状态（完整 reply 门槛在定位后校验）。
 		page = f.page.Context(ctx).Timeout(5 * time.Minute)
 		if err := checkPageAccessible(page); err != nil {
 			return err
-		}
-		reader := NewReadStageAction(page, f.state)
-		if err := reader.ReadMin(ctx, feedID, 45*time.Second); err != nil {
-			return fmt.Errorf("回复前阅读阶段失败: %w", err)
-		}
-		if err := reader.DwellInComments(ctx, feedID, 60*time.Second); err != nil {
-			return fmt.Errorf("回复前评论区停留失败: %w", err)
 		}
 		page, err = f.preparePage(ctx, feedID, xsecToken, "reply", 5*time.Minute)
 	} else {
@@ -181,8 +177,14 @@ func (f *CommentFeedAction) ReplyToComment(ctx context.Context, feedID, xsecToke
 		return err
 	}
 
+	// 查找评论前记录开始时间，用于累计本次真实查找耗时
+	var searchStart time.Time
+	if f.state != nil {
+		searchStart = time.Now()
+	}
+
 	// 使用 Go 实现的查找逻辑
-	commentEl, err := findCommentElement(page, commentID, userID)
+	commentEl, scrolled, err := findCommentElement(ctx, page, commentID, userID)
 	if err != nil {
 		return fmt.Errorf("无法找到评论: %w", err)
 	}
@@ -194,6 +196,16 @@ func (f *CommentFeedAction) ReplyToComment(ctx context.Context, feedID, xsecToke
 	}
 	if err := sleepForCommentStep(page, 500*time.Millisecond, 1500*time.Millisecond); err != nil {
 		return err
+	}
+
+	if f.state != nil {
+		// 目标查找和最终 ScrollIntoView 完成后，将实际 elapsed/scrolled 累计到 ActionState。
+		_ = f.state.RecordCommentDwell(feedID, time.Since(searchStart), scrolled)
+		// 点击回复按钮前再次完整校验 reply 门槛（60 秒 + 确认滚动）；
+		// 未累计满则快速失败且不得点击回复按钮。
+		if err := f.state.ValidateInteraction(feedID, "reply"); err != nil {
+			return fmt.Errorf("回复前累计评论阅读不足，请先通过 get_note_detail(max_items/cursor) 阅读并滚动评论区: %w", err)
+		}
 	}
 
 	logrus.Info("准备点击回复按钮")
@@ -254,7 +266,12 @@ func (f *CommentFeedAction) ReplyToComment(ctx context.Context, feedID, xsecToke
 func (f *CommentFeedAction) preparePage(ctx context.Context, feedID, xsecToken, action string, timeout time.Duration) (*hrod.Page, error) {
 	page := f.page.Context(ctx).Timeout(timeout)
 	if f.state != nil {
-		if err := f.state.ValidateInteraction(feedID, action); err != nil {
+		// reply 门槛依赖累计评论阅读，定位/滚动后再做完整校验；这里只确认基础风控与目标。
+		if action == "reply" {
+			if err := f.state.ValidateInteractionTarget(feedID); err != nil {
+				return nil, fmt.Errorf("%s前置校验失败: %w", commentActionName(action), err)
+			}
+		} else if err := f.state.ValidateInteraction(feedID, action); err != nil {
 			return nil, fmt.Errorf("%s前置校验失败: %w", commentActionName(action), err)
 		}
 		ok, err := isCurrentFeedDetail(page, feedID)
@@ -292,130 +309,134 @@ func commentActionName(action string) string {
 	return "评论"
 }
 
-// findCommentElement 查找指定评论元素（参考 feed_detail.go 的滚动逻辑）
-func findCommentElement(page *hrod.Page, commentID, userID string) (*hrod.Element, error) {
+// findCommentElement 查找指定评论元素，返回 (*hrod.Element, 是否发生滚动, error)。
+// 每轮一次 Eval 返回 .comment-item 数量、atEnd、commentID 匹配索引、userID 匹配索引数组；
+// commentID 唯一定位优先，userID 只接受唯一匹配（多匹配直接报歧义，禁止选择第一条）。
+// 未找到时才执行物理滚动；ctx 取消、到底或连续停滞停止。
+func findCommentElement(ctx context.Context, page *hrod.Page, commentID, userID string) (*hrod.Element, bool, error) {
 	logrus.Infof("开始查找评论 - commentID: %s, userID: %s", commentID, userID)
 
-	const maxAttempts = 100
-	// 先滚动到评论区
+	// 先滚动到评论区（物理滚轮）
 	if err := scrollToCommentsArea(page); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if err := sleepForCommentStep(page, 500*time.Millisecond, 1500*time.Millisecond); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
-	var lastCommentCount = 0
+	scrolled := false
+	const maxStagnant = 10
+	lastCount := -1
 	stagnantChecks := 0
 
-	logrus.Infof("开始循环查找，最大尝试次数: %d", maxAttempts)
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, scrolled, err
+		}
 
-	for attempt := 0; attempt < maxAttempts; attempt++ {
-		logrus.Infof("=== 查找尝试 %d/%d ===", attempt+1, maxAttempts)
+		// 每轮一次 Eval 返回匹配状态
+		result, err := page.Eval(`(commentID, userID) => {
+			const items = Array.from(document.querySelectorAll(".comment-item"));
+			let commentIndex = -1;
+			if (commentID) {
+				commentIndex = items.findIndex((el) => {
+					const id = el.getAttribute("id") || el.dataset?.id || el.getAttribute("data-comment-id") || "";
+					return id === commentID;
+				});
+			}
+			const userIndices = [];
+			if (userID) {
+				items.forEach((el, index) => {
+					const uidEl = el.querySelector("[data-user-id]");
+					const uid = uidEl ? uidEl.getAttribute("data-user-id") : "";
+					if (uid === userID) userIndices.push(index);
+				});
+			}
+			const endText = document.querySelector(".end-container")?.textContent || "";
+			return JSON.stringify({
+				count: items.length,
+				atEnd: /THE\s*END/i.test(endText),
+				commentIndex,
+				userIndices,
+			});
+		}`, commentID, userID)
+		if err != nil {
+			return nil, scrolled, err
+		}
+		if result == nil {
+			return nil, scrolled, fmt.Errorf("查找评论状态未返回结果")
+		}
+		var state struct {
+			Count        int   `json:"count"`
+			AtEnd        bool  `json:"atEnd"`
+			CommentIndex int   `json:"commentIndex"`
+			UserIndices  []int `json:"userIndices"`
+		}
+		if err := json.Unmarshal([]byte(result.Value.Str()), &state); err != nil {
+			return nil, scrolled, fmt.Errorf("解析查找评论状态失败: %w", err)
+		}
 
-		// === 1. 检查是否到达底部 ===
-		if checkEndContainer(page) {
+		// commentID 唯一定位优先于 userID
+		if commentID != "" && state.CommentIndex >= 0 {
+			if el := commentElementAt(page, state.CommentIndex); el != nil {
+				logrus.Infof("✓ 通过 commentID 找到评论: %s", commentID)
+				return el, scrolled, nil
+			}
+			continue // DOM 重排导致索引失效，下一轮重新匹配
+		}
+		if userID != "" {
+			switch len(state.UserIndices) {
+			case 1:
+				if el := commentElementAt(page, state.UserIndices[0]); el != nil {
+					logrus.Infof("✓ 通过 userID 唯一匹配到评论: %s", userID)
+					return el, scrolled, nil
+				}
+				continue
+			case 0:
+				// 未匹配，继续滚动
+			default:
+				return nil, scrolled, fmt.Errorf("userID %s 匹配到 %d 条评论，存在歧义，禁止选择第一条", userID, len(state.UserIndices))
+			}
+		}
+
+		if state.AtEnd {
 			logrus.Info("已到达评论底部，未找到目标评论")
 			break
 		}
-
-		// === 2. 获取当前评论数量 ===
-		currentCount := getCommentCount(page)
-		logrus.Infof("当前评论数: %d", currentCount)
-		
-		if currentCount != lastCommentCount {
-			logrus.Infof("✓ 评论数增加: %d -> %d", lastCommentCount, currentCount)
-			lastCommentCount = currentCount
-			stagnantChecks = 0
-		} else {
+		if state.Count == lastCount {
 			stagnantChecks++
-			if stagnantChecks%5 == 0 {
-				logrus.Infof("评论数停滞 %d 次", stagnantChecks)
-			}
+		} else {
+			lastCount = state.Count
+			stagnantChecks = 0
 		}
-
-		// === 3. 停滞检测 ===
-		if stagnantChecks >= 10 {
-			logrus.Info("评论数量停滞超过10次，可能已加载完所有评论")
+		if stagnantChecks >= maxStagnant {
+			logrus.Infof("评论数量连续%d轮无增长(%d)，停止查找", stagnantChecks, state.Count)
 			break
 		}
 
-		// === 4. 先滚动到最后一个评论（触发懒加载）===
-		if currentCount > 0 {
-			logrus.Infof("滚动到最后一个评论（共 %d 条）", currentCount)
-
-			// 使用 Go 获取所有评论元素
-			elements, err := page.Timeout(2 * time.Second).Elements(".parent-comment, .comment-item, .comment")
-			if err == nil && len(elements) > 0 {
-				// 滚动到最后一个评论
-				lastComment := elements[len(elements)-1]
-				err := lastComment.ScrollIntoView()
-				if err != nil {
-					logrus.Warnf("滚动到最后一个评论失败: %v", err)
-				}
-			} else {
-				logrus.Warnf("未找到评论元素: %v", err)
-			}
-			if err := sleepForCommentStep(page, 300*time.Millisecond, 800*time.Millisecond); err != nil {
-				return nil, err
-			}
+		// 未找到时才执行物理滚动
+		moved, err := scrollNoteScrollerMoved(page, 600)
+		if err != nil {
+			return nil, scrolled, fmt.Errorf("滚动查找评论失败: %w", err)
 		}
-
-		// === 5. 继续向下滚动 ===
-		logrus.Infof("继续向下滚动...")
-		if err := scrollNoteScroller(page, 600); err != nil {
-			logrus.Warnf("滚动失败: %v", err)
+		if moved {
+			scrolled = true
 		}
 		if err := sleepForCommentStep(page, 500*time.Millisecond, 1200*time.Millisecond); err != nil {
-			return nil, err
-		}
-
-		// === 6. 滚动后立即查找（边滚动边查找）===
-		// 优先通过 commentID 查找（使用 Timeout 避免长时间等待）
-		if commentID != "" {
-			selector := fmt.Sprintf("#comment-%s", commentID)
-			logrus.Infof("尝试通过 commentID 查找: %s", selector)
-
-			// 使用 Timeout 避免长时间等待
-			el, err := page.Timeout(2 * time.Second).Element(selector)
-			if err == nil && el != nil {
-				logrus.Infof("✓ 通过 commentID 找到评论: %s (尝试 %d 次)", commentID, attempt+1)
-				return el, nil
-			}
-			logrus.Infof("未找到 commentID (2秒超时)")
-		}
-
-		// 通过 userID 查找
-		if userID != "" {
-			logrus.Infof("尝试通过 userID 查找: %s", userID)
-			
-			// 使用 Timeout 避免长时间等待
-			elements, err := page.Timeout(2 * time.Second).Elements(".comment-item, .comment, .parent-comment")
-			if err == nil && len(elements) > 0 {
-				logrus.Infof("找到 %d 个评论元素", len(elements))
-				for i, el := range elements {
-					// 快速检查，不等待
-					userEl, err := el.Timeout(500 * time.Millisecond).Element(fmt.Sprintf(`[data-user-id="%s"]`, userID))
-					if err == nil && userEl != nil {
-						logrus.Infof("✓ 通过 userID 在第 %d 个元素中找到评论: %s (尝试 %d 次)", i+1, userID, attempt+1)
-						return el, nil
-					}
-				}
-				logrus.Infof("在 %d 个元素中未找到匹配的 userID", len(elements))
-			} else {
-				logrus.Infof("获取评论元素失败或超时: %v", err)
-			}
-		}
-		
-		logrus.Infof("本次尝试未找到目标评论，继续下一轮...")
-
-		// === 7. 等待内容加载 ===
-		if err := sleepForCommentStep(page, 600*time.Millisecond, 1200*time.Millisecond); err != nil {
-			return nil, err
+			return nil, scrolled, err
 		}
 	}
 
-	return nil, fmt.Errorf("未找到评论 (commentID: %s, userID: %s), 尝试次数: %d", commentID, userID, maxAttempts)
+	return nil, scrolled, fmt.Errorf("未找到评论 (commentID: %s, userID: %s)", commentID, userID)
+}
+
+// commentElementAt 按唯一索引取一次 .comment-item 集合中的元素；取不到返回 nil。
+func commentElementAt(page *hrod.Page, index int) *hrod.Element {
+	els, err := page.Elements(".comment-item")
+	if err != nil || index < 0 || index >= len(els) {
+		return nil
+	}
+	return els[index]
 }
 
 // browseBeforeComment triggers the post's lazy-loaded content before interacting
