@@ -18,7 +18,7 @@ jobs:
       run: |
         go test ./...
         go build ./...
-        (cd third_party/headless_browser && go test ./...)
+        (cd third_party/headless_browser && go mod tidy && go test ./...)
 
   build:
     needs: verify
