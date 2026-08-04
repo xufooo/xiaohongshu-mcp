@@ -130,6 +130,21 @@ func (s *ActionStateStore) RecordFeedScroll(feedID string, count int) error {
 	})
 }
 
+// RecordReadStage 单次 update 同时更新阅读时长、正文滚动次数与 LastReadAt，用于 Read 结束时一次性落盘。
+func (s *ActionStateStore) RecordReadStage(feedID string, duration time.Duration, scrollCount int) error {
+	if scrollCount <= 0 {
+		scrollCount = 1
+	}
+	return s.update(func(state *ActionState) {
+		if state.LastOpenedFeedID == feedID {
+			now := time.Now()
+			state.ReadDuration += duration
+			state.FeedScrollCount += scrollCount
+			state.LastReadAt = now
+		}
+	})
+}
+
 func (s *ActionStateStore) RecordCommentDwell(feedID string, duration time.Duration, scrolled bool) error {
 	return s.update(func(state *ActionState) {
 		if state.LastOpenedFeedID == feedID {

@@ -383,7 +383,7 @@ func (s *BrowseSession) PageState(ctx context.Context) (*BrowseSessionPageState,
 	}
 
 	page = page.Context(opCtx)
-	probe, err := probeXHSReady(page, feedID)
+	probe, err := probeXHSReadyFull(page, feedID)
 	if err != nil {
 		return nil, err
 	}
@@ -1127,7 +1127,7 @@ func waitForHistoryTargetReady(ctx context.Context, page *hrod.Page, fromURL, so
 		if err := ctx.Err(); err != nil {
 			return last, err
 		}
-		probe, err := probeXHSReady(page.Context(ctx), "")
+		probe, err := probeXHSReadyFull(page.Context(ctx), "")
 		if err != nil {
 			lastErr = err
 		} else {
@@ -2012,17 +2012,20 @@ func (s *BrowseSession) refreshPageState(ctx context.Context) {
 	evalCtx, cancel := context.WithTimeout(ctx, browseSessionRefreshTimeout)
 	defer cancel()
 
-	var currentURL string
-	var scrollY int
-	var hasURL, hasScrollY bool
+	// 一次 Eval 返回 {url, scroll_y}，解析一次后持锁提交；缺失字段只跳过该字段。
+	var snapshot struct {
+		URL     *string `json:"url"`
+		ScrollY *int    `json:"scroll_y"`
+	}
+	got := false
 	if s.evalJS != nil {
-		if url, err := s.evalJS(evalCtx, page, `() => location.href`); err == nil && url != nil {
-			currentURL = url.Value.Str()
-			hasURL = true
-		}
-		if y, err := s.evalJS(evalCtx, page, `() => Math.round(window.scrollY || document.scrollingElement?.scrollTop || 0)`); err == nil && y != nil {
-			scrollY = y.Value.Int()
-			hasScrollY = true
+		if result, err := s.evalJS(evalCtx, page, `() => JSON.stringify({
+			url: location.href,
+			scroll_y: Math.round(window.scrollY || document.scrollingElement?.scrollTop || 0),
+		})`); err == nil && result != nil {
+			if err := json.Unmarshal([]byte(result.Value.Str()), &snapshot); err == nil {
+				got = true
+			}
 		}
 	}
 
@@ -2031,11 +2034,13 @@ func (s *BrowseSession) refreshPageState(ctx context.Context) {
 	if s.closed || s.page != page {
 		return
 	}
-	if hasURL {
-		s.currentURL = currentURL
-	}
-	if hasScrollY {
-		s.scrollY = scrollY
+	if got {
+		if snapshot.URL != nil && *snapshot.URL != "" {
+			s.currentURL = *snapshot.URL
+		}
+		if snapshot.ScrollY != nil {
+			s.scrollY = *snapshot.ScrollY
+		}
 	}
 }
 
@@ -2054,7 +2059,14 @@ func (s *BrowseSession) probeWatchdogSelectorsForKind(ctx context.Context, kind 
 	probeWatchdogSelectors(page.Context(ctx), XHSReadyOptions{Kind: kind, FeedID: feedID})
 }
 
+// currentPageURL 先在锁内读取非空缓存 currentURL，仅缓存为空时执行现场 Eval。
 func (s *BrowseSession) currentPageURL(ctx context.Context) (string, error) {
+	s.mu.Lock()
+	cached := s.currentURL
+	s.mu.Unlock()
+	if cached != "" {
+		return cached, nil
+	}
 	if s.page == nil {
 		return "", nil
 	}

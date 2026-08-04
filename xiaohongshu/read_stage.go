@@ -10,12 +10,9 @@ import (
 	hrod "github.com/xpzouying/xiaohongshu-mcp/pkg/humanize/rod"
 )
 
+// contentMetrics 只保留实际参与阅读算法的图片数。
 type contentMetrics struct {
-	TitleLen int  `json:"titleLen"`
-	DescLen  int  `json:"descLen"`
-	Images   int  `json:"images"`
-	Comments int  `json:"comments"`
-	HasVideo bool `json:"hasVideo"`
+	Images int `json:"images"`
 }
 
 type carouselReadState struct {
@@ -64,12 +61,12 @@ func (a *ReadStageAction) Read(ctx context.Context, feedID string, minDuration t
 		return nil
 	}
 	page := a.page.Context(ctx)
-	metrics, err := readContentMetrics(page)
+	probe, err := carouselReadProbe(page)
 	if err != nil {
 		return err
 	}
 	if minDuration <= 0 {
-		minDuration = dynamicReadDuration(metrics)
+		minDuration = dynamicReadDuration(probe.contentMetrics)
 	}
 
 	start := time.Now()
@@ -79,35 +76,32 @@ func (a *ReadStageAction) Read(ctx context.Context, feedID string, minDuration t
 	if err := scrollNoteScroller(page, 160); err != nil {
 		return err
 	}
-	_ = a.state.RecordFeedScroll(feedID, 1)
 
-	// The Phase 2 browser report verified a right-side click on .swiper-slide
-	// advances 0 -> 1 -> 2. Confirm the active data-swiper-slide-index changes
-	// after every click before accounting for a viewed page.
-	for turn := 0; turn < minInt(metrics.Images-1, 2); turn++ {
-		before, err := carouselReadProbe(page)
-		if err != nil || before.ActiveIndex < 0 {
+	// 初始 probe 同时保留 Images 与 ActiveIndex。每次切换只用一次 Promise Eval 等
+	// active index 变化，不再重复完整 carousel probe。
+	activeIndex := probe.ActiveIndex
+	for turn := 0; turn < minInt(probe.Images-1, 2); turn++ {
+		if activeIndex < 0 {
 			break
 		}
-		if _, err := advanceCarouselRight(page, before.ActiveIndex); err != nil {
+		next, err := advanceCarouselRight(page, activeIndex)
+		if err != nil {
 			break
 		}
+		activeIndex = next
 		if err := page.SleepRandom(2*time.Second, 3*time.Second); err != nil {
 			return err
 		}
 	}
 
-	for time.Since(start) < minDuration {
-		remaining := minDuration - time.Since(start)
-		pause := 500 * time.Millisecond
-		if remaining < pause {
-			pause = remaining
-		}
-		if err := page.SleepRandom(pause, pause); err != nil {
+	// 剩余停留一次可取消 Sleep 完成，不再 500ms 循环。
+	if remaining := minDuration - time.Since(start); remaining > 0 {
+		if err := page.Sleep(remaining); err != nil {
 			return err
 		}
 	}
-	return a.state.RecordRead(feedID, time.Since(start))
+	// 成功完成仅一次落盘，同时更新阅读时长、滚动次数与 LastReadAt；失败/取消不记录。
+	return a.state.RecordReadStage(feedID, time.Since(start), 1)
 }
 
 func readContentMetrics(page *hrod.Page) (contentMetrics, error) {
@@ -135,9 +129,6 @@ func carouselReadProbe(page *hrod.Page) (carouselReadState, error) {
 
 func carouselReadProbeScript() string {
 	return `() => {
-		const clean = (v) => (v || "").trim();
-		const title = clean(document.querySelector("#detail-title")?.innerText || document.querySelector(".title")?.innerText || "");
-		const desc = clean(document.querySelector("#detail-desc")?.innerText || document.querySelector(".note-text")?.innerText || document.querySelector(".desc")?.innerText || "");
 		const indices = new Set();
 		document.querySelectorAll(".swiper-slide").forEach((slide) => {
 			const index = slide.getAttribute("data-swiper-slide-index");
@@ -145,13 +136,8 @@ func carouselReadProbeScript() string {
 		});
 		const active = document.querySelector(".swiper-slide-active");
 		const activeIndex = Number.parseInt(active?.getAttribute("data-swiper-slide-index") || "-1", 10);
-		const fallbackImages = document.querySelectorAll(".note-content img, .media-container img, .carousel img").length;
 		return JSON.stringify({
-			titleLen: title.length,
-			descLen: desc.length,
-			images: indices.size || (fallbackImages > 0 ? 1 : 0),
-			comments: 0,
-			hasVideo: !!document.querySelector("video"),
+			images: indices.size,
 			activeIndex,
 		});
 	}`
@@ -170,17 +156,40 @@ func advanceCarouselRight(page *hrod.Page, previousIndex int) (int, error) {
 		return previousIndex, fmt.Errorf("点击图片轮播右侧失败: %w", err)
 	}
 
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		probe, err := carouselReadProbe(page)
-		if err == nil && probe.ActiveIndex >= 0 && probe.ActiveIndex != previousIndex {
-			return probe.ActiveIndex, nil
+	// 用一次可等待 Promise/MutationObserver Eval 等待 active index 变化，最长 2 秒，
+	// 不再每 100~150ms 重复完整 carousel probe。
+	result, err := page.Eval(`(previousIndex) => new Promise((resolve) => {
+		const read = () => {
+			const el = document.querySelector(".swiper-slide-active");
+			return Number.parseInt(el?.getAttribute("data-swiper-slide-index") || "-1", 10);
+		};
+		let observer;
+		const check = () => {
+			const index = read();
+			if (index >= 0 && index !== previousIndex) {
+				observer?.disconnect();
+				resolve(index);
+				return true;
+			}
+			return false;
+		};
+		if (!check()) {
+			observer = new MutationObserver(check);
+			observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ["data-swiper-slide-index", "class"] });
 		}
-		if err := page.SleepRandom(100*time.Millisecond, 150*time.Millisecond); err != nil {
-			return previousIndex, err
-		}
+		setTimeout(() => { observer?.disconnect(); resolve(-1); }, 2000);
+	})`, previousIndex)
+	if err != nil {
+		return previousIndex, err
 	}
-	return previousIndex, fmt.Errorf("图片轮播页未从 index=%d 切换", previousIndex)
+	index := -1
+	if result != nil {
+		index = int(result.Value.Int())
+	}
+	if index < 0 {
+		return previousIndex, fmt.Errorf("图片轮播页未从 index=%d 切换", previousIndex)
+	}
+	return index, nil
 }
 
 func carouselRightClickPoint(slide *hrod.Element) (proto.Point, error) {
@@ -221,30 +230,7 @@ func (a *ReadStageAction) ReadMin(ctx context.Context, feedID string, minDuratio
 	return a.Read(ctx, feedID, minDuration)
 }
 
-// DwellInComments remains an explicit, separate operation for callers that
-// genuinely need comment-area dwell. Read must not call it.
-func (a *ReadStageAction) DwellInComments(ctx context.Context, feedID string, minDuration time.Duration) error {
-	if a.state == nil || minDuration <= 0 {
-		return nil
-	}
-	page := a.page.Context(ctx)
-	if err := scrollToCommentsArea(page); err != nil {
-		return err
-	}
-	start := time.Now()
-	scrolled := false
-	for time.Since(start) < minDuration {
-		if err := scrollNoteScroller(page, 120); err != nil {
-			return err
-		}
-		scrolled = true
-		if err := page.SleepRandom(3*time.Second, 6*time.Second); err != nil {
-			return err
-		}
-	}
-	return a.state.RecordCommentDwell(feedID, time.Since(start), scrolled)
-}
-
+// RecordCommentDwell 由 FeedDetail 在评论阅读累计时调用，保留为薄 wrapper。
 func (a *ReadStageAction) RecordCommentDwell(feedID string, duration time.Duration, scrolled bool) {
 	if a.state != nil {
 		_ = a.state.RecordCommentDwell(feedID, duration, scrolled)

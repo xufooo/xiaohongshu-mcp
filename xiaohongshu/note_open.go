@@ -60,30 +60,51 @@ func (a *NoteOpenAction) OpenFromCards(ctx context.Context, feedID, xsecToken, s
 	return nil
 }
 
+// findFeedCardAnchor 用一次页面 Eval 批量扫描卡片 anchor，按 href/data-feed-id/outerHTML 匹配 feedID。
+// 只接受已连接且有尺寸的候选；零匹配报未找到，多匹配报歧义；Go 侧只调用一次 Elements 按索引取 anchor。
 func findFeedCardAnchor(page *hrod.Page, feedID string) (*hrod.Element, error) {
+	result, err := page.Eval(`(feedID) => {
+		const anchors = Array.from(document.querySelectorAll("section.note-item a.cover.mask.ld"));
+		const matches = [];
+		anchors.forEach((a, index) => {
+			const href = a.getAttribute("href") || "";
+			const dataFeedID = a.dataset?.feedId || "";
+			if (!(href.includes(feedID) || dataFeedID.includes(feedID) || a.outerHTML.includes(feedID))) return;
+			if (!a.isConnected) return;
+			const rect = a.getBoundingClientRect();
+			if (rect.width <= 0 || rect.height <= 0) return;
+			matches.push(index);
+		});
+		return JSON.stringify({ matches });
+	}`, feedID)
+	if err != nil {
+		return nil, fmt.Errorf("扫描卡片 anchor 失败: %w", err)
+	}
+	if result == nil || strings.TrimSpace(result.Value.Str()) == "" {
+		return nil, fmt.Errorf("当前列表中没有 feed_id=%s 的搜索结果 anchor", feedID)
+	}
+	var scan struct {
+		Matches []int `json:"matches"`
+	}
+	if err := json.Unmarshal([]byte(result.Value.Str()), &scan); err != nil {
+		return nil, fmt.Errorf("解析卡片 anchor 扫描结果失败: %w", err)
+	}
+	if len(scan.Matches) == 0 {
+		return nil, fmt.Errorf("当前列表中没有 feed_id=%s 的搜索结果 anchor", feedID)
+	}
+	if len(scan.Matches) > 1 {
+		return nil, fmt.Errorf("feed_id=%s 在列表中出现 %d 个匹配 anchor，拒绝歧义点击", feedID, len(scan.Matches))
+	}
+
 	anchors, err := page.Elements("section.note-item a.cover.mask.ld")
 	if err != nil {
 		return nil, fmt.Errorf("读取搜索结果 anchor 失败: %w", err)
 	}
-
-	for _, anchor := range anchors {
-		matched, err := anchor.Eval(`(feedID) => {
-			const href = this.getAttribute('href') || '';
-			const dataFeedID = this.dataset?.feedId || '';
-			const matched = href.includes(feedID) || dataFeedID.includes(feedID) || this.outerHTML.includes(feedID);
-			if (!matched) return false;
-			const rect = this.getBoundingClientRect();
-			return rect.width > 0 && rect.height > 0;
-		}`, feedID)
-		if err != nil {
-			continue
-		}
-		if matched != nil && matched.Value.Bool() {
-			return anchor, nil
-		}
+	index := scan.Matches[0]
+	if index >= len(anchors) {
+		return nil, fmt.Errorf("feed_id=%s anchor 索引越界: %d>=%d", feedID, index, len(anchors))
 	}
-
-	return nil, fmt.Errorf("当前列表中没有 feed_id=%s 的搜索结果 anchor", feedID)
+	return anchors[index], nil
 }
 
 type feedCardPoint struct {
