@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -319,7 +318,7 @@ func loadCommentsByJS(page *hrod.Page, config CommentLoadConfig) error {
 		// 每5轮检查一次进度（非致命，超时继续）
 		if i%5 == 0 {
 			if config.ClickMoreReplies {
-				button, err := nextVisibleShowMoreButton(page, config.MaxRepliesThreshold)
+				button, err := nextShowMoreButton(page, config.MaxRepliesThreshold, true)
 				if err != nil {
 					logrus.Warnf("检查可见子评论展开按钮失败: %v", err)
 				} else if button != nil {
@@ -468,6 +467,15 @@ func LoadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 
 	inputBase := len(batchCursor.ReturnedIDs)
 
+	// 本次 cursor 确有增长且 ctx 正常时返回 partial success，否则返回原错误；
+	// ctx canceled/deadline exceeded 不得转换为成功。
+	partialOrError := func(err error) ([]Comment, *CommentCursor, bool, error) {
+		if len(batchCursor.ReturnedIDs) > inputBase && ctx.Err() == nil {
+			return batch, batchCursor, true, nil
+		}
+		return nil, nil, false, err
+	}
+
 	more, moreVisible, collectErr := collect(maxItems)
 	if collectErr != nil {
 		return nil, nil, false, collectErr
@@ -476,10 +484,7 @@ func LoadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 
 	progress, progressErr := getCommentProgress(page)
 	if progressErr != nil {
-		if len(batchCursor.ReturnedIDs) > inputBase && ctx.Err() == nil {
-			return batch, batchCursor, true, nil
-		}
-		return nil, nil, false, fmt.Errorf("评论进度读取失败: %w", progressErr)
+		return partialOrError(fmt.Errorf("评论进度读取失败: %w", progressErr))
 	}
 
 	for i := 0; i < 500; i++ {
@@ -489,12 +494,9 @@ func LoadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 		}
 
 		if config.ClickMoreReplies {
-			button, err := nextShowMoreButton(page, config.MaxRepliesThreshold)
+			button, err := nextShowMoreButton(page, config.MaxRepliesThreshold, false)
 			if err != nil {
-				if len(batchCursor.ReturnedIDs) > inputBase && ctx.Err() == nil {
-					return batch, batchCursor, true, nil
-				}
-				return nil, nil, false, fmt.Errorf("查询展开按钮失败: %w", err)
+				return partialOrError(fmt.Errorf("查询展开按钮失败: %w", err))
 			}
 			if button != nil {
 				if len(batch) >= maxItems {
@@ -503,16 +505,10 @@ func LoadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 				if !replyStall && replyClicksTotal < 8 {
 					before, countErr := countReplyItems(page, button.ParentIndex)
 					if countErr != nil {
-						if len(batchCursor.ReturnedIDs) > inputBase && ctx.Err() == nil {
-							return batch, batchCursor, true, nil
-						}
-						return nil, nil, false, fmt.Errorf("回复计数失败: %w", countErr)
+						return partialOrError(fmt.Errorf("回复计数失败: %w", countErr))
 					}
 					if err := clickShowMoreButton(page.Context(ctx), button); err != nil {
-						if len(batchCursor.ReturnedIDs) > inputBase && ctx.Err() == nil {
-							return batch, batchCursor, true, nil
-						}
-						return nil, nil, false, fmt.Errorf("回复展开点击失败: %w", err)
+						return partialOrError(fmt.Errorf("回复展开点击失败: %w", err))
 					}
 					replyClicksTotal++
 					batchCursor.ExpandRound++
@@ -521,27 +517,18 @@ func LoadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 					}
 					more, moreVisible, collectErr = collect(maxItems - len(batch))
 					if collectErr != nil {
-						if len(batchCursor.ReturnedIDs) > inputBase && ctx.Err() == nil {
-							return batch, batchCursor, true, nil
-						}
-						return nil, nil, false, collectErr
+						return partialOrError(collectErr)
 					}
 					batch = append(batch, more...)
 					continue
 				}
-				if len(batchCursor.ReturnedIDs) > inputBase && ctx.Err() == nil {
-					return batch, batchCursor, true, nil
-				}
-				return nil, nil, false, fmt.Errorf("评论滚动无进展，请重试")
+				return partialOrError(fmt.Errorf("评论滚动无进展，请重试"))
 			}
 		}
 
 		progress, progressErr = getCommentProgress(page)
 		if progressErr != nil {
-			if len(batchCursor.ReturnedIDs) > inputBase && ctx.Err() == nil {
-				return batch, batchCursor, true, nil
-			}
-			return nil, nil, false, fmt.Errorf("评论进度读取失败: %w", progressErr)
+			return partialOrError(fmt.Errorf("评论进度读取失败: %w", progressErr))
 		}
 
 		if len(batch) >= maxItems {
@@ -560,27 +547,18 @@ func LoadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 
 		moved, scrollErr := scrollNoteScrollerMoved(page, scrollDelta)
 		if scrollErr != nil {
-			if len(batchCursor.ReturnedIDs) > inputBase && ctx.Err() == nil {
-				return batch, batchCursor, true, nil
-			}
-			return nil, nil, false, fmt.Errorf("评论容器滚动失败: %w", scrollErr)
+			return partialOrError(fmt.Errorf("评论容器滚动失败: %w", scrollErr))
 		}
 		if moved {
 			batchCursor.Round++
 		}
 		if err := page.Sleep(await); err != nil {
-			if len(batchCursor.ReturnedIDs) > inputBase && ctx.Err() == nil {
-				return batch, batchCursor, true, nil
-			}
-			return nil, nil, false, err
+			return partialOrError(err)
 		}
 
 		more, moreVisible, collectErr = collect(maxItems - len(batch))
 		if collectErr != nil {
-			if len(batchCursor.ReturnedIDs) > inputBase && ctx.Err() == nil {
-				return batch, batchCursor, true, nil
-			}
-			return nil, nil, false, collectErr
+			return partialOrError(collectErr)
 		}
 		batch = append(batch, more...)
 
@@ -595,10 +573,7 @@ func LoadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 				}
 				return batch, batchCursor, true, nil
 			}
-			if len(batchCursor.ReturnedIDs) > inputBase && ctx.Err() == nil {
-				return batch, batchCursor, true, nil
-			}
-			return nil, nil, false, fmt.Errorf("评论滚动无进展，请重试")
+			return partialOrError(fmt.Errorf("评论滚动无进展，请重试"))
 		}
 	}
 
@@ -608,47 +583,35 @@ func LoadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 
 	m, moreVis, collectErr := collect(maxItems - len(batch))
 	if collectErr != nil {
-		if len(batchCursor.ReturnedIDs) > inputBase && ctx.Err() == nil {
-			return batch, batchCursor, true, nil
-		}
-		return nil, nil, false, collectErr
+		return partialOrError(collectErr)
 	}
 	batch = append(batch, m...)
 
 	idsGrew := len(batchCursor.ReturnedIDs) > inputBase
 
 	if config.ClickMoreReplies {
-		button, err := nextShowMoreButton(page, config.MaxRepliesThreshold)
+		button, err := nextShowMoreButton(page, config.MaxRepliesThreshold, false)
 		if err != nil {
-			if len(batchCursor.ReturnedIDs) > inputBase && ctx.Err() == nil {
-				return batch, batchCursor, true, nil
-			}
-			return nil, nil, false, fmt.Errorf("查询展开按钮失败: %w", err)
+			return partialOrError(fmt.Errorf("查询展开按钮失败: %w", err))
 		}
 		if button != nil {
 			if idsGrew {
 				return batch, batchCursor, true, nil
 			}
-			return nil, nil, false, fmt.Errorf("评论滚动无进展，请重试")
+			return partialOrError(fmt.Errorf("评论滚动无进展，请重试"))
 		}
 	}
 
 	p, e := getCommentProgress(page)
 	if e != nil {
-		if len(batchCursor.ReturnedIDs) > inputBase && ctx.Err() == nil {
-			return batch, batchCursor, true, nil
-		}
-		return nil, nil, false, fmt.Errorf("评论进度读取失败: %w", e)
+		return partialOrError(fmt.Errorf("评论进度读取失败: %w", e))
 	}
 
 	if len(batch) == 0 && !p.AtEnd {
 		if ctx.Err() != nil {
 			return nil, nil, false, ctx.Err()
 		}
-		if len(batchCursor.ReturnedIDs) > inputBase && ctx.Err() == nil {
-			return batch, batchCursor, true, nil
-		}
-		return nil, nil, false, fmt.Errorf("评论滚动无进展，请重试")
+		return partialOrError(fmt.Errorf("评论滚动无进展，请重试"))
 	}
 
 	if p.AtEnd && !moreVis {
@@ -659,7 +622,7 @@ func LoadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 		if ctx.Err() != nil {
 			return nil, nil, false, ctx.Err()
 		}
-		return nil, nil, false, fmt.Errorf("评论滚动无进展，请重试")
+		return partialOrError(fmt.Errorf("评论滚动无进展，请重试"))
 	}
 
 	return batch, batchCursor, true, nil
@@ -905,7 +868,7 @@ func clickMoreReplies(page *hrod.Page, maxRepliesThreshold int, remainingDeadlin
 				break
 			}
 		}
-		button, err := nextShowMoreButton(page, maxRepliesThreshold)
+		button, err := nextShowMoreButton(page, maxRepliesThreshold, false)
 		if err != nil {
 			if isEvalTimeout(err) {
 				logrus.Warnf("检查子评论展开按钮超时，跳过本轮: %v", err)
@@ -938,11 +901,18 @@ func clickMoreReplies(page *hrod.Page, maxRepliesThreshold int, remainingDeadlin
 	return nil
 }
 
-func nextShowMoreButton(page *hrod.Page, maxRepliesThreshold int) (*showMoreButtonSnapshot, error) {
-	result, err := page.Timeout(2*time.Second).Eval(`(maxRepliesThreshold) => {
+// nextShowMoreButton 单次 Eval 返回"展开子评论"候选按钮的 btnIndex/parentIndex/文本/数量。
+// visibleOnly=true 时只匹配评论滚动容器可见区域内的按钮；否则只要求有尺寸。
+func nextShowMoreButton(page *hrod.Page, maxRepliesThreshold int, visibleOnly bool) (*showMoreButtonSnapshot, error) {
+	result, err := page.Timeout(2*time.Second).Eval(`(maxRepliesThreshold, visibleOnly) => {
 		const clean = (value) => (value || "").replace(/\s+/g, " ").trim();
+		const scroller = document.querySelector(".note-scroller");
+		const sRect = scroller?.getBoundingClientRect();
+		const visibleTop = sRect ? Math.max(0, sRect.top) : 0;
+		const visibleBottom = sRect ? Math.min(window.innerHeight, sRect.bottom) : window.innerHeight;
 		const all = Array.from(document.querySelectorAll(".parent-comment > .children-comments .show-more, .parent-comment > .reply-container .show-more"));
-		for (const btn of all) {
+		for (let btnIndex = 0; btnIndex < all.length; btnIndex++) {
+			const btn = all[btnIndex];
 			const text = clean(btn.innerText || btn.textContent);
 			if (!text) continue;
 			if (!text.includes("展开") || text.includes("收起")) continue;
@@ -951,6 +921,7 @@ func nextShowMoreButton(page *hrod.Page, maxRepliesThreshold int) (*showMoreButt
 			if (parentIndex < 0) continue;
 			const rect = btn.getBoundingClientRect();
 			if (rect.width <= 0 || rect.height <= 0) continue;
+			if (visibleOnly && (rect.top < visibleTop || rect.bottom > visibleBottom)) continue;
 			const match = text.match(/(\d+(?:\.\d+)?)\s*([万千])?/);
 			let count = match ? Number(match[1]) : 0;
 			if (match?.[2] === "万") count *= 10000;
@@ -963,11 +934,11 @@ func nextShowMoreButton(page *hrod.Page, maxRepliesThreshold int) (*showMoreButt
 				y: rect.top + rect.height / 2,
 				count,
 				parentIndex,
-				btnIndex: all.indexOf(btn),
+				btnIndex,
 			});
 		}
 		return "";
-	}`, maxRepliesThreshold)
+	}`, maxRepliesThreshold, visibleOnly)
 	if err != nil {
 		return nil, err
 	}
@@ -977,54 +948,6 @@ func nextShowMoreButton(page *hrod.Page, maxRepliesThreshold int) (*showMoreButt
 	var button showMoreButtonSnapshot
 	if err := json.Unmarshal([]byte(result.Value.Str()), &button); err != nil {
 		return nil, fmt.Errorf("解析展开按钮位置失败: %w", err)
-	}
-	return &button, nil
-}
-
-func nextVisibleShowMoreButton(page *hrod.Page, maxRepliesThreshold int) (*showMoreButtonSnapshot, error) {
-	result, err := page.Timeout(2*time.Second).Eval(`(maxRepliesThreshold) => {
-		const clean = (value) => (value || "").replace(/\s+/g, " ").trim();
-		const scroller = document.querySelector(".note-scroller");
-		const sRect = scroller?.getBoundingClientRect();
-		const visibleTop = sRect ? Math.max(0, sRect.top) : 0;
-		const visibleBottom = sRect ? Math.min(window.innerHeight, sRect.bottom) : window.innerHeight;
-		const all = Array.from(document.querySelectorAll(".parent-comment > .children-comments .show-more, .parent-comment > .reply-container .show-more"));
-		for (const btn of all) {
-			const text = clean(btn.innerText || btn.textContent);
-			if (!text) continue;
-			if (!text.includes("展开") || text.includes("收起")) continue;
-			const parent = btn.closest(".parent-comment");
-			const parentIndex = Array.from(document.querySelectorAll(".parent-comment")).indexOf(parent);
-			if (parentIndex < 0) continue;
-			const rect = btn.getBoundingClientRect();
-			if (rect.width <= 0 || rect.height <= 0) continue;
-			if (rect.top < visibleTop || rect.bottom > visibleBottom) continue;
-			const match = text.match(/(\d+(?:\.\d+)?)\s*([万千])?/);
-			let count = match ? Number(match[1]) : 0;
-			if (match?.[2] === "万") count *= 10000;
-			if (match?.[2] === "千") count *= 1000;
-			count = Math.floor(count);
-			if (maxRepliesThreshold > 0 && count > maxRepliesThreshold) continue;
-			return JSON.stringify({
-				text,
-				x: rect.left + rect.width / 2,
-				y: rect.top + rect.height / 2,
-				count,
-				parentIndex,
-				btnIndex: all.indexOf(btn),
-			});
-		}
-		return "";
-	}`, maxRepliesThreshold)
-	if err != nil {
-		return nil, err
-	}
-	if result == nil || strings.TrimSpace(result.Value.Str()) == "" {
-		return nil, nil
-	}
-	var button showMoreButtonSnapshot
-	if err := json.Unmarshal([]byte(result.Value.Str()), &button); err != nil {
-		return nil, fmt.Errorf("解析可见展开按钮位置失败: %w", err)
 	}
 	return &button, nil
 }
@@ -1111,41 +1034,6 @@ func getCommentProgress(page *hrod.Page) (commentProgress, error) {
 	return progress, nil
 }
 
-func getScrollTop(page *hrod.Page) int {
-	var result int
-
-	// 使用retry-go来处理可能的DOM查询失败
-	err := retry.Do(
-		func() error {
-			evalResult, err := page.Timeout(2*time.Second).Eval(`() => {
-				return window.pageYOffset || document.documentElement.scrollTop || document.body.scrollTop || 0;
-			}`)
-			if err != nil {
-				return err
-			}
-			if evalResult == nil {
-				return fmt.Errorf("读取滚动位置未返回结果")
-			}
-
-			result = evalResult.Value.Int()
-			return nil
-		},
-		retry.Attempts(3),
-		retry.Delay(100*time.Millisecond),
-		retry.MaxJitter(200*time.Millisecond),
-		retry.OnRetry(func(n uint, err error) {
-			logrus.Debugf("获取滚动位置重试 #%d: %v", n, err)
-		}),
-	)
-
-	if err != nil {
-		logrus.Warnf("获取滚动位置失败: %v", err)
-		return 0 // 失败时返回0
-	}
-
-	return result
-}
-
 func getCommentCount(page *hrod.Page) int {
 	var result int
 
@@ -1174,81 +1062,6 @@ func getCommentCount(page *hrod.Page) int {
 	}
 
 	return result
-}
-
-func getTotalCommentCount(page *hrod.Page) int {
-	var result int
-
-	// 使用retry-go来处理可能的DOM查询失败
-	err := retry.Do(
-		func() error {
-			// 使用 Go 获取总评论数元素，多选择器备用
-			totalEl, err := page.Timeout(2 * time.Second).Element(".comments-container .total")
-			if err != nil {
-				// 备用选择器
-				totalEl, err = page.Timeout(1 * time.Second).Element(".comment-total")
-				if err != nil {
-					totalEl, err = page.Timeout(1 * time.Second).Element(".total")
-				}
-			}
-			if err != nil {
-				return err
-			}
-
-			// 获取文本内容
-			text, err := totalEl.Text()
-			if err != nil {
-				return err
-			}
-
-			// 使用正则提取数字
-			re := regexp.MustCompile(`共(\d+)条评论`)
-			matches := re.FindStringSubmatch(text)
-			if len(matches) > 1 {
-				count, err := strconv.Atoi(matches[1])
-				if err != nil {
-					return err
-				}
-				result = count
-			} else {
-				result = 0
-			}
-
-			return nil
-		},
-		retry.Attempts(3),
-		retry.Delay(100*time.Millisecond),
-		retry.MaxJitter(200*time.Millisecond),
-		retry.OnRetry(func(n uint, err error) {
-			logrus.Debugf("获取总评论计数重试 #%d: %v", n, err)
-		}),
-	)
-
-	if err != nil {
-		logrus.Warnf("获取总评论计数失败: %v", err)
-		return 0 // 失败时返回0
-	}
-
-	return result
-}
-
-func checkNoCommentsArea(page *hrod.Page) bool {
-	// 查找无评论区域
-	noCommentsEl, err := page.Timeout(2 * time.Second).Element(".no-comments-text")
-	if err != nil {
-		// 未找到无评论元素，说明有评论或评论区正常
-		return false
-	}
-
-	// 获取文本内容
-	text, err := noCommentsEl.Text()
-	if err != nil {
-		return false
-	}
-
-	// 检查是否包含"这是一片荒地"等关键词
-	text = strings.TrimSpace(text)
-	return strings.Contains(text, "这是一片荒地")
 }
 
 func checkEndContainer(page *hrod.Page) bool {

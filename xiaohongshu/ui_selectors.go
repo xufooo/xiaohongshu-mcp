@@ -41,7 +41,6 @@ type SelectorSpec struct {
 	Purpose     string `json:"purpose,omitempty"`
 	Required    bool   `json:"required,omitempty"`
 	VisibleOnly bool   `json:"visible_only,omitempty"`
-	MaxMatches  int    `json:"max_matches,omitempty"`
 }
 
 type SelectorProbeResult struct {
@@ -59,7 +58,6 @@ var (
 		Purpose:     "搜索框",
 		Required:    true,
 		VisibleOnly: true,
-		MaxMatches:  2,
 	}
 	SearchResultSpec = SelectorSpec{
 		Name:        "search_result",
@@ -67,28 +65,24 @@ var (
 		Purpose:     "搜索结果卡片",
 		Required:    true,
 		VisibleOnly: true,
-		MaxMatches:  2,
 	}
 	FeedDetailReadySpec = SelectorSpec{
 		Name:       "feed_detail_ready",
 		Selector:   SelectorFeedDetailReady,
 		Purpose:    "笔记详情页主体",
 		Required:   true,
-		MaxMatches: 2,
 	}
 	CommentBoxSpec = SelectorSpec{
 		Name:        "comment_box",
 		Selector:    SelectorCommentBox,
 		Purpose:     "评论输入框",
 		VisibleOnly: true,
-		MaxMatches:  2,
 	}
 	LikeButtonSpec = SelectorSpec{
 		Name:        "like_button",
 		Selector:    SelectorLikeButton,
 		Purpose:     "点赞按钮",
 		VisibleOnly: true,
-		MaxMatches:  2,
 	}
 	NotificationPageSpec = SelectorSpec{
 		Name:        "notification_page",
@@ -96,7 +90,6 @@ var (
 		Purpose:     "通知页容器",
 		Required:    true,
 		VisibleOnly: true,
-		MaxMatches:  1,
 	}
 	NotificationTabSpec = SelectorSpec{
 		Name:        "notification_tab",
@@ -104,14 +97,12 @@ var (
 		Purpose:     "通知 tab",
 		Required:    true,
 		VisibleOnly: true,
-		MaxMatches:  3,
 	}
 	NotificationItemSpec = SelectorSpec{
 		Name:        "notification_item",
 		Selector:    SelectorNotificationItem,
 		Purpose:     "通知 item",
 		VisibleOnly: true,
-		MaxMatches:  20,
 	}
 )
 

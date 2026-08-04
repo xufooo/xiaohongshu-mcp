@@ -152,6 +152,45 @@ func TestMatchNotificationDOM(t *testing.T) {
 	}
 }
 
+func TestMatchNotificationDOMItem(t *testing.T) {
+	target := notificationTarget{Item: NotificationItem{
+		From:        NotificationUser{UserID: "u1", Nickname: "小明"},
+		CommentText: "你好世界",
+	}}
+
+	// 未找到 → error，index 为 -1
+	if _, index, err := matchNotificationDOMItem(&notificationDOMSnapshot{}, target); err == nil {
+		t.Fatal("未找到应报错")
+	} else if index != -1 {
+		t.Errorf("未找到 index 应为 -1, 实际 %d", index)
+	}
+
+	// 唯一匹配 → 返回匹配项与对应 index
+	dom := &notificationDOMSnapshot{Items: []notificationDOMItem{
+		{UserID: "u2", Nickname: "小红", Content: "别的"},
+		{UserID: "u1", Nickname: "小明", Content: "你好世界"},
+	}}
+	matched, index, err := matchNotificationDOMItem(dom, target)
+	if err != nil {
+		t.Fatalf("唯一匹配不应报错: %v", err)
+	}
+	if matched == nil || matched.UserID != "u1" {
+		t.Fatalf("唯一匹配应命中 u1, 实际 %+v", matched)
+	}
+	if index != 1 {
+		t.Errorf("唯一匹配 index 应为 1, 实际 %d", index)
+	}
+
+	// 双重匹配 → 歧义报错
+	ambiguous := &notificationDOMSnapshot{Items: []notificationDOMItem{
+		{UserID: "u1", Nickname: "小明", Content: "你好世界"},
+		{UserID: "u1", Nickname: "小明", Content: "你好世界"},
+	}}
+	if _, _, err := matchNotificationDOMItem(ambiguous, target); err == nil {
+		t.Fatal("双重匹配应报歧义错误")
+	}
+}
+
 func TestConvertNotifications(t *testing.T) {
 	raw := []rawNotification{
 		{
