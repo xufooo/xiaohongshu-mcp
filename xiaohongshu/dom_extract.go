@@ -9,6 +9,142 @@ import (
 	hrod "github.com/xpzouying/xiaohongshu-mcp/pkg/humanize/rod"
 )
 
+// interactStateJS 是唯一的互动状态来源：同时要求 like/collect wrapper 存在，
+// like use 读取 xlink:href（兼容 href），#liked→true / #like→false，
+// #collected→true / #collect→false。use 缺失、未知 href 或任一 wrapper 缺失
+// 均返回 null（unknown，fail-closed）。
+const interactStateJS = `
+	const likeWrapper = document.querySelector(likeSel);
+	const collectWrapper = document.querySelector(collectSel);
+	if (!likeWrapper || !collectWrapper) return null;
+	const likeUse = likeWrapper.querySelector("use");
+	if (!likeUse) return null;
+	const likeHref = likeUse.getAttribute("xlink:href") || likeUse.getAttribute("href") || "";
+	let liked;
+	if (likeHref === "#liked") liked = true;
+	else if (likeHref === "#like") liked = false;
+	else return null;
+	const collectUse = collectWrapper.querySelector("use");
+	if (!collectUse) return null;
+	const collectHref = collectUse.getAttribute("xlink:href") || collectUse.getAttribute("href") || "";
+	let collected;
+	if (collectHref === "#collected") collected = true;
+	else if (collectHref === "#collect") collected = false;
+	else return null;
+	return { liked, collected };
+`
+
+// OpenedNoteSnapshot 是打开笔记后的一次 DOM 快照：正文、图片、href 互动状态和当前首屏评论。
+type OpenedNoteSnapshot struct {
+	Note     OpenedNoteContent `json:"note"`
+	Comments []Comment         `json:"comments"`
+}
+
+// ExtractOpenedNoteSnapshotFromDOM 单次 Eval 返回打开笔记的完整首屏快照。
+func ExtractOpenedNoteSnapshotFromDOM(page *hrod.Page, feedID string) (*OpenedNoteSnapshot, error) {
+	result, err := page.Eval(`(feedID, likeSel, collectSel) => {
+		const clean = (value) => (value || "").replace(/\s+/g, " ").trim();
+		const pickText = (selectors) => {
+			for (const selector of selectors) {
+				const el = document.querySelector(selector);
+				const text = clean(el?.innerText || el?.textContent);
+				if (text) return text;
+			}
+			return "";
+		};
+		const pickAttr = (selectors, attr) => {
+			for (const selector of selectors) {
+				const el = document.querySelector(selector);
+				const value = el?.getAttribute(attr) || "";
+				if (value) return value;
+			}
+			return "";
+		};
+		const countNear = (selectors) => {
+			for (const selector of selectors) {
+				const el = document.querySelector(selector);
+				if (!el) continue;
+				const text = clean(el.innerText || el.textContent || el.parentElement?.innerText);
+				const match = text.match(/([\d.万wWkK]+)/);
+				if (match) return match[1];
+			}
+			return "";
+		};
+		const interact = (() => {` + interactStateJS + `})();
+		if (!interact) return "";
+
+		const title = pickText(["#detail-title", ".note-content .title", ".title", "[class*='title']"]);
+		const desc = pickText(["#detail-desc", ".note-content .desc", ".note-text", ".desc", "[class*='desc']"]);
+		const author = pickText([".author .name", ".author-wrapper .name", ".user .name", ".nickname", "[class*='author'] [class*='name']"]);
+		const avatar = pickAttr([".author img", ".user img", ".avatar img", "img.avatar"], "src");
+		const images = Array.from(document.querySelectorAll(".swiper img, .note-content img, .media-container img"))
+			.map((img) => ({ width: img.naturalWidth || 0, height: img.naturalHeight || 0, urlDefault: img.src || "", urlPre: img.src || "" }))
+			.filter((img) => img.urlDefault);
+		const comments = Array.from(document.querySelectorAll(".parent-comment")).map((parent) => {
+			const top = parent.querySelector(":scope > .comment-item") || parent;
+			const content = clean(top.querySelector(".content, .note-text, [class*='content']")?.innerText || top.innerText);
+			const user = clean(top.querySelector(".author-wrapper .name, .name, .nickname, [class*='name']")?.innerText);
+			const likeText = clean(top.querySelector(".interactions .like, .like, [class*='like']")?.innerText);
+			const subComments = Array.from(parent.querySelectorAll(":scope > .reply-container > .list-container > .comment-item")).map((sub) => {
+				const subContent = clean(sub.querySelector(".content, .note-text, [class*='content']")?.innerText || sub.innerText);
+				const subUser = clean(sub.querySelector(".author-wrapper .name, .name, .nickname, [class*='name']")?.innerText);
+				const subLikeText = clean(sub.querySelector(".interactions .like, .like, [class*='like']")?.innerText);
+				return {
+					id: sub.getAttribute("id") || sub.dataset?.id || sub.getAttribute("data-comment-id") || "",
+					noteId: feedID,
+					content: subContent,
+					likeCount: (subLikeText.match(/([\d.万wWkK]+)/) || ["", ""])[1],
+					userInfo: { nickname: subUser, nickName: subUser },
+					subComments: [],
+					showTags: []
+				};
+			}).filter((subComment) => subComment.content);
+			return {
+				id: top.getAttribute("id") || parent.dataset?.id || parent.getAttribute("data-comment-id") || top.dataset?.id || top.getAttribute("data-comment-id") || "",
+				noteId: feedID,
+				content,
+				likeCount: (likeText.match(/([\d.万wWkK]+)/) || ["", ""])[1],
+				userInfo: { nickname: user, nickName: user },
+				subCommentCount: subComments.length ? String(subComments.length) : "",
+				subComments,
+				showTags: []
+			};
+		}).filter((comment) => comment.content);
+
+		if (!title && !desc && comments.length === 0) return "";
+		return JSON.stringify({
+			note: {
+				note_id: feedID,
+				title,
+				desc,
+				type: document.querySelector("video") ? "video" : "normal",
+				user: { nickname: author, nickName: author, avatar },
+				interactInfo: {
+					liked: interact.liked,
+					collected: interact.collected,
+					likedCount: countNear([".interact-container .like-lottie", ".interact-container .like-wrapper", ".interact-container [class*='like']"]),
+					commentCount: countNear([".comments-container .total", ".comment-wrapper", "[class*='comment']"]),
+					collectedCount: countNear([".interact-container .collect-icon", ".interact-container .collect-wrapper", ".interact-container [class*='collect']"])
+				},
+				imageList: images
+			},
+			comments
+		});
+	}`, feedID, SelectorLikeButton, SelectorCollectButton)
+	if err != nil {
+		return nil, fmt.Errorf("提取打开笔记快照失败: %w", err)
+	}
+	if result == nil || strings.TrimSpace(result.Value.Str()) == "" {
+		return nil, errors.ErrNoFeedDetail
+	}
+
+	var snapshot OpenedNoteSnapshot
+	if err := json.Unmarshal([]byte(result.Value.Str()), &snapshot); err != nil {
+		return nil, fmt.Errorf("解析打开笔记快照失败: %w", err)
+	}
+	return &snapshot, nil
+}
+
 // ExtractSearchFeedsFromDOM 从渲染后的搜索/首页卡片提取笔记信息。
 func ExtractSearchFeedsFromDOM(page *hrod.Page) ([]Feed, error) {
 	result, err := page.Eval(`(selector) => {
@@ -137,7 +273,7 @@ func ExtractSearchFeedsFromDOM(page *hrod.Page) ([]Feed, error) {
 
 // ExtractFeedDetailFromDOM 从当前详情页可见 DOM 提取笔记、作者、评论和互动状态。
 func ExtractFeedDetailFromDOM(page *hrod.Page, feedID string) (*FeedDetailResponse, error) {
-	result, err := page.Eval(`(feedID) => {
+	result, err := page.Eval(`(feedID, likeSel, collectSel) => {
 		const clean = (value) => (value || "").replace(/\s+/g, " ").trim();
 		const pickText = (selectors) => {
 			for (const selector of selectors) {
@@ -155,19 +291,8 @@ func ExtractFeedDetailFromDOM(page *hrod.Page, feedID string) (*FeedDetailRespon
 			}
 			return "";
 		};
-		const isActive = (selectors) => selectors.some((selector) => {
-			const el = document.querySelector(selector);
-			if (!el) return false;
-			const value = [
-				el.getAttribute("aria-pressed"),
-				el.getAttribute("aria-checked"),
-				el.getAttribute("data-active"),
-				el.className,
-				el.getAttribute("class"),
-				el.getAttribute("style"),
-			].join(" ").toLowerCase();
-			return /\btrue\b|active|selected|liked|collected|--active|fill|color:\s*rgb/.test(value);
-		});
+		const interact = (() => {` + interactStateJS + `})();
+		if (!interact) return "";
 		const countNear = (selectors) => {
 			for (const selector of selectors) {
 				const el = document.querySelector(selector);
@@ -217,8 +342,6 @@ func ExtractFeedDetailFromDOM(page *hrod.Page, feedID string) (*FeedDetailRespon
 			};
 		}).filter((comment) => comment.content);
 
-		const liked = isActive([".interact-container .like-lottie", ".interact-container .like-wrapper", ".interact-container [class*='like']"]);
-		const collected = isActive([".interact-container .collect-icon", ".interact-container .collect-wrapper", ".interact-container [class*='collect']"]);
 		const detail = {
 			note: {
 				noteId: feedID,
@@ -228,8 +351,8 @@ func ExtractFeedDetailFromDOM(page *hrod.Page, feedID string) (*FeedDetailRespon
 				type: document.querySelector("video") ? "video" : "normal",
 				user: { nickname: author, nickName: author, avatar },
 				interactInfo: {
-					liked,
-					collected,
+					liked: interact.liked,
+					collected: interact.collected,
 					likedCount: countNear([".interact-container .like-lottie", ".interact-container .like-wrapper", ".interact-container [class*='like']"]),
 					commentCount: countNear([".comments-container .total", ".comment-wrapper", "[class*='comment']"]),
 					collectedCount: countNear([".interact-container .collect-icon", ".interact-container .collect-wrapper", ".interact-container [class*='collect']"])
@@ -240,7 +363,7 @@ func ExtractFeedDetailFromDOM(page *hrod.Page, feedID string) (*FeedDetailRespon
 		};
 		if (!title && !desc && comments.length === 0) return "";
 		return JSON.stringify(detail);
-	}`, feedID)
+	}`, feedID, SelectorLikeButton, SelectorCollectButton)
 	if err != nil {
 		return nil, fmt.Errorf("提取 DOM Feed 详情失败: %w", err)
 	}
@@ -255,90 +378,14 @@ func ExtractFeedDetailFromDOM(page *hrod.Page, feedID string) (*FeedDetailRespon
 	return &response, nil
 }
 
-// ExtractOpenedNoteContentFromDOM 只读取打开笔记后的首屏标题和正文。
+// ExtractOpenedNoteContentFromDOM 是兼容薄 wrapper：内部调用单次快照后只返回正文。
 // 图片、视频和评论的后续读取由 session_detail 负责。
 func ExtractOpenedNoteContentFromDOM(page *hrod.Page, feedID string) (*OpenedNoteContent, error) {
-	result, err := page.Eval(`(feedID) => {
-		const clean = (value) => (value || "").replace(/\s+/g, " ").trim();
-		const pickText = (selectors) => {
-			for (const selector of selectors) {
-				const el = document.querySelector(selector);
-				const text = clean(el?.innerText || el?.textContent);
-				if (text) return text;
-			}
-			return "";
-		};
-		const pickAttr = (selectors, attr) => {
-			for (const selector of selectors) {
-				const el = document.querySelector(selector);
-				const value = el?.getAttribute(attr) || "";
-				if (value) return value;
-			}
-			return "";
-		};
-		const isActive = (selectors) => selectors.some((selector) => {
-			const el = document.querySelector(selector);
-			if (!el) return false;
-			const value = [
-				el.getAttribute("aria-pressed"),
-				el.getAttribute("aria-checked"),
-				el.getAttribute("data-active"),
-				el.className,
-				el.getAttribute("class"),
-				el.getAttribute("style"),
-			].join(" ").toLowerCase();
-			return /\\btrue\\b|active|selected|liked|collected|--active|fill|color:\\s*rgb/.test(value);
-		});
-		const countNear = (selectors) => {
-			for (const selector of selectors) {
-				const el = document.querySelector(selector);
-				if (!el) continue;
-				const text = clean(el.innerText || el.textContent || el.parentElement?.innerText);
-				const match = text.match(/([\\d.万wWkK]+)/);
-				if (match) return match[1];
-			}
-			return "";
-		};
-
-		const title = pickText(["#detail-title", ".note-content .title", ".title", "[class*='title']"]);
-		const desc = pickText(["#detail-desc", ".note-content .desc", ".note-text", ".desc", "[class*='desc']"]);
-		const author = pickText([".author .name", ".author-wrapper .name", ".user .name", ".nickname", "[class*='author'] [class*='name']"]);
-		const avatar = pickAttr([".author img", ".user img", ".avatar img", "img.avatar"], "src");
-		const images = Array.from(document.querySelectorAll(".swiper img, .note-content img, .media-container img"))
-			.map((img) => ({ width: img.naturalWidth || 0, height: img.naturalHeight || 0, urlDefault: img.src || "", urlPre: img.src || "" }))
-			.filter((img) => img.urlDefault);
-		const liked = isActive([".interact-container .like-lottie", ".interact-container .like-wrapper", ".interact-container [class*='like']"]);
-		const collected = isActive([".interact-container .collect-icon", ".interact-container .collect-wrapper", ".interact-container [class*='collect']"]);
-
-		if (!title && !desc) return "";
-		return JSON.stringify({
-			note_id: feedID,
-			title,
-			desc,
-			type: document.querySelector("video") ? "video" : "normal",
-			user: { nickname: author, nickName: author, avatar },
-			interactInfo: {
-				liked,
-				collected,
-				likedCount: countNear([".interact-container .like-lottie", ".interact-container .like-wrapper", ".interact-container [class*='like']"]),
-				commentCount: countNear([".comments-container .total", ".comment-wrapper", "[class*='comment']"]),
-				collectedCount: countNear([".interact-container .collect-icon", ".interact-container .collect-wrapper", ".interact-container [class*='collect']"])
-			},
-			imageList: images
-		});
-	}`, feedID)
+	snapshot, err := ExtractOpenedNoteSnapshotFromDOM(page, feedID)
 	if err != nil {
-		return nil, fmt.Errorf("提取打开笔记正文失败: %w", err)
+		return nil, err
 	}
-	if result == nil || strings.TrimSpace(result.Value.Str()) == "" {
-		return nil, errors.ErrNoFeedDetail
-	}
-
-	var content OpenedNoteContent
-	if err := json.Unmarshal([]byte(result.Value.Str()), &content); err != nil {
-		return nil, fmt.Errorf("解析打开笔记正文失败: %w", err)
-	}
-	return &content, nil
+	return &snapshot.Note, nil
 }
 
 func ExtractCommentsFromDOM(page *hrod.Page, feedID string) ([]Comment, error) {
@@ -390,29 +437,12 @@ func ExtractCommentsFromDOM(page *hrod.Page, feedID string) ([]Comment, error) {
 	return comments, nil
 }
 
-// ExtractInteractStateFromDOM 从详情页可见按钮状态读取点赞/收藏状态。
+// ExtractInteractStateFromDOM 复用唯一 href 状态片段读取点赞/收藏状态。
 func ExtractInteractStateFromDOM(page *hrod.Page, feedID string) (bool, bool, error) {
 	result, err := page.Eval(`(likeSel, collectSel) => {
-		const like = document.querySelector(likeSel);
-		const collect = document.querySelector(collectSel);
-		if (!like || !collect) return "";
-		const likeUse = like.querySelector("use");
-		if (!likeUse) return "";
-		const likeHref = likeUse.getAttribute("xlink:href") || likeUse.getAttribute("href") || "";
-		let liked;
-		if (likeHref === "#liked") {
-			liked = true;
-		} else if (likeHref === "#like") {
-			liked = false;
-		} else {
-			return "";
-		}
-		const use = collect.querySelector("use");
-		if (!use) return "";
-		const href = use.getAttribute("xlink:href") || use.getAttribute("href") || "";
-		if (href === "#collected") return JSON.stringify({ liked, collected: true });
-		if (href === "#collect") return JSON.stringify({ liked, collected: false });
-		return "";
+		const interact = (() => {` + interactStateJS + `})();
+		if (!interact) return "";
+		return JSON.stringify(interact);
 	}`, SelectorLikeButton, SelectorCollectButton)
 	if err != nil {
 		return false, false, err

@@ -633,15 +633,13 @@ func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, xsecToken strin
 		return nil, fmt.Errorf("从卡片打开笔记失败，请重新搜索或滚动后重试: %w", err)
 	}
 
-	content, err := ExtractOpenedNoteContentFromDOM(s.page.Context(opCtx), feed.ID)
+	// 单次 DOM 快照一次返回正文、互动状态、图片和首屏评论。
+	snapshot, err := ExtractOpenedNoteSnapshotFromDOM(s.page.Context(opCtx), feed.ID)
 	if err != nil {
 		return nil, err
 	}
-
-	comments, commentErr := ExtractCommentsFromDOM(s.page.Context(opCtx), feed.ID)
-	if commentErr != nil {
-		comments = nil
-	}
+	content := snapshot.Note
+	comments := snapshot.Comments
 
 	s.mu.Lock()
 	s.sourceURL = sourceURL
@@ -763,11 +761,26 @@ func (s *BrowseSession) detailCommentsBatchLifecycle(
 		}
 	}
 
+	// 在 loader 前记录开始时间
+	var dwellStart time.Time
+	if s.state != nil {
+		dwellStart = time.Now()
+	}
 	comments, nextCursor, hasMore, err := runDetailCommentsBatch(opCtx, func(loadCtx context.Context) ([]Comment, *CommentCursor, bool, error) {
 		return loader(loadCtx, page)
 	})
 	if err != nil {
 		return nil, nil, false, err
+	}
+	// loader 成功后记录本次真实停留时间与是否发生确认过的物理滚动；
+	// error 路径不记录未完成停留。
+	if s.state != nil {
+		inputRound := 0
+		if cursor != nil {
+			inputRound = cursor.Round
+		}
+		scrolled := nextCursor != nil && nextCursor.Round > inputRound
+		_ = s.state.RecordCommentDwell(feedID, time.Since(dwellStart), scrolled)
 	}
 	return s.completeDetailCommentsBatch(opCtx, page, feedID, maxItems, comments, nextCursor, hasMore)
 }
@@ -872,6 +885,9 @@ func (s *BrowseSession) detail(ctx context.Context, expectedFeedID string, loadC
 			},
 		}
 		var loadErr error
+		// 记录实际加载时长；滚动确认用物理滚轮后的容器位置变化，加载失败不累计。
+		loadStart := time.Now()
+		beforeScrollTop, beforeErr := commentScrollerScrollTop(commentPage)
 		if useConfig {
 			loadErr = loadSessionCommentsForDetailWithConfig(config, ops)
 		} else {
@@ -882,6 +898,14 @@ func (s *BrowseSession) detail(ctx context.Context, expectedFeedID string, loadC
 				return nil, loadErr
 			}
 			logrus.Warnf("session detail load comments failed: %v", loadErr)
+		} else if s.state != nil {
+			// 前后两次都成功才确认滚动；任一读取失败均按未滚动处理，不累计。
+			scrolled := false
+			afterScrollTop, afterErr := commentScrollerScrollTop(commentPage)
+			if beforeErr == nil && afterErr == nil && afterScrollTop > beforeScrollTop {
+				scrolled = true
+			}
+			_ = s.state.RecordCommentDwell(feedID, time.Since(loadStart), scrolled)
 		}
 	}
 	detail, err := ExtractFeedDetailFromDOM(page.Context(opCtx), feedID)

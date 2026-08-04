@@ -133,9 +133,14 @@ func (s *ActionStateStore) RecordFeedScroll(feedID string, count int) error {
 func (s *ActionStateStore) RecordCommentDwell(feedID string, duration time.Duration, scrolled bool) error {
 	return s.update(func(state *ActionState) {
 		if state.LastOpenedFeedID == feedID {
+			now := time.Now()
 			state.CommentDwellTime += duration
 			if scrolled {
 				state.CommentScrollCount++
+			}
+			// 有有效停留或滚动时同步更新 LastReadAt，使评论区阅读可解除"连续互动前需重新阅读"。
+			if duration > 0 || scrolled {
+				state.LastReadAt = now
 			}
 		}
 	})
@@ -188,11 +193,9 @@ func (s *ActionStateStore) ClearIdentity() error {
 	})
 }
 
-func (s *ActionStateStore) ValidateInteraction(feedID, action string) error {
-	state, err := s.Load()
-	if err != nil {
-		return err
-	}
+// validateInteractionState 校验目标与基础风控：冷却、已打开 feed、feed 匹配、30 分钟有效期。
+// Target 与完整 ValidateInteraction 共用，避免重复规则。
+func validateInteractionState(state ActionState, feedID string) error {
 	now := time.Now()
 	if state.RiskCooldownUntil.After(now) {
 		return fmt.Errorf("账号处于风控冷却中，冷却至 %s：%s", state.RiskCooldownUntil.Format(time.RFC3339), state.LastRiskText)
@@ -206,6 +209,28 @@ func (s *ActionStateStore) ValidateInteraction(feedID, action string) error {
 	if now.Sub(state.LastOpenAt) > 30*time.Minute {
 		return fmt.Errorf("最近打开笔记已超过 30 分钟，需要重新打开并阅读")
 	}
+	return nil
+}
+
+// ValidateInteractionTarget 只校验冷却、已打开 feed、feed 匹配和 30 分钟有效期，
+// 不校验阅读/滚动阈值，供回复定位前确认页面和基础风控状态。
+func (s *ActionStateStore) ValidateInteractionTarget(feedID string) error {
+	state, err := s.Load()
+	if err != nil {
+		return err
+	}
+	return validateInteractionState(state, feedID)
+}
+
+func (s *ActionStateStore) ValidateInteraction(feedID, action string) error {
+	state, err := s.Load()
+	if err != nil {
+		return err
+	}
+	if err := validateInteractionState(state, feedID); err != nil {
+		return err
+	}
+	now := time.Now()
 	if state.InteractionsOnFeed > 0 && state.LastActionAt.After(state.LastReadAt) {
 		return fmt.Errorf("同一篇笔记连续互动前必须再次阅读或滚动")
 	}
