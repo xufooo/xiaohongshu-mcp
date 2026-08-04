@@ -7,7 +7,7 @@ import (
 
 	"github.com/go-rod/rod/lib/proto"
 	"github.com/sirupsen/logrus"
-	hrod "github.com/xpzouying/xiaohongshu-mcp/pkg/humanize/rod"
+	hrod "github.com/xpzouying/xiaohongshu-mcp/humanize/rod"
 )
 
 // ActionResult 通用动作响应（点赞/收藏等）

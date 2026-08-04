@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	hrod "github.com/xpzouying/xiaohongshu-mcp/pkg/humanize/rod"
+	hrod "github.com/xpzouying/xiaohongshu-mcp/humanize/rod"
 	"github.com/sirupsen/logrus"
 )
 

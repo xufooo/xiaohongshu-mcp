@@ -8,8 +8,8 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/xpzouying/headless_browser"
 	"github.com/xpzouying/xiaohongshu-mcp/cookies"
-	"github.com/xpzouying/xiaohongshu-mcp/pkg/humanize"
-	hrod "github.com/xpzouying/xiaohongshu-mcp/pkg/humanize/rod"
+	"github.com/xpzouying/xiaohongshu-mcp/humanize"
+	hrod "github.com/xpzouying/xiaohongshu-mcp/humanize/rod"
 )
 
 type browserConfig struct {

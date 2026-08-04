@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/go-rod/rod/lib/proto"
-	hrod "github.com/xpzouying/xiaohongshu-mcp/pkg/humanize/rod"
+	hrod "github.com/xpzouying/xiaohongshu-mcp/humanize/rod"
 )
 
 // NotificationLikeResult like_notification 结果。

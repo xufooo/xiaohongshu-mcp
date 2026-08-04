@@ -23,7 +23,7 @@ import (
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/proto"
 	"github.com/xpzouying/headless_browser"
-	"github.com/xpzouying/xiaohongshu-mcp/pkg/humanize"
+	"github.com/xpzouying/xiaohongshu-mcp/humanize"
 	"github.com/ysmood/gson"
 )
 

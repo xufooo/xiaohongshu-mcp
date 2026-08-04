@@ -9,7 +9,7 @@ import (
 	"strings"
 
 	"github.com/go-rod/rod/lib/cdp"
-	hrod "github.com/xpzouying/xiaohongshu-mcp/pkg/humanize/rod"
+	hrod "github.com/xpzouying/xiaohongshu-mcp/humanize/rod"
 )
 
 const xhsProbeVisibleJS = `

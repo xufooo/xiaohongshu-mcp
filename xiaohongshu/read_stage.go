@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/go-rod/rod/lib/proto"
-	hrod "github.com/xpzouying/xiaohongshu-mcp/pkg/humanize/rod"
+	hrod "github.com/xpzouying/xiaohongshu-mcp/humanize/rod"
 )
 
 // contentMetrics 只保留实际参与阅读算法的图片数。
