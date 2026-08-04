@@ -21,6 +21,33 @@ type ImageDownloader struct {
 	httpClient *http.Client
 }
 
+// maxRemoteImageBytes 远程图片单张大小上限（50MiB），防止无界内存增长。
+const maxRemoteImageBytes int64 = 50 << 20
+
+// readImageBody 读取响应体并限制大小；超过 limit 返回明确错误。
+func readImageBody(r io.Reader, limit int64) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(r, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("remote image exceeds size limit (%d bytes)", limit)
+	}
+	return data, nil
+}
+
+// displayImageURL 移除 URL 的 userinfo/query/fragment，仅保留 scheme/host/path，避免日志泄露 token；解析失败 fail-closed。
+func displayImageURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "[invalid-url]"
+	}
+	u.User = nil
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String()
+}
+
 // NewImageDownloader 创建图片下载器
 func NewImageDownloader(savePath string) *ImageDownloader {
 	// 确保保存目录存在
@@ -62,18 +89,23 @@ func (d *ImageDownloader) DownloadImage(imageURL string) (string, error) {
 	// 下载图片数据
 	resp, err := d.httpClient.Do(req)
 	if err != nil {
-		return "", errors.Wrapf(err, "failed to download image from %s", imageURL)
+		return "", errors.Wrapf(err, "failed to download image from %s", displayImageURL(imageURL))
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("download failed with status %d for URL: %s", resp.StatusCode, imageURL)
+		return "", fmt.Errorf("download failed with status %d for URL: %s", resp.StatusCode, displayImageURL(imageURL))
 	}
 
-	// 读取图片数据
-	imageData, err := io.ReadAll(resp.Body)
+	// Content-Length 已知且超限时，读取前直接拒绝
+	if resp.ContentLength > maxRemoteImageBytes {
+		return "", fmt.Errorf("remote image exceeds size limit (%d bytes): %s", maxRemoteImageBytes, displayImageURL(imageURL))
+	}
+
+	// 读取图片数据（限制单张大小）
+	imageData, err := readImageBody(resp.Body, maxRemoteImageBytes)
 	if err != nil {
-		return "", errors.Wrap(err, "failed to read image data")
+		return "", errors.Wrapf(err, "failed to read image data from %s", displayImageURL(imageURL))
 	}
 
 	// 检测图片格式
@@ -111,7 +143,7 @@ func (d *ImageDownloader) DownloadImages(imageURLs []string) ([]string, error) {
 	for _, imageURL := range imageURLs {
 		localPath, err := d.DownloadImage(imageURL)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("failed to download %s: %w", imageURL, err))
+			errs = append(errs, fmt.Errorf("failed to download %s: %w", displayImageURL(imageURL), err))
 			continue
 		}
 		localPaths = append(localPaths, localPath)

@@ -112,7 +112,14 @@ func (c *localCookie) write(cks []byte, seed int) error {
 		}
 	}
 
-	return os.WriteFile(c.path, data, 0644)
+	if err := os.WriteFile(c.path, data, 0600); err != nil {
+		return errors.Wrap(err, "write session file failed")
+	}
+	// 确保权限收紧为 0600（防止旧 umask 或预建文件放宽）
+	if err := os.Chmod(c.path, 0600); err != nil {
+		return errors.Wrap(err, "chmod session file failed")
+	}
+	return nil
 }
 
 // DeleteCookies 删除 cookies 文件。

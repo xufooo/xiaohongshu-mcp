@@ -187,7 +187,7 @@ func New(ctx context.Context, options ...Option) (*Browser, error) {
 		}
 		l = l.Set("fingerprint", strconv.Itoa(seed)).
 			Set("fingerprint-platform", platform)
-		logrus.Infof("fingerprint enabled: platform=%s seed=%d", platform, seed)
+		logrus.Infof("fingerprint enabled: platform=%s", platform)
 	}
 	for k, v := range cfg.ExtraFlags {
 		l = l.Set(flags.Flag(k), v)
@@ -218,8 +218,8 @@ func New(ctx context.Context, options ...Option) (*Browser, error) {
 	}
 
 	logrus.WithFields(logrus.Fields{
-		"bin":  cfg.ChromeBinPath,
-		"args": l.FormatArgs(),
+		"bin":       cfg.ChromeBinPath,
+		"arg_count": len(l.FormatArgs()),
 	}).Info("launching browser")
 	url, err := l.Context(ctx).Launch()
 	if err != nil {

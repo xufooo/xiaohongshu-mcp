@@ -94,3 +94,16 @@ func TestValidateInteractionCommentThreshold(t *testing.T) {
 		t.Fatalf("阅读 20s 且滚动后应通过: %v", err)
 	}
 }
+
+func TestGetInitialCommentIDsDefensiveCopy(t *testing.T) {
+	s := &BrowseSession{initialCommentIDs: []string{"c1", "c2"}}
+	got := s.GetInitialCommentIDs()
+	// 修改返回切片
+	got[0] = "changed"
+	got = append(got, "c3")
+	// 内部状态必须保持原值
+	again := s.GetInitialCommentIDs()
+	if len(again) != 2 || again[0] != "c1" || again[1] != "c2" {
+		t.Fatalf("内部 comment IDs 被外部修改: %v", again)
+	}
+}

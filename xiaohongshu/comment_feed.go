@@ -285,7 +285,7 @@ func (f *CommentFeedAction) preparePage(ctx context.Context, feedID, xsecToken, 
 	}
 
 	url := makeFeedDetailURL(feedID, xsecToken)
-	logrus.Infof("打开 feed 详情页: %s", url)
+	logrus.Infof("打开 feed 详情页: %s", redactSensitiveURL(url))
 	if err := page.Navigate(url); err != nil {
 		return nil, fmt.Errorf("打开 feed 详情页失败: %w", err)
 	}

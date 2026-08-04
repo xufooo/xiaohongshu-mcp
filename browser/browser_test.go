@@ -1,6 +1,7 @@
 package browser
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/xpzouying/headless_browser"
@@ -43,5 +44,31 @@ func TestCloakFingerprintOptions(t *testing.T) {
 	}
 	if cfg.ExtraFlags["fingerprint-brand"] != "Chrome" {
 		t.Errorf("ExtraFlags 应含 fingerprint-brand=Chrome, got %v", cfg.ExtraFlags)
+	}
+}
+func TestMaskProxyCredentials(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"无认证", "http://proxy.example.com:8080", "http://proxy.example.com:8080"},
+		{"仅用户名", "http://user123@proxy.example.com:8080", "http://***@proxy.example.com:8080"},
+		{"用户名+密码", "http://user123:pass456@proxy.example.com:8080", "http://***:***@proxy.example.com:8080"},
+		{"userinfo 转义 @", "http://user%40x:p%40ss@proxy.example.com:8080", "http://***:***@proxy.example.com:8080"},
+		{"畸形 URL", "http://[bad url", "[invalid-proxy]"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := maskProxyCredentials(tc.in)
+			if got != tc.want {
+				t.Fatalf("maskProxyCredentials(%q) = %q, 期望 %q", tc.in, got, tc.want)
+			}
+			for _, secret := range []string{"user123", "pass456"} {
+				if strings.Contains(got, secret) {
+					t.Fatalf("凭据泄露: %q contains %q", got, secret)
+				}
+			}
+		})
 	}
 }

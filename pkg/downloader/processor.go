@@ -32,7 +32,7 @@ func (p *ImageProcessor) ProcessImages(images []string) ([]string, error) {
 			// URL图片：立即下载，失败直接返回错误
 			localPath, err := p.downloader.DownloadImage(image)
 			if err != nil {
-				return nil, fmt.Errorf("下载图片失败 %s: %w", image, err)
+				return nil, fmt.Errorf("下载图片失败 %s: %w", displayImageURL(image), err)
 			}
 			localPaths = append(localPaths, localPath)
 		} else {
