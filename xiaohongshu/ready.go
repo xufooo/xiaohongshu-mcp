@@ -187,7 +187,7 @@ func probeXHSReady(page *hrod.Page, kind XHSReadyKind, feedID string) (xhsReadyP
 }
 
 // decodeXHSReadyProbe 统一 ready probe 的 nil 检查与 JSON 解码。
-func decodeXHSReadyProbe(obj *rod.Value, err error) (xhsReadyProbe, error) {
+func decodeXHSReadyProbe(obj *hrod.Value, err error) (xhsReadyProbe, error) {
 	if err != nil {
 		return xhsReadyProbe{}, err
 	}
