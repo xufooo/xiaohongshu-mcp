@@ -628,36 +628,6 @@ func waitFeedsChanged(page *hrod.Page, before string, timeout time.Duration) boo
 	return false
 }
 
-func waitForFilterRefresh(page *hrod.Page, baseline searchResultsBaseline, keyword string) (stateRefreshed bool, _ error) {
-	deadline := time.Now().Add(searchFilterRefreshWaitTimeout)
-	var lastErr error
-
-	for time.Now().Before(deadline) {
-		if err := page.Err(); err != nil {
-			return false, err
-		}
-
-		probe, err := probeSearchResultsKeyword(page, keyword)
-		if err != nil {
-			lastErr = err
-		} else {
-			lastErr = nil
-			if probe.OnSearchPage && probe.InputMatched && probe.HasVisibleCards && searchResultsChanged(probe, baseline) {
-				return probe.StateSignature != "" && probe.StateSignature != baseline.StateSignature, nil
-			}
-		}
-
-		if err := page.Sleep(300 * time.Millisecond); err != nil {
-			return false, err
-		}
-	}
-
-	if lastErr != nil {
-		return false, fmt.Errorf("筛选结果未刷新: %w", lastErr)
-	}
-	return false, fmt.Errorf("筛选结果未刷新: 基线未变化")
-}
-
 type searchInputProbe struct {
 	URL                string   `json:"url"`
 	Title              string   `json:"title"`

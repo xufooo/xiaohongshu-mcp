@@ -1934,11 +1934,6 @@ func (s *BrowseSession) currentOpenedFeedIDFor(expectedFeedID string) (string, e
 	return s.currentFeedID, nil
 }
 
-func (s *BrowseSession) currentFeed() (string, string) {
-	feedID, xsecToken, _ := s.currentFeedFor("")
-	return feedID, xsecToken
-}
-
 func (s *BrowseSession) currentFeedFor(expectedFeedID string) (string, string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1949,18 +1944,6 @@ func (s *BrowseSession) currentFeedFor(expectedFeedID string) (string, string, e
 		return "", "", fmt.Errorf("session 当前笔记 %s 与目标笔记 %s 不一致", s.currentFeedID, expectedFeedID)
 	}
 	return s.currentFeedID, s.currentXsecToken, nil
-}
-
-func (s *BrowseSession) ensureReadableInteraction() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !s.opened || s.currentFeedID == "" {
-		return fmt.Errorf("互动只能对已打开的笔记执行")
-	}
-	if !s.read {
-		return fmt.Errorf("互动只能对已阅读的笔记执行")
-	}
-	return nil
 }
 
 func (s *BrowseSession) isExpired() bool {

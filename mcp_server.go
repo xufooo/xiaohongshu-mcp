@@ -257,19 +257,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 			},
 		},
 		withPanicRecovery("publish_content", func(ctx context.Context, req *mcp.CallToolRequest, args PublishContentArgs) (*mcp.CallToolResult, any, error) {
-			// 转换参数格式到现有的 handler
-			argsMap := map[string]interface{}{
-				"title":         args.Title,
-				"content":       args.Content,
-				"images":        convertStringsToInterfaces(args.Images),
-				"tags":          convertStringsToInterfaces(args.Tags),
-				"schedule_at":   args.ScheduleAt,
-				"is_original":   args.IsOriginal,
-				"visibility":    args.Visibility,
-				"products":      convertStringsToInterfaces(args.Products),
-				"confirm_token": args.ConfirmToken,
-			}
-			result := appServer.handlePublishContent(ctx, argsMap)
+			result := appServer.handlePublishContent(ctx, args)
 			return convertToMCPResult(result), nil, nil
 		}),
 	)
@@ -317,11 +305,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 			},
 		},
 		withPanicRecovery("user_profile", func(ctx context.Context, req *mcp.CallToolRequest, args UserProfileArgs) (*mcp.CallToolResult, any, error) {
-			argsMap := map[string]interface{}{
-				"user_id":    args.UserID,
-				"xsec_token": args.XsecToken,
-			}
-			result := appServer.handleUserProfile(ctx, argsMap)
+			result := appServer.handleUserProfile(ctx, args)
 			return convertToMCPResult(result), nil, nil
 		}),
 	)
@@ -369,17 +353,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 			},
 		},
 		withPanicRecovery("publish_with_video", func(ctx context.Context, req *mcp.CallToolRequest, args PublishVideoArgs) (*mcp.CallToolResult, any, error) {
-			argsMap := map[string]interface{}{
-				"title":         args.Title,
-				"content":       args.Content,
-				"video":         args.Video,
-				"tags":          convertStringsToInterfaces(args.Tags),
-				"schedule_at":   args.ScheduleAt,
-				"visibility":    args.Visibility,
-				"products":      convertStringsToInterfaces(args.Products),
-				"confirm_token": args.ConfirmToken,
-			}
-			result := appServer.handlePublishVideo(ctx, argsMap)
+			result := appServer.handlePublishVideo(ctx, args)
 			return convertToMCPResult(result), nil, nil
 		}),
 	)
@@ -607,13 +581,4 @@ func convertToMCPResult(result *MCPToolResult) *mcp.CallToolResult {
 		Content: contents,
 		IsError: result.IsError,
 	}
-}
-
-// convertStringsToInterfaces 辅助函数：将 []string 转换为 []interface{}
-func convertStringsToInterfaces(strs []string) []interface{} {
-	result := make([]interface{}, len(strs))
-	for i, s := range strs {
-		result[i] = s
-	}
-	return result
 }

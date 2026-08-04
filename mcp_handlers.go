@@ -69,18 +69,6 @@ type toolResult struct {
 
 // MCP 工具处理函数
 
-// parseVisibility 从 MCP 参数中解析可见范围
-func parseVisibility(args map[string]interface{}) string {
-	v, ok := args["visibility"]
-	if !ok || v == nil {
-		return ""
-	}
-	if s, ok := v.(string); ok {
-		return s
-	}
-	return ""
-}
-
 func (s *AppServer) requireBrowserAvailableForMCP(name string) *MCPToolResult {
 	if s.xiaohongshuService == nil {
 		return nil
@@ -336,43 +324,18 @@ func (s *AppServer) handleDeleteCookies(ctx context.Context) *MCPToolResult {
 }
 
 // handlePublishContent 处理发布内容
-func (s *AppServer) handlePublishContent(ctx context.Context, args map[string]interface{}) *MCPToolResult {
+func (s *AppServer) handlePublishContent(ctx context.Context, args PublishContentArgs) *MCPToolResult {
 	logrus.Info("MCP: 发布内容")
 
-	// 解析参数
-	title, _ := args["title"].(string)
-	content, _ := args["content"].(string)
-	imagePathsInterface, _ := args["images"].([]interface{})
-	tagsInterface, _ := args["tags"].([]interface{})
-	productsInterface, _ := args["products"].([]interface{})
-
-	var imagePaths []string
-	for _, path := range imagePathsInterface {
-		if pathStr, ok := path.(string); ok {
-			imagePaths = append(imagePaths, pathStr)
-		}
-	}
-
-	var tags []string
-	for _, tag := range tagsInterface {
-		if tagStr, ok := tag.(string); ok {
-			tags = append(tags, tagStr)
-		}
-	}
-
-	var products []string
-	for _, p := range productsInterface {
-		if pStr, ok := p.(string); ok {
-			products = append(products, pStr)
-		}
-	}
-
-	// 解析定时发布参数
-	scheduleAt, _ := args["schedule_at"].(string)
-	visibility := parseVisibility(args)
-
-	// 解析原创参数
-	isOriginal, _ := args["is_original"].(bool)
+	title := args.Title
+	content := args.Content
+	imagePaths := args.Images
+	tags := args.Tags
+	products := args.Products
+	scheduleAt := args.ScheduleAt
+	visibility := args.Visibility
+	isOriginal := args.IsOriginal
+	confirmToken := args.ConfirmToken
 
 	logrus.Infof("MCP: 发布内容 - 标题: %s, 图片数量: %d, 标签数量: %d, 定时: %s, 原创: %v, visibility: %s, 商品: %v", title, len(imagePaths), len(tags), scheduleAt, isOriginal, visibility, products)
 
@@ -388,7 +351,6 @@ func (s *AppServer) handlePublishContent(ctx context.Context, args map[string]in
 		Products:   products,
 	}
 
-	confirmToken, _ := args["confirm_token"].(string)
 	key := writeConfirmationKey("publish_content", title, content, imagePaths, tags, scheduleAt, isOriginal, visibility, products)
 	summary := fmt.Sprintf("发布图文: title=%q images=%d visibility=%s content=%q", title, len(imagePaths), visibility, compactWriteSummary(content))
 	if blocked := s.requireBrowserAvailableForMCP("发布内容"); blocked != nil {
@@ -419,28 +381,14 @@ func (s *AppServer) handlePublishContent(ctx context.Context, args map[string]in
 }
 
 // handlePublishVideo 处理发布视频内容（仅本地单个视频文件）
-func (s *AppServer) handlePublishVideo(ctx context.Context, args map[string]interface{}) *MCPToolResult {
+func (s *AppServer) handlePublishVideo(ctx context.Context, args PublishVideoArgs) *MCPToolResult {
 	logrus.Info("MCP: 发布视频内容（本地）")
 
-	title, _ := args["title"].(string)
-	content, _ := args["content"].(string)
-	videoPath, _ := args["video"].(string)
-	tagsInterface, _ := args["tags"].([]interface{})
-	productsInterface, _ := args["products"].([]interface{})
-
-	var tags []string
-	for _, tag := range tagsInterface {
-		if tagStr, ok := tag.(string); ok {
-			tags = append(tags, tagStr)
-		}
-	}
-
-	var products []string
-	for _, p := range productsInterface {
-		if pStr, ok := p.(string); ok {
-			products = append(products, pStr)
-		}
-	}
+	title := args.Title
+	content := args.Content
+	videoPath := args.Video
+	tags := args.Tags
+	products := args.Products
 
 	if videoPath == "" {
 		return &MCPToolResult{
@@ -452,9 +400,9 @@ func (s *AppServer) handlePublishVideo(ctx context.Context, args map[string]inte
 		}
 	}
 
-	// 解析定时发布参数
-	scheduleAt, _ := args["schedule_at"].(string)
-	visibility := parseVisibility(args)
+	scheduleAt := args.ScheduleAt
+	visibility := args.Visibility
+	confirmToken := args.ConfirmToken
 
 	logrus.Infof("MCP: 发布视频 - 标题: %s, 标签数量: %d, 定时: %s, visibility: %s, 商品: %v", title, len(tags), scheduleAt, visibility, products)
 
@@ -469,7 +417,6 @@ func (s *AppServer) handlePublishVideo(ctx context.Context, args map[string]inte
 		Products:   products,
 	}
 
-	confirmToken, _ := args["confirm_token"].(string)
 	key := writeConfirmationKey("publish_video", title, content, videoPath, tags, scheduleAt, visibility, products)
 	summary := fmt.Sprintf("发布视频: title=%q video=%q visibility=%s content=%q", title, videoPath, visibility, compactWriteSummary(content))
 	if blocked := s.requireBrowserAvailableForMCP("发布视频"); blocked != nil {
@@ -520,41 +467,19 @@ func (s *AppServer) handleListFeeds(ctx context.Context, args ListFeedsArgs) *MC
 		}
 	}
 
-	// 格式化输出，转换为JSON字符串
-	jsonData, err := json.MarshalIndent(result, "", "  ")
-	if err != nil {
-		return &MCPToolResult{
-			Content: []MCPContent{{
-				Type: "text",
-				Text: fmt.Sprintf("获取Feeds列表成功，但序列化失败: %v", err),
-			}},
-			IsError: true,
-		}
-	}
-
-	// 序列化一次以获取结构化的 data；再包上 available_tools
-	var raw any
-	if err := json.Unmarshal(jsonData, &raw); err != nil {
-		return &MCPToolResult{
-			Content: []MCPContent{{
-				Type: "text",
-				Text: string(jsonData),
-			}},
-		}
-	}
-	return jsonMCPResultWithTools(raw, afterFeedsTools)
+	// 成功后直接包上 available_tools，避免序列化往返
+	return jsonMCPResultWithTools(result, afterFeedsTools)
 }
 
 // handleUserProfile 获取用户主页
-func (s *AppServer) handleUserProfile(ctx context.Context, args map[string]any) *MCPToolResult {
+func (s *AppServer) handleUserProfile(ctx context.Context, args UserProfileArgs) *MCPToolResult {
 	if blocked := s.requireBrowserAvailableForMCP("获取用户主页"); blocked != nil {
 		return blocked
 	}
 	logrus.Info("MCP: 获取用户主页")
 
-	// 解析参数
-	userID, ok := args["user_id"].(string)
-	if !ok || userID == "" {
+	userID := args.UserID
+	if userID == "" {
 		return &MCPToolResult{
 			Content: []MCPContent{{
 				Type: "text",
@@ -564,8 +489,8 @@ func (s *AppServer) handleUserProfile(ctx context.Context, args map[string]any) 
 		}
 	}
 
-	xsecToken, ok := args["xsec_token"].(string)
-	if !ok || xsecToken == "" {
+	xsecToken := args.XsecToken
+	if xsecToken == "" {
 		return &MCPToolResult{
 			Content: []MCPContent{{
 				Type: "text",

@@ -29,7 +29,6 @@ type XiaohongshuService struct {
 	actionState    *xiaohongshu.ActionStateStore
 	browseSessions *xiaohongshu.BrowseSessionManager
 	rateLimiter    *ratelimit.Limiter
-	rateLimitFunc  func(ctx context.Context, name string, action ratelimit.Action) bool
 
 	commentCursors     sync.Map
 	commentCursorTTL   time.Duration
@@ -65,17 +64,6 @@ func NewXiaohongshuService() *XiaohongshuService {
 
 func (s *XiaohongshuService) SetRateLimiter(limiter *ratelimit.Limiter) {
 	s.rateLimiter = limiter
-	s.rateLimitFunc = func(ctx context.Context, name string, action ratelimit.Action) bool {
-		if limiter == nil {
-			return true
-		}
-		_, _, canProceed, err := limiter.ReserveAction(ctx, action)
-		if err != nil {
-			logrus.Errorf("rate limit check error: %v", err)
-			return false
-		}
-		return canProceed
-	}
 }
 
 func (s *XiaohongshuService) setCommentCursor(id string, cursor *xiaohongshu.CommentCursor, scope replayScope) {
@@ -351,6 +339,39 @@ func (s *XiaohongshuService) getFeedCursor(id string) (feedCursorEntry, bool) {
 
 func (s *XiaohongshuService) delFeedCursor(id string) {
 	s.feedCursors.Delete(strings.TrimSpace(id))
+}
+
+// loadFeedCursor 读取并校验 feed cursor；空 cursor 返回 nil，返回 clone 不暴露存储对象。
+func (s *XiaohongshuService) loadFeedCursor(cursorID, sessionID, queryKey string) (*xiaohongshu.FeedCursor, error) {
+	if cursorID == "" {
+		return nil, nil
+	}
+	entry, ok := s.getFeedCursor(cursorID)
+	if !ok {
+		return nil, fmt.Errorf("feed cursor 不存在或已过期")
+	}
+	if err := entry.Validate(sessionID, queryKey); err != nil {
+		return nil, err
+	}
+	return cloneFeedCursor(entry.Cursor), nil
+}
+
+// commitFeedCursor 成功完成页面批次后消费旧 cursor 并保存新 cursor。
+// 返回新 cursor ID 与已见数量；seenCount 取 next.ReturnedIDs（即使 hasMore=false 也保持现状）。
+func (s *XiaohongshuService) commitFeedCursor(oldCursorID, sessionID, queryKey string, next *xiaohongshu.FeedCursor, hasMore bool) (string, int) {
+	nextCursorID := ""
+	if hasMore && next != nil {
+		nextCursorID = fmt.Sprintf("fc_%s_%d", sessionID, time.Now().UnixNano())
+		s.setFeedCursor(nextCursorID, feedCursorEntry{SessionID: sessionID, QueryKey: queryKey, Cursor: next})
+	}
+	if oldCursorID != "" {
+		s.delFeedCursor(oldCursorID)
+	}
+	seenCount := 0
+	if next != nil {
+		seenCount = len(next.ReturnedIDs)
+	}
+	return nextCursorID, seenCount
 }
 
 func (s *XiaohongshuService) startReadNetworkCapture(page *hrod.Page) *xiaohongshu.NetworkCapture {
@@ -1314,16 +1335,9 @@ func (s *XiaohongshuService) SessionListFeeds(ctx context.Context, id, cursorID 
 	}
 
 	queryKey := "home::"
-	var cursor *xiaohongshu.FeedCursor
-	if cursorID != "" {
-		entry, ok := s.getFeedCursor(cursorID)
-		if !ok {
-			return nil, fmt.Errorf("feed cursor 不存在或已过期")
-		}
-		if err := entry.Validate(id, queryKey); err != nil {
-			return nil, err
-		}
-		cursor = cloneFeedCursor(entry.Cursor)
+	cursor, err := s.loadFeedCursor(cursorID, id, queryKey)
+	if err != nil {
+		return nil, err
 	}
 
 	feeds, nextCursor, hasMore, err := session.ListFeedsBatch(ctx, cursor, maxItems)
@@ -1332,18 +1346,7 @@ func (s *XiaohongshuService) SessionListFeeds(ctx context.Context, id, cursorID 
 		return nil, err
 	}
 
-	nextCursorID := ""
-	if hasMore && nextCursor != nil {
-		nextCursorID = fmt.Sprintf("fc_%s_%d", id, time.Now().UnixNano())
-		s.setFeedCursor(nextCursorID, feedCursorEntry{SessionID: id, QueryKey: queryKey, Cursor: nextCursor})
-	}
-	if cursorID != "" {
-		s.delFeedCursor(cursorID)
-	}
-	seenCount := 0
-	if nextCursor != nil {
-		seenCount = len(nextCursor.ReturnedIDs)
-	}
+	nextCursorID, seenCount := s.commitFeedCursor(cursorID, id, queryKey, nextCursor, hasMore)
 	return &FeedsListResponse{
 		Feeds:     feeds,
 		Count:     len(feeds),
@@ -1364,16 +1367,9 @@ func (s *XiaohongshuService) SessionSearch(ctx context.Context, id, keyword, cur
 		return nil, fmt.Errorf("计算 query key 失败: %w", err)
 	}
 
-	var cursor *xiaohongshu.FeedCursor
-	if cursorID != "" {
-		entry, ok := s.getFeedCursor(cursorID)
-		if !ok {
-			return nil, fmt.Errorf("feed cursor 不存在或已过期")
-		}
-		if err := entry.Validate(id, queryKey); err != nil {
-			return nil, err
-		}
-		cursor = cloneFeedCursor(entry.Cursor)
+	cursor, err := s.loadFeedCursor(cursorID, id, queryKey)
+	if err != nil {
+		return nil, err
 	}
 
 	searchResult, nextCursor, hasMore, err := session.SearchBatchWithAI(ctx, keyword, filters, cursor, maxItems)
@@ -1383,18 +1379,7 @@ func (s *XiaohongshuService) SessionSearch(ctx context.Context, id, keyword, cur
 	}
 	feeds := searchResult.Feeds
 
-	nextCursorID := ""
-	if hasMore && nextCursor != nil {
-		nextCursorID = fmt.Sprintf("fc_%s_%d", id, time.Now().UnixNano())
-		s.setFeedCursor(nextCursorID, feedCursorEntry{SessionID: id, QueryKey: queryKey, Cursor: nextCursor})
-	}
-	if cursorID != "" {
-		s.delFeedCursor(cursorID)
-	}
-	seenCount := 0
-	if nextCursor != nil {
-		seenCount = len(nextCursor.ReturnedIDs)
-	}
+	nextCursorID, seenCount := s.commitFeedCursor(cursorID, id, queryKey, nextCursor, hasMore)
 	return &FeedsListResponse{
 		Feeds:     feeds,
 		AIChat:    searchResult.AIChat,
@@ -1757,10 +1742,6 @@ func formatRiskReason(signal xiaohongshu.RiskSignal) string {
 		reason = fmt.Sprintf("%s: %s", reason, signal.MatchedText)
 	}
 	return reason
-}
-
-func (s *XiaohongshuService) acquirePage(ctx context.Context) (*hrod.Page, error) {
-	return s.acquirePageFor(ctx, "browser_operation")
 }
 
 func (s *XiaohongshuService) acquirePageFor(ctx context.Context, owner string) (*hrod.Page, error) {
