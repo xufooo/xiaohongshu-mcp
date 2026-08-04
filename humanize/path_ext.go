@@ -65,7 +65,7 @@ func generateSegment(start, end Point, steps int, roughness float64) []Point {
 		var p Point
 		switch curve {
 		case CurveBezier:
-			p = cubicBezier(t, start, cp1, cp2, end)
+			p = actorCubicBezier(t, start, cp1, cp2, end)
 		case CurveQuadBezier:
 			p = quadraticBezier(t, start, midPoint(start, end), end)
 		case CurveSigmoid:
@@ -150,7 +150,7 @@ func GeneratePath(start, end Point, minSteps, maxSteps int, overshootRatio float
 	return path
 }
 
-func cubicBezier(t float64, p0, p1, p2, p3 Point) Point {
+func actorCubicBezier(t float64, p0, p1, p2, p3 Point) Point {
 	u := 1 - t
 	return Point{
 		X: u*u*u*p0.X + 3*u*u*t*p1.X + 3*u*t*t*p2.X + t*t*t*p3.X,

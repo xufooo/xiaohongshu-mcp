@@ -6,7 +6,7 @@ import (
 	"strings"
 
 	"github.com/xpzouying/xiaohongshu-mcp/errors"
-	hrod "github.com/xpzouying/xiaohongshu-mcp/pkg/humanize/rod"
+	hrod "github.com/xpzouying/xiaohongshu-mcp/humanize/rod"
 )
 
 // interactStateJS 是唯一的互动状态来源：同时要求 like/collect wrapper 存在，

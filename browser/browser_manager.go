@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/xpzouying/xiaohongshu-mcp/configs"
-	hrod "github.com/xpzouying/xiaohongshu-mcp/pkg/humanize/rod"
+	hrod "github.com/xpzouying/xiaohongshu-mcp/humanize/rod"
 )
 
 const (

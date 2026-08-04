@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/go-rod/rod"
-	"github.com/xpzouying/xiaohongshu-mcp/pkg/humanize"
+	"github.com/xpzouying/xiaohongshu-mcp/humanize"
 )
 
 // newTestElement 构造一个不连接浏览器的测试元素：裸 *rod.Element + 独立 actor。
