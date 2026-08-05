@@ -35,7 +35,8 @@ func (u *UserProfileAction) UserProfile(ctx context.Context, userID, xsecToken s
 		const unwrap = (o) =>
 			o && o.value !== undefined ? o.value :
 			o && o._value !== undefined ? o._value : o;
-		return !!(u && unwrap(u.userPageData) && unwrap(u.notes));
+		// 等页面非 loading（JS 引擎空闲）再提取，否则 Eval 会排队 60s 超时。
+		return document.readyState !== "loading" && !!(u && unwrap(u.userPageData) && unwrap(u.notes));
 	}`)); err != nil {
 		return nil, fmt.Errorf("wait for profile state failed: %w", err)
 	}
@@ -49,7 +50,7 @@ func (u *UserProfileAction) extractUserProfileData(page *hrod.Page) (*UserProfil
 		return nil, fmt.Errorf("wait for profile state failed: %w", err)
 	}
 
-	// 分两次小 Eval 提取，避免一次全量 stringify 大对象回传（RPi 上会 60s 超时）。
+	// 分两次小 Eval 提取，对齐 upstream/main 分次提取方式。
 	// 保持 envelope 结构不变，Go 侧拼接后走原有 parseUserProfileState。
 	userDataObj, err := page.Eval(`() => {
 		const s = window.__INITIAL_STATE__;
