@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -98,5 +99,34 @@ func TestDownloadImageSuccessAndLimits(t *testing.T) {
 	_, err = d.DownloadImage(srv.URL + "/text.txt")
 	if err == nil {
 		t.Fatal("非图片应拒绝")
+	}
+}
+
+// failingTransport 返回带完整 URL 的 *url.Error，模拟真实网络错误形态。
+type failingTransport struct{}
+
+func (failingTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, &url.Error{
+		Op:  "Get",
+		URL: "https://example.com/img.jpg?xsec_token=SECRET123",
+		Err: fmt.Errorf("connection refused"),
+	}
+}
+
+// TestDownloadImageErrorStripsURLToken 传输错误剥离 URL 后不得泄露 xsec_token。
+func TestDownloadImageErrorStripsURLToken(t *testing.T) {
+	d := &ImageDownloader{
+		savePath:   t.TempDir(),
+		httpClient: &http.Client{Transport: failingTransport{}},
+	}
+	_, err := d.DownloadImage("https://example.com/img.jpg?xsec_token=SECRET123")
+	if err == nil {
+		t.Fatal("下载应失败")
+	}
+	if strings.Contains(err.Error(), "SECRET123") {
+		t.Fatalf("错误信息泄露 URL token: %v", err)
+	}
+	if !strings.Contains(err.Error(), "example.com/img.jpg") {
+		t.Fatalf("错误信息应保留脱敏 URL: %v", err)
 	}
 }

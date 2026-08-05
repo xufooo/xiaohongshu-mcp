@@ -15,6 +15,17 @@ import (
 	"github.com/pkg/errors"
 )
 
+// stripURLError 循环剥离 *url.Error 内部 URL，仅保留底层错误（http.Client 可能多层包装）。
+func stripURLError(err error) error {
+	for {
+		uerr, ok := err.(*url.Error)
+		if !ok {
+			return err
+		}
+		err = uerr.Err
+	}
+}
+
 // ImageDownloader 图片下载器
 type ImageDownloader struct {
 	savePath   string
@@ -89,7 +100,8 @@ func (d *ImageDownloader) DownloadImage(imageURL string) (string, error) {
 	// 下载图片数据
 	resp, err := d.httpClient.Do(req)
 	if err != nil {
-		return "", errors.Wrapf(err, "failed to download image from %s", displayImageURL(imageURL))
+		// url.Error 内部包含完整 URL（含 xsec_token），剥离后只包装底层错误。
+		return "", errors.Wrapf(stripURLError(err), "failed to download image from %s", displayImageURL(imageURL))
 	}
 	defer resp.Body.Close()
 

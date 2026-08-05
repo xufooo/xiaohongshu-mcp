@@ -109,14 +109,21 @@ func maskProxyCredentials(proxyURL string) string {
 	if _, hasPwd := u.User.Password(); hasPwd {
 		masked = "***:***"
 	}
-	// 定位 authority 的 userinfo 段并替换，避免 url.User 再次百分号编码。
-	// 使用最后一个 @ 作为边界：userinfo 内的 @ 会以 %40 转义，不参与匹配。
-	idx := strings.Index(proxyURL, "://")
-	if idx < 0 {
-		return proxyURL
+	// 定位 authority：支持 scheme:// 与 scheme-relative // 两种形态；只替换 authority 段内的 userinfo。
+	start := 0
+	if idx := strings.Index(proxyURL, "://"); idx >= 0 {
+		start = idx + 3
+	} else if strings.HasPrefix(proxyURL, "//") {
+		start = 2
+	} else {
+		// 无 scheme 前缀却带 userinfo：无法安全确认 authority 边界，fail-closed。
+		return "[invalid-proxy]"
 	}
-	start := idx + 3
-	at := strings.LastIndex(proxyURL[start:], "@")
+	authEnd := len(proxyURL)
+	if slash := strings.IndexAny(proxyURL[start:], "/?#"); slash >= 0 {
+		authEnd = start + slash
+	}
+	at := strings.LastIndex(proxyURL[start:authEnd], "@")
 	if at < 0 {
 		return proxyURL
 	}
