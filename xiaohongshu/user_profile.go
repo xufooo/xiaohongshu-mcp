@@ -22,7 +22,7 @@ func NewUserProfileAction(page *hrod.Page) *UserProfileAction {
 // UserProfile 获取用户基本信息及帖子
 // 对齐上游 main：导航后等目标数据（user.userPageData）出现再提取。
 // main 用 MustWaitStable（等网络空闲 500ms），RPi 上用户主页持续请求不空闲会 60s 超时，
-// 改为等 userPageData 与 notes 就绪（页面 hydrate 完成的目标数据，语义等价且不依赖网络空闲）。
+// 改为等 userPageData 就绪（notes 在 extract 中快速判定，不依赖网络空闲）。
 func (u *UserProfileAction) UserProfile(ctx context.Context, userID, xsecToken string) (*UserProfileResponse, error) {
 	page := u.page.Context(ctx).Timeout(60 * time.Second)
 
@@ -35,8 +35,9 @@ func (u *UserProfileAction) UserProfile(ctx context.Context, userID, xsecToken s
 		const unwrap = (o) =>
 			o && o.value !== undefined ? o.value :
 			o && o._value !== undefined ? o._value : o;
-		// 等页面非 loading（JS 引擎空闲）再提取，否则 Eval 会排队 60s 超时。
-		return document.readyState !== "loading" && !!(u && unwrap(u.userPageData) && unwrap(u.notes));
+		// 等页面非 loading 且 userPageData 就绪即可（对齐 main：不等 notes，
+		// notes 由 extract 单独判定，未就绪快速报错而非卡 60s）。
+		return document.readyState !== "loading" && !!(u && unwrap(u.userPageData));
 	}`)); err != nil {
 		return nil, fmt.Errorf("wait for profile state failed: %w", err)
 	}
