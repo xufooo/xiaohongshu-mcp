@@ -56,6 +56,10 @@ func TestMaskProxyCredentials(t *testing.T) {
 		{"仅用户名", "http://user123@proxy.example.com:8080", "http://***@proxy.example.com:8080"},
 		{"用户名+密码", "http://user123:pass456@proxy.example.com:8080", "http://***:***@proxy.example.com:8080"},
 		{"userinfo 转义 @", "http://user%40x:p%40ss@proxy.example.com:8080", "http://***:***@proxy.example.com:8080"},
+		{"scheme-relative 带认证", "//user123:pass456@proxy.example.com:8080", "//***:***@proxy.example.com:8080"},
+		{"scheme-relative 仅用户名", "//user123@proxy.example.com:8080", "//***@proxy.example.com:8080"},
+		{"路径含 @ 不干扰边界", "http://user123:pass456@proxy.example.com:8080/path@x", "http://***:***@proxy.example.com:8080/path@x"},
+		{"无 scheme 带 userinfo fail-closed", "user123:pass456@proxy.example.com:8080", "[invalid-proxy]"},
 		{"畸形 URL", "http://[bad url", "[invalid-proxy]"},
 	}
 	for _, tc := range cases {

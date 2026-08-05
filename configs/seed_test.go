@@ -1,9 +1,12 @@
 package configs
 
 import (
+	"bytes"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/sirupsen/logrus"
 	"github.com/xpzouying/xiaohongshu-mcp/cookies"
 )
 
@@ -59,5 +62,25 @@ func TestResolveFingerprintSeedGeneratesAndSaves(t *testing.T) {
 	// 再次解析应复用已保存的 seed，不重新生成
 	if again := ResolveFingerprintSeed(c); again != seed {
 		t.Fatalf("重启后 seed 应保持不变: got %d, want %d", again, seed)
+	}
+}
+// TestResolveFingerprintSeedInvalidEnvNoLeak 非法 XHS_FP_SEED 不输出原值到日志。
+func TestResolveFingerprintSeedInvalidEnvNoLeak(t *testing.T) {
+	raw := "secret-invalid-seed-value"
+	t.Setenv("XHS_FP_SEED", raw)
+	c := testCookier(t)
+
+	var buf bytes.Buffer
+	oldOut := logrus.StandardLogger().Out
+	logrus.SetOutput(&buf)
+	defer logrus.SetOutput(oldOut)
+
+	_ = ResolveFingerprintSeed(c)
+
+	if strings.Contains(buf.String(), raw) {
+		t.Fatalf("日志泄露 XHS_FP_SEED 原值: %q", buf.String())
+	}
+	if !strings.Contains(buf.String(), "已忽略") {
+		t.Fatalf("应记录忽略提示: %q", buf.String())
 	}
 }

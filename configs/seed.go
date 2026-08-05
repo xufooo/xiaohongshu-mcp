@@ -20,7 +20,7 @@ func ResolveFingerprintSeed(cookier cookies.Cookier) int {
 		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
 			return n
 		}
-		logrus.Warnf("XHS_FP_SEED 非法，忽略: %q", raw)
+		logrus.Warn("XHS_FP_SEED 非法，已忽略")
 	}
 	if seed := cookier.LoadSeed(); seed > 0 {
 		return seed

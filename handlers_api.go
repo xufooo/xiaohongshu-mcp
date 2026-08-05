@@ -92,6 +92,7 @@ func (s *AppServer) checkRateLimit(c *gin.Context, action ratelimit.Action) (can
 	if err != nil {
 		logrus.Errorf("rate limiter check error: %v", err)
 		c.Set("rate_limit", &info)
+		respondError(c, http.StatusInternalServerError, "RATE_LIMIT_CHECK_FAILED", "限流检查失败", err)
 		return false
 	}
 
@@ -124,11 +125,16 @@ type checkRateLimitResult struct {
 
 // checkRateLimitInternal 通用速率限制检查（供 MCP handler 使用）。
 func (s *AppServer) checkRateLimitInternal(ctx context.Context, action ratelimit.Action) checkRateLimitResult {
-	if s.rateLimiter == nil {
+	return checkRateLimitWithLimiter(ctx, s.rateLimiter, action)
+}
+
+// checkRateLimitWithLimiter 包级限流检查（MCP wrapper 与 handler 复用）。
+func checkRateLimitWithLimiter(ctx context.Context, limiter *ratelimit.Limiter, action ratelimit.Action) checkRateLimitResult {
+	if limiter == nil {
 		return checkRateLimitResult{CanProceed: true}
 	}
 
-	info, wait, canProceed, err := s.rateLimiter.ReserveAction(ctx, action)
+	info, wait, canProceed, err := limiter.ReserveAction(ctx, action)
 	if err != nil {
 		logrus.Errorf("rate limiter check error: %v", err)
 		return checkRateLimitResult{CanProceed: false, Info: info}
@@ -147,7 +153,7 @@ func (s *AppServer) checkRateLimitInternal(ctx context.Context, action ratelimit
 		}
 	}
 
-	logrus.Infof("[ratelimit] MCP - %s", s.rateLimiter.String())
+	logrus.Infof("[ratelimit] MCP - %s", limiter.String())
 	return checkRateLimitResult{CanProceed: true, Info: info}
 }
 
@@ -218,6 +224,10 @@ func (s *AppServer) publishHandler(c *gin.Context) {
 	if s.requireHTTPWriteConfirmation(c, "api_publish_content", key, summary, req.ConfirmToken) {
 		return
 	}
+
+	if !s.checkRateLimit(c, ratelimit.ActionPublish) {
+		return
+	}
 	// 执行发布
 	result, err := s.xiaohongshuService.PublishContent(c.Request.Context(), &req)
 	if err != nil {
@@ -242,6 +252,9 @@ func (s *AppServer) publishVideoHandler(c *gin.Context) {
 	if s.requireHTTPWriteConfirmation(c, "api_publish_video", key, summary, req.ConfirmToken) {
 		return
 	}
+	if !s.checkRateLimit(c, ratelimit.ActionPublish) {
+		return
+	}
 	// 执行视频发布
 	result, err := s.xiaohongshuService.PublishVideo(c.Request.Context(), &req)
 	if err != nil {
@@ -255,6 +268,10 @@ func (s *AppServer) publishVideoHandler(c *gin.Context) {
 
 // listFeedsHandler 获取Feeds列表
 func (s *AppServer) listFeedsHandler(c *gin.Context) {
+
+	if !s.checkRateLimit(c, ratelimit.ActionBrowse) {
+		return
+	}
 	// 获取 Feeds 列表
 	result, err := s.xiaohongshuService.ListFeeds(c.Request.Context())
 	if err != nil {
@@ -293,6 +310,10 @@ func (s *AppServer) searchFeedsHandler(c *gin.Context) {
 		return
 	}
 
+	if !s.checkRateLimit(c, ratelimit.ActionSearch) {
+		return
+	}
+
 	// 搜索 Feeds
 	result, err := s.xiaohongshuService.SearchFeeds(c.Request.Context(), keyword, filters)
 	if err != nil {
@@ -314,6 +335,9 @@ func (s *AppServer) getFeedDetailHandler(c *gin.Context) {
 		return
 	}
 
+	if !s.checkRateLimit(c, ratelimit.ActionOpenNote) {
+		return
+	}
 	var result *FeedDetailResponse
 	var err error
 
@@ -350,6 +374,9 @@ func (s *AppServer) userProfileHandler(c *gin.Context) {
 		return
 	}
 
+	if !s.checkRateLimit(c, ratelimit.ActionOpenNote) {
+		return
+	}
 	// 获取用户信息
 	result, err := s.xiaohongshuService.UserProfile(c.Request.Context(), req.UserID, req.XsecToken)
 	if err != nil {
@@ -375,6 +402,10 @@ func (s *AppServer) postCommentHandler(c *gin.Context) {
 	if s.requireHTTPWriteConfirmation(c, "api_post_comment", key, summary, req.ConfirmToken) {
 		return
 	}
+
+	if !s.checkRateLimit(c, ratelimit.ActionComment) {
+		return
+	}
 	// 发表评论
 	result, err := s.xiaohongshuService.PostCommentToFeed(c.Request.Context(), req.FeedID, req.XsecToken, req.Content)
 	if err != nil {
@@ -398,6 +429,9 @@ func (s *AppServer) replyCommentHandler(c *gin.Context) {
 	key := writeConfirmationKey("api_reply_comment", req.FeedID, req.XsecToken, req.CommentID, req.UserID, req.Content)
 	summary := fmt.Sprintf("回复评论: feed_id=%s comment_id=%s user_id=%s content=%q", req.FeedID, req.CommentID, req.UserID, compactWriteSummary(req.Content))
 	if s.requireHTTPWriteConfirmation(c, "api_reply_comment", key, summary, req.ConfirmToken) {
+		return
+	}
+	if !s.checkRateLimit(c, ratelimit.ActionReply) {
 		return
 	}
 	result, err := s.xiaohongshuService.ReplyCommentToFeed(c.Request.Context(), req.FeedID, req.XsecToken, req.CommentID, req.UserID, req.Content)
