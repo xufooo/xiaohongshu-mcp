@@ -639,6 +639,7 @@ func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, xsecToken strin
 		return nil, err
 	}
 	content := snapshot.Note
+	mergeOpenedNoteUserFromSearchResult(&content, feed)
 	comments := snapshot.Comments
 
 	s.mu.Lock()
@@ -671,6 +672,19 @@ func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, xsecToken strin
 		Comments:          comments,
 		Media:             SessionMediaReadStatus{Implemented: false, Message: "图片和视频阅读功能尚未实现，后续由 get_note_detail 支持"},
 	}, nil
+}
+
+func mergeOpenedNoteUserFromSearchResult(content *OpenedNoteContent, feed Feed) {
+	if content == nil {
+		return
+	}
+	searchUser := feed.NoteCard.User
+	if content.User.UserID == "" {
+		content.User.UserID = searchUser.UserID
+	}
+	if content.User.XsecToken == "" {
+		content.User.XsecToken = searchUser.XsecToken
+	}
 }
 
 func (s *BrowseSession) Detail(ctx context.Context, _ bool, _ int) (*SessionDetailResponse, error) {

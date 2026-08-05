@@ -27,8 +27,16 @@ func (u *UserProfileAction) UserProfile(ctx context.Context, userID, xsecToken s
 	page := u.page.Context(ctx).Timeout(60 * time.Second)
 
 	searchURL := makeUserProfileURL(userID, xsecToken)
-	if err := page.Navigate(searchURL); err != nil {
-		return nil, fmt.Errorf("navigate to user profile failed: %w", err)
+	if _, err := page.Eval(`(url) => {
+		const a = document.createElement("a");
+		a.href = url;
+		a.target = "_self";
+		a.style.display = "none";
+		(document.body || document.documentElement).appendChild(a);
+		a.click();
+		return true;
+	}`, searchURL); err != nil {
+		return nil, fmt.Errorf("click user profile link failed: %w", err)
 	}
 	if err := page.Wait(rod.Eval(`() => {
 		const u = window.__INITIAL_STATE__?.user;
