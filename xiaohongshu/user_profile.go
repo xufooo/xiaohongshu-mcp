@@ -49,40 +49,57 @@ func (u *UserProfileAction) extractUserProfileData(page *hrod.Page) (*UserProfil
 		return nil, fmt.Errorf("wait for profile state failed: %w", err)
 	}
 
-	raw, err := page.Eval(`() => {
+	// 分两次小 Eval 提取，避免一次全量 stringify 大对象回传（RPi 上会 60s 超时）。
+	// 保持 envelope 结构不变，Go 侧拼接后走原有 parseUserProfileState。
+	userDataObj, err := page.Eval(`() => {
 		const s = window.__INITIAL_STATE__;
 		if (!s || !s.user) return "";
 		const ud = s.user.userPageData;
-		const notes = s.user.notes;
-		const at = s.user.activeTab;
-		if (!ud) return "NO_USERPAGEDATA";
-		if (!notes) return "NO_NOTES";
-		// Vue ref 的 deps/sub 含循环引用，先按 value → _value → 原对象解包成纯数据再序列化。
-		const unwrap = (o) =>
-			o && o.value !== undefined ? o.value :
-			o && o._value !== undefined ? o._value : o;
-		return JSON.stringify({
-			userPageData: unwrap(ud),
-			notes: unwrap(notes),
-			activeTab: unwrap(at)
-		});
+		const unwrap = (o) => o && o.value !== undefined ? o.value : o && o._value !== undefined ? o._value : o;
+		const data = unwrap(ud);
+		return data ? JSON.stringify(data) : "";
 	}`)
 	if err != nil {
-		return nil, fmt.Errorf("extract profile state failed: %w", err)
+		return nil, fmt.Errorf("extract userPageData failed: %w", err)
 	}
-	rawStr := ""
-	if raw != nil {
-		rawStr = raw.Value.Str()
+	userDataResult := ""
+	if userDataObj != nil {
+		userDataResult = userDataObj.Value.Str()
 	}
-	switch rawStr {
-	case "":
-		return nil, fmt.Errorf("__INITIAL_STATE__.user not found")
-	case "NO_USERPAGEDATA":
+	if userDataResult == "" {
 		return nil, fmt.Errorf("user.userPageData.value not found in __INITIAL_STATE__")
-	case "NO_NOTES":
+	}
+
+	notesObj, err := page.Eval(`() => {
+		const s = window.__INITIAL_STATE__;
+		if (!s || !s.user) return "";
+		const unwrap = (o) => o && o.value !== undefined ? o.value : o && o._value !== undefined ? o._value : o;
+		const notes = unwrap(s.user.notes);
+		if (!notes) return "";
+		return JSON.stringify({ notes: notes, activeTab: unwrap(s.user.activeTab) || {} });
+	}`)
+	if err != nil {
+		return nil, fmt.Errorf("extract user notes failed: %w", err)
+	}
+	notesResult := ""
+	if notesObj != nil {
+		notesResult = notesObj.Value.Str()
+	}
+	if notesResult == "" {
 		return nil, fmt.Errorf("user.notes.value not found in __INITIAL_STATE__")
 	}
-	return parseUserProfileState(rawStr)
+
+	var notesPart struct {
+		Notes      json.RawMessage `json:"notes"`
+		ActiveTab  json.RawMessage `json:"activeTab"`
+	}
+	if err := json.Unmarshal([]byte(notesResult), &notesPart); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal notes part: %w", err)
+	}
+	combined := fmt.Sprintf(`{"userPageData":%s,"notes":%s,"activeTab":%s}`,
+		userDataResult, notesPart.Notes, notesPart.ActiveTab)
+
+	return parseUserProfileState(combined)
 }
 
 // userProfileStateSnapshot 一次 Eval 提取的个人主页状态 envelope。
