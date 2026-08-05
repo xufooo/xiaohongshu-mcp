@@ -1329,6 +1329,9 @@ func fillMissingFeedFields(dst *Feed, src Feed) {
 	if dst.NoteCard.User.Avatar == "" {
 		dst.NoteCard.User.Avatar = src.NoteCard.User.Avatar
 	}
+	if dst.NoteCard.User.XsecToken == "" {
+		dst.NoteCard.User.XsecToken = src.NoteCard.User.XsecToken
+	}
 	if dst.NoteCard.InteractInfo.LikedCount == "" {
 		dst.NoteCard.InteractInfo.LikedCount = src.NoteCard.InteractInfo.LikedCount
 	}

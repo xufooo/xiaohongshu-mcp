@@ -20,14 +20,17 @@ func NewUserProfileAction(page *hrod.Page) *UserProfileAction {
 }
 
 // UserProfile 获取用户基本信息及帖子
-// 对齐上游 main：导航后只等 __INITIAL_STATE__ 出现即可提取，不做 profile probe 轮询
-// （probe 在用户主页不稳定，曾导致 60s 超时并清理浏览器）。
+// 对齐上游 main：导航后等页面稳定（MustWaitStable）+ 等 __INITIAL_STATE__ 出现再提取。
+// （profile probe 轮询在用户主页不稳定，曾导致 60s 超时并清理浏览器，已移除。）
 func (u *UserProfileAction) UserProfile(ctx context.Context, userID, xsecToken string) (*UserProfileResponse, error) {
 	page := u.page.Context(ctx).Timeout(60 * time.Second)
 
 	searchURL := makeUserProfileURL(userID, xsecToken)
 	if err := page.Navigate(searchURL); err != nil {
 		return nil, fmt.Errorf("navigate to user profile failed: %w", err)
+	}
+	if err := page.WaitStable(500 * time.Millisecond); err != nil {
+		return nil, fmt.Errorf("wait for profile stable failed: %w", err)
 	}
 	if err := page.Wait(rod.Eval(`() => window.__INITIAL_STATE__ !== undefined`)); err != nil {
 		return nil, fmt.Errorf("wait for profile state failed: %w", err)
