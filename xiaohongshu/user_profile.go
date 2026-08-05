@@ -20,8 +20,9 @@ func NewUserProfileAction(page *hrod.Page) *UserProfileAction {
 }
 
 // UserProfile 获取用户基本信息及帖子
-// 对齐上游 main：导航后等页面稳定（MustWaitStable）+ 等 __INITIAL_STATE__ 出现再提取。
-// （profile probe 轮询在用户主页不稳定，曾导致 60s 超时并清理浏览器，已移除。）
+// 对齐上游 main：导航后等目标数据（user.userPageData）出现再提取。
+// main 用 MustWaitStable（等网络空闲 500ms），RPi 上用户主页持续请求不空闲会 60s 超时，
+// 改为等 userPageData 与 notes 就绪（页面 hydrate 完成的目标数据，语义等价且不依赖网络空闲）。
 func (u *UserProfileAction) UserProfile(ctx context.Context, userID, xsecToken string) (*UserProfileResponse, error) {
 	page := u.page.Context(ctx).Timeout(60 * time.Second)
 
@@ -29,10 +30,13 @@ func (u *UserProfileAction) UserProfile(ctx context.Context, userID, xsecToken s
 	if err := page.Navigate(searchURL); err != nil {
 		return nil, fmt.Errorf("navigate to user profile failed: %w", err)
 	}
-	if err := page.WaitStable(500 * time.Millisecond); err != nil {
-		return nil, fmt.Errorf("wait for profile stable failed: %w", err)
-	}
-	if err := page.Wait(rod.Eval(`() => window.__INITIAL_STATE__ !== undefined`)); err != nil {
+	if err := page.Wait(rod.Eval(`() => {
+		const u = window.__INITIAL_STATE__?.user;
+		const unwrap = (o) =>
+			o && o.value !== undefined ? o.value :
+			o && o._value !== undefined ? o._value : o;
+		return !!(u && unwrap(u.userPageData) && unwrap(u.notes));
+	}`)); err != nil {
 		return nil, fmt.Errorf("wait for profile state failed: %w", err)
 	}
 
