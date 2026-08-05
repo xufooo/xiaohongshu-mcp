@@ -48,10 +48,14 @@ func (u *UserProfileAction) extractUserProfileData(page *hrod.Page) (*UserProfil
 		const at = s.user.activeTab;
 		if (!ud) return "NO_USERPAGEDATA";
 		if (!notes) return "NO_NOTES";
+		// Vue ref 的 deps/sub 含循环引用，先按 value → _value → 原对象解包成纯数据再序列化。
+		const unwrap = (o) =>
+			o && o.value !== undefined ? o.value :
+			o && o._value !== undefined ? o._value : o;
 		return JSON.stringify({
-			userPageData: ud,
-			notes: notes,
-			activeTab: at
+			userPageData: unwrap(ud),
+			notes: unwrap(notes),
+			activeTab: unwrap(at)
 		});
 	}`)
 	if err != nil {
