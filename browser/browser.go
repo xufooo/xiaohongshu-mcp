@@ -103,6 +103,10 @@ func maskProxyCredentials(proxyURL string) string {
 		return "[invalid-proxy]"
 	}
 	if u.User == nil {
+		// 无 scheme 前缀的 user:pass@host 会被 url.Parse 误判为 scheme，opaque 段含 @ 时无法安全确认。
+		if strings.Contains(u.Opaque, "@") {
+			return "[invalid-proxy]"
+		}
 		return proxyURL
 	}
 	masked := "***"
