@@ -274,11 +274,34 @@ func decodeNotificationCount(raw string) (*NotificationCount, error) {
 	}, nil
 }
 
+// findVisibleNotificationEntry 选可见的通知入口（排除 AI 侧栏隐藏副本）。
+// 小红书页面存在 side-bar-ai 内的隐藏 a[href="/notification"]（0x0 无内容区域），
+// 直接 Element 会命中隐藏副本导致点击失败。
+func findVisibleNotificationEntry(page *hrod.Page) (*hrod.Element, error) {
+	elems, err := page.Elements(SelectorNotificationEntry)
+	if err != nil {
+		return nil, err
+	}
+	for _, el := range elems {
+		visible, err := el.Eval(`() => {
+			const r = this.getBoundingClientRect();
+			return r.width > 0 && r.height > 0 && this.getClientRects().length > 0;
+		}`)
+		if err != nil || visible == nil {
+			continue
+		}
+		if visible.Value.Bool() {
+			return el, nil
+		}
+	}
+	return nil, fmt.Errorf("通知入口均不可见")
+}
+
 // enterNotificationPage 只通过侧栏通知入口真实点击进入通知页；禁止直接导航 /notification。
 // 点击前拟人停留，使用真实 Click；点击后等待 XHSReadyNotification，超时上限 15 秒。
 // 当前是详情弹层且入口不可交互时 fail-closed，提示先 go_back。
 func enterNotificationPage(ctx context.Context, page *hrod.Page) error {
-	entry, err := page.Element(SelectorNotificationEntry)
+	entry, err := findVisibleNotificationEntry(page)
 	if err != nil {
 		return fmt.Errorf("未找到通知入口（可能在详情弹层中，请先 go_back）: %w", err)
 	}

@@ -678,12 +678,20 @@ func scrollNoteScroller(page *hrod.Page, delta float64) error {
 	return err
 }
 
-// findCommentScroller 按唯一优先级查找评论滚动容器：.note-scroller，其次 .comments-container。
-// 找不到即返回错误，不回退 DOM scrollBy/scrollTo。
+// findCommentScroller 按可滚动性查找评论滚动容器：.note-scroller，其次 .comments-container，
+// 最后 .note-container（AI 搜索模式详情页评论区随 note-container 滚动）。
+// 只选真正可滚动的容器（scrollHeight>clientHeight 且 overflowY=scroll/auto），找不到即错误，不回退 DOM scrollBy。
 func findCommentScroller(page *hrod.Page) (*hrod.Element, error) {
 	result, err := page.Eval(`() => {
-		if (document.querySelector(".note-scroller")) return ".note-scroller";
-		if (document.querySelector(".comments-container")) return ".comments-container";
+		const candidates = [".note-scroller", ".comments-container", ".note-container"];
+		for (const selector of candidates) {
+			const el = document.querySelector(selector);
+			if (!el) continue;
+			const style = getComputedStyle(el);
+			if (el.scrollHeight > el.clientHeight && (style.overflowY === "auto" || style.overflowY === "scroll")) {
+				return selector;
+			}
+		}
 		return "";
 	}`)
 	if err != nil {
@@ -694,7 +702,7 @@ func findCommentScroller(page *hrod.Page) (*hrod.Element, error) {
 		selector = result.Value.Str()
 	}
 	if selector == "" {
-		return nil, fmt.Errorf("找不到评论滚动容器 (.note-scroller/.comments-container)")
+		return nil, fmt.Errorf("找不到评论滚动容器 (.note-scroller/.comments-container/.note-container)")
 	}
 	el, err := page.Element(selector)
 	if err != nil || el == nil {
