@@ -1416,6 +1416,29 @@ func (s *XiaohongshuService) SessionDetail(ctx context.Context, id string, loadC
 	return detail, nil
 }
 
+// inheritCommentScope 从已保存的 cursor/replay entry 继承首次请求的 scope 配置，
+// 供续页时保持展开参数一致（避免 cursor scope mismatch）。
+func (s *XiaohongshuService) inheritCommentScope(cursorID string) (replayScope, bool) {
+	cursorID = strings.TrimSpace(cursorID)
+	if cursorID == "" {
+		return replayScope{}, false
+	}
+	if value, ok := s.commentCursors.Load(cursorID); ok {
+		if entry, ok := value.(*commentCursorEntry); ok && entry != nil && entry.Cursor != nil {
+			return entry.Scope, true
+		}
+	}
+	if value, ok := s.commentReplays.Load(cursorID); ok {
+		if entry, ok := value.(*commentReplayEntry); ok && entry != nil {
+			if time.Since(entry.CreatedAt) <= 2*time.Minute {
+				return entry.Scope, true
+			}
+			s.commentReplays.CompareAndDelete(cursorID, entry)
+		}
+	}
+	return replayScope{}, false
+}
+
 func (s *XiaohongshuService) SessionDetailBatch(ctx context.Context, id, cursorID string, maxItems int, config xiaohongshu.CommentLoadConfig) (*FeedDetailResponse, error) {
 	session, err := s.browseSessions.Get(id)
 	if err != nil {
@@ -1425,6 +1448,15 @@ func (s *XiaohongshuService) SessionDetailBatch(ctx context.Context, id, cursorI
 
 	maxItems = normalizeMaxItems(maxItems)
 	config.ScrollSpeed = normalizeScopeSpeed(config.ScrollSpeed)
+
+	// 续页时继承首次请求的展开配置（max_items/click_more_replies/reply_limit/scroll_speed），
+	// 避免本次请求参数与已保存 cursor scope 不一致而触发 scope mismatch。
+	if inherited, ok := s.inheritCommentScope(cursorID); ok {
+		maxItems = inherited.MaxItems
+		config.ClickMoreReplies = inherited.ClickMoreReplies
+		config.MaxRepliesThreshold = inherited.MaxRepliesThreshold
+		config.ScrollSpeed = inherited.ScrollSpeed
+	}
 
 	scope := replayScope{
 		EntryType:           "session",
