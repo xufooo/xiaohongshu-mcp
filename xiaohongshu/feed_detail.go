@@ -804,9 +804,34 @@ func humanScrollCommentScroller(page *hrod.Page, delta float64) (bool, error) {
 	return after > before, nil
 }
 
-// scrollNoteScrollerMoved 采用物理滚轮实现，返回是否发生滚动（moved）。
+// scrollNoteScrollerMoved 滚动评论容器，返回是否发生滚动（moved）。
 func scrollNoteScrollerMoved(page *hrod.Page, delta float64) (bool, error) {
-	return humanScrollCommentScroller(page, delta)
+	el, err := findCommentScroller(page)
+	if err != nil {
+		return false, err
+	}
+	before, _, _, err := readCommentScrollerPosition(el)
+	if err != nil {
+		return false, err
+	}
+	result, err := el.Eval(`(delta) => {
+		if (!this.isConnected) return "";
+		this.scrollBy(0, delta);
+		return JSON.stringify({ top: this.scrollTop });
+	}`, delta)
+	if err != nil {
+		return false, err
+	}
+	if result == nil || strings.TrimSpace(result.Value.Str()) == "" {
+		return false, fmt.Errorf("评论滚动容器不存在或不可滚动")
+	}
+	var pos struct {
+		Top float64 `json:"top"`
+	}
+	if err := json.Unmarshal([]byte(result.Value.Str()), &pos); err != nil {
+		return false, fmt.Errorf("解析评论滚动位置失败: %w", err)
+	}
+	return pos.Top > before, nil
 }
 
 func commentProgressScript() string {
