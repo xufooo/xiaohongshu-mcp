@@ -901,7 +901,7 @@ func (s *BrowseSession) detail(ctx context.Context, expectedFeedID string, loadC
 		var loadErr error
 		// 记录实际加载时长；滚动确认用物理滚轮后的容器位置变化，加载失败不累计。
 		loadStart := time.Now()
-		beforeScrollTop, beforeErr := commentScrollerScrollTop(commentPage)
+		beforeScrollTop, beforeErr := commentScrollerTop(commentPage)
 		if useConfig {
 			loadErr = loadSessionCommentsForDetailWithConfig(config, ops)
 		} else {
@@ -915,7 +915,7 @@ func (s *BrowseSession) detail(ctx context.Context, expectedFeedID string, loadC
 		} else if s.state != nil {
 			// 前后两次都成功才确认滚动；任一读取失败均按未滚动处理，不累计。
 			scrolled := false
-			afterScrollTop, afterErr := commentScrollerScrollTop(commentPage)
+			afterScrollTop, afterErr := commentScrollerTop(commentPage)
 			if beforeErr == nil && afterErr == nil && afterScrollTop > beforeScrollTop {
 				scrolled = true
 			}

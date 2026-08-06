@@ -94,11 +94,7 @@ func WaitForXHSReady(page *hrod.Page, opts XHSReadyOptions) error {
 		}
 
 		if !time.Now().Before(deadline) {
-			// 超时后额外执行一次 full probe，用于 URL fallback 与最终诊断。
-			if full, probeErr := probeXHSReadyFull(page, opts.FeedID); probeErr == nil {
-				last = full
-				lastErr = nil
-			}
+			// 超时直接用最后一次 scoped probe 结果完成 URL fallback 与诊断（对齐 pre，不换 full probe）。
 			if lastErr == nil && isXHSReady(last, opts.Kind, opts.FeedID, true) {
 				probeWatchdogSelectors(page, opts)
 				return nil
