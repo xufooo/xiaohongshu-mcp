@@ -7,9 +7,10 @@ import (
 	"strings"
 	"time"
 
-	hrod "github.com/xpzouying/xiaohongshu-mcp/humanize/rod"
 	"github.com/go-rod/rod/lib/proto"
 	"github.com/sirupsen/logrus"
+	"github.com/xpzouying/xiaohongshu-mcp/humanize"
+	hrod "github.com/xpzouying/xiaohongshu-mcp/humanize/rod"
 )
 
 // CommentFeedAction 表示 Feed 评论动作
@@ -80,6 +81,7 @@ func (f *CommentFeedAction) PostComment(ctx context.Context, feedID, xsecToken, 
 		logrus.Warnf("Failed to focus comment editor: %v", err)
 		return fmt.Errorf("无法聚焦评论输入框: %w", err)
 	}
+	humanize.Delay(ctx, humanize.AfterClick)
 
 	elem, err := page.Element(SelectorCommentBox)
 	if err != nil {
@@ -92,9 +94,7 @@ func (f *CommentFeedAction) PostComment(ctx context.Context, feedID, xsecToken, 
 		return fmt.Errorf("无法输入评论内容: %w", err)
 	}
 
-	if err := sleepForCommentStep(page, 500*time.Millisecond, 1500*time.Millisecond); err != nil {
-		return err
-	}
+	humanize.Delay(ctx, humanize.AfterType)
 	entered, err := elem.Text()
 	if err != nil {
 		return fmt.Errorf("无法确认评论内容是否写入: %w", err)
@@ -117,6 +117,7 @@ func (f *CommentFeedAction) PostComment(ctx context.Context, feedID, xsecToken, 
 		logrus.Warnf("Failed to click submit button: %v", err)
 		return fmt.Errorf("无法点击提交按钮: %w", err)
 	}
+	humanize.Delay(ctx, humanize.AfterClick)
 
 	if err := verifyCommentSubmission(page, content, initialMatchCount); err != nil {
 		return fmt.Errorf("评论提交未成功: %w", err)
@@ -192,9 +193,7 @@ func (f *CommentFeedAction) ReplyToComment(ctx context.Context, feedID, xsecToke
 	if err := commentEl.ScrollIntoView(); err != nil {
 		return fmt.Errorf("滚动到评论位置失败: %w", err)
 	}
-	if err := sleepForCommentStep(page, 500*time.Millisecond, 1500*time.Millisecond); err != nil {
-		return err
-	}
+	humanize.Delay(ctx, humanize.BetweenScroll)
 
 	if f.state != nil {
 		// 目标查找和最终 ScrollIntoView 完成后，将实际 elapsed/scrolled 累计到 ActionState。
@@ -217,10 +216,7 @@ func (f *CommentFeedAction) ReplyToComment(ctx context.Context, feedID, xsecToke
 	if err := replyBtn.Click(proto.InputMouseButtonLeft, 1); err != nil {
 		return fmt.Errorf("点击回复按钮失败: %w", err)
 	}
-
-	if err := sleepForCommentStep(page, 500*time.Millisecond, 1500*time.Millisecond); err != nil {
-		return err
-	}
+	humanize.Delay(ctx, humanize.AfterClick)
 
 	// 查找回复输入框
 	inputEl, err := page.Element("div.input-box div.content-edit p.content-input")
@@ -232,10 +228,7 @@ func (f *CommentFeedAction) ReplyToComment(ctx context.Context, feedID, xsecToke
 	if err := inputEl.Input(content); err != nil {
 		return fmt.Errorf("输入回复内容失败: %w", err)
 	}
-
-	if err := sleepForCommentStep(page, 500*time.Millisecond, 1500*time.Millisecond); err != nil {
-		return err
-	}
+	humanize.Delay(ctx, humanize.AfterType)
 	initialMatchCount, err := countCommentContent(page, content)
 	if err != nil {
 		return fmt.Errorf("提交前检查回复区失败: %w", err)
@@ -250,6 +243,7 @@ func (f *CommentFeedAction) ReplyToComment(ctx context.Context, feedID, xsecToke
 	if err := submitBtn.Click(proto.InputMouseButtonLeft, 1); err != nil {
 		return fmt.Errorf("点击提交按钮失败: %w", err)
 	}
+	humanize.Delay(ctx, humanize.AfterClick)
 
 	if err := verifyCommentSubmission(page, content, initialMatchCount); err != nil {
 		return fmt.Errorf("回复提交未成功: %w", err)
@@ -294,9 +288,7 @@ func (f *CommentFeedAction) preparePage(ctx context.Context, feedID, xsecToken, 
 	if err := WaitForXHSReady(page, XHSReadyOptions{Kind: kind, FeedID: feedID}); err != nil {
 		return nil, err
 	}
-	if err := sleepForCommentStep(page, 1500*time.Millisecond, 3*time.Second); err != nil {
-		return nil, err
-	}
+	humanize.Delay(ctx, humanize.AfterNavigate)
 	return page, nil
 }
 

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/go-rod/rod/lib/proto"
+	"github.com/xpzouying/xiaohongshu-mcp/humanize"
 	hrod "github.com/xpzouying/xiaohongshu-mcp/humanize/rod"
 )
 
@@ -44,9 +45,8 @@ func likeNotificationOnPage(ctx context.Context, page *hrod.Page, target notific
 	if err != nil {
 		return nil, fmt.Errorf("通知行点赞按钮缺失: %w", err)
 	}
-	if err := page.SleepRandom(800*time.Millisecond, 1500*time.Millisecond); err != nil {
-		return nil, err
-	}
+	humanize.Delay(ctx, humanize.Reading)
+	humanize.Delay(ctx, humanize.BeforeClick)
 	if err := likeBtn.Click(proto.InputMouseButtonLeft, 1); err != nil {
 		return nil, fmt.Errorf("点击点赞按钮失败: %w", err)
 	}
@@ -65,6 +65,7 @@ func likeNotificationOnPage(ctx context.Context, page *hrod.Page, target notific
 			continue
 		}
 		if got == want {
+			humanize.Delay(ctx, humanize.AfterInteract)
 			return &NotificationLikeResult{Ref: target.Ref, Liked: want, Message: "操作成功"}, nil
 		}
 	}

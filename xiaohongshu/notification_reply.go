@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/go-rod/rod/lib/proto"
+	"github.com/xpzouying/xiaohongshu-mcp/humanize"
 	hrod "github.com/xpzouying/xiaohongshu-mcp/humanize/rod"
 )
 
@@ -38,12 +39,12 @@ func replyNotificationOnPage(ctx context.Context, page *hrod.Page, target notifi
 	if err != nil {
 		return nil, fmt.Errorf("通知行回复按钮缺失: %w", err)
 	}
-	if err := page.SleepRandom(800*time.Millisecond, 1500*time.Millisecond); err != nil {
-		return nil, err
-	}
+	humanize.Delay(ctx, humanize.Reading)
+	humanize.Delay(ctx, humanize.BeforeClick)
 	if err := replyBtn.Click(proto.InputMouseButtonLeft, 1); err != nil {
 		return nil, fmt.Errorf("点击回复按钮失败: %w", err)
 	}
+	humanize.Delay(ctx, humanize.AfterClick)
 
 	inputEl, err := waitNotificationReplyInput(ctx, page, row)
 	if err != nil {
@@ -52,12 +53,10 @@ func replyNotificationOnPage(ctx context.Context, page *hrod.Page, target notifi
 	if err := verifyNotificationReplyPlaceholder(inputEl, target.Item.From.Nickname); err != nil {
 		return nil, err
 	}
-	if err := page.SleepRandom(300*time.Millisecond, 600*time.Millisecond); err != nil {
-		return nil, err
-	}
 	if err := inputEl.Input(content); err != nil {
 		return nil, fmt.Errorf("输入回复内容失败: %w", err)
 	}
+	humanize.Delay(ctx, humanize.AfterType)
 	gotValue, err := notificationReplyInputValue(inputEl)
 	if err != nil {
 		return nil, err
@@ -70,15 +69,14 @@ func replyNotificationOnPage(ctx context.Context, page *hrod.Page, target notifi
 	if err != nil {
 		return nil, err
 	}
-	if err := page.SleepRandom(400*time.Millisecond, 800*time.Millisecond); err != nil {
-		return nil, err
-	}
+	humanize.Delay(ctx, humanize.BeforeSubmit)
 	if err := submitBtn.Click(proto.InputMouseButtonLeft, 1); err != nil {
 		return nil, fmt.Errorf("点击发送按钮失败: %w", err)
 	}
 	if err := waitNotificationReplyAccepted(ctx, page, row); err != nil {
 		return nil, err
 	}
+	humanize.Delay(ctx, humanize.AfterInteract)
 	return &NotificationReplyResult{Ref: target.Ref, CommentID: target.Item.CommentID, Sent: true, Message: "回复已发送"}, nil
 }
 

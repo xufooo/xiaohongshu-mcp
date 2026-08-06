@@ -14,6 +14,7 @@ import (
 	"github.com/go-rod/rod/lib/proto"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
+	"github.com/xpzouying/xiaohongshu-mcp/humanize"
 	hrod "github.com/xpzouying/xiaohongshu-mcp/humanize/rod"
 )
 
@@ -88,7 +89,7 @@ func (p *PublishAction) Publish(ctx context.Context, content PublishImageContent
 
 	logrus.Infof("发布内容: title=%s, images=%v, tags=%v, schedule=%v, original=%v, visibility=%s, products=%v", content.Title, len(content.ImagePaths), tags, content.ScheduleTime, content.IsOriginal, content.Visibility, content.Products)
 
-	if err := submitPublish(page, content.Title, content.Content, tags, content.ScheduleTime, content.IsOriginal, content.Visibility, content.Products); err != nil {
+	if err := submitPublish(ctx, page, content.Title, content.Content, tags, content.ScheduleTime, content.IsOriginal, content.Visibility, content.Products); err != nil {
 		return errors.Wrap(err, "小红书发布失败")
 	}
 
@@ -296,7 +297,7 @@ func waitForUploadComplete(page *hrod.Page, expectedCount int) error {
 	return errors.Errorf("第%d张图片上传超时(60s)，请检查网络连接和图片大小", expectedCount)
 }
 
-func submitPublish(page *hrod.Page, title, content string, tags []string, scheduleTime *time.Time, isOriginal bool, visibility string, products []string) error {
+func submitPublish(ctx context.Context, page *hrod.Page, title, content string, tags []string, scheduleTime *time.Time, isOriginal bool, visibility string, products []string) error {
 	titleElem, err := page.Element("div.d-input input")
 	if err != nil {
 		return errors.Wrap(err, "查找标题输入框失败")
@@ -304,6 +305,7 @@ func submitPublish(page *hrod.Page, title, content string, tags []string, schedu
 	if err := titleElem.Input(title); err != nil {
 		return errors.Wrap(err, "输入标题失败")
 	}
+	humanize.Delay(ctx, humanize.AfterType)
 
 	// 检查标题长度
 	if err := page.Sleep(500 * time.Millisecond); err != nil {
@@ -314,9 +316,7 @@ func submitPublish(page *hrod.Page, title, content string, tags []string, schedu
 	}
 	slog.Info("检查标题长度：通过")
 
-	if err := page.Sleep(time.Second); err != nil {
-		return err
-	}
+	humanize.Delay(ctx, humanize.AfterType)
 
 	contentElem, ok := getContentElement(page)
 	if !ok {
@@ -331,6 +331,7 @@ func submitPublish(page *hrod.Page, title, content string, tags []string, schedu
 	if err := inputTags(contentElem, tags); err != nil {
 		return err
 	}
+	humanize.Delay(ctx, humanize.AfterType)
 
 	if err := page.Sleep(time.Second); err != nil {
 		return err

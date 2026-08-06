@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/go-rod/rod/lib/proto"
+	"github.com/xpzouying/xiaohongshu-mcp/humanize"
 	hrod "github.com/xpzouying/xiaohongshu-mcp/humanize/rod"
 )
 
@@ -43,6 +44,7 @@ func (n *NavigateAction) ToProfilePage(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("获取个人页入口失败: %w", err)
 	}
+	humanize.Delay(ctx, humanize.BeforeClick)
 	if err := profileLink.Click(proto.InputMouseButtonLeft, 1); err != nil {
 		return fmt.Errorf("点击个人页入口失败: %w", err)
 	}

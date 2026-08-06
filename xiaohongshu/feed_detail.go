@@ -14,6 +14,7 @@ import (
 	"github.com/go-rod/rod/lib/proto"
 	"github.com/sirupsen/logrus"
 	"github.com/xpzouying/xiaohongshu-mcp/errors"
+	"github.com/xpzouying/xiaohongshu-mcp/humanize"
 	hrod "github.com/xpzouying/xiaohongshu-mcp/humanize/rod"
 )
 
@@ -93,9 +94,7 @@ func (f *FeedDetailAction) GetFeedDetailWithConfig(ctx context.Context, feedID, 
 	if err := opener.OpenFromCards(ctx, feedID, xsecToken, ""); err != nil {
 		return nil, fmt.Errorf("从卡片打开笔记失败，请重新搜索或滚动后重试: %w", err)
 	}
-	if err := sleepRandom(page, 1000, 1000); err != nil {
-		return nil, err
-	}
+	humanize.Delay(ctx, humanize.AfterNavigate)
 
 	if err := checkPageAccessible(page); err != nil {
 		return nil, err
@@ -166,9 +165,7 @@ func (f *FeedDetailAction) GetFeedDetailCommentsBatch(ctx context.Context, feedI
 	if err := opener.OpenFromCards(ctx, feedID, xsecToken, ""); err != nil {
 		return nil, nil, false, fmt.Errorf("从卡片打开笔记失败，请重新搜索或滚动后重试: %w", err)
 	}
-	if err := sleepRandom(page, 1000, 1000); err != nil {
-		return nil, nil, false, err
-	}
+	humanize.Delay(ctx, humanize.AfterNavigate)
 	if err := checkPageAccessible(page); err != nil {
 		return nil, nil, false, err
 	}
