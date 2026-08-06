@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/go-rod/rod/lib/proto"
+	"github.com/xpzouying/xiaohongshu-mcp/humanize"
 	hrod "github.com/xpzouying/xiaohongshu-mcp/humanize/rod"
 )
 
@@ -305,15 +306,14 @@ func enterNotificationPage(ctx context.Context, page *hrod.Page) error {
 	if err != nil {
 		return fmt.Errorf("未找到通知入口（可能在详情弹层中，请先 go_back）: %w", err)
 	}
-	if err := page.SleepRandom(800*time.Millisecond, 1500*time.Millisecond); err != nil {
-		return err
-	}
+	humanize.Delay(ctx, humanize.BeforeClick)
 	if err := entry.Click(proto.InputMouseButtonLeft, 1); err != nil {
 		return fmt.Errorf("点击通知入口失败（可能是详情弹层遮挡，请先 go_back）: %w", err)
 	}
 	if err := WaitForXHSReady(page, XHSReadyOptions{Kind: XHSReadyNotification, Timeout: 15 * time.Second}); err != nil {
 		return err
 	}
+	humanize.Delay(ctx, humanize.AfterNavigate)
 	return nil
 }
 
@@ -346,12 +346,11 @@ func switchNotificationTab(ctx context.Context, page *hrod.Page, tab Notificatio
 	if activeObj != nil && activeObj.Value.Bool() {
 		return nil
 	}
-	if err := page.SleepRandom(600*time.Millisecond, 1200*time.Millisecond); err != nil {
-		return err
-	}
+	humanize.Delay(ctx, humanize.BeforeClick)
 	if err := target.Click(proto.InputMouseButtonLeft, 1); err != nil {
 		return fmt.Errorf("点击 tab %q 失败: %w", label, err)
 	}
+	humanize.Delay(ctx, humanize.AfterClick)
 	return waitNotificationTabActive(ctx, page, tab)
 }
 

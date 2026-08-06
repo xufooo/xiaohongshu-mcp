@@ -7,6 +7,7 @@ import (
 
 	"github.com/go-rod/rod/lib/proto"
 	"github.com/sirupsen/logrus"
+	"github.com/xpzouying/xiaohongshu-mcp/humanize"
 	hrod "github.com/xpzouying/xiaohongshu-mcp/humanize/rod"
 )
 
@@ -75,9 +76,7 @@ func (a *interactAction) preparePage(ctx context.Context, actionType interactAct
 	if err := WaitForXHSReady(page, XHSReadyOptions{Kind: XHSReadyDetail, FeedID: feedID}); err != nil {
 		return nil, err
 	}
-	if err := page.SleepRandom(500*time.Millisecond, 1500*time.Millisecond); err != nil {
-		return nil, err
-	}
+	humanize.Delay(ctx, humanize.AfterNavigate)
 
 	return page, nil
 }
@@ -151,12 +150,12 @@ func (a *interactAction) performInteraction(ctx context.Context, spec interactAc
 		return nil
 	}
 
-	return a.toggleInteractionOnce(page, feedID, spec)
+	return a.toggleInteractionOnce(ctx, page, feedID, spec)
 }
 
 // toggleInteractionOnce 统一执行至多一次点击：点击 -> 拟人停留 -> 校验进入目标状态。
 // 状态未确认时返回 state_unknown，取消立即二次点击。
-func (a *interactAction) toggleInteractionOnce(page *hrod.Page, feedID string, spec interactActionSpec) error {
+func (a *interactAction) toggleInteractionOnce(ctx context.Context, page *hrod.Page, feedID string, spec interactActionSpec) error {
 	if err := a.performClick(page, spec.selector); err != nil {
 		return fmt.Errorf("%s点击按钮失败: %w", spec.actionType, err)
 	}
@@ -173,6 +172,7 @@ func (a *interactAction) toggleInteractionOnce(page *hrod.Page, feedID string, s
 		if a.state != nil {
 			_ = a.state.RecordInteraction(feedID, interactionValidationAction(spec.actionType))
 		}
+		humanize.Delay(ctx, humanize.AfterInteract)
 		return nil
 	}
 
