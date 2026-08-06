@@ -28,10 +28,6 @@ const (
 	initialCommentStateTimeout = 5 * time.Second
 )
 
-// showMoreButtonSelector 是"展开子评论"按钮的全局选择器，必须与 JS flatMap 选择器一致，
-// 保证 Eval 返回的 btnIndex 与 page.Elements 返回的顺序一一对应。
-const showMoreButtonSelector = ".parent-comment > .children-comments .show-more, .parent-comment > .reply-container .show-more"
-
 const (
 	feedDetailPageTimeout = 10 * time.Minute
 	commentLoadTimeout    = 9 * time.Minute
@@ -318,7 +314,7 @@ func loadCommentsByJS(page *hrod.Page, config CommentLoadConfig) error {
 		// 每5轮检查一次进度（非致命，超时继续）
 		if i%5 == 0 {
 			if config.ClickMoreReplies {
-				button, err := nextShowMoreButton(page, config.MaxRepliesThreshold, true)
+				button, err := nextShowMoreButton(page, config.MaxRepliesThreshold)
 				if err != nil {
 					logrus.Warnf("检查可见子评论展开按钮失败: %v", err)
 				} else if button != nil {
@@ -494,7 +490,7 @@ func LoadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 		}
 
 		if config.ClickMoreReplies {
-			button, err := nextShowMoreButton(page, config.MaxRepliesThreshold, false)
+			button, err := nextShowMoreButton(page, config.MaxRepliesThreshold)
 			if err != nil {
 				return partialOrError(fmt.Errorf("查询展开按钮失败: %w", err))
 			}
@@ -590,7 +586,7 @@ func LoadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 	idsGrew := len(batchCursor.ReturnedIDs) > inputBase
 
 	if config.ClickMoreReplies {
-		button, err := nextShowMoreButton(page, config.MaxRepliesThreshold, false)
+		button, err := nextShowMoreButton(page, config.MaxRepliesThreshold)
 		if err != nil {
 			return partialOrError(fmt.Errorf("查询展开按钮失败: %w", err))
 		}
@@ -889,7 +885,6 @@ type showMoreButtonSnapshot struct {
 	Y           float64 `json:"y"`
 	Count       int     `json:"count"`
 	ParentIndex int     `json:"parentIndex"`
-	ButtonIndex int     `json:"btnIndex"`
 }
 
 func clickMoreReplies(page *hrod.Page, maxRepliesThreshold int, remainingDeadline func() time.Duration) error {
@@ -901,7 +896,7 @@ func clickMoreReplies(page *hrod.Page, maxRepliesThreshold int, remainingDeadlin
 				break
 			}
 		}
-		button, err := nextShowMoreButton(page, maxRepliesThreshold, false)
+		button, err := nextShowMoreButton(page, maxRepliesThreshold)
 		if err != nil {
 			if isEvalTimeout(err) {
 				logrus.Warnf("检查子评论展开按钮超时，跳过本轮: %v", err)
@@ -934,44 +929,62 @@ func clickMoreReplies(page *hrod.Page, maxRepliesThreshold int, remainingDeadlin
 	return nil
 }
 
-// nextShowMoreButton 单次 Eval 返回"展开子评论"候选按钮的 btnIndex/parentIndex/文本/数量。
-// visibleOnly=true 时只匹配评论滚动容器可见区域内的按钮；否则只要求有尺寸。
-func nextShowMoreButton(page *hrod.Page, maxRepliesThreshold int, visibleOnly bool) (*showMoreButtonSnapshot, error) {
-	result, err := page.Timeout(2*time.Second).Eval(`(maxRepliesThreshold, visibleOnly) => {
+// nextShowMoreButton 单次 Eval 返回"展开子评论"候选按钮的坐标/父评论索引/文本/数量，
+// 并在 Eval 内将按钮滚动到评论区容器可见区域（pre 验证过的定位方式）。
+func nextShowMoreButton(page *hrod.Page, maxRepliesThreshold int) (*showMoreButtonSnapshot, error) {
+	result, err := page.Timeout(2*time.Second).Eval(`(maxRepliesThreshold) => {
 		const clean = (value) => (value || "").replace(/\s+/g, " ").trim();
-		const scroller = document.querySelector(".note-scroller");
-		const sRect = scroller?.getBoundingClientRect();
-		const visibleTop = sRect ? Math.max(0, sRect.top) : 0;
-		const visibleBottom = sRect ? Math.min(window.innerHeight, sRect.bottom) : window.innerHeight;
-		const all = Array.from(document.querySelectorAll(".parent-comment > .children-comments .show-more, .parent-comment > .reply-container .show-more"));
-		for (let btnIndex = 0; btnIndex < all.length; btnIndex++) {
-			const btn = all[btnIndex];
+		const candidates = [".note-scroller", ".comments-container", ".note-container"];
+		let scroller = null;
+		for (const selector of candidates) {
+			const el = document.querySelector(selector);
+			if (!el) continue;
+			const style = getComputedStyle(el);
+			if (el.scrollHeight > el.clientHeight && (style.overflowY === "auto" || style.overflowY === "scroll")) {
+				scroller = el;
+				break;
+			}
+		}
+		const parents = Array.from(document.querySelectorAll(".parent-comment"));
+		const buttons = parents
+			.flatMap((parent) => Array.from(parent.querySelectorAll(":scope > .children-comments .show-more, :scope > .reply-container .show-more")));
+		for (const btn of buttons) {
 			const text = clean(btn.innerText || btn.textContent);
 			if (!text) continue;
 			if (!text.includes("展开") || text.includes("收起")) continue;
 			const parent = btn.closest(".parent-comment");
-			const parentIndex = Array.from(document.querySelectorAll(".parent-comment")).indexOf(parent);
+			const parentIndex = parents.indexOf(parent);
 			if (parentIndex < 0) continue;
-			const rect = btn.getBoundingClientRect();
+			let rect = btn.getBoundingClientRect();
 			if (rect.width <= 0 || rect.height <= 0) continue;
-			if (visibleOnly && (rect.top < visibleTop || rect.bottom > visibleBottom)) continue;
 			const match = text.match(/(\d+(?:\.\d+)?)\s*([万千])?/);
 			let count = match ? Number(match[1]) : 0;
 			if (match?.[2] === "万") count *= 10000;
 			if (match?.[2] === "千") count *= 1000;
 			count = Math.floor(count);
 			if (maxRepliesThreshold > 0 && count > maxRepliesThreshold) continue;
+			btn.scrollIntoView({ block: "center", inline: "nearest" });
+			rect = btn.getBoundingClientRect();
+			if (scroller) {
+				const sRect = scroller.getBoundingClientRect();
+				const visibleTop = Math.max(0, sRect.top);
+				const visibleBottom = Math.min(window.innerHeight, sRect.bottom);
+				if (rect.top < visibleTop || rect.bottom > visibleBottom) {
+					scroller.scrollBy(0, rect.top - sRect.top - sRect.height / 2 + rect.height / 2);
+					rect = btn.getBoundingClientRect();
+				}
+			}
+			if (rect.width <= 0 || rect.height <= 0) continue;
 			return JSON.stringify({
 				text,
 				x: rect.left + rect.width / 2,
 				y: rect.top + rect.height / 2,
 				count,
 				parentIndex,
-				btnIndex,
 			});
 		}
 		return "";
-	}`, maxRepliesThreshold, visibleOnly)
+	}`, maxRepliesThreshold)
 	if err != nil {
 		return nil, err
 	}
@@ -985,20 +998,9 @@ func nextShowMoreButton(page *hrod.Page, maxRepliesThreshold int, visibleOnly bo
 	return &button, nil
 }
 
-// clickShowMoreButton 用 hrod 定位展开按钮元素并按真实鼠标点击。
-// 点击由 hrod 处理，内部会先物理滚动到可视区域，不再依赖坐标点击与 JS scrollBy/scrollIntoView。
+// clickShowMoreButton 按坐标真实点击展开按钮（pre 验证过的点击方式）。
 func clickShowMoreButton(page *hrod.Page, button *showMoreButtonSnapshot) error {
-	els, err := page.Elements(showMoreButtonSelector)
-	if err != nil {
-		return fmt.Errorf("定位子评论展开按钮失败: %w", err)
-	}
-	if button.ButtonIndex < 0 || button.ButtonIndex >= len(els) {
-		return fmt.Errorf("子评论展开按钮索引越界: %d>=%d", button.ButtonIndex, len(els))
-	}
-	if err := els[button.ButtonIndex].Click(proto.InputMouseButtonLeft, 1); err != nil {
-		return fmt.Errorf("点击子评论展开按钮失败: %w", err)
-	}
-	return nil
+	return page.ClickPoint(proto.Point{X: button.X, Y: button.Y})
 }
 
 func sleepRandom(page *hrod.Page, minMs, maxMs int) error {
