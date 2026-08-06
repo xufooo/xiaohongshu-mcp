@@ -55,7 +55,7 @@ func DefaultCommentLoadConfig() CommentLoadConfig {
 		ClickMoreReplies:    false,
 		MaxRepliesThreshold: 10,
 		MaxCommentItems:     0,
-		ScrollSpeed:         "fast",
+		ScrollSpeed:         "normal",
 	}
 }
 
@@ -850,17 +850,10 @@ func clickMoreReplies(page *hrod.Page, maxRepliesThreshold int, remainingDeadlin
 func nextShowMoreButton(page *hrod.Page, maxRepliesThreshold int) (*showMoreButtonSnapshot, error) {
 	result, err := page.Timeout(2*time.Second).Eval(`(maxRepliesThreshold) => {
 		const clean = (value) => (value || "").replace(/\s+/g, " ").trim();
-		const candidates = [".note-scroller", ".comments-container", ".note-container"];
-		let scroller = null;
-		for (const selector of candidates) {
-			const el = document.querySelector(selector);
-			if (!el) continue;
-			const style = getComputedStyle(el);
-			if (el.scrollHeight > el.clientHeight && (style.overflowY === "auto" || style.overflowY === "scroll")) {
-				scroller = el;
-				break;
-			}
-		}
+		const scroller = document.querySelector(".note-scroller");
+		const sRect = scroller?.getBoundingClientRect();
+		const visibleTop = sRect ? Math.max(0, sRect.top) : 0;
+		const visibleBottom = sRect ? Math.min(window.innerHeight, sRect.bottom) : window.innerHeight;
 		const parents = Array.from(document.querySelectorAll(".parent-comment"));
 		const buttons = parents
 			.flatMap((parent) => Array.from(parent.querySelectorAll(":scope > .children-comments .show-more, :scope > .reply-container .show-more")));
@@ -871,26 +864,15 @@ func nextShowMoreButton(page *hrod.Page, maxRepliesThreshold int) (*showMoreButt
 			const parent = btn.closest(".parent-comment");
 			const parentIndex = parents.indexOf(parent);
 			if (parentIndex < 0) continue;
-			let rect = btn.getBoundingClientRect();
+			const rect = btn.getBoundingClientRect();
 			if (rect.width <= 0 || rect.height <= 0) continue;
+			if (rect.top < visibleTop || rect.bottom > visibleBottom) continue;
 			const match = text.match(/(\d+(?:\.\d+)?)\s*([万千])?/);
 			let count = match ? Number(match[1]) : 0;
 			if (match?.[2] === "万") count *= 10000;
 			if (match?.[2] === "千") count *= 1000;
 			count = Math.floor(count);
 			if (maxRepliesThreshold > 0 && count > maxRepliesThreshold) continue;
-			btn.scrollIntoView({ block: "center", inline: "nearest" });
-			rect = btn.getBoundingClientRect();
-			if (scroller) {
-				const sRect = scroller.getBoundingClientRect();
-				const visibleTop = Math.max(0, sRect.top);
-				const visibleBottom = Math.min(window.innerHeight, sRect.bottom);
-				if (rect.top < visibleTop || rect.bottom > visibleBottom) {
-					scroller.scrollBy(0, rect.top - sRect.top - sRect.height / 2 + rect.height / 2);
-					rect = btn.getBoundingClientRect();
-				}
-			}
-			if (rect.width <= 0 || rect.height <= 0) continue;
 			return JSON.stringify({
 				text,
 				x: rect.left + rect.width / 2,
