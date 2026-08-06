@@ -225,9 +225,6 @@ func (s *AppServer) publishHandler(c *gin.Context) {
 		return
 	}
 
-	if !s.checkRateLimit(c, ratelimit.ActionPublish) {
-		return
-	}
 	// 执行发布
 	result, err := s.xiaohongshuService.PublishContent(c.Request.Context(), &req)
 	if err != nil {
@@ -252,9 +249,6 @@ func (s *AppServer) publishVideoHandler(c *gin.Context) {
 	if s.requireHTTPWriteConfirmation(c, "api_publish_video", key, summary, req.ConfirmToken) {
 		return
 	}
-	if !s.checkRateLimit(c, ratelimit.ActionPublish) {
-		return
-	}
 	// 执行视频发布
 	result, err := s.xiaohongshuService.PublishVideo(c.Request.Context(), &req)
 	if err != nil {
@@ -269,9 +263,6 @@ func (s *AppServer) publishVideoHandler(c *gin.Context) {
 // listFeedsHandler 获取Feeds列表
 func (s *AppServer) listFeedsHandler(c *gin.Context) {
 
-	if !s.checkRateLimit(c, ratelimit.ActionBrowse) {
-		return
-	}
 	// 获取 Feeds 列表
 	result, err := s.xiaohongshuService.ListFeeds(c.Request.Context())
 	if err != nil {
@@ -310,9 +301,6 @@ func (s *AppServer) searchFeedsHandler(c *gin.Context) {
 		return
 	}
 
-	if !s.checkRateLimit(c, ratelimit.ActionSearch) {
-		return
-	}
 
 	// 搜索 Feeds
 	result, err := s.xiaohongshuService.SearchFeeds(c.Request.Context(), keyword, filters)
@@ -335,9 +323,6 @@ func (s *AppServer) getFeedDetailHandler(c *gin.Context) {
 		return
 	}
 
-	if !s.checkRateLimit(c, ratelimit.ActionOpenNote) {
-		return
-	}
 	var result *FeedDetailResponse
 	var err error
 
@@ -374,9 +359,6 @@ func (s *AppServer) userProfileHandler(c *gin.Context) {
 		return
 	}
 
-	if !s.checkRateLimit(c, ratelimit.ActionOpenNote) {
-		return
-	}
 	// 获取用户信息
 	result, err := s.xiaohongshuService.UserProfile(c.Request.Context(), req.UserID, req.XsecToken)
 	if err != nil {
@@ -403,9 +385,6 @@ func (s *AppServer) postCommentHandler(c *gin.Context) {
 		return
 	}
 
-	if !s.checkRateLimit(c, ratelimit.ActionComment) {
-		return
-	}
 	// 发表评论
 	result, err := s.xiaohongshuService.PostCommentToFeed(c.Request.Context(), req.FeedID, req.XsecToken, req.Content)
 	if err != nil {
@@ -429,9 +408,6 @@ func (s *AppServer) replyCommentHandler(c *gin.Context) {
 	key := writeConfirmationKey("api_reply_comment", req.FeedID, req.XsecToken, req.CommentID, req.UserID, req.Content)
 	summary := fmt.Sprintf("回复评论: feed_id=%s comment_id=%s user_id=%s content=%q", req.FeedID, req.CommentID, req.UserID, compactWriteSummary(req.Content))
 	if s.requireHTTPWriteConfirmation(c, "api_reply_comment", key, summary, req.ConfirmToken) {
-		return
-	}
-	if !s.checkRateLimit(c, ratelimit.ActionReply) {
 		return
 	}
 	result, err := s.xiaohongshuService.ReplyCommentToFeed(c.Request.Context(), req.FeedID, req.XsecToken, req.CommentID, req.UserID, req.Content)

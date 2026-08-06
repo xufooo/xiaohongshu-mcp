@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"math"
 	"math/rand"
 	"strconv"
 	"strings"
@@ -674,160 +673,80 @@ func scrollNoteScroller(page *hrod.Page, delta float64) error {
 	return err
 }
 
-// findCommentScroller 按可滚动性查找评论滚动容器：.note-scroller，其次 .comments-container，
-// 最后 .note-container（AI 搜索模式详情页评论区随 note-container 滚动）。
-// 只选真正可滚动的容器（scrollHeight>clientHeight 且 overflowY=scroll/auto），找不到即错误，不回退 DOM scrollBy。
-func findCommentScroller(page *hrod.Page) (*hrod.Element, error) {
-	result, err := page.Eval(`() => {
+
+// scrollNoteScrollerMoved 单次 Eval 滚动评论容器并返回是否发生滚动（moved）。
+// 对齐 pre 的单次 Eval（容器查找+祖先遍历+读取 before+scrollBy 一次完成），
+// 候选扩展 .comments-container/.note-container 以兼容 AI 搜索模式。
+func scrollNoteScrollerMoved(page *hrod.Page, delta float64) (bool, error) {
+	result, err := page.Timeout(2*time.Second).Eval(`(delta) => {
 		const candidates = [".note-scroller", ".comments-container", ".note-container"];
+		let scroller = null;
 		for (const selector of candidates) {
 			const el = document.querySelector(selector);
 			if (!el) continue;
-			const style = getComputedStyle(el);
-			if (el.scrollHeight > el.clientHeight && (style.overflowY === "auto" || style.overflowY === "scroll")) {
-				return selector;
+			let node = el;
+			while (node) {
+				const style = getComputedStyle(node);
+				const canScroll = node.scrollHeight > node.clientHeight &&
+					(style.overflowY === "auto" || style.overflowY === "scroll");
+				if (canScroll) { scroller = node; break; }
+				node = node.parentElement;
 			}
+			if (scroller) break;
 		}
-		return "";
-	}`)
-	if err != nil {
-		return nil, err
-	}
-	selector := ""
-	if result != nil {
-		selector = result.Value.Str()
-	}
-	if selector == "" {
-		return nil, fmt.Errorf("找不到评论滚动容器 (.note-scroller/.comments-container/.note-container)")
-	}
-	el, err := page.Element(selector)
-	if err != nil || el == nil {
-		return nil, fmt.Errorf("读取评论滚动容器失败: %w", err)
-	}
-	return el, nil
-}
-
-// readCommentScrollerPosition 读取滚动容器位置；元素断开或不可滚动均返回错误。
-func readCommentScrollerPosition(el *hrod.Element) (float64, float64, float64, error) {
-	result, err := el.Eval(`() => {
-		if (!this.isConnected) return "";
-		const style = getComputedStyle(this);
-		const canScroll = this.scrollHeight > this.clientHeight &&
-			(style.overflowY === "auto" || style.overflowY === "scroll");
-		if (!canScroll) return "";
-		return JSON.stringify({ scrollTop: this.scrollTop, scrollHeight: this.scrollHeight, clientHeight: this.clientHeight });
-	}`)
-	if err != nil {
-		return 0, 0, 0, err
-	}
-	if result == nil || strings.TrimSpace(result.Value.Str()) == "" {
-		return 0, 0, 0, fmt.Errorf("评论滚动容器不存在或不可滚动")
-	}
-	var pos struct {
-		ScrollTop    float64 `json:"scrollTop"`
-		ScrollHeight float64 `json:"scrollHeight"`
-		ClientHeight float64 `json:"clientHeight"`
-	}
-	if err := json.Unmarshal([]byte(result.Value.Str()), &pos); err != nil {
-		return 0, 0, 0, fmt.Errorf("解析评论滚动容器位置失败: %w", err)
-	}
-	return pos.ScrollTop, pos.ScrollHeight, pos.ClientHeight, nil
-}
-
-// commentScrollerScrollTop 读取评论滚动容器当前位置，用于确认物理滚轮后位置是否变化。
-// 读取失败返回 error，调用方必须前后两次都成功才可判定滚动，避免误判。
-func commentScrollerScrollTop(page *hrod.Page) (float64, error) {
-	el, err := findCommentScroller(page)
-	if err != nil {
-		return 0, err
-	}
-	top, _, _, err := readCommentScrollerPosition(el)
-	if err != nil {
-		return 0, err
-	}
-	return top, nil
-}
-
-// humanScrollCommentScroller 用真实物理滚轮推动评论容器：
-// 读取 before -> Hover 移入容器 -> 按 100~140px 分格 Mouse.Scroll -> 格间短暂停顿。
-// after==before 返回 moved=false,nil 供"已到底"判断；任何一步无法确认均返回 error。
-func humanScrollCommentScroller(page *hrod.Page, delta float64) (bool, error) {
-	el, err := findCommentScroller(page)
-	if err != nil {
-		return false, err
-	}
-	before, _, _, err := readCommentScrollerPosition(el)
-	if err != nil {
-		return false, err
-	}
-
-	// 真实鼠标移入滚动容器
-	if err := el.Hover(); err != nil {
-		return false, fmt.Errorf("移入评论滚动容器失败: %w", err)
-	}
-
-	// 100~140px 分格物理滚轮，禁止 DOM scrollBy/scrollTo fallback
-	remaining := delta
-	for remaining != 0 {
-		seg := math.Abs(remaining)
-		if seg > 140 {
-			seg = 100 + rand.Float64()*40
-		}
-		if seg > math.Abs(remaining) {
-			seg = math.Abs(remaining)
-		}
-		if delta < 0 {
-			seg = -seg
-		}
-		if err := page.Actor().Mouse.Scroll(0, seg); err != nil {
-			return false, fmt.Errorf("物理滚轮滚动评论区失败: %w", err)
-		}
-		remaining -= seg
-		if remaining != 0 {
-			if err := page.SleepRandom(20*time.Millisecond, 65*time.Millisecond); err != nil {
-				return false, err
-			}
-		}
-	}
-	if err := page.SleepRandom(120*time.Millisecond, 220*time.Millisecond); err != nil {
-		return false, err
-	}
-
-	after, _, _, err := readCommentScrollerPosition(el)
-	if err != nil {
-		return false, err
-	}
-	return after > before, nil
-}
-
-// scrollNoteScrollerMoved 滚动评论容器，返回是否发生滚动（moved）。
-func scrollNoteScrollerMoved(page *hrod.Page, delta float64) (bool, error) {
-	el, err := findCommentScroller(page)
-	if err != nil {
-		return false, err
-	}
-	before, _, _, err := readCommentScrollerPosition(el)
-	if err != nil {
-		return false, err
-	}
-	result, err := el.Eval(`(delta) => {
-		if (!this.isConnected) return "";
-		this.scrollBy(0, delta);
-		return JSON.stringify({ top: this.scrollTop });
+		if (!scroller) return JSON.stringify({found: false, moved: false});
+		const before = scroller.scrollTop;
+		scroller.scrollBy(0, delta);
+		return JSON.stringify({found: true, moved: scroller.scrollTop > before});
 	}`, delta)
 	if err != nil {
 		return false, err
 	}
-	if result == nil || strings.TrimSpace(result.Value.Str()) == "" {
-		return false, fmt.Errorf("评论滚动容器不存在或不可滚动")
+	if result == nil {
+		return false, fmt.Errorf("评论容器滚动未返回结果")
 	}
-	var pos struct {
-		Top float64 `json:"top"`
+	var state struct {
+		Found bool `json:"found"`
+		Moved bool `json:"moved"`
 	}
-	if err := json.Unmarshal([]byte(result.Value.Str()), &pos); err != nil {
-		return false, fmt.Errorf("解析评论滚动位置失败: %w", err)
+	if err := json.Unmarshal([]byte(result.Value.Str()), &state); err != nil {
+		return false, fmt.Errorf("解析评论容器滚动状态: %w", err)
 	}
-	return pos.Top > before, nil
+	if !state.Found {
+		return false, fmt.Errorf("评论容器不存在")
+	}
+	return state.Moved, nil
+}
+
+// commentScrollerTop 单次 Eval 读取评论滚动容器当前 scrollTop，用于加载前后滚动确认。
+func commentScrollerTop(page *hrod.Page) (float64, error) {
+	result, err := page.Timeout(2*time.Second).Eval(`() => {
+		const candidates = [".note-scroller", ".comments-container", ".note-container"];
+		for (const selector of candidates) {
+			const el = document.querySelector(selector);
+			if (!el) continue;
+			let node = el;
+			while (node) {
+				const style = getComputedStyle(node);
+				const canScroll = node.scrollHeight > node.clientHeight &&
+					(style.overflowY === "auto" || style.overflowY === "scroll");
+				if (canScroll) return node.scrollTop;
+				node = node.parentElement;
+			}
+		}
+		return -1;
+	}`)
+	if err != nil {
+		return 0, err
+	}
+	if result == nil {
+		return 0, fmt.Errorf("评论滚动容器未返回结果")
+	}
+	top := result.Value.Num()
+	if top < 0 {
+		return 0, fmt.Errorf("评论滚动容器不存在")
+	}
+	return top, nil
 }
 
 func commentProgressScript() string {
@@ -1007,23 +926,32 @@ func sleepRandom(page *hrod.Page, minMs, maxMs int) error {
 	return page.SleepRandom(time.Duration(minMs)*time.Millisecond, time.Duration(maxMs)*time.Millisecond)
 }
 
-// scrollToCommentsArea 定位评论区：对评论区容器 .comments-container 调 hrod ScrollIntoView
-// （直接滚到评论区而非仅把滚动容器置入视口），拟人停顿后执行一次小幅物理滚轮激活懒加载。
+// scrollToCommentsArea 使用 JS 定位到评论区（comment_feed.go 引用），对齐 pre 的单次 Eval：
+// 祖先遍历找可滚动容器后 scrollTo；找不到评论区时不主动报错；Eval 超时记录 warning 后继续。
+// 候选扩展 .note-container 以兼容 AI 搜索模式。
 func scrollToCommentsArea(page *hrod.Page) error {
-	comments, err := page.Element(".comments-container")
-	if err != nil || comments == nil {
-		return fmt.Errorf("找不到评论区容器 (.comments-container)")
+	_, err := page.Timeout(2*time.Second).Eval(`() => {
+		const cc = document.querySelector('.comments-container, .comments-el');
+		let scroller = cc;
+		while (scroller) {
+			const style = getComputedStyle(scroller);
+			const canScroll = scroller.scrollHeight > scroller.clientHeight &&
+				(style.overflowY === 'auto' || style.overflowY === 'scroll');
+			if (canScroll) break;
+			scroller = scroller.parentElement;
+		}
+		if (cc && scroller) {
+			const top = cc.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop;
+			scroller.scrollTo(0, Math.max(0, top - 80));
+			return;
+		}
+		if (cc) { cc.scrollIntoView({block:'center'}); }
+	}`)
+	if err != nil && isEvalTimeout(err) {
+		logrus.Warnf("定位评论区 Eval 超时: %v", err)
+		return nil
 	}
-	if err := comments.ScrollIntoView(); err != nil {
-		return fmt.Errorf("滚动到评论区失败: %w", err)
-	}
-	if err := page.SleepRandom(300*time.Millisecond, 600*time.Millisecond); err != nil {
-		return err
-	}
-	if _, err := humanScrollCommentScroller(page, 100); err != nil {
-		return fmt.Errorf("评论区懒加载滚轮失败: %w", err)
-	}
-	return nil
+	return err
 }
 
 func isEvalTimeout(err error) bool {

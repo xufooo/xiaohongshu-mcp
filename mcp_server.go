@@ -8,21 +8,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/sirupsen/logrus"
-	"github.com/xpzouying/xiaohongshu-mcp/pkg/ratelimit"
 )
-
-// readActionForTool 读工具 → 限流 action（仅限实际页面/网络操作；状态读取与资源清理不限流）。
-func readActionForTool(toolName string) (ratelimit.Action, bool) {
-	switch toolName {
-	case "list_feeds", "go_back", "start_page", "list_notifications", "get_unread_count":
-		return ratelimit.ActionBrowse, true
-	case "search_feeds":
-		return ratelimit.ActionSearch, true
-	case "open_note", "get_note_detail", "user_profile":
-		return ratelimit.ActionOpenNote, true
-	}
-	return "", false
-}
 
 // Helper functions for annotation pointers
 func boolPtr(b bool) *bool { return &b }
@@ -180,7 +166,6 @@ func InitMCPServer(appServer *AppServer) *mcp.Server {
 
 func withPanicRecovery[T any](
 	toolName string,
-	limiter *ratelimit.Limiter,
 	handler func(context.Context, *mcp.CallToolRequest, T) (*mcp.CallToolResult, any, error),
 ) func(context.Context, *mcp.CallToolRequest, T) (*mcp.CallToolResult, any, error) {
 
@@ -206,17 +191,6 @@ func withPanicRecovery[T any](
 				err = nil
 			}
 		}()
-
-		// 读工具限流；写工具在 handler 内 confirm_token 验证后接入（避免确认挑战消耗额度）。
-		if action, ok := readActionForTool(toolName); ok {
-			if res := checkRateLimitWithLimiter(ctx, limiter, action); !res.CanProceed {
-				return &mcp.CallToolResult{
-					Content: []mcp.Content{&mcp.TextContent{Text: "操作超限，请稍后再试: " + res.Info.Warning}},
-					IsError: true,
-				}, nil, nil
-			}
-		}
-
 		return handler(ctx, req, args)
 	}
 }
@@ -232,7 +206,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 				ReadOnlyHint: true,
 			},
 		},
-		withPanicRecovery("check_login_status", appServer.rateLimiter, func(ctx context.Context, req *mcp.CallToolRequest, _ any) (*mcp.CallToolResult, any, error) {
+		withPanicRecovery("check_login_status", func(ctx context.Context, req *mcp.CallToolRequest, _ any) (*mcp.CallToolResult, any, error) {
 			result := appServer.handleCheckLoginStatus(ctx)
 			return convertToMCPResult(result), nil, nil
 		}),
@@ -248,7 +222,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 				ReadOnlyHint: true,
 			},
 		},
-		withPanicRecovery("get_login_qrcode", appServer.rateLimiter, func(ctx context.Context, req *mcp.CallToolRequest, _ any) (*mcp.CallToolResult, any, error) {
+		withPanicRecovery("get_login_qrcode", func(ctx context.Context, req *mcp.CallToolRequest, _ any) (*mcp.CallToolResult, any, error) {
 			result := appServer.handleGetLoginQrcode(ctx)
 			return convertToMCPResult(result), nil, nil
 		}),
@@ -264,7 +238,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 				DestructiveHint: boolPtr(true),
 			},
 		},
-		withPanicRecovery("delete_cookies", appServer.rateLimiter, func(ctx context.Context, req *mcp.CallToolRequest, _ any) (*mcp.CallToolResult, any, error) {
+		withPanicRecovery("delete_cookies", func(ctx context.Context, req *mcp.CallToolRequest, _ any) (*mcp.CallToolResult, any, error) {
 			result := appServer.handleDeleteCookies(ctx)
 			return convertToMCPResult(result), nil, nil
 		}),
@@ -280,7 +254,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 				DestructiveHint: boolPtr(true),
 			},
 		},
-		withPanicRecovery("publish_content", appServer.rateLimiter, func(ctx context.Context, req *mcp.CallToolRequest, args PublishContentArgs) (*mcp.CallToolResult, any, error) {
+		withPanicRecovery("publish_content", func(ctx context.Context, req *mcp.CallToolRequest, args PublishContentArgs) (*mcp.CallToolResult, any, error) {
 			result := appServer.handlePublishContent(ctx, args)
 			return convertToMCPResult(result), nil, nil
 		}),
@@ -296,7 +270,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 				ReadOnlyHint: true,
 			},
 		},
-		withPanicRecovery("list_feeds", appServer.rateLimiter, func(ctx context.Context, req *mcp.CallToolRequest, args ListFeedsArgs) (*mcp.CallToolResult, any, error) {
+		withPanicRecovery("list_feeds", func(ctx context.Context, req *mcp.CallToolRequest, args ListFeedsArgs) (*mcp.CallToolResult, any, error) {
 			result := appServer.handleListFeeds(ctx, args)
 			return convertToMCPResult(result), nil, nil
 		}),
@@ -312,7 +286,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 				ReadOnlyHint: true,
 			},
 		},
-		withPanicRecovery("search_feeds", appServer.rateLimiter, func(ctx context.Context, req *mcp.CallToolRequest, args SessionSearchArgs) (*mcp.CallToolResult, any, error) {
+		withPanicRecovery("search_feeds", func(ctx context.Context, req *mcp.CallToolRequest, args SessionSearchArgs) (*mcp.CallToolResult, any, error) {
 			result := appServer.handleSessionSearch(ctx, args)
 			return convertToMCPResult(result), nil, nil
 		}),
@@ -328,7 +302,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 				ReadOnlyHint: true,
 			},
 		},
-		withPanicRecovery("user_profile", appServer.rateLimiter, func(ctx context.Context, req *mcp.CallToolRequest, args UserProfileArgs) (*mcp.CallToolResult, any, error) {
+		withPanicRecovery("user_profile", func(ctx context.Context, req *mcp.CallToolRequest, args UserProfileArgs) (*mcp.CallToolResult, any, error) {
 			result := appServer.handleUserProfile(ctx, args)
 			return convertToMCPResult(result), nil, nil
 		}),
@@ -344,7 +318,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 				DestructiveHint: boolPtr(true),
 			},
 		},
-		withPanicRecovery("comment_feed", appServer.rateLimiter, func(ctx context.Context, req *mcp.CallToolRequest, args SessionCommentArgs) (*mcp.CallToolResult, any, error) {
+		withPanicRecovery("comment_feed", func(ctx context.Context, req *mcp.CallToolRequest, args SessionCommentArgs) (*mcp.CallToolResult, any, error) {
 			result := appServer.handleSessionComment(ctx, args)
 			return convertToMCPResult(result), nil, nil
 		}),
@@ -360,7 +334,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 				DestructiveHint: boolPtr(true),
 			},
 		},
-		withPanicRecovery("reply_comment_in_feed", appServer.rateLimiter, func(ctx context.Context, req *mcp.CallToolRequest, args ReplyCommentArgs) (*mcp.CallToolResult, any, error) {
+		withPanicRecovery("reply_comment_in_feed", func(ctx context.Context, req *mcp.CallToolRequest, args ReplyCommentArgs) (*mcp.CallToolResult, any, error) {
 			result := appServer.handleReplyComment(ctx, args)
 			return convertToMCPResult(result), nil, nil
 		}),
@@ -376,7 +350,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 				DestructiveHint: boolPtr(true),
 			},
 		},
-		withPanicRecovery("publish_with_video", appServer.rateLimiter, func(ctx context.Context, req *mcp.CallToolRequest, args PublishVideoArgs) (*mcp.CallToolResult, any, error) {
+		withPanicRecovery("publish_with_video", func(ctx context.Context, req *mcp.CallToolRequest, args PublishVideoArgs) (*mcp.CallToolResult, any, error) {
 			result := appServer.handlePublishVideo(ctx, args)
 			return convertToMCPResult(result), nil, nil
 		}),
@@ -392,7 +366,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 				DestructiveHint: boolPtr(true),
 			},
 		},
-		withPanicRecovery("like_feed", appServer.rateLimiter, func(ctx context.Context, req *mcp.CallToolRequest, args SessionLikeArgs) (*mcp.CallToolResult, any, error) {
+		withPanicRecovery("like_feed", func(ctx context.Context, req *mcp.CallToolRequest, args SessionLikeArgs) (*mcp.CallToolResult, any, error) {
 			result := appServer.handleSessionLike(ctx, args)
 			return convertToMCPResult(result), nil, nil
 		}),
@@ -408,7 +382,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 				DestructiveHint: boolPtr(true),
 			},
 		},
-		withPanicRecovery("favorite_feed", appServer.rateLimiter, func(ctx context.Context, req *mcp.CallToolRequest, args FavoriteFeedArgs) (*mcp.CallToolResult, any, error) {
+		withPanicRecovery("favorite_feed", func(ctx context.Context, req *mcp.CallToolRequest, args FavoriteFeedArgs) (*mcp.CallToolResult, any, error) {
 			result := appServer.handleFavoriteFeed(ctx, args)
 			return convertToMCPResult(result), nil, nil
 		}),
@@ -424,7 +398,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 				ReadOnlyHint: true,
 			},
 		},
-		withPanicRecovery("start_page", appServer.rateLimiter, func(ctx context.Context, req *mcp.CallToolRequest, args CreateBrowseSessionArgs) (*mcp.CallToolResult, any, error) {
+		withPanicRecovery("start_page", func(ctx context.Context, req *mcp.CallToolRequest, args CreateBrowseSessionArgs) (*mcp.CallToolResult, any, error) {
 			result := appServer.handleCreateBrowseSession(ctx, args)
 			return convertToMCPResult(result), nil, nil
 		}),
@@ -440,7 +414,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 				ReadOnlyHint: true,
 			},
 		},
-		withPanicRecovery("get_page_state", appServer.rateLimiter, func(ctx context.Context, req *mcp.CallToolRequest, args BrowseSessionIDArgs) (*mcp.CallToolResult, any, error) {
+		withPanicRecovery("get_page_state", func(ctx context.Context, req *mcp.CallToolRequest, args BrowseSessionIDArgs) (*mcp.CallToolResult, any, error) {
 			result := appServer.handleSessionState(ctx, args)
 			return convertToMCPResult(result), nil, nil
 		}),
@@ -456,7 +430,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 				ReadOnlyHint: true,
 			},
 		},
-		withPanicRecovery("open_note", appServer.rateLimiter, func(ctx context.Context, req *mcp.CallToolRequest, args SessionOpenNoteArgs) (*mcp.CallToolResult, any, error) {
+		withPanicRecovery("open_note", func(ctx context.Context, req *mcp.CallToolRequest, args SessionOpenNoteArgs) (*mcp.CallToolResult, any, error) {
 			result := appServer.handleSessionOpenNote(ctx, args)
 			return convertToMCPResult(result), nil, nil
 		}),
@@ -472,7 +446,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 				ReadOnlyHint: true,
 			},
 		},
-		withPanicRecovery("get_note_detail", appServer.rateLimiter, func(ctx context.Context, req *mcp.CallToolRequest, args SessionDetailArgs) (*mcp.CallToolResult, any, error) {
+		withPanicRecovery("get_note_detail", func(ctx context.Context, req *mcp.CallToolRequest, args SessionDetailArgs) (*mcp.CallToolResult, any, error) {
 			result := appServer.handleSessionDetail(ctx, args)
 			return convertToMCPResult(result), nil, nil
 		}),
@@ -488,7 +462,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 				ReadOnlyHint: true,
 			},
 		},
-		withPanicRecovery("go_back", appServer.rateLimiter, func(ctx context.Context, req *mcp.CallToolRequest, args BrowseSessionIDArgs) (*mcp.CallToolResult, any, error) {
+		withPanicRecovery("go_back", func(ctx context.Context, req *mcp.CallToolRequest, args BrowseSessionIDArgs) (*mcp.CallToolResult, any, error) {
 			result := appServer.handleSessionBack(ctx, args)
 			return convertToMCPResult(result), nil, nil
 		}),
@@ -504,7 +478,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 				DestructiveHint: boolPtr(true),
 			},
 		},
-		withPanicRecovery("close_page", appServer.rateLimiter, func(ctx context.Context, req *mcp.CallToolRequest, args BrowseSessionIDArgs) (*mcp.CallToolResult, any, error) {
+		withPanicRecovery("close_page", func(ctx context.Context, req *mcp.CallToolRequest, args BrowseSessionIDArgs) (*mcp.CallToolResult, any, error) {
 			result := appServer.handleCloseBrowseSession(ctx, args)
 			return convertToMCPResult(result), nil, nil
 		}),
@@ -520,7 +494,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 				ReadOnlyHint: true,
 			},
 		},
-		withPanicRecovery("get_unread_count", appServer.rateLimiter, func(ctx context.Context, req *mcp.CallToolRequest, args UnreadNotificationCountArgs) (*mcp.CallToolResult, any, error) {
+		withPanicRecovery("get_unread_count", func(ctx context.Context, req *mcp.CallToolRequest, args UnreadNotificationCountArgs) (*mcp.CallToolResult, any, error) {
 			result := appServer.handleGetUnreadCount(ctx, args)
 			return convertToMCPResult(result), nil, nil
 		}),
@@ -535,7 +509,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 				Title: "List Notifications",
 			},
 		},
-		withPanicRecovery("list_notifications", appServer.rateLimiter, func(ctx context.Context, req *mcp.CallToolRequest, args ListNotificationsArgs) (*mcp.CallToolResult, any, error) {
+		withPanicRecovery("list_notifications", func(ctx context.Context, req *mcp.CallToolRequest, args ListNotificationsArgs) (*mcp.CallToolResult, any, error) {
 			result := appServer.handleListNotifications(ctx, args)
 			return convertToMCPResult(result), nil, nil
 		}),
@@ -551,7 +525,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 				DestructiveHint: boolPtr(true),
 			},
 		},
-		withPanicRecovery("like_notification", appServer.rateLimiter, func(ctx context.Context, req *mcp.CallToolRequest, args LikeNotificationArgs) (*mcp.CallToolResult, any, error) {
+		withPanicRecovery("like_notification", func(ctx context.Context, req *mcp.CallToolRequest, args LikeNotificationArgs) (*mcp.CallToolResult, any, error) {
 			result := appServer.handleLikeNotification(ctx, args)
 			return convertToMCPResult(result), nil, nil
 		}),
@@ -567,7 +541,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 				DestructiveHint: boolPtr(true),
 			},
 		},
-		withPanicRecovery("reply_notification", appServer.rateLimiter, func(ctx context.Context, req *mcp.CallToolRequest, args ReplyNotificationArgs) (*mcp.CallToolResult, any, error) {
+		withPanicRecovery("reply_notification", func(ctx context.Context, req *mcp.CallToolRequest, args ReplyNotificationArgs) (*mcp.CallToolResult, any, error) {
 			result := appServer.handleReplyNotification(ctx, args)
 			return convertToMCPResult(result), nil, nil
 		}),

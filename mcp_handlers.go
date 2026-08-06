@@ -9,7 +9,6 @@ import (
 
 	"github.com/sirupsen/logrus"
 	"github.com/xpzouying/xiaohongshu-mcp/cookies"
-	"github.com/xpzouying/xiaohongshu-mcp/pkg/ratelimit"
 	"github.com/xpzouying/xiaohongshu-mcp/xiaohongshu"
 )
 
@@ -360,10 +359,6 @@ func (s *AppServer) handlePublishContent(ctx context.Context, args PublishConten
 	if confirm := s.requireWriteConfirmation("publish_content", key, summary, confirmToken); confirm != nil {
 		return confirm
 	}
-	// 限流：confirm 验证通过后占用配额
-	if res := s.checkRateLimitInternal(ctx, ratelimit.ActionPublish); !res.CanProceed {
-		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "操作超限，请稍后再试: " + res.Info.Warning}}, IsError: true}
-	}
 	// 执行发布
 	result, err := s.xiaohongshuService.PublishContent(ctx, req)
 	if err != nil {
@@ -429,10 +424,6 @@ func (s *AppServer) handlePublishVideo(ctx context.Context, args PublishVideoArg
 	}
 	if confirm := s.requireWriteConfirmation("publish_video", key, summary, confirmToken); confirm != nil {
 		return confirm
-	}
-	// 限流：confirm 验证通过后占用配额
-	if res := s.checkRateLimitInternal(ctx, ratelimit.ActionPublish); !res.CanProceed {
-		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "操作超限，请稍后再试: " + res.Info.Warning}}, IsError: true}
 	}
 	// 执行发布
 	result, err := s.xiaohongshuService.PublishVideo(ctx, req)
@@ -557,10 +548,6 @@ func (s *AppServer) handleFavoriteFeed(ctx context.Context, args FavoriteFeedArg
 	if confirm := s.requireWriteConfirmation("favorite_feed", key, summary, args.ConfirmToken); confirm != nil {
 		return confirm
 	}
-	// 限流：confirm 验证通过后占用配额
-	if res := s.checkRateLimitInternal(ctx, ratelimit.ActionFavorite); !res.CanProceed {
-		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "操作超限，请稍后再试: " + res.Info.Warning}}, IsError: true}
-	}
 	result, err := s.xiaohongshuService.SessionFavorite(ctx, args.SessionID, args.Unfavorite)
 	if err != nil {
 		return sessionMCPErrorFromErr(action+"失败", err, sessionNextStepState())
@@ -587,10 +574,6 @@ func (s *AppServer) handleReplyComment(ctx context.Context, args ReplyCommentArg
 	summary := fmt.Sprintf("回复评论: session_id=%s comment_id=%s user_id=%s content=%q", args.SessionID, args.CommentID, args.UserID, compactWriteSummary(args.Content))
 	if confirm := s.requireWriteConfirmation("reply_comment_in_feed", key, summary, args.ConfirmToken); confirm != nil {
 		return confirm
-	}
-	// 限流：confirm 验证通过后占用配额
-	if res := s.checkRateLimitInternal(ctx, ratelimit.ActionReply); !res.CanProceed {
-		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "操作超限，请稍后再试: " + res.Info.Warning}}, IsError: true}
 	}
 	result, err := s.xiaohongshuService.SessionReply(ctx, args.SessionID, args.CommentID, args.UserID, args.Content)
 	if err != nil {
@@ -731,10 +714,6 @@ func (s *AppServer) handleSessionLike(ctx context.Context, args SessionLikeArgs)
 	if confirm := s.requireWriteConfirmation("like_feed", key, summary, args.ConfirmToken); confirm != nil {
 		return confirm
 	}
-	// 限流：confirm 验证通过后占用配额
-	if res := s.checkRateLimitInternal(ctx, ratelimit.ActionLike); !res.CanProceed {
-		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "操作超限，请稍后再试: " + res.Info.Warning}}, IsError: true}
-	}
 	result, err := s.xiaohongshuService.SessionLike(ctx, args.SessionID, args.Unlike)
 	if err != nil {
 		return sessionMCPErrorFromErr("点赞失败", err, sessionNextStepState())
@@ -753,10 +732,6 @@ func (s *AppServer) handleSessionComment(ctx context.Context, args SessionCommen
 	summary := fmt.Sprintf("评论当前笔记: session_id=%s content=%q", args.SessionID, compactWriteSummary(args.Content))
 	if confirm := s.requireWriteConfirmation("comment_feed", key, summary, args.ConfirmToken); confirm != nil {
 		return confirm
-	}
-	// 限流：confirm 验证通过后占用配额
-	if res := s.checkRateLimitInternal(ctx, ratelimit.ActionComment); !res.CanProceed {
-		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "操作超限，请稍后再试: " + res.Info.Warning}}, IsError: true}
 	}
 	result, err := s.xiaohongshuService.SessionComment(ctx, args.SessionID, args.Content)
 	if err != nil {
@@ -832,10 +807,6 @@ func (s *AppServer) handleLikeNotification(ctx context.Context, args LikeNotific
 	if confirm := s.requireWriteConfirmation("like_notification", key, summary, args.ConfirmToken); confirm != nil {
 		return confirm
 	}
-	// 限流：confirm 验证通过后占用配额
-	if res := s.checkRateLimitInternal(ctx, ratelimit.ActionLike); !res.CanProceed {
-		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "操作超限，请稍后再试: " + res.Info.Warning}}, IsError: true}
-	}
 	result, err := s.xiaohongshuService.SessionLikeNotification(ctx, args.SessionID, args.NotificationRef, args.Unlike)
 	if err != nil {
 		return sessionMCPErrorFromErr("点赞通知失败", err, sessionNextStepState())
@@ -861,10 +832,6 @@ func (s *AppServer) handleReplyNotification(ctx context.Context, args ReplyNotif
 		args.SessionID, args.NotificationRef, compactWriteSummary(args.Content))
 	if confirm := s.requireWriteConfirmation("reply_notification", key, summary, args.ConfirmToken); confirm != nil {
 		return confirm
-	}
-	// 限流：confirm 验证通过后占用配额
-	if res := s.checkRateLimitInternal(ctx, ratelimit.ActionReply); !res.CanProceed {
-		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "操作超限，请稍后再试: " + res.Info.Warning}}, IsError: true}
 	}
 	result, err := s.xiaohongshuService.SessionReplyNotification(ctx, args.SessionID, args.NotificationRef, args.Content)
 	if err != nil {
