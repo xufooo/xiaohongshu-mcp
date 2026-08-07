@@ -427,6 +427,15 @@ func LoadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 
 		progress, progressErr = getCommentProgress(page)
 		if progressErr != nil {
+			// 大帖 DOM 大时 getCommentProgress 的 Eval 可能偶发超时；降级为跳过本轮
+			// （对齐 nextShowMoreButton 容错），避免中断整个读取。
+			if isEvalTimeout(progressErr) {
+				logrus.Warnf("评论进度读取超时，跳过本轮: %v", progressErr)
+				if err := page.Sleep(await); err != nil {
+					return partialOrError(err)
+				}
+				continue
+			}
 			return partialOrError(fmt.Errorf("评论进度读取失败: %w", progressErr))
 		}
 
@@ -765,7 +774,10 @@ func clickMoreReplies(page *hrod.Page, maxRepliesThreshold int, remainingDeadlin
 	const maxRounds = 50
 	for i := 0; i < maxRounds; i++ {
 		if remainingDeadline != nil {
-			if remaining := remainingDeadline(); remaining < 15*time.Second {
+			// 阈值从 15s 降到 2s：单次按钮点击约 1-2s，2s 足够点完最后 1 个按钮；
+			// 15s 提前退出会导致大帖（如 434 评）滚动用满预算后，最后一个
+			// "展开 12 条回复"按钮未点，读到 417/434 而非全量。
+			if remaining := remainingDeadline(); remaining < 2*time.Second {
 				logrus.Warnf("评论加载剩余时间不足(%s)，停止展开子评论", remaining.Round(time.Second))
 				break
 			}
