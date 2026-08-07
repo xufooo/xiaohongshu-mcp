@@ -804,10 +804,13 @@ func clickMoreReplies(page *hrod.Page, maxRepliesThreshold int, remainingDeadlin
 		if err := clickShowMoreButton(page, button); err != nil {
 			return err
 		}
-		if err := waitReplyItemsChanged(page, button.ParentIndex, before, 7*time.Second); err != nil {
+		// 等待缩短（7s→3s）：RPi 上单轮 11s 太贵，9min 预算内点不完级联按钮（实测 432/434 差最后 1 个）。
+		// 3s 与主循环展开块 waitReplyItemsChanged 一致，增长慢时下轮会继续点，不会漏。
+		if err := waitReplyItemsChanged(page, button.ParentIndex, before, 3*time.Second); err != nil {
 			logrus.Debugf("等待子评论增长超时，继续下一轮: %v", err)
 		}
-		if err := page.Sleep(4 * time.Second); err != nil {
+		// 点击后休息缩短（4s→2s）：配合上面，单轮约 5s，预算内能点完所有级联按钮。
+		if err := page.Sleep(2 * time.Second); err != nil {
 			return err
 		}
 	}
