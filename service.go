@@ -940,53 +940,6 @@ func (s *XiaohongshuService) SearchFeeds(ctx context.Context, keyword string, fi
 	return response, nil
 }
 
-// GetFeedDetail 获取Feed详情
-func (s *XiaohongshuService) GetFeedDetail(ctx context.Context, feedID, xsecToken string, loadAllComments bool) (*FeedDetailResponse, error) {
-	return s.GetFeedDetailWithConfig(ctx, feedID, xsecToken, loadAllComments, xiaohongshu.DefaultCommentLoadConfig())
-}
-
-// GetFeedDetailWithConfig 使用配置获取Feed详情。
-// 当存在活跃 session 且已打开同一笔记时，委托给 session。
-func (s *XiaohongshuService) GetFeedDetailWithConfig(ctx context.Context, feedID, xsecToken string, loadAllComments bool, config xiaohongshu.CommentLoadConfig) (*FeedDetailResponse, error) {
-	if sid, ok := s.activeSessionForFeed(feedID); ok {
-		detail, err := s.SessionDetailForFeed(ctx, sid, feedID, loadAllComments, config)
-		if err != nil {
-			return nil, err
-		}
-		return &FeedDetailResponse{FeedID: feedID, Data: detail}, nil
-	}
-	detailCtx := ctx
-	if detailCtx == nil {
-		detailCtx = context.Background()
-	}
-
-	page, err := s.acquirePageFor(detailCtx, "feed_detail")
-	if err != nil {
-		return nil, err
-	}
-	defer s.browserManager.Release(page)
-
-	// 创建 Feed 详情 action，并绑定到本次详情操作的有界上下文。
-	action := xiaohongshu.NewFeedDetailActionWithState(page.Context(detailCtx), s.actionState)
-	capture := s.startReadNetworkCapture(page)
-
-	// 获取 Feed 详情
-	result, err := action.GetFeedDetailWithConfig(detailCtx, feedID, xsecToken, loadAllComments, config)
-	network := stopReadNetworkCapture(capture)
-	if err != nil {
-		s.recordRiskFromPage(page, err)
-		return nil, err
-	}
-
-	response := &FeedDetailResponse{
-		FeedID:  feedID,
-		Data:    result,
-		Network: network,
-	}
-
-	return response, nil
-}
-
 func (s *XiaohongshuService) GetFeedDetailCommentsBatch(ctx context.Context, feedID, xsecToken, cursorID string, maxItems int, config xiaohongshu.CommentLoadConfig) (*FeedDetailResponse, error) {
 	maxItems = normalizeMaxItems(maxItems)
 	config.ScrollSpeed = normalizeScopeSpeed(config.ScrollSpeed)
@@ -1492,19 +1445,6 @@ func (s *XiaohongshuService) SessionDetailBatch(ctx context.Context, id, cursorI
 		}
 		return s.commitCommentBatchResult(info.CurrentFeedID, cursorID, guardCursor, detail, nextCursor, hasMore, seenCount, nil, scope)
 	})
-}
-
-func (s *XiaohongshuService) SessionDetailForFeed(ctx context.Context, id, feedID string, loadComments bool, config xiaohongshu.CommentLoadConfig) (*xiaohongshu.FeedDetailResponse, error) {
-	session, err := s.browseSessions.Get(id)
-	if err != nil {
-		return nil, err
-	}
-	detail, err := session.DetailForFeed(ctx, feedID, loadComments, config)
-	if err != nil {
-		s.recordRiskFromSession(session, err)
-		return nil, err
-	}
-	return detail, nil
 }
 
 func (s *XiaohongshuService) SessionDetailCommentsBatch(ctx context.Context, id, feedID string, cursor *xiaohongshu.CommentCursor, maxItems int, config xiaohongshu.CommentLoadConfig) (*xiaohongshu.FeedDetailResponse, *xiaohongshu.CommentCursor, bool, error) {

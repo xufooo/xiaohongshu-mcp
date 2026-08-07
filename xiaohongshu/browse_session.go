@@ -725,10 +725,6 @@ func (s *BrowseSession) Detail(ctx context.Context, _ bool, _ int) (*SessionDeta
 	}, nil
 }
 
-func (s *BrowseSession) DetailForFeed(ctx context.Context, expectedFeedID string, loadComments bool, config CommentLoadConfig) (*FeedDetailResponse, error) {
-	return s.detail(ctx, expectedFeedID, loadComments, 0, config, true)
-}
-
 func (s *BrowseSession) DetailCommentsBatch(ctx context.Context, expectedFeedID string, cursor *CommentCursor, maxItems int, config CommentLoadConfig) (*FeedDetailResponse, *CommentCursor, bool, error) {
 	return s.detailCommentsBatchLifecycle(
 		ctx, expectedFeedID, maxItems, cursor,
@@ -866,110 +862,6 @@ func (s *BrowseSession) recoverCommentBatchSession(ctx context.Context, page *hr
 		return fmt.Errorf("session 当前页面与目标笔记不匹配: expected=%s, actual=%s", expectedFeedID, feedID)
 	}
 	return p.Sleep(1500 * time.Millisecond)
-}
-
-func (s *BrowseSession) detail(ctx context.Context, expectedFeedID string, loadComments bool, pages int, config CommentLoadConfig, useConfig bool) (*FeedDetailResponse, error) {
-	opCtx, err := s.beginLockedOperation(ctx, true)
-	if err != nil {
-		return nil, err
-	}
-	defer s.finishOperation()
-
-	feedID, err := s.currentOpenedFeedIDFor(expectedFeedID)
-	if err != nil {
-		return nil, err
-	}
-	s.mu.Lock()
-	page := s.page
-	s.mu.Unlock()
-	if page == nil {
-		return nil, fmt.Errorf("browse session 页面不存在: %s", s.id)
-	}
-	if err := WaitForXHSReady(page.Context(opCtx), XHSReadyOptions{Kind: XHSReadyDetail, FeedID: feedID}); err != nil {
-		return nil, err
-	}
-	if loadComments {
-		commentPage := page.Context(opCtx).Timeout(commentLoadTimeout)
-		ops := sessionCommentLoadOps{
-			getProgress: func() (commentProgress, error) {
-				return getCommentProgress(commentPage)
-			},
-			load: func(config CommentLoadConfig) error {
-				return loadCommentsByJS(commentPage, config)
-			},
-		}
-		var loadErr error
-		// 记录实际加载时长；滚动确认用物理滚轮后的容器位置变化，加载失败不累计。
-		loadStart := time.Now()
-		beforeScrollTop, beforeErr := commentScrollerTop(commentPage)
-		if useConfig {
-			loadErr = loadSessionCommentsForDetailWithConfig(config, ops)
-		} else {
-			loadErr = loadSessionCommentsForDetail(pages, ops)
-		}
-		if loadErr != nil {
-			if errors.Is(loadErr, context.Canceled) || errors.Is(loadErr, context.DeadlineExceeded) {
-				return nil, loadErr
-			}
-			logrus.Warnf("session detail load comments failed: %v", loadErr)
-		} else if s.state != nil {
-			// 前后两次都成功才确认滚动；任一读取失败均按未滚动处理，不累计。
-			scrolled := false
-			afterScrollTop, afterErr := commentScrollerTop(commentPage)
-			if beforeErr == nil && afterErr == nil && afterScrollTop > beforeScrollTop {
-				scrolled = true
-			}
-			_ = s.state.RecordCommentDwell(feedID, time.Since(loadStart), scrolled)
-		}
-	}
-	detail, err := ExtractFeedDetailFromDOM(page.Context(opCtx), feedID)
-	if err != nil {
-		return nil, err
-	}
-
-	s.mu.Lock()
-	s.recordTimelineLocked("detail", feedID, "ok", time.Now(), "")
-	s.mu.Unlock()
-	s.probeWatchdogSelectorsForKind(opCtx, XHSReadyDetail, feedID)
-	return detail, nil
-}
-
-type sessionCommentLoadOps struct {
-	getProgress func() (commentProgress, error)
-	load        func(CommentLoadConfig) error
-}
-
-func loadSessionCommentsForDetail(pages int, ops sessionCommentLoadOps) error {
-	progress, err := ops.getProgress()
-	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return err
-		}
-	}
-	config := sessionCommentPageLoadConfig(progress, err)
-	if pages > 0 {
-		config.MaxCommentItems = progress.Count + pages*20
-	} else if pages < 0 {
-		config.MaxCommentItems = 0
-	}
-	if err := ops.load(config); err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return err
-		}
-		logrus.Warnf("session detail load comments failed: %v", err)
-	}
-	return nil
-}
-
-func loadSessionCommentsForDetailWithConfig(config CommentLoadConfig, ops sessionCommentLoadOps) error {
-	config = normalizeCommentLoadConfig(config)
-	if err := ops.load(config); err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return err
-		}
-		logrus.Warnf("session detail load comments failed: %v", err)
-	}
-	return nil
 }
 
 func (s *BrowseSession) Like(ctx context.Context, unlike bool) error {
