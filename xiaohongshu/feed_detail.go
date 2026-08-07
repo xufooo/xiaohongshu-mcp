@@ -332,19 +332,15 @@ func LoadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 			return partialOrError(fmt.Errorf("评论进度读取失败: %w", progressErr))
 		}
 
+		// 滚动到底且无更多可见新评论：break 走收尾段（clickMoreReplies 兜底展开剩余按钮），
+		// 否则剩余 showMore 按钮会被跳过；batch 已满或仍有可见评论时返回续页。
+		if progress.AtEnd && !moreVisible {
+			break
+		}
 		if len(batch) >= maxItems {
-			if progress.AtEnd && !moreVisible {
-				// 滚动到底且无更多可见新评论：不立即返回，break 走收尾段
-				// （收尾段 clickMoreReplies 兜底展开剩余按钮），否则剩余 showMore 按钮会被跳过。
-				break
-			}
 			return batch, batchCursor, true, nil
 		}
-
 		if progress.AtEnd {
-			if !moreVisible {
-				break
-			}
 			return batch, batchCursor, true, nil
 		}
 
