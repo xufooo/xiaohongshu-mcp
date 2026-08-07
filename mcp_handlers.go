@@ -670,8 +670,10 @@ func (s *AppServer) handleSessionDetail(ctx context.Context, args SessionDetailA
 		if maxItems <= 0 {
 			maxItems = 20
 		}
-		if maxItems > 50 {
-			maxItems = 50
+		// 大帖（如 434 评）需要多轮续页才能读完；上限提到 200 减少轮数。
+		// RPi 内存紧（955Mi），单轮 DOM 全展开 200 条已接近硬件余量，不再上调。
+		if maxItems > 200 {
+			maxItems = 200
 		}
 		config := xiaohongshu.DefaultCommentLoadConfig()
 		if args.ClickMoreReplies != nil {

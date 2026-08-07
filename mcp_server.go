@@ -87,7 +87,7 @@ type ListFeedsArgs struct {
 
 type SessionDetailArgs struct {
 	SessionID        string `json:"session_id" jsonschema:"浏览会话ID，由start_page返回"`
-	MaxItems         int    `json:"max_items,omitempty" jsonschema:"可选，分批加载每批最多返回数量，默认20，最大50；不传或传0则仅返回当前可见评论"`
+	MaxItems         int    `json:"max_items,omitempty" jsonschema:"可选，分批加载每批最多返回数量，默认20，最大200；不传或传0则仅返回当前可见评论"`
 	Cursor           string `json:"cursor,omitempty" jsonschema:"可选，分批加载游标，由上次 get_note_detail 返回的 cursor 字段提供"`
 	ClickMoreReplies *bool  `json:"click_more_replies,omitempty" jsonschema:"可选，是否自动点击展开子评论（二级回复），默认false"`
 	ReplyLimit       *int   `json:"reply_limit,omitempty" jsonschema:"可选，子评论展开阈值，默认10；-1表示不展开子评论，0表示全部展开，正数表示回复数超过此值的评论不展开"`
