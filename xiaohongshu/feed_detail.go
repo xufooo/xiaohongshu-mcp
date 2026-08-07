@@ -441,14 +441,17 @@ func LoadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 
 		if len(batch) >= maxItems {
 			if progress.AtEnd && !moreVisible {
-				return batch, batchCursor, false, nil
+				// 滚动到底且无更多可见新评论：不立即返回，break 走收尾段
+				// （收尾段 allMode 调 clickMoreReplies 兜底展开剩余按钮，
+				//  分批模式查按钮决定是否续页），否则剩余 showMore 按钮会被跳过。
+				break
 			}
 			return batch, batchCursor, true, nil
 		}
 
 		if progress.AtEnd {
 			if !moreVisible {
-				return batch, batchCursor, false, nil
+				break
 			}
 			return batch, batchCursor, true, nil
 		}
@@ -535,17 +538,28 @@ func LoadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 			}
 			batch = append(batch, m...)
 			idsGrew = len(batchCursor.ReturnedIDs) > inputBase
-			_ = moreVis2
-		} else {
-			button, err := nextShowMoreButton(page, config.MaxRepliesThreshold)
-			if err != nil {
-				return partialOrError(fmt.Errorf("查询展开按钮失败: %w", err))
+			if moreVis2 {
+				// 展开后仍有更多可见新评论（或 batch 未满），更新可见状态，
+				// 让下方 AtEnd/idsGrew 判定基于展开后的真实状态。
+				moreVis = true
 			}
-			if button != nil {
-				if idsGrew {
-					return batch, batchCursor, true, nil
-				}
-				return partialOrError(fmt.Errorf("评论滚动无进展，请重试"))
+		} else {
+			// 分批模式：主循环可能因 AtEnd/!moreVisible break 提前结束，剩余 showMore 按钮
+			// 不会被点（idsGrew=false 时旧逻辑还会误报"评论滚动无进展"）。收尾同样调用
+			// clickMoreReplies 兜底展开剩余按钮，再 collect 收新评论，返回续页或读完。
+			if err := clickMoreReplies(page, config.MaxRepliesThreshold, remaining); err != nil {
+				return partialOrError(fmt.Errorf("全量展开子评论失败: %w", err))
+			}
+			m, moreVis2, collectErr2 := collect(maxItems - len(batch))
+			if collectErr2 != nil {
+				return partialOrError(collectErr2)
+			}
+			batch = append(batch, m...)
+			idsGrew = len(batchCursor.ReturnedIDs) > inputBase
+			if moreVis2 {
+				// 展开后仍有更多可见新评论（或 batch 未满），更新可见状态，
+				// 让下方 AtEnd/idsGrew 判定基于展开后的真实状态。
+				moreVis = true
 			}
 		}
 	}
