@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/go-rod/rod/lib/proto"
-	"github.com/sirupsen/logrus"
 	hrod "github.com/xpzouying/xiaohongshu-mcp/humanize/rod"
 )
 
