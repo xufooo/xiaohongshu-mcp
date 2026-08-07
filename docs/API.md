@@ -96,7 +96,6 @@ start_page
 | POST | `/api/v1/publish_video` | 发布视频内容 |
 | GET | `/api/v1/feeds/list` | 获取 Feeds 列表 |
 | GET/POST | `/api/v1/feeds/search` | 搜索 Feeds |
-| POST | `/api/v1/feeds/detail` | 获取 Feed 详情 |
 | POST | `/api/v1/user/profile` | 获取用户主页信息 |
 | GET | `/api/v1/user/me` | 获取当前登录用户信息 |
 | POST | `/api/v1/feeds/comment` | 发表评论 |
@@ -470,139 +469,6 @@ Content-Type: application/json
 - `video`: 视频笔记时有此字段，图文笔记为 null
 ```
 
-#### 4.3 获取 Feed 详情
-
-获取指定 Feed 的详细信息，支持加载全部评论和自定义评论加载配置。
-
-**请求**
-```
-POST /api/v1/feeds/detail
-Content-Type: application/json
-```
-
-**请求体**
-```json
-{
-  "feed_id": "64f1a2b3c4d5e6f7a8b9c0d1",
-  "xsec_token": "security_token_here",
-  "load_all_comments": false,
-  "comment_config": {
-    "click_more_replies": true,
-    "max_replies_threshold": 50,
-    "max_comment_items": 100,
-    "scroll_speed": "normal"
-  }
-}
-```
-
-**请求参数说明:**
-- `feed_id` (string, required): Feed ID
-- `xsec_token` (string, required): 安全令牌
-- `load_all_comments` (boolean, optional): 是否加载全部评论，默认 false
-- `comment_config` (object, optional): 评论加载配置
-  - `click_more_replies` (boolean): 是否点击"更多回复"按钮
-  - `max_replies_threshold` (int): 回复数量阈值，超过这个数量的"更多"按钮将被跳过（0表示不跳过任何）
-  - `max_comment_items` (int): 最大加载评论数（.parent-comment 数量），0表示加载所有
-  - `scroll_speed` (string): 滚动速度等级，可选值：`slow`(慢速) | `normal`(正常) | `fast`(快速)，默认 `fast`
-
-**响应**
-```json
-{
-  "success": true,
-  "data": {
-    "feed_id": "64f1a2b3c4d5e6f7a8b9c0d1",
-    "data": {
-      "note": {
-        "noteId": "64f1a2b3c4d5e6f7a8b9c0d1",
-        "xsecToken": "security_token_value",
-        "title": "笔记标题",
-        "desc": "笔记详细内容描述",
-        "type": "normal",
-        "time": 1702195200000,
-        "ipLocation": "浙江",
-        "user": {
-          "userId": "user_id_123",
-          "nickname": "作者昵称",
-          "nickName": "作者昵称",
-          "avatar": "https://example.com/avatar.jpg"
-        },
-        "interactInfo": {
-          "liked": false,
-          "likedCount": "100",
-          "collected": false,
-          "collectedCount": "80",
-          "commentCount": "50",
-          "sharedCount": "20"
-        },
-        "imageList": [
-          {
-            "width": 1080,
-            "height": 1440,
-            "urlDefault": "https://example.com/image1_default.jpg",
-            "urlPre": "https://example.com/image1_pre.jpg",
-            "livePhoto": false
-          }
-        ]
-      },
-      "comments": {
-        "list": [
-          {
-            "id": "comment_id_1",
-            "noteId": "64f1a2b3c4d5e6f7a8b9c0d1",
-            "content": "评论内容",
-            "likeCount": "10",
-            "createTime": 1702195200000,
-            "ipLocation": "北京",
-            "liked": false,
-            "userInfo": {
-              "userId": "commenter_id",
-              "nickname": "评论者昵称",
-              "avatar": "https://example.com/commenter_avatar.jpg"
-            },
-            "subCommentCount": "5",
-            "subComments": [
-              {
-                "id": "sub_comment_id_1",
-                "content": "子评论内容",
-                "createTime": 1702195300000,
-                "userInfo": {
-                  "nickname": "回复者昵称"
-                }
-              }
-            ],
-            "showTags": ["热评"]
-          }
-        ],
-        "cursor": "next_cursor_value",
-        "hasMore": true
-      }
-    }
-  },
-  "message": "获取Feed详情成功"
-}
-```
-
-**响应字段说明:**
-- `note.time`: 笔记发布时间戳（毫秒）
-- `note.ipLocation`: 发布者 IP 归属地
-- `note.type`: 笔记类型
-- `note.interactInfo`: 互动信息
-  - `liked`: 当前用户是否已点赞
-  - `collected`: 当前用户是否已收藏
-- `note.imageList[].livePhoto`: 是否为 Live Photo
-- `comments.list[].createTime`: 评论发布时间戳（毫秒）
-- `comments.list[].ipLocation`: 评论者 IP 归属地
-- `comments.list[].likeCount`: 评论点赞数
-- `comments.list[].liked`: 当前用户是否已点赞该评论
-- `comments.list[].subCommentCount`: 子评论数量
-- `comments.list[].subComments`: 子评论列表
-- `comments.list[].showTags`: 显示标签（如 "热评"）
-- `comments.cursor`: 分页游标
-- `comments.hasMore`: 是否有更多评论
-```
-
----
-
 ### 5. 用户信息
 
 #### 5.1 获取用户主页信息
@@ -860,7 +726,6 @@ Content-Type: application/json
 | `PUBLISH_VIDEO_FAILED` | 500 | 发布视频内容失败 |
 | `LIST_FEEDS_FAILED` | 500 | 获取 Feeds 列表失败 |
 | `SEARCH_FEEDS_FAILED` | 500 | 搜索 Feeds 失败 |
-| `GET_FEED_DETAIL_FAILED` | 500 | 获取 Feed 详情失败 |
 | `GET_USER_PROFILE_FAILED` | 500 | 获取用户主页信息失败 |
 | `GET_MY_PROFILE_FAILED` | 500 | 获取当前用户信息失败 |
 | `POST_COMMENT_FAILED` | 500 | 发表评论失败 |

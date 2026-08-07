@@ -314,42 +314,6 @@ func (s *AppServer) searchFeedsHandler(c *gin.Context) {
 	respondSuccess(c, result, "搜索Feeds成功")
 }
 
-// getFeedDetailHandler 获取Feed详情
-func (s *AppServer) getFeedDetailHandler(c *gin.Context) {
-	var req FeedDetailRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		respondError(c, http.StatusBadRequest, "INVALID_REQUEST",
-			"请求参数错误", err.Error())
-		return
-	}
-
-	var result *FeedDetailResponse
-	var err error
-
-	if req.CommentConfig != nil {
-		// 使用配置参数
-		config := xiaohongshu.CommentLoadConfig{
-			ClickMoreReplies:    req.CommentConfig.ClickMoreReplies,
-			MaxRepliesThreshold: req.CommentConfig.MaxRepliesThreshold,
-			MaxCommentItems:     req.CommentConfig.MaxCommentItems,
-			ScrollSpeed:         req.CommentConfig.ScrollSpeed,
-		}
-		result, err = s.xiaohongshuService.GetFeedDetailWithConfig(c.Request.Context(), req.FeedID, req.XsecToken, req.LoadAllComments, config)
-	} else {
-		// 使用默认配置
-		result, err = s.xiaohongshuService.GetFeedDetail(c.Request.Context(), req.FeedID, req.XsecToken, req.LoadAllComments)
-	}
-
-	if err != nil {
-		respondServiceError(c, http.StatusInternalServerError, "GET_FEED_DETAIL_FAILED",
-			"获取Feed详情失败", err)
-		return
-	}
-
-	c.Set("account", "ai-report")
-	respondSuccess(c, result, "获取Feed详情成功")
-}
-
 // userProfileHandler 用户主页
 func (s *AppServer) userProfileHandler(c *gin.Context) {
 	var req UserProfileRequest
