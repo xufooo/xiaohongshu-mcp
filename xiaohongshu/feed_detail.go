@@ -243,135 +243,24 @@ type commentProgress struct {
 	NoComments bool `json:"noComments"`
 }
 
+// loadCommentsByJS 加载全部评论（滚动 + 展开子回复直到 THE END / 停滞 / deadline）。
+// 统一实现：委托 LoadCommentsBatch 全量模式（maxItems<=0），调用方只关心 error。
 func loadCommentsByJS(page *hrod.Page, config CommentLoadConfig) error {
-	logrus.Info("开始加载评论(note-scroller JS scrollBy)...")
-	logrus.Infof("配置: maxItems=%d, speed=%s", config.MaxCommentItems, config.ScrollSpeed)
-
-	await, scrollDelta := commentScrollSettings(config.ScrollSpeed)
-	maxRounds := 500
-	commentDeadline := time.Now().Add(commentLoadTimeout)
-	remainingDeadline := func() time.Duration {
-		return time.Until(commentDeadline)
-	}
-
-	// 先确保评论区可见
-	if err := scrollToCommentsArea(page); err != nil {
-		logrus.Warnf("定位评论区失败: %v", err)
-	}
-	if err := page.Sleep(time.Second); err != nil {
-		return err
-	}
-
-	lastCount := -1
-	staleChecks := 0
-	const maxStaleChecks = 20 // 连续20次无增长即退出
-
-	progressFunc := func() (int, bool, bool) {
-		result, err := page.Timeout(2*time.Second).Eval(commentProgressScript())
-		if err != nil {
-			logrus.Warnf("评论进度检查失败: %v", err)
-			return lastCount, false, false
-		}
-		if result == nil {
-			return lastCount, false, false
-		}
-		var p struct {
-			Count      int  `json:"count"`
-			AtEnd      bool `json:"atEnd"`
-			NoComments bool `json:"noComments"`
-		}
-		if err := json.Unmarshal([]byte(result.Value.Str()), &p); err != nil {
-			return lastCount, false, false
-		}
-		return p.Count, p.AtEnd, p.NoComments
-	}
-
-	for i := 0; i < maxRounds; i++ {
-		if remaining := remainingDeadline(); remaining < 30*time.Second {
-			logrus.Warnf("评论加载剩余时间不足(%s)，停止新滚动", remaining.Round(time.Second))
-			break
-		}
-		moved, scrollErr := scrollNoteScrollerMoved(page, scrollDelta)
-		if scrollErr != nil {
-			return fmt.Errorf("评论容器滚动失败: %w", scrollErr)
-		}
-		if err := page.Sleep(await); err != nil {
-			return err
-		}
-		if !moved {
-			count, atEnd, noComments := progressFunc()
-			if noComments || atEnd {
-				logrus.Infof("评论容器到达末尾: count=%d", count)
-				break
-			}
-			return fmt.Errorf("评论容器未推进且尚未出现 end 标识")
-		}
-
-		// 每5轮检查一次进度（非致命，超时继续）
-		if i%5 == 0 {
-			if config.ClickMoreReplies {
-				button, err := nextShowMoreButton(page, config.MaxRepliesThreshold)
-				if err != nil {
-					logrus.Warnf("检查可见子评论展开按钮失败: %v", err)
-				} else if button != nil {
-					logrus.Infof("滚动中点击展开子评论: %s", button.Text)
-					if err := clickShowMoreButton(page, button); err != nil {
-						logrus.Warnf("滚动中展开子评论失败: %v", err)
-					}
-				}
-			}
-
-			count, atEnd, noComments := progressFunc()
-			if noComments {
-				logrus.Info("✓ 笔记无评论（荒地），跳过加载")
-				return nil
-			}
-			if atEnd {
-				logrus.Infof("✓ 检测到评论已到底: count=%d", count)
-				break
-			}
-			logrus.Debugf("评论进度: %d/%d, atEnd=%v", count, config.MaxCommentItems, atEnd)
-
-			if config.MaxCommentItems > 0 && count >= config.MaxCommentItems {
-				logrus.Infof("✓ 已达到目标评论数: %d", count)
-				break
-			}
-
-			if count > lastCount {
-				lastCount = count
-				staleChecks = 0
-			} else {
-				staleChecks++
-				if staleChecks >= maxStaleChecks {
-					logrus.Infof("✓ 评论数连续%d轮无增长(%d)，停止", staleChecks*5, count)
-					break
-				}
-			}
-		}
-	}
-
-	if config.ClickMoreReplies {
-		if remaining := remainingDeadline(); remaining < 15*time.Second {
-			logrus.Warnf("评论加载剩余时间不足(%s)，跳过末尾子评论展开", remaining.Round(time.Second))
-			logrus.Info("✓ 评论加载流程结束")
-			return nil
-		}
-		if err := clickMoreReplies(page, config.MaxRepliesThreshold, remainingDeadline); err != nil {
-			return err
-		}
-	}
-
-	logrus.Info("✓ 评论加载流程结束")
-	return nil
+	// 与原实现一致：deadline 用 page 自带 timeout（commentLoadTimeout），不额外依赖外部 ctx 取消。
+	_, _, _, err := LoadCommentsBatch(context.Background(), page, config, nil, 0)
+	return err
 }
 
 func LoadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadConfig, cursor *CommentCursor, maxItems int) ([]Comment, *CommentCursor, bool, error) {
 	config = normalizeCommentLoadConfig(config)
-	if maxItems <= 0 {
-		maxItems = 20
+	// maxItems<=0 表示全量加载（不设批次上限，滚动到 THE END / 停滞 / deadline），
+	// 供 loadCommentsByJS 薄封装与"加载全部评论"语义使用；分批路径由 MCP 层保证 >0。
+	allMode := maxItems <= 0
+	if allMode {
+		maxItems = 1 << 30 // 全量：批次上限近似无限，主循环不会据此提前返回
 	}
 
-	logrus.Infof("开始分批加载评论: maxItems=%d", maxItems)
+	logrus.Infof("开始分批加载评论: maxItems=%d, allMode=%v", maxItems, allMode)
 	await, scrollDelta := commentScrollSettings(config.ScrollSpeed)
 	deadline := commentLoadDeadline(ctx)
 	remaining := func() time.Duration { return time.Until(deadline) }
@@ -456,6 +345,8 @@ func LoadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 	var batch []Comment
 	replyClicksTotal := 0
 	replyStall := false
+	staleChecks := 0
+	const maxStaleChecks = 20 // 全量模式连续无进展轮数上限（对齐 loadCommentsByJS）
 
 	inputBase := len(batchCursor.ReturnedIDs)
 
@@ -478,6 +369,11 @@ func LoadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 	if progressErr != nil {
 		return partialOrError(fmt.Errorf("评论进度读取失败: %w", progressErr))
 	}
+	// 无评论（荒地）时直接返回空（对齐 loadCommentsByJS 的 noComments 提前退出，避免空转）。
+	if progress.NoComments {
+		logrus.Info("✓ 笔记无评论（荒地），跳过加载")
+		return batch, batchCursor, false, nil
+	}
 
 	for i := 0; i < 500; i++ {
 		if rem := remaining(); rem < 15*time.Second {
@@ -494,7 +390,10 @@ func LoadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 				if len(batch) >= maxItems {
 					return batch, batchCursor, true, nil
 				}
-				if !replyStall && replyClicksTotal < 8 {
+				// reply_limit=0（全部展开）时不受 8 次硬上限约束，一直点完可见按钮
+				// （nextShowMoreButton 返回 nil 或点击后停滞 replyStall 自然退出）；
+				// 有明确阈值（>0）时保持原 8 次上限，避免无谓的重复点击。
+				if !replyStall && (replyClicksTotal < 8 || config.MaxRepliesThreshold == 0) {
 					before, countErr := countReplyItems(page, button.ParentIndex)
 					if countErr != nil {
 						return partialOrError(fmt.Errorf("回复计数失败: %w", countErr))
@@ -514,7 +413,9 @@ func LoadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 					batch = append(batch, more...)
 					continue
 				}
-				return partialOrError(fmt.Errorf("评论滚动无进展，请重试"))
+				// 展开停滞（replyStall）或达到点击上限：不报"无进展"，继续滚动加载
+				// （对齐 pre 原始设计：stall 后 break 内层展开循环，继续主循环滚动）。
+				logrus.Infof("子评论展开停止(replyStall=%v, 已展开%d)，继续滚动", replyStall, replyClicksTotal)
 			}
 		}
 
@@ -537,6 +438,12 @@ func LoadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 			return batch, batchCursor, true, nil
 		}
 
+		// 全量模式：达到目标评论数（MaxCommentItems>0）提前结束（对齐 loadCommentsByJS）。
+		if allMode && config.MaxCommentItems > 0 && len(batchCursor.ReturnedIDs) >= config.MaxCommentItems {
+			logrus.Infof("全量评论加载达到目标评论数: %d", config.MaxCommentItems)
+			return batch, batchCursor, false, nil
+		}
+
 		moved, scrollErr := scrollNoteScrollerMoved(page, scrollDelta)
 		if scrollErr != nil {
 			return partialOrError(fmt.Errorf("评论容器滚动失败: %w", scrollErr))
@@ -553,6 +460,10 @@ func LoadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 			return partialOrError(collectErr)
 		}
 		batch = append(batch, more...)
+		// 收集到新评论或滚动有进展时重置停滞计数（对齐 loadCommentsByJS：count 增长即重置）。
+		if len(more) > 0 || moved {
+			staleChecks = 0
+		}
 
 		if !moved && len(more) == 0 {
 			if ctx.Err() != nil {
@@ -564,6 +475,19 @@ func LoadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 					break
 				}
 				return batch, batchCursor, true, nil
+			}
+			if allMode {
+				// 全量模式：滚动无进展且未到 end 时，不报"无进展"，
+				// 记录停滞次数，连续 maxStaleChecks 次仍无进展才结束（对齐 loadCommentsByJS）。
+				staleChecks++
+				if staleChecks >= maxStaleChecks {
+					logrus.Infof("全量评论加载连续%d轮无进展(%d)，停止", staleChecks, len(batch))
+					break
+				}
+				if err := page.Sleep(await); err != nil {
+					return partialOrError(err)
+				}
+				continue
 			}
 			return partialOrError(fmt.Errorf("评论滚动无进展，请重试"))
 		}
@@ -590,6 +514,11 @@ func LoadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 			if idsGrew {
 				return batch, batchCursor, true, nil
 			}
+			if allMode {
+				// 全量模式：主循环已结束仍有可见按钮且无新增，正常返回（不再误报"无进展"）。
+				logrus.Infof("全量评论加载结束仍有可见展开按钮，返回已加载数据")
+				return batch, batchCursor, false, nil
+			}
 			return partialOrError(fmt.Errorf("评论滚动无进展，请重试"))
 		}
 	}
@@ -603,6 +532,11 @@ func LoadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 		if ctx.Err() != nil {
 			return nil, nil, false, ctx.Err()
 		}
+		if allMode {
+			// 全量模式：没读到评论且未到 end，视为无评论（荒地）或平台返回不完整，正常返回。
+			logrus.Infof("全量评论加载未获取到评论且未到 end，返回已加载数据")
+			return batch, batchCursor, false, nil
+		}
 		return partialOrError(fmt.Errorf("评论滚动无进展，请重试"))
 	}
 
@@ -613,6 +547,10 @@ func LoadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 	if !idsGrew {
 		if ctx.Err() != nil {
 			return nil, nil, false, ctx.Err()
+		}
+		if allMode {
+			// 全量模式：本次无新增评论但滚动已结束，正常返回（不再误报"无进展"）。
+			return batch, batchCursor, false, nil
 		}
 		return partialOrError(fmt.Errorf("评论滚动无进展，请重试"))
 	}
@@ -857,6 +795,8 @@ func nextShowMoreButton(page *hrod.Page, maxRepliesThreshold int) (*showMoreButt
 		const parents = Array.from(document.querySelectorAll(".parent-comment"));
 		const buttons = parents
 			.flatMap((parent) => Array.from(parent.querySelectorAll(":scope > .children-comments .show-more, :scope > .reply-container .show-more")));
+		// reply_limit=-1：一个子评论都不展开（跳过所有展开按钮）。
+		if (maxRepliesThreshold === -1) return "";
 		for (const btn of buttons) {
 			const text = clean(btn.innerText || btn.textContent);
 			if (!text) continue;
