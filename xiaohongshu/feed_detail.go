@@ -384,7 +384,13 @@ func LoadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 		if config.ClickMoreReplies {
 			button, err := nextShowMoreButton(page, config.MaxRepliesThreshold)
 			if err != nil {
-				return partialOrError(fmt.Errorf("查询展开按钮失败: %w", err))
+				// 大帖展开后 DOM 变大，Eval 扫描按钮可能偶发超时；降级为跳过本轮
+				// （对齐 clickMoreReplies 的 isEvalTimeout 容错），避免中断整个读取。
+				if isEvalTimeout(err) {
+					logrus.Warnf("查询展开按钮超时，跳过本轮: %v", err)
+				} else {
+					return partialOrError(fmt.Errorf("查询展开按钮失败: %w", err))
+				}
 			}
 			if button != nil {
 				if len(batch) >= maxItems {
