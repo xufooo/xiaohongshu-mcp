@@ -506,20 +506,32 @@ func LoadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 	idsGrew := len(batchCursor.ReturnedIDs) > inputBase
 
 	if config.ClickMoreReplies {
-		button, err := nextShowMoreButton(page, config.MaxRepliesThreshold)
-		if err != nil {
-			return partialOrError(fmt.Errorf("查询展开按钮失败: %w", err))
-		}
-		if button != nil {
-			if idsGrew {
-				return batch, batchCursor, true, nil
+		if allMode {
+			// 全量模式：滚动到底后仍有大量"展开更多回复"按钮（nextShowMoreButton 只找可见区域，
+			// 滚动中只能碰到部分按钮）。循环结束后调用 clickMoreReplies 把剩余按钮逐个点开，
+			// 对齐 pre 版 loadCommentsByJS 的"滚动后全量展开子评论"行为——否则大帖子回复
+			// （如 434 评帖 144 父+290 子）只能读到滚动碰到的部分，漏掉未展开的子评论。
+			if err := clickMoreReplies(page, config.MaxRepliesThreshold, remaining); err != nil {
+				return partialOrError(fmt.Errorf("全量展开子评论失败: %w", err))
 			}
-			if allMode {
-				// 全量模式：主循环已结束仍有可见按钮且无新增，正常返回（不再误报"无进展"）。
-				logrus.Infof("全量评论加载结束仍有可见展开按钮，返回已加载数据")
-				return batch, batchCursor, false, nil
+			m, moreVis2, collectErr2 := collect(maxItems - len(batch))
+			if collectErr2 != nil {
+				return partialOrError(collectErr2)
 			}
-			return partialOrError(fmt.Errorf("评论滚动无进展，请重试"))
+			batch = append(batch, m...)
+			idsGrew = len(batchCursor.ReturnedIDs) > inputBase
+			_ = moreVis2
+		} else {
+			button, err := nextShowMoreButton(page, config.MaxRepliesThreshold)
+			if err != nil {
+				return partialOrError(fmt.Errorf("查询展开按钮失败: %w", err))
+			}
+			if button != nil {
+				if idsGrew {
+					return batch, batchCursor, true, nil
+				}
+				return partialOrError(fmt.Errorf("评论滚动无进展，请重试"))
+			}
 		}
 	}
 
@@ -742,7 +754,9 @@ type showMoreButtonSnapshot struct {
 }
 
 func clickMoreReplies(page *hrod.Page, maxRepliesThreshold int, remainingDeadline func() time.Duration) error {
-	const maxRounds = 20
+	// 大帖（如 434 评帖）子回复密集，可能有数十个"展开更多回复"按钮；
+	// maxRounds 放宽到 50，配合 remainingDeadline 兜底，确保滚动后能点完所有可见按钮。
+	const maxRounds = 50
 	for i := 0; i < maxRounds; i++ {
 		if remainingDeadline != nil {
 			if remaining := remainingDeadline(); remaining < 15*time.Second {
@@ -789,9 +803,6 @@ func nextShowMoreButton(page *hrod.Page, maxRepliesThreshold int) (*showMoreButt
 	result, err := page.Timeout(2*time.Second).Eval(`(maxRepliesThreshold) => {
 		const clean = (value) => (value || "").replace(/\s+/g, " ").trim();
 		const scroller = document.querySelector(".note-scroller");
-		const sRect = scroller?.getBoundingClientRect();
-		const visibleTop = sRect ? Math.max(0, sRect.top) : 0;
-		const visibleBottom = sRect ? Math.min(window.innerHeight, sRect.bottom) : window.innerHeight;
 		const parents = Array.from(document.querySelectorAll(".parent-comment"));
 		const buttons = parents
 			.flatMap((parent) => Array.from(parent.querySelectorAll(":scope > .children-comments .show-more, :scope > .reply-container .show-more")));
@@ -804,15 +815,26 @@ func nextShowMoreButton(page *hrod.Page, maxRepliesThreshold int) (*showMoreButt
 			const parent = btn.closest(".parent-comment");
 			const parentIndex = parents.indexOf(parent);
 			if (parentIndex < 0) continue;
-			const rect = btn.getBoundingClientRect();
+			let rect = btn.getBoundingClientRect();
 			if (rect.width <= 0 || rect.height <= 0) continue;
-			if (rect.top < visibleTop || rect.bottom > visibleBottom) continue;
 			const match = text.match(/(\d+(?:\.\d+)?)\s*([万千])?/);
 			let count = match ? Number(match[1]) : 0;
 			if (match?.[2] === "万") count *= 10000;
 			if (match?.[2] === "千") count *= 1000;
 			count = Math.floor(count);
 			if (maxRepliesThreshold > 0 && count > maxRepliesThreshold) continue;
+			btn.scrollIntoView({ block: "center", inline: "nearest" });
+			rect = btn.getBoundingClientRect();
+			if (scroller) {
+				const sRect = scroller.getBoundingClientRect();
+				const visibleTop = Math.max(0, sRect.top);
+				const visibleBottom = Math.min(window.innerHeight, sRect.bottom);
+				if (rect.top < visibleTop || rect.bottom > visibleBottom) {
+					scroller.scrollBy(0, rect.top - sRect.top - sRect.height / 2 + rect.height / 2);
+					rect = btn.getBoundingClientRect();
+				}
+			}
+			if (rect.width <= 0 || rect.height <= 0) continue;
 			return JSON.stringify({
 				text,
 				x: rect.left + rect.width / 2,
