@@ -661,8 +661,8 @@ func (s *AppServer) handleSessionDetail(ctx context.Context, args SessionDetailA
 	if args.SessionID == "" {
 		return sessionMCPErrorResult("笔记详情获取失败: 缺少session_id参数", sessionNextStepCreateSession())
 	}
-	if args.ReplyLimit != nil && *args.ReplyLimit < 0 {
-		return sessionMCPErrorResult("分批加载评论失败: reply_limit不能为负数", sessionNextStepOpenNote())
+	if args.ReplyLimit != nil && *args.ReplyLimit < -1 {
+		return sessionMCPErrorResult("分批加载评论失败: reply_limit不能小于-1（-1=不展开子评论，0=全部展开，正数=阈值过滤）", sessionNextStepOpenNote())
 	}
 
 	if args.MaxItems > 0 || args.Cursor != "" {
