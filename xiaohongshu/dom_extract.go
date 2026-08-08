@@ -352,8 +352,8 @@ func ExtractFeedDetailFromDOM(ctx context.Context, page *hrod.Page, counter *eva
 	return &response, nil
 }
 
-func ExtractCommentsFromDOM(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, feedID string) ([]Comment, error) {
-	snapshot, err := extractCommentsWithProgressFromDOM(ctx, page, counter, feedID)
+func ExtractCommentsFromDOM(ctx context.Context, page *hrod.Page, feedID string) ([]Comment, error) {
+	snapshot, err := extractCommentsWithProgressFromDOM(ctx, page, feedID)
 	if err != nil {
 		return nil, err
 	}
@@ -365,8 +365,8 @@ type commentsDOMSnapshot struct {
 	Progress commentProgress `json:"progress"`
 }
 
-func extractCommentsWithProgressFromDOM(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, feedID string) (commentsDOMSnapshot, error) {
-	result, err := evalJS(ctx, counter, page, `(feedID) => {` + domCleanJS + domCommentExtractorJS + `
+func extractCommentsWithProgressFromDOM(ctx context.Context, page *hrod.Page, feedID string) (commentsDOMSnapshot, error) {
+	result, err := evalJSNoCounter(ctx, page, `(feedID) => {` + domCleanJS + domCommentExtractorJS + `
 		const comments = extractComments(feedID);
 		const totalText = (document.querySelector(".comments-container .total") ||
 			document.querySelector(".comment-total") || document.querySelector(".total"))?.innerText || "";

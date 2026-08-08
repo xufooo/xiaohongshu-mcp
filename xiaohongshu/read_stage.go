@@ -79,7 +79,7 @@ func (a *ReadStageAction) read(ctx context.Context, counter *evalTimeoutCounter,
 	if err := page.SleepRandom(1*time.Second, 2*time.Second); err != nil {
 		return err
 	}
-	if err := scrollNoteScroller(ctx, page, counter, 160); err != nil {
+	if err := scrollNoteScroller(ctx, page, 160); err != nil {
 		return err
 	}
 
