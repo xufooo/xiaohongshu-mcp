@@ -655,7 +655,7 @@ func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, xsecToken strin
 		_ = s.state.RecordOpen(feed.ID, OpenSourceSearch)
 	}
 
-	snapshot, err := pollOpenedNoteSnapshot(opCtx, 4*time.Second, 250*time.Millisecond, func() (*OpenedNoteSnapshot, error) {
+	snapshot, err := pollOpenedNoteSnapshot(opCtx, 15*time.Second, 250*time.Millisecond, func() (*OpenedNoteSnapshot, error) {
 		return ExtractOpenedNoteSnapshotFromDOM(opCtx, page, counter, feed.ID)
 	})
 	if err != nil {
@@ -725,11 +725,14 @@ func pollOpenedNoteSnapshot(ctx context.Context, timeout, interval time.Duration
 		if err == nil {
 			return snapshot, nil
 		}
-		if !errors.Is(err, xerrors.ErrNoFeedDetail) {
+		if IsFatalRendererError(err) {
+			return nil, err
+		}
+		if !errors.Is(err, xerrors.ErrNoFeedDetail) && !isEvalTimeout(err) {
 			return nil, err
 		}
 		if !time.Now().Before(deadline) {
-			return nil, xerrors.ErrNoFeedDetail
+			return nil, err
 		}
 		timer := time.NewTimer(min(interval, time.Until(deadline)))
 		select {
@@ -1842,10 +1845,7 @@ func (s *BrowseSession) endOperation(operationErr error) {
 	opCtx := s.opCtx
 	expired := !closed && time.Now().After(s.expiresAt)
 	s.mu.Unlock()
-	fatal := IsFatalRendererError(operationErr) || errors.Is(operationErr, context.Canceled) || errors.Is(operationErr, context.DeadlineExceeded)
-	if opCtx != nil && opCtx.Err() != nil {
-		fatal = true
-	}
+	fatal := IsFatalRendererError(operationErr)
 
 	if expired {
 		s.close()

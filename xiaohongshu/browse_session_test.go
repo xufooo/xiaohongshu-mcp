@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -102,17 +103,81 @@ func TestMergeOpenedNoteUserFromSearchResultNilContent(t *testing.T) {
 func TestEvalTimeoutCounterConsecutiveTimeouts(t *testing.T) {
 	counter := &evalTimeoutCounter{}
 	timeoutErr := context.DeadlineExceeded
-	if err := counter.add(timeoutErr); IsFatalRendererError(err) {
+	probeCalls := 0
+	probeTimeout := func() error {
+		probeCalls++
+		return context.DeadlineExceeded
+	}
+	if err := counter.add(context.Background(), timeoutErr, probeTimeout); IsFatalRendererError(err) {
 		t.Fatal("首次 timeout 不应 fatal")
 	}
-	if err := counter.add(timeoutErr); !IsFatalRendererError(err) {
-		t.Fatalf("连续第二次 timeout 应 fatal: %v", err)
+	if err := counter.add(context.Background(), timeoutErr, probeTimeout); IsFatalRendererError(err) {
+		t.Fatal("连续第二次 timeout 不应 fatal")
+	}
+	if err := counter.add(context.Background(), timeoutErr, probeTimeout); !IsFatalRendererError(err) {
+		t.Fatalf("连续第三次 timeout 且 probe timeout 应 fatal: %v", err)
+	}
+	if probeCalls != 1 {
+		t.Fatalf("第三次 timeout 应执行一次 probe，实际 %d", probeCalls)
 	}
 	counter = &evalTimeoutCounter{}
-	_ = counter.add(timeoutErr)
-	_ = counter.add(nil)
-	if err := counter.add(timeoutErr); IsFatalRendererError(err) {
+	_ = counter.add(context.Background(), timeoutErr, probeTimeout)
+	_ = counter.add(context.Background(), nil, probeTimeout)
+	if err := counter.add(context.Background(), timeoutErr, probeTimeout); IsFatalRendererError(err) {
 		t.Fatal("成功 Eval 后应清零连续 timeout")
+	}
+}
+
+func TestEvalTimeoutCounterProbeSuccessResetsCounter(t *testing.T) {
+	counter := &evalTimeoutCounter{}
+	timeoutErr := context.DeadlineExceeded
+	probeCalls := 0
+	probeSuccess := func() error {
+		probeCalls++
+		return nil
+	}
+	_ = counter.add(context.Background(), timeoutErr, probeSuccess)
+	_ = counter.add(context.Background(), timeoutErr, probeSuccess)
+	if err := counter.add(context.Background(), timeoutErr, probeSuccess); IsFatalRendererError(err) {
+		t.Fatalf("probe 成功不应 fatal: %v", err)
+	}
+	if probeCalls != 1 || counter.timeouts != 0 {
+		t.Fatalf("probe 成功应执行一次并清零 counter: calls=%d timeouts=%d", probeCalls, counter.timeouts)
+	}
+	if err := counter.add(context.Background(), timeoutErr, probeSuccess); IsFatalRendererError(err) {
+		t.Fatal("probe 成功清零后下一次 timeout 应重新计数")
+	}
+}
+
+func TestEvalTimeoutCounterProbeErrorIsFatal(t *testing.T) {
+	counter := &evalTimeoutCounter{}
+	timeoutErr := context.DeadlineExceeded
+	probeErr := errors.New("renderer connection closed")
+	_ = counter.add(context.Background(), timeoutErr, func() error { return nil })
+	_ = counter.add(context.Background(), timeoutErr, func() error { return nil })
+	err := counter.add(context.Background(), timeoutErr, func() error { return probeErr })
+	if !IsFatalRendererError(err) {
+		t.Fatalf("probe 返回非 timeout 错误应 fatal: %v", err)
+	}
+	if !strings.Contains(err.Error(), probeErr.Error()) {
+		t.Fatalf("fatal 错误应包含 probe 错误详情: %v", err)
+	}
+}
+
+func TestEvalTimeoutCounterParentContextCancellationResetsCounter(t *testing.T) {
+	counter := &evalTimeoutCounter{timeouts: 2}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	probeCalls := 0
+	err := counter.add(ctx, context.DeadlineExceeded, func() error {
+		probeCalls++
+		return context.DeadlineExceeded
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("父 context 取消后应返回原错误: %v", err)
+	}
+	if counter.timeouts != 0 || probeCalls != 0 {
+		t.Fatalf("父 context 取消后应清零且不 probe: timeouts=%d calls=%d", counter.timeouts, probeCalls)
 	}
 }
 
@@ -176,6 +241,33 @@ func TestFinishOperationSkipsRefreshAndTTLOnFatal(t *testing.T) {
 	}
 }
 
+func TestFinishOperationKeepsDeadlineNonFatal(t *testing.T) {
+	page := &hrod.Page{}
+	expiresAt := time.Now().Add(time.Minute)
+	var evals atomic.Int32
+	session := &BrowseSession{
+		opToken:       make(chan struct{}, 1),
+		closedCh:      make(chan struct{}),
+		opCtx:         context.Background(),
+		activeOp:      func() {},
+		page:          page,
+		touchOnFinish: true,
+		expiresAt:     expiresAt,
+		timeout:       time.Minute,
+		evalJS: func(context.Context, *hrod.Page, string) (*proto.RuntimeRemoteObject, error) {
+			evals.Add(1)
+			return nil, context.DeadlineExceeded
+		},
+	}
+	session.finishOperation(fmt.Errorf("wrapped: %w", context.DeadlineExceeded))
+	if evals.Load() != 1 {
+		t.Fatalf("普通 deadline 收尾应尝试刷新页面状态，实际 Eval %d", evals.Load())
+	}
+	if !session.expiresAt.After(expiresAt) {
+		t.Fatal("普通 deadline 收尾应保留 session 并刷新 TTL")
+	}
+}
+
 func TestOpenNoteTwoStageState(t *testing.T) {
 	session := &BrowseSession{
 		seenNotes:         map[string]bool{"old": true},
@@ -217,7 +309,7 @@ func TestPollOpenedNoteSnapshotDoesNotSwallowFatal(t *testing.T) {
 	}
 }
 
-func TestPollOpenedNoteSnapshotRetriesOnlyNoDetail(t *testing.T) {
+func TestPollOpenedNoteSnapshotRetriesNoDetail(t *testing.T) {
 	calls := 0
 	want := &OpenedNoteSnapshot{}
 	got, err := pollOpenedNoteSnapshot(context.Background(), time.Second, time.Millisecond, func() (*OpenedNoteSnapshot, error) {
@@ -235,5 +327,20 @@ func TestPollOpenedNoteSnapshotRetriesOnlyNoDetail(t *testing.T) {
 	})
 	if !errors.Is(err, xerrors.ErrNoFeedDetail) {
 		t.Fatalf("轮询耗尽应保留 ErrNoFeedDetail: %v", err)
+	}
+}
+
+func TestPollOpenedNoteSnapshotRetriesEvalTimeout(t *testing.T) {
+	calls := 0
+	want := &OpenedNoteSnapshot{}
+	got, err := pollOpenedNoteSnapshot(context.Background(), time.Second, time.Millisecond, func() (*OpenedNoteSnapshot, error) {
+		calls++
+		if calls == 1 {
+			return nil, context.DeadlineExceeded
+		}
+		return want, nil
+	})
+	if err != nil || got != want || calls != 2 {
+		t.Fatalf("Eval timeout 后应在预算内重试成功: calls=%d err=%v", calls, err)
 	}
 }

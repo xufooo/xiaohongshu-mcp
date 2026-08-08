@@ -144,12 +144,12 @@ func NewSearchActionWithState(page *hrod.Page, state *ActionStateStore) *SearchA
 }
 
 func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...FilterOption) (SearchPageResult, error) {
-	counter := &evalTimeoutCounter{}
+	preSearchCounter := &evalTimeoutCounter{}
 	var previousAIState *aiStateProbe
 	pageBeforeSearch := s.page.Context(ctx)
 	if !isCurrentSearchPage(pageBeforeSearch, keyword) || len(filters) > 0 {
 		previousAIState = &aiStateProbe{}
-		probe, err := probeAIResponseState(ctx, pageBeforeSearch, counter)
+		probe, err := probeAIResponseState(ctx, pageBeforeSearch, preSearchCounter)
 		if IsFatalRendererError(err) {
 			return SearchPageResult{}, err
 		}
@@ -161,13 +161,15 @@ func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...Fi
 		}
 	}
 
-	page, feeds, err := s.searchFeeds(ctx, counter, keyword, filters...)
+	searchCounter := &evalTimeoutCounter{}
+	page, feeds, err := s.searchFeeds(ctx, searchCounter, keyword, filters...)
 	if err != nil {
 		return SearchPageResult{}, err
 	}
 
 	result := SearchPageResult{Feeds: feeds}
-	aiChat, err := readAIResponseFromState(ctx, page, counter, previousAIState)
+	postSearchCounter := &evalTimeoutCounter{}
+	aiChat, err := readAIResponseFromState(ctx, page, postSearchCounter, previousAIState)
 	if err != nil {
 		if IsFatalRendererError(err) {
 			return SearchPageResult{}, err
@@ -292,7 +294,10 @@ func (s *SearchAction) searchByUI(ctx context.Context, page *hrod.Page, counter 
 			return waitForSearchResults(ctx, page, counter, keyword, b)
 		},
 		pageErr:  page.Err,
-		navigate: page.Navigate,
+		navigate: func(url string) error {
+			counter.reset()
+			return page.Navigate(url)
+		},
 	}); err != nil {
 		return err
 	}
