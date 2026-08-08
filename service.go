@@ -1684,8 +1684,11 @@ func (s *XiaohongshuService) handleSessionOperationError(ctx context.Context, id
 	if operationErr == nil {
 		return
 	}
-	if ctx.Err() != nil || errors.Is(operationErr, context.Canceled) || errors.Is(operationErr, context.DeadlineExceeded) || xiaohongshu.IsFatalRendererError(operationErr) {
+	if xiaohongshu.IsFatalRendererError(operationErr) {
 		_ = s.browseSessions.Close(id)
+		return
+	}
+	if ctx.Err() != nil || errors.Is(operationErr, context.Canceled) || errors.Is(operationErr, context.DeadlineExceeded) {
 		return
 	}
 	s.recordRiskFromSession(session, operationErr)

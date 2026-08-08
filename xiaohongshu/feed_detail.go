@@ -811,24 +811,48 @@ type evalTimeoutCounter struct {
 	timeouts int
 }
 
-func (c *evalTimeoutCounter) add(err error) error {
+func (c *evalTimeoutCounter) reset() {
+	c.timeouts = 0
+}
+
+func (c *evalTimeoutCounter) add(ctx context.Context, err error, probe func() error) error {
+	if ctx.Err() != nil {
+		c.reset()
+		return err
+	}
 	if err == nil || !isEvalTimeout(err) {
-		c.timeouts = 0
+		c.reset()
 		return err
 	}
 	c.timeouts++
-	if c.timeouts >= 2 {
-		return fmt.Errorf("%w: %v", ErrFatalRendererError, err)
+	if c.timeouts < 3 {
+		return err
 	}
-	return err
+	probeErr := probe()
+	if probeErr == nil {
+		c.reset()
+		return err
+	}
+	if isEvalTimeout(probeErr) {
+		return fmt.Errorf("%w: business eval: %v; renderer probe: %v", ErrFatalRendererError, err, probeErr)
+	}
+	return fmt.Errorf("%w: business eval: %v; renderer probe failed: %v", ErrFatalRendererError, err, probeErr)
 }
 
 func evalJS(ctx context.Context, counter *evalTimeoutCounter, page *hrod.Page, fn string, args ...interface{}) (*proto.RuntimeRemoteObject, error) {
-	evalCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	evalCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	result, err := page.Context(evalCtx).Eval(fn, args...)
 	if counter != nil {
-		err = counter.add(err)
+		err = counter.add(ctx, err, func() error {
+			probeCtx, probeCancel := context.WithTimeout(ctx, 2*time.Second)
+			defer probeCancel()
+			_, probeErr := page.Context(probeCtx).Eval(`() => 1`)
+			if ctx.Err() != nil {
+				return nil
+			}
+			return probeErr
+		})
 	}
 	return result, err
 }
