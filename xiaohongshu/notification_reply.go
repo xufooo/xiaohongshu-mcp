@@ -25,10 +25,11 @@ type NotificationReplyResult struct {
 // 输入后用 textarea value 核对；提交按钮校验文本"发送"（可见性/禁用交给 hrod Click 的 interactable 检查）；
 // 发送后以目标行内 textarea 消失/隐藏作为确认，不重试发送。
 func replyNotificationOnPage(ctx context.Context, page *hrod.Page, target notificationTarget, content string) (*NotificationReplyResult, error) {
-	if err := verifyNotificationTargetInState(page, target); err != nil {
+	counter := &evalTimeoutCounter{}
+	if err := verifyNotificationTargetInState(ctx, page, counter, target); err != nil {
 		return nil, err
 	}
-	row, _, err := findNotificationRowElement(page, target)
+	row, _, err := findNotificationRowElement(ctx, page, counter, target)
 	if err != nil {
 		return nil, err
 	}
@@ -57,7 +58,7 @@ func replyNotificationOnPage(ctx context.Context, page *hrod.Page, target notifi
 		return nil, fmt.Errorf("输入回复内容失败: %w", err)
 	}
 	humanize.Delay(ctx, humanize.AfterType)
-	gotValue, err := notificationReplyInputValue(inputEl)
+	gotValue, err := notificationReplyInputValue(ctx, counter, inputEl)
 	if err != nil {
 		return nil, err
 	}
@@ -65,7 +66,7 @@ func replyNotificationOnPage(ctx context.Context, page *hrod.Page, target notifi
 		return nil, fmt.Errorf("输入核对失败: textarea 内容与预期不一致，不发送")
 	}
 
-	submitBtn, err := findNotificationSubmitButton(row)
+	submitBtn, err := findNotificationSubmitButton(ctx, counter, row)
 	if err != nil {
 		return nil, err
 	}
@@ -73,7 +74,7 @@ func replyNotificationOnPage(ctx context.Context, page *hrod.Page, target notifi
 	if err := submitBtn.Click(proto.InputMouseButtonLeft, 1); err != nil {
 		return nil, fmt.Errorf("点击发送按钮失败: %w", err)
 	}
-	if err := waitNotificationReplyAccepted(ctx, page, row); err != nil {
+	if err := waitNotificationReplyAccepted(ctx, page, counter, row); err != nil {
 		return nil, err
 	}
 	humanize.Delay(ctx, humanize.AfterInteract)
@@ -100,8 +101,8 @@ func verifyNotificationReplyPlaceholder(inputEl *hrod.Element, nickname string) 
 }
 
 // notificationReplyInputValue 读取 textarea 当前值。
-func notificationReplyInputValue(inputEl *hrod.Element) (string, error) {
-	obj, err := inputEl.Eval(`() => this.value`)
+func notificationReplyInputValue(ctx context.Context, counter *evalTimeoutCounter, inputEl *hrod.Element) (string, error) {
+	obj, err := evalElementJS(ctx, counter, inputEl, `() => this.value`)
 	if err != nil {
 		return "", err
 	}
@@ -113,7 +114,7 @@ func notificationReplyInputValue(inputEl *hrod.Element) (string, error) {
 
 // findNotificationSubmitButton 仅在目标通知行内查找发送按钮，校验文本为「发送」且未被禁用；找不到即报错（fail-closed）。
 // 按钮可见性/遮挡交给 hrod Click 的 interactable 检查；原生 disabled/aria-disabled/.disabled 在此精简校验。
-func findNotificationSubmitButton(row *hrod.Element) (*hrod.Element, error) {
+func findNotificationSubmitButton(ctx context.Context, counter *evalTimeoutCounter, row *hrod.Element) (*hrod.Element, error) {
 	if row == nil {
 		return nil, fmt.Errorf("找不到发送按钮: 目标通知行缺失")
 	}
@@ -128,7 +129,7 @@ func findNotificationSubmitButton(row *hrod.Element) (*hrod.Element, error) {
 	if normalizeNotificationText(text) != "发送" {
 		return nil, fmt.Errorf("发送按钮文本必须为「发送」，实际: %q", normalizeNotificationText(text))
 	}
-	obj, err := btn.Eval(`() => this.disabled || this.getAttribute("aria-disabled") === "true" || this.classList.contains("disabled")`)
+	obj, err := evalElementJS(ctx, counter, btn, `() => this.disabled || this.getAttribute("aria-disabled") === "true" || this.classList.contains("disabled")`)
 	if err != nil {
 		return nil, fmt.Errorf("检查发送按钮禁用状态失败: %w", err)
 	}
@@ -160,7 +161,7 @@ func waitNotificationReplyInput(ctx context.Context, page *hrod.Page, row *hrod.
 
 // waitNotificationReplyAccepted 提交后轮询确认：目标行内 textarea.comment-input 消失/隐藏即成功；
 // 同一次 Eval 顺带检查明确的风控/发送失败提示。最长等待 8 秒，不重试发送。
-func waitNotificationReplyAccepted(ctx context.Context, page *hrod.Page, row *hrod.Element) error {
+func waitNotificationReplyAccepted(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, row *hrod.Element) error {
 	if row == nil {
 		return fmt.Errorf("等待回复提交确认失败: 目标通知行缺失")
 	}
@@ -169,7 +170,7 @@ func waitNotificationReplyAccepted(ctx context.Context, page *hrod.Page, row *hr
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		obj, err := row.Eval(`() => {
+		obj, err := evalElementJS(ctx, counter, row, `() => {
 			const input = this.querySelector('textarea.comment-input');
 			const gone = !input || input.offsetParent === null || input.offsetWidth === 0 || input.offsetHeight === 0;
 			const keywords = ["操作频繁", "回复过于频繁", "请验证", "滑块验证", "安全验证", "回复失败", "发送失败", "提交失败", "禁止回复"];

@@ -161,7 +161,23 @@ func ExtractOpenedNoteSnapshotFromDOM(ctx context.Context, page *hrod.Page, coun
 
 // ExtractSearchFeedsFromDOM 从渲染后的搜索/首页卡片提取笔记信息。
 func ExtractSearchFeedsFromDOM(page *hrod.Page) ([]Feed, error) {
-	result, err := page.Eval(`(selector) => {
+	sources, err := extractSearchFeedSources(context.Background(), page, nil, false)
+	if err != nil {
+		return nil, err
+	}
+	if len(sources.DOM) == 0 {
+		return nil, errors.ErrNoFeeds
+	}
+	return sources.DOM, nil
+}
+
+type searchFeedSources struct {
+	DOM   []Feed `json:"dom"`
+	State []Feed `json:"state"`
+}
+
+func extractSearchFeedSources(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, includeState bool) (searchFeedSources, error) {
+	result, err := evalJS(ctx, counter, page, `(selector, includeState) => {
 		const clean = (value) => (value || "").replace(/\s+/g, " ").trim();
 		const pickText = (root, selectors) => {
 			for (const selector of selectors) {
@@ -214,7 +230,7 @@ func ExtractSearchFeedsFromDOM(page *hrod.Page) ([]Feed, error) {
 		};
 
 		const cards = Array.from(document.querySelectorAll(selector));
-		return JSON.stringify(cards.map((card, index) => {
+		const dom = cards.map((card, index) => {
 			const links = Array.from(card.querySelectorAll("a[href]"));
 			const noteLink = links.find((a) => /\/(?:explore|discovery\/item)\//.test(a.href)) || links[0];
 			const href = noteLink?.href || "";
@@ -266,23 +282,23 @@ func ExtractSearchFeedsFromDOM(page *hrod.Page) ([]Feed, error) {
 					},
 				},
 			};
-		}).filter((feed) => feed.id || feed.noteCard.displayTitle));
-	}`, SelectorFeedCard)
+		}).filter((feed) => feed.id || feed.noteCard.displayTitle);
+		const feeds = includeState ? window.__INITIAL_STATE__?.search?.feeds : null;
+		const state = feeds?.value !== undefined ? feeds.value : (feeds?._value !== undefined ? feeds._value : feeds?._rawValue);
+		return JSON.stringify({ dom, state: Array.isArray(state) ? state : [] });
+	}`, SelectorFeedCard, includeState)
 	if err != nil {
-		return nil, err
+		return searchFeedSources{}, err
 	}
 	if result == nil || strings.TrimSpace(result.Value.Str()) == "" {
-		return nil, errors.ErrNoFeeds
+		return searchFeedSources{}, errors.ErrNoFeeds
 	}
 
-	var feeds []Feed
-	if err := json.Unmarshal([]byte(result.Value.Str()), &feeds); err != nil {
-		return nil, fmt.Errorf("解析 DOM 搜索结果失败: %w", err)
+	var sources searchFeedSources
+	if err := json.Unmarshal([]byte(result.Value.Str()), &sources); err != nil {
+		return searchFeedSources{}, fmt.Errorf("解析搜索结果失败: %w", err)
 	}
-	if len(feeds) == 0 {
-		return nil, errors.ErrNoFeeds
-	}
-	return feeds, nil
+	return sources, nil
 }
 
 // ExtractFeedDetailFromDOM 从当前详情页可见 DOM 提取笔记、作者、评论和互动状态。
@@ -336,33 +352,48 @@ func ExtractFeedDetailFromDOM(ctx context.Context, page *hrod.Page, counter *eva
 	return &response, nil
 }
 
-// ExtractOpenedNoteContentFromDOM 是兼容薄 wrapper：内部调用单次快照后只返回正文。
-// 图片、视频和评论的后续读取由 session_detail 负责。
-func ExtractOpenedNoteContentFromDOM(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, feedID string) (*OpenedNoteContent, error) {
-	snapshot, err := ExtractOpenedNoteSnapshotFromDOM(ctx, page, counter, feedID)
+func ExtractCommentsFromDOM(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, feedID string) ([]Comment, error) {
+	snapshot, err := extractCommentsWithProgressFromDOM(ctx, page, counter, feedID)
 	if err != nil {
 		return nil, err
 	}
-	return &snapshot.Note, nil
+	return snapshot.Comments, nil
 }
 
-func ExtractCommentsFromDOM(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, feedID string) ([]Comment, error) {
+type commentsDOMSnapshot struct {
+	Comments []Comment       `json:"comments"`
+	Progress commentProgress `json:"progress"`
+}
+
+func extractCommentsWithProgressFromDOM(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, feedID string) (commentsDOMSnapshot, error) {
 	result, err := evalJS(ctx, counter, page, `(feedID) => {` + domCleanJS + domCommentExtractorJS + `
 		const comments = extractComments(feedID);
-		return JSON.stringify(comments);
+		const totalText = (document.querySelector(".comments-container .total") ||
+			document.querySelector(".comment-total") || document.querySelector(".total"))?.innerText || "";
+		const totalMatch = totalText.match(/共\s*(\d+)\s*条评论/);
+		const endText = document.querySelector(".end-container")?.textContent || "";
+		const noCommentsText = document.querySelector(".no-comments-text")?.textContent || "";
+		return JSON.stringify({
+			comments,
+			progress: {
+				total: totalMatch ? Number(totalMatch[1]) : 0,
+				atEnd: /THE\s*END/i.test(endText),
+				noComments: noCommentsText.includes("这是一片荒地"),
+			},
+		});
 	}`, feedID)
 	if err != nil {
-		return nil, fmt.Errorf("提取 DOM 评论失败: %w", err)
+		return commentsDOMSnapshot{}, fmt.Errorf("提取 DOM 评论失败: %w", err)
 	}
 	if result == nil || strings.TrimSpace(result.Value.Str()) == "" {
-		return nil, errors.ErrNoFeedDetail
+		return commentsDOMSnapshot{}, errors.ErrNoFeedDetail
 	}
 
-	var comments []Comment
-	if err := json.Unmarshal([]byte(result.Value.Str()), &comments); err != nil {
-		return nil, fmt.Errorf("解析 DOM 评论失败: %w", err)
+	var snapshot commentsDOMSnapshot
+	if err := json.Unmarshal([]byte(result.Value.Str()), &snapshot); err != nil {
+		return commentsDOMSnapshot{}, fmt.Errorf("解析 DOM 评论失败: %w", err)
 	}
-	return comments, nil
+	return snapshot, nil
 }
 
 // ExtractInteractStateFromDOM 复用唯一 href 状态片段读取点赞/收藏状态。

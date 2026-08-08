@@ -94,7 +94,7 @@ func (f *FeedDetailAction) GetFeedDetailCommentsBatch(ctx context.Context, feedI
 		_ = f.state.RecordOpen(feedID, source)
 	}
 	humanize.Delay(ctx, humanize.AfterNavigate)
-	if err := checkPageAccessible(page); err != nil {
+	if err := checkPageAccessible(ctx, page, counter); err != nil {
 		return nil, nil, false, err
 	}
 
@@ -159,7 +159,6 @@ func normalizeCommentLoadConfig(config CommentLoadConfig) CommentLoadConfig {
 // commentProgress is collected in one browser evaluation. Keeping the check in
 // the browser avoids several round trips per scroll on slower devices.
 type commentProgress struct {
-	Count      int  `json:"count"`
 	Total      int  `json:"total"`
 	AtEnd      bool `json:"atEnd"`
 	NoComments bool `json:"noComments"`
@@ -235,15 +234,17 @@ func loadCommentsBatch(ctx context.Context, page *hrod.Page, counter *evalTimeou
 		}
 	}
 
-	collect := func(limit int) ([]Comment, bool, error) {
+	collect := func(limit int) ([]Comment, bool, commentProgress, error) {
 		if limit <= 0 {
-			return nil, true, nil
+			progress, err := getCommentProgress(ctx, page, counter)
+			return nil, true, progress, err
 		}
-		comments, err := ExtractCommentsFromDOM(ctx, page, counter, feedID)
+		snapshot, err := extractCommentsWithProgressFromDOM(ctx, page, counter, feedID)
 		if err != nil {
-			return nil, false, err
+			return nil, false, commentProgress{}, err
 		}
-		flat := flattenComments(comments)
+		flat := flattenComments(snapshot.Comments)
+		snapshot.Comments = nil
 		var batch []Comment
 		for i, comment := range flat {
 			key := commentBatchKey(i, comment)
@@ -254,13 +255,13 @@ func loadCommentsBatch(ctx context.Context, page *hrod.Page, counter *evalTimeou
 				continue
 			}
 			if len(batch) >= limit {
-				return batch, true, nil
+				return batch, true, snapshot.Progress, nil
 			}
 			returned[key] = struct{}{}
 			batchCursor.ReturnedIDs = append(batchCursor.ReturnedIDs, key)
 			batch = append(batch, comment)
 		}
-		return batch, false, nil
+		return batch, false, snapshot.Progress, nil
 	}
 
 	var batch []Comment
@@ -279,16 +280,12 @@ func loadCommentsBatch(ctx context.Context, page *hrod.Page, counter *evalTimeou
 		return nil, nil, false, err
 	}
 
-	more, moreVisible, collectErr := collect(maxItems)
+	more, moreVisible, progress, collectErr := collect(maxItems)
 	if collectErr != nil {
 		return nil, nil, false, collectErr
 	}
 	batch = append(batch, more...)
 
-	progress, progressErr := getCommentProgress(ctx, page, counter)
-	if progressErr != nil {
-		return partialOrError(fmt.Errorf("评论进度读取失败: %w", progressErr))
-	}
 	// 无评论（荒地）时直接返回空，避免空转。
 	if progress.NoComments {
 		logrus.Info("✓ 笔记无评论（荒地），跳过加载")
@@ -342,7 +339,7 @@ func loadCommentsBatch(ctx context.Context, page *hrod.Page, counter *evalTimeou
 						}
 						replyStall = true
 					}
-					more, moreVisible, collectErr = collect(maxItems - len(batch))
+					more, moreVisible, progress, collectErr = collect(maxItems - len(batch))
 					if collectErr != nil {
 						return partialOrError(collectErr)
 					}
@@ -353,21 +350,6 @@ func loadCommentsBatch(ctx context.Context, page *hrod.Page, counter *evalTimeou
 				// （对齐 pre 原始设计：stall 后 break 内层展开循环，继续主循环滚动）。
 				logrus.Infof("子评论展开停止(replyStall=%v, 已展开%d)，继续滚动", replyStall, replyClicksTotal)
 			}
-		}
-
-		progress, progressErr = getCommentProgress(ctx, page, counter)
-		if progressErr != nil {
-			if IsFatalRendererError(progressErr) {
-				return partialOrError(progressErr)
-			}
-			if isEvalTimeout(progressErr) {
-				logrus.Warnf("评论进度读取超时，跳过本轮: %v", progressErr)
-				if err := page.Sleep(await); err != nil {
-					return partialOrError(err)
-				}
-				continue
-			}
-			return partialOrError(fmt.Errorf("评论进度读取失败: %w", progressErr))
 		}
 
 		// 滚动到底且无更多可见新评论：break 走收尾段（clickMoreReplies 兜底展开剩余按钮），
@@ -399,7 +381,7 @@ func loadCommentsBatch(ctx context.Context, page *hrod.Page, counter *evalTimeou
 			return partialOrError(err)
 		}
 
-		more, moreVisible, collectErr = collect(maxItems - len(batch))
+		more, moreVisible, progress, collectErr = collect(maxItems - len(batch))
 		if collectErr != nil {
 			return partialOrError(collectErr)
 		}
@@ -409,11 +391,7 @@ func loadCommentsBatch(ctx context.Context, page *hrod.Page, counter *evalTimeou
 			if ctx.Err() != nil {
 				return nil, nil, false, ctx.Err()
 			}
-			p, pe := getCommentProgress(ctx, page, counter)
-			if IsFatalRendererError(pe) {
-				return partialOrError(pe)
-			}
-			if pe == nil && p.AtEnd {
+			if progress.AtEnd {
 				if !moreVisible {
 					break
 				}
@@ -427,7 +405,7 @@ func loadCommentsBatch(ctx context.Context, page *hrod.Page, counter *evalTimeou
 		return nil, nil, false, ctx.Err()
 	}
 
-	m, moreVis, collectErr := collect(maxItems - len(batch))
+	m, moreVis, progress, collectErr := collect(maxItems - len(batch))
 	if collectErr != nil {
 		return partialOrError(collectErr)
 	}
@@ -443,7 +421,7 @@ func loadCommentsBatch(ctx context.Context, page *hrod.Page, counter *evalTimeou
 		if err := clickMoreReplies(ctx, page, counter, config.MaxRepliesThreshold, remaining); err != nil {
 			return partialOrError(fmt.Errorf("全量展开子评论失败: %w", err))
 		}
-		m, moreVis2, collectErr2 := collect(maxItems - len(batch))
+		m, moreVis2, progress, collectErr2 := collect(maxItems - len(batch))
 		if collectErr2 != nil {
 			return partialOrError(collectErr2)
 		}
@@ -456,22 +434,14 @@ func loadCommentsBatch(ctx context.Context, page *hrod.Page, counter *evalTimeou
 		}
 	}
 
-	p, e := getCommentProgress(ctx, page, counter)
-	if e != nil {
-		if IsFatalRendererError(e) {
-			return partialOrError(e)
-		}
-		return partialOrError(fmt.Errorf("评论进度读取失败: %w", e))
-	}
-
-	if len(batch) == 0 && !p.AtEnd {
+	if len(batch) == 0 && !progress.AtEnd {
 		if ctx.Err() != nil {
 			return nil, nil, false, ctx.Err()
 		}
 		return partialOrError(fmt.Errorf("评论滚动无进展，请重试"))
 	}
 
-	if p.AtEnd && !moreVis {
+	if progress.AtEnd && !moreVis {
 		return batch, batchCursor, false, nil
 	}
 
@@ -577,21 +547,6 @@ func scrollNoteScrollerMoved(ctx context.Context, page *hrod.Page, counter *eval
 		return false, fmt.Errorf("评论容器不存在")
 	}
 	return state.Moved, nil
-}
-
-func commentProgressScript() string {
-	return `() => {
-		const endEl = document.querySelector(".end-container");
-		const endText = endEl?.textContent || "";
-		const noCommentsText = document.querySelector(".no-comments-text")?.textContent || "";
-		const parentCount = document.querySelectorAll(".parent-comment").length;
-		const subCount = document.querySelectorAll(".parent-comment > .children-comments > .comment-item-sub, .parent-comment > .reply-container > .list-container > .comment-item").length;
-		return JSON.stringify({
-			count: parentCount + subCount,
-			atEnd: /THE\s*END/i.test(endText),
-			noComments: noCommentsText.includes("这是一片荒地"),
-		});
-	}`
 }
 
 func countReplyItems(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, parentIndex int) (int, error) {
@@ -857,6 +812,25 @@ func evalJS(ctx context.Context, counter *evalTimeoutCounter, page *hrod.Page, f
 	return result, err
 }
 
+func evalElementJS(ctx context.Context, counter *evalTimeoutCounter, element *hrod.Element, fn string, args ...interface{}) (*proto.RuntimeRemoteObject, error) {
+	evalCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	result, err := element.Context(evalCtx).Eval(fn, args...)
+	if counter != nil {
+		page := element.Page()
+		err = counter.add(ctx, err, func() error {
+			probeCtx, probeCancel := context.WithTimeout(ctx, 2*time.Second)
+			defer probeCancel()
+			_, probeErr := page.Context(probeCtx).Eval(`() => 1`)
+			if ctx.Err() != nil {
+				return nil
+			}
+			return probeErr
+		})
+	}
+	return result, err
+}
+
 // ========== DOM 查询 ==========
 
 func getCommentProgress(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter) (commentProgress, error) {
@@ -870,11 +844,7 @@ func getCommentProgress(ctx context.Context, page *hrod.Page, counter *evalTimeo
 		const totalMatch = totalText.match(/共\s*(\d+)\s*条评论/);
 		const endText = document.querySelector(".end-container")?.textContent || "";
 		const noCommentsText = document.querySelector(".no-comments-text")?.textContent || "";
-		const parentCount = document.querySelectorAll(".parent-comment").length;
-		const subCount = document.querySelectorAll(".parent-comment > .children-comments > .comment-item-sub, .parent-comment > .reply-container > .list-container > .comment-item").length;
-
 		return JSON.stringify({
-			count: parentCount + subCount,
 			total: totalMatch ? Number(totalMatch[1]) : 0,
 			atEnd: /THE\s*END/i.test(endText),
 			noComments: noCommentsText.includes("这是一片荒地"),
@@ -894,10 +864,8 @@ func getCommentProgress(ctx context.Context, page *hrod.Page, counter *evalTimeo
 
 // ========== 页面检查 ==========
 
-func checkPageAccessible(page *hrod.Page) error {
-	// 单次 Eval 完成错误容器查询，不再固定等待或创建内部 timeout，
-	// 由调用方 page/ctx 控制超时；Eval 失败直接返回错误，不把失败解释为可访问。
-	result, err := page.Eval(`() => {
+func checkPageAccessible(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter) error {
+	result, err := evalJS(ctx, counter, page, `() => {
 		const wrapper = document.querySelector(".access-wrapper, .error-wrapper, .not-found-wrapper, .blocked-wrapper");
 		const text = (wrapper?.innerText || wrapper?.textContent || "").replace(/\s+/g, " ").trim();
 		return JSON.stringify({ found: !!wrapper, text });

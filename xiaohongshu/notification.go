@@ -215,8 +215,8 @@ func parseNotificationLikeHref(href string) (bool, error) {
 // 解析出 mentions/likes/connections 三个分区明细与 unreadCount（真实结构为对象而非数字）。
 // 兼容 Vue value/_value 包装；state 或 count 缺失返回结构漂移错误，禁止误报为 0。
 // 全程不点击、不导航。
-func readNotificationCount(page *hrod.Page) (*NotificationCount, error) {
-	obj, err := page.Eval(`() => {
+func readNotificationCount(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter) (*NotificationCount, error) {
+	obj, err := evalJS(ctx, counter, page, `() => {
 		const unwrap = (v) => {
 			if (v && typeof v === "object") {
 				if ("value" in v) return v.value;
@@ -278,13 +278,13 @@ func decodeNotificationCount(raw string) (*NotificationCount, error) {
 // findVisibleNotificationEntry 选可见的通知入口（排除 AI 侧栏隐藏副本）。
 // 小红书页面存在 side-bar-ai 内的隐藏 a[href="/notification"]（0x0 无内容区域），
 // 直接 Element 会命中隐藏副本导致点击失败。
-func findVisibleNotificationEntry(page *hrod.Page) (*hrod.Element, error) {
+func findVisibleNotificationEntry(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter) (*hrod.Element, error) {
 	elems, err := page.Elements(SelectorNotificationEntry)
 	if err != nil {
 		return nil, err
 	}
 	for _, el := range elems {
-		visible, err := el.Eval(`() => {
+		visible, err := evalElementJS(ctx, counter, el, `() => {
 			const r = this.getBoundingClientRect();
 			return r.width > 0 && r.height > 0 && this.getClientRects().length > 0;
 		}`)
@@ -301,8 +301,8 @@ func findVisibleNotificationEntry(page *hrod.Page) (*hrod.Element, error) {
 // enterNotificationPage 只通过侧栏通知入口真实点击进入通知页；禁止直接导航 /notification。
 // 点击前拟人停留，使用真实 Click；点击后等待 XHSReadyNotification，超时上限 15 秒。
 // 当前是详情弹层且入口不可交互时 fail-closed，提示先 go_back。
-func enterNotificationPage(ctx context.Context, page *hrod.Page) error {
-	entry, err := findVisibleNotificationEntry(page)
+func enterNotificationPage(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter) error {
+	entry, err := findVisibleNotificationEntry(ctx, page, counter)
 	if err != nil {
 		return fmt.Errorf("未找到通知入口（可能在详情弹层中，请先 go_back）: %w", err)
 	}
@@ -319,7 +319,7 @@ func enterNotificationPage(ctx context.Context, page *hrod.Page) error {
 
 // switchNotificationTab 精确定位匹配三个通知 tab。
 // 已 active 不点击；非 active 拟人停留后点击，并等待目标 tab 获得 .active。
-func switchNotificationTab(ctx context.Context, page *hrod.Page, tab NotificationTab) error {
+func switchNotificationTab(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, tab NotificationTab) error {
 	label := notificationTabLabel(tab)
 	tabs, err := page.Elements(SelectorNotificationTab)
 	if err != nil {
@@ -339,7 +339,7 @@ func switchNotificationTab(ctx context.Context, page *hrod.Page, tab Notificatio
 	if target == nil {
 		return fmt.Errorf("通知页未找到 tab %q", label)
 	}
-	activeObj, err := target.Eval(`() => this.classList.contains("active")`)
+	activeObj, err := evalElementJS(ctx, counter, target, `() => this.classList.contains("active")`)
 	if err != nil {
 		return fmt.Errorf("读取 tab active 状态失败: %w", err)
 	}
@@ -351,18 +351,18 @@ func switchNotificationTab(ctx context.Context, page *hrod.Page, tab Notificatio
 		return fmt.Errorf("点击 tab %q 失败: %w", label, err)
 	}
 	humanize.Delay(ctx, humanize.AfterClick)
-	return waitNotificationTabActive(ctx, page, tab)
+	return waitNotificationTabActive(ctx, page, counter, tab)
 }
 
 // waitNotificationTabActive 轮询等待目标 tab 获得 .active（上限 10 秒）。
-func waitNotificationTabActive(ctx context.Context, page *hrod.Page, tab NotificationTab) error {
+func waitNotificationTabActive(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, tab NotificationTab) error {
 	label := notificationTabLabel(tab)
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		obj, err := page.Eval(`(label) => {
+		obj, err := evalJS(ctx, counter, page, `(label) => {
 			const active = Array.from(document.querySelectorAll('.notification-page .reds-tab-item.tab-item.active'));
 			return active.some((el) => String(el.textContent || "").replace(/\s+/g, " ").trim() === label);
 		}`, label)
@@ -378,8 +378,8 @@ func waitNotificationTabActive(ctx context.Context, page *hrod.Page, tab Notific
 
 // readNotificationTabState 读取指定 tab 的真实 state：notificationMap[tab].messageList。
 // 兼容 Vue value/_value 包装；notification state 缺失或分区缺失都直接报错（fail-closed，不掩盖漂移）。
-func readNotificationTabState(page *hrod.Page, tab NotificationTab) (*notificationPayload, error) {
-	obj, err := page.Eval(`(tab) => {
+func readNotificationTabState(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, tab NotificationTab) (*notificationPayload, error) {
+	obj, err := evalJS(ctx, counter, page, `(tab) => {
 		const unwrap = (v) => {
 			if (v && typeof v === "object") {
 				if ("value" in v) return v.value;
@@ -422,8 +422,8 @@ func readNotificationTabState(page *hrod.Page, tab NotificationTab) (*notificati
 
 // readNotificationDOMSnapshot 读取当前通知 surface 的 DOM 行快照。
 // 头像链接解析用户 ID 与 xsec_token；点赞状态仅读取 svg use 的 href。
-func readNotificationDOMSnapshot(page *hrod.Page) (notificationDOMSnapshot, error) {
-	obj, err := page.Eval(`(itemSelector, avatarSel, nickSel, contentSel, likeSel, replySel, likeUseSel) => {
+func readNotificationDOMSnapshot(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter) (notificationDOMSnapshot, error) {
+	obj, err := evalJS(ctx, counter, page, `(itemSelector, avatarSel, nickSel, contentSel, likeSel, replySel, likeUseSel) => {
 		const normalize = (s) => String(s || "").replace(/\s+/g, " ").trim();
 		const hrefUserID = (a) => {
 			const href = a ? String(a.getAttribute("href") || "") : "";
@@ -534,8 +534,8 @@ func matchNotificationDOM(entry rawNotification, dom notificationDOMSnapshot) *n
 
 // verifyNotificationTargetInState 点击前重新读取 tab state，复核 comment ID / user ID 仍存在。
 // 匹配真实 messageList 里的 commentInfo.id，确认发起用户一致且仍可见；否则 fail-closed。
-func verifyNotificationTargetInState(page *hrod.Page, target notificationTarget) error {
-	state, err := readNotificationTabState(page, target.Tab)
+func verifyNotificationTargetInState(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, target notificationTarget) error {
+	state, err := readNotificationTabState(ctx, page, counter, target.Tab)
 	if err != nil {
 		return fmt.Errorf("读取通知 state 复核失败: %w", err)
 	}

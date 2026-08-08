@@ -48,7 +48,7 @@ func (f *CommentFeedAction) PostComment(ctx context.Context, feedID, xsecToken, 
 	var err error
 	if f.state != nil {
 		page = f.page.Context(ctx).Timeout(120 * time.Second)
-		if err := checkPageAccessible(page); err != nil {
+		if err := checkPageAccessible(ctx, page, counter); err != nil {
 			return err
 		}
 		reader := NewReadStageAction(page, f.state)
@@ -64,7 +64,7 @@ func (f *CommentFeedAction) PostComment(ctx context.Context, feedID, xsecToken, 
 	}
 
 	// 检测页面是否可访问
-	if err := checkPageAccessible(page); err != nil {
+	if err := checkPageAccessible(ctx, page, counter); err != nil {
 		return err
 	}
 	if f.state == nil {
@@ -152,7 +152,7 @@ func (f *CommentFeedAction) ReplyToComment(ctx context.Context, feedID, xsecToke
 	if f.state != nil {
 		// 开始时只确认页面和基本风控状态（完整 reply 门槛在定位后校验）。
 		page = f.page.Context(ctx).Timeout(5 * time.Minute)
-		if err := checkPageAccessible(page); err != nil {
+		if err := checkPageAccessible(ctx, page, counter); err != nil {
 			return err
 		}
 		page, err = f.preparePage(ctx, counter, feedID, xsecToken, "reply", 5*time.Minute)
@@ -164,7 +164,7 @@ func (f *CommentFeedAction) ReplyToComment(ctx context.Context, feedID, xsecToke
 	}
 
 	// 检测页面是否可访问
-	if err := checkPageAccessible(page); err != nil {
+	if err := checkPageAccessible(ctx, page, counter); err != nil {
 		return err
 	}
 	if f.state == nil {

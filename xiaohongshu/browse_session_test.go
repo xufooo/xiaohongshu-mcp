@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -286,6 +287,12 @@ func TestOpenNoteTwoStageState(t *testing.T) {
 	if len(session.timeline) != 1 || session.timeline[0].Action != "open_note" {
 		t.Fatalf("第一阶段 timeline 错误: %+v", session.timeline)
 	}
+	firstStageTools := strings.Join(session.availableActionsLocked(1), ",")
+	for _, tool := range []string{"get_note_detail", "like_feed", "favorite_feed", "comment_feed", "reply_comment_in_feed"} {
+		if strings.Contains(firstStageTools, tool) {
+			t.Fatalf("第一阶段不得暴露依赖阅读完成的工具 %s: %s", tool, firstStageTools)
+		}
+	}
 	info = session.commitReadNoteStage(feed.ID, []string{"c1", "c2"}, "ref-1")
 	if !info.Opened || !info.Read || !info.SeenNotes[feed.ID] {
 		t.Fatalf("第二阶段状态错误: %+v", info)
@@ -295,6 +302,64 @@ func TestOpenNoteTwoStageState(t *testing.T) {
 	}
 	if len(session.timeline) != 2 || session.timeline[1].Action != "read_note" {
 		t.Fatalf("第二阶段 timeline 错误: %+v", session.timeline)
+	}
+	secondStageTools := strings.Join(session.availableActionsLocked(1), ",")
+	for _, tool := range []string{"get_note_detail", "like_feed", "favorite_feed", "comment_feed", "reply_comment_in_feed"} {
+		if !strings.Contains(secondStageTools, tool) {
+			t.Fatalf("第二阶段应暴露工具 %s: %s", tool, secondStageTools)
+		}
+	}
+}
+
+func TestSessionResultsCapacityAndBounds(t *testing.T) {
+	feeds := make([]Feed, maxBrowseSessionResults+25)
+	for i := range feeds {
+		feeds[i].ID = fmt.Sprintf("feed-%d", i)
+	}
+	results, next := replaceSessionResults(feeds)
+	if next != maxBrowseSessionResults {
+		t.Fatalf("nextResultIndex=%d, want %d", next, maxBrowseSessionResults)
+	}
+	session := &BrowseSession{results: results, nextResultIndex: next}
+	if _, err := session.resolveResult(strconv.Itoa(maxBrowseSessionResults)); err == nil || !strings.Contains(err.Error(), "索引越界") {
+		t.Fatalf("越界 result_ref 应返回明确错误: %v", err)
+	}
+	more := []Feed{{ID: "overflow"}}
+	results, next, registered := appendSessionResults(results, next, more)
+	if next != maxBrowseSessionResults {
+		t.Fatalf("容量满后 nextResultIndex 不应增长: %d", next)
+	}
+	if len(registered) != 0 {
+		t.Fatalf("容量满后不得返回未登记 feed: %+v", registered)
+	}
+	if _, ok := results["overflow"]; ok {
+		t.Fatal("容量满后不得继续缓存 feed ID")
+	}
+}
+
+func TestAppendSessionResultsReturnsOnlyResolvableFeedsNearCapacity(t *testing.T) {
+	initial := make([]Feed, maxBrowseSessionResults-2)
+	for i := range initial {
+		initial[i].ID = fmt.Sprintf("feed-%d", i)
+	}
+	results, next := replaceSessionResults(initial)
+	more := []Feed{{ID: "feed-498"}, {ID: "feed-499"}, {ID: "feed-500"}}
+	results, next, registered := appendSessionResults(results, next, more)
+	if len(registered) != 2 || next != maxBrowseSessionResults {
+		t.Fatalf("登记结果不符合容量上限: registered=%d next=%d", len(registered), next)
+	}
+	session := &BrowseSession{results: results, nextResultIndex: next}
+	for _, feed := range registered {
+		resolved, err := session.resolveResult(strconv.Itoa(feed.Index))
+		if err != nil {
+			t.Fatalf("响应 index=%d 无法 resolveResult: %v", feed.Index, err)
+		}
+		if resolved.ID != feed.ID {
+			t.Fatalf("响应 index=%d 打开目标错误: got=%s want=%s", feed.Index, resolved.ID, feed.ID)
+		}
+	}
+	if _, ok := results["feed-500"]; ok {
+		t.Fatal("未返回 feed 不得登记到 result_ref")
 	}
 }
 

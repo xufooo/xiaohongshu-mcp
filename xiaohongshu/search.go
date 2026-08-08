@@ -15,15 +15,7 @@ import (
 	"github.com/xpzouying/xiaohongshu-mcp/errors"
 	"github.com/xpzouying/xiaohongshu-mcp/humanize"
 	hrod "github.com/xpzouying/xiaohongshu-mcp/humanize/rod"
-
-	"github.com/go-rod/rod"
 )
-
-type SearchResult struct {
-	Search struct {
-		Feeds FeedsValue `json:"feeds"`
-	} `json:"search"`
-}
 
 const (
 	searchInputWaitTimeout         = 45 * time.Second
@@ -31,6 +23,7 @@ const (
 	searchFilterRefreshWaitTimeout = 20 * time.Second
 	aiResponseWaitTimeout          = 3 * time.Second
 	aiResponsePollInterval         = 500 * time.Millisecond
+	aiResponseTextLimit            = 20_000
 )
 
 // FilterOption 筛选选项结构体
@@ -131,16 +124,11 @@ const feedIDsJS = `() => {
 }`
 
 type SearchAction struct {
-	page  *hrod.Page
-	state *ActionStateStore
+	page *hrod.Page
 }
 
 func NewSearchAction(page *hrod.Page) *SearchAction {
 	return &SearchAction{page: page}
-}
-
-func NewSearchActionWithState(page *hrod.Page, state *ActionStateStore) *SearchAction {
-	return &SearchAction{page: page, state: state}
 }
 
 func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...FilterOption) (SearchPageResult, error) {
@@ -149,7 +137,7 @@ func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...Fi
 	pageBeforeSearch := s.page.Context(ctx)
 	if !isCurrentSearchPage(pageBeforeSearch, keyword) || len(filters) > 0 {
 		previousAIState = &aiStateProbe{}
-		probe, err := probeAIResponseState(ctx, pageBeforeSearch, preSearchCounter)
+		probe, err := probeAIResponseState(ctx, pageBeforeSearch, preSearchCounter, "", -1)
 		if IsFatalRendererError(err) {
 			return SearchPageResult{}, err
 		}
@@ -205,7 +193,7 @@ func (s *SearchAction) searchFeeds(ctx context.Context, counter *evalTimeoutCoun
 		humanize.Delay(ctx, humanize.AfterNavigate)
 	}
 
-	feeds, err := s.collectResults(page, keyword, pfs)
+	feeds, err := s.collectResults(ctx, page, counter, pfs)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -220,29 +208,6 @@ func (s *SearchAction) SearchFeedsOnly(ctx context.Context, keyword string, filt
 		return nil, err
 	}
 	return feeds, nil
-}
-
-func (s *SearchAction) SearchByURLFallback(ctx context.Context, keyword string, filters ...FilterOption) ([]Feed, error) {
-	page := s.page.Context(ctx)
-	counter := &evalTimeoutCounter{}
-	searchURL := makeSearchURL(keyword)
-	if err := page.Navigate(searchURL); err != nil {
-		return nil, fmt.Errorf("导航搜索页失败: %w", err)
-	}
-	if err := waitForSearchResults(ctx, page, counter, keyword, searchResultsBaseline{}); err != nil {
-		return nil, fmt.Errorf("URL兜底等待搜索结果失败: %w", err)
-	}
-	humanize.Delay(ctx, humanize.AfterNavigate)
-
-	var pfs []pendingFilter
-	for _, f := range filters {
-		collected, err := collectFilters(f)
-		if err != nil {
-			return nil, err
-		}
-		pfs = append(pfs, collected...)
-	}
-	return s.collectResults(page, keyword, pfs)
 }
 
 func (s *SearchAction) searchByUI(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, keyword string) error {
@@ -262,7 +227,7 @@ func (s *SearchAction) searchByUI(ctx context.Context, page *hrod.Page, counter 
 	}
 
 	// 等搜索框出现，不使用WaitLoad因为小红书是SPA。
-	input, err := waitForSearchInput(page, searchInputWaitTimeout, searchSelector)
+	input, err := waitForSearchInput(ctx, page, counter, searchInputWaitTimeout, searchSelector)
 	if err != nil {
 		return fmt.Errorf("未找到搜索框: %w", err)
 	}
@@ -579,8 +544,8 @@ func findFilterOption(page *hrod.Page, pf pendingFilter) (*hrod.Element, error) 
 }
 
 // readFeedIDs 从 __INITIAL_STATE__ 读取当前搜索结果 feed ID 列表
-func readFeedIDs(page *hrod.Page) (string, error) {
-	result, err := page.Eval(feedIDsJS)
+func readFeedIDs(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter) (string, error) {
+	result, err := evalJS(ctx, counter, page, feedIDsJS)
 	if err != nil {
 		return "", err
 	}
@@ -591,13 +556,13 @@ func readFeedIDs(page *hrod.Page) (string, error) {
 }
 
 // waitFeedsChanged 轮询等待搜索结果 ID 列表发生变化
-func waitFeedsChanged(page *hrod.Page, before string, timeout time.Duration) bool {
+func waitFeedsChanged(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, before string, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if err := page.Err(); err != nil {
 			return false
 		}
-		after, err := readFeedIDs(page)
+		after, err := readFeedIDs(ctx, page, counter)
 		if err == nil && after != "" && after != before {
 			return true
 		}
@@ -619,7 +584,7 @@ type searchInputProbe struct {
 	BodyText           string   `json:"bodyText"`
 }
 
-func waitForSearchInput(page *hrod.Page, timeout time.Duration, searchSelector string) (*hrod.Element, error) {
+func waitForSearchInput(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, timeout time.Duration, searchSelector string) (*hrod.Element, error) {
 	deadline := time.Now().Add(timeout)
 	var last searchInputProbe
 	var lastErr error
@@ -629,7 +594,7 @@ func waitForSearchInput(page *hrod.Page, timeout time.Duration, searchSelector s
 			return nil, err
 		}
 
-		probe, err := probeSearchInput(page, searchSelector, SelectorSearchInputInFeeds+", "+SelectorSearchInputInSearchResult)
+		probe, err := probeSearchInput(ctx, page, counter, searchSelector, SelectorSearchInputInFeeds+", "+SelectorSearchInputInSearchResult)
 		if err != nil {
 			lastErr = err
 		} else {
@@ -654,8 +619,8 @@ func waitForSearchInput(page *hrod.Page, timeout time.Duration, searchSelector s
 	return nil, fmt.Errorf("等待搜索框超时(%s): %s", timeout, formatSearchInputProbe(last))
 }
 
-func probeSearchInput(page *hrod.Page, searchSelector, primarySelector string) (searchInputProbe, error) {
-	obj, err := page.Eval(`(searchSelector, primarySelector) => {
+func probeSearchInput(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, searchSelector, primarySelector string) (searchInputProbe, error) {
+	obj, err := evalJS(ctx, counter, page, `(searchSelector, primarySelector) => {
 		const visible = (el) => {
 			if (!el || !el.isConnected) return false;
 			const style = window.getComputedStyle(el);
@@ -736,7 +701,7 @@ func formatSearchInputProbe(probe searchInputProbe) string {
 	return string(data)
 }
 
-func (s *SearchAction) collectResults(page *hrod.Page, keyword string, pfs []pendingFilter) ([]Feed, error) {
+func (s *SearchAction) collectResults(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, pfs []pendingFilter) ([]Feed, error) {
 	appliedFilters := false
 	var stateRefreshed bool
 
@@ -772,11 +737,20 @@ func (s *SearchAction) collectResults(page *hrod.Page, keyword string, pfs []pen
 		humanize.Delay(filterCtx, humanize.BeforeClick)
 
 		t0 = time.Now()
-		if err := filterPage.Wait(rod.Eval(`() => document.querySelector('.filter-panel') !== null`)); err != nil {
-			return nil, stageErr("filter_panel_wait", t0, err, "")
+		for {
+			panel, panelErr := evalJS(filterCtx, counter, filterPage, `() => document.querySelector('.filter-panel') !== null`)
+			if panelErr != nil {
+				return nil, stageErr("filter_panel_wait", t0, panelErr, "")
+			}
+			if panel != nil && panel.Value.Bool() {
+				break
+			}
+			if sleepErr := filterPage.Sleep(300 * time.Millisecond); sleepErr != nil {
+				return nil, stageErr("filter_panel_wait", t0, sleepErr, "")
+			}
 		}
 
-		before, _ := readFeedIDs(page)
+		before, _ := readFeedIDs(ctx, page, counter)
 
 		for _, pf := range pfs {
 			option, err := findFilterOption(page, pf)
@@ -796,12 +770,19 @@ func (s *SearchAction) collectResults(page *hrod.Page, keyword string, pfs []pen
 			}
 		}
 
-		stateRefreshed = waitFeedsChanged(page, before, searchFilterRefreshWaitTimeout)
+		stateRefreshed = waitFeedsChanged(ctx, page, counter, before, searchFilterRefreshWaitTimeout)
 		appliedFilters = true
 	}
 
-	domFeeds, domErr := ExtractSearchFeedsFromDOM(page)
-	stateFeeds, stateErr := readSearchFeedsFromState(page)
+	sources, sourceErr := extractSearchFeedSources(ctx, page, counter, true)
+	domFeeds, stateFeeds := sources.DOM, sources.State
+	domErr, stateErr := sourceErr, sourceErr
+	if sourceErr == nil && len(domFeeds) == 0 {
+		domErr = errors.ErrNoFeeds
+	}
+	if sourceErr == nil && len(stateFeeds) == 0 {
+		stateErr = errors.ErrNoFeeds
+	}
 
 	if appliedFilters {
 		if stateRefreshed && stateErr == nil && len(stateFeeds) > 0 {
@@ -809,9 +790,6 @@ func (s *SearchAction) collectResults(page *hrod.Page, keyword string, pfs []pen
 		}
 		if domErr == nil && len(domFeeds) > 0 {
 			return domFeeds, nil
-		}
-		if stateRefreshed && stateErr == nil && len(stateFeeds) > 0 {
-			return stateFeeds, nil
 		}
 		if domErr != nil {
 			return nil, domErr
@@ -831,11 +809,15 @@ func (s *SearchAction) collectResults(page *hrod.Page, keyword string, pfs []pen
 	return nil, stateErr
 }
 
-func collectSearchFeeds(page *hrod.Page, stateFirst bool) ([]Feed, error) {
-	domFeeds, domErr := ExtractSearchFeedsFromDOM(page)
-	stateFeeds, stateErr := readSearchFeedsFromState(page)
-	if stateFirst && stateErr == nil && len(stateFeeds) > 0 {
-		return mergeFeedsByID(stateFeeds, domFeeds), nil
+func collectSearchFeeds(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter) ([]Feed, error) {
+	sources, sourceErr := extractSearchFeedSources(ctx, page, counter, true)
+	domFeeds, stateFeeds := sources.DOM, sources.State
+	domErr, stateErr := sourceErr, sourceErr
+	if sourceErr == nil && len(domFeeds) == 0 {
+		domErr = errors.ErrNoFeeds
+	}
+	if sourceErr == nil && len(stateFeeds) == 0 {
+		stateErr = errors.ErrNoFeeds
 	}
 	if domErr == nil && len(domFeeds) > 0 {
 		return mergeFeedsByID(domFeeds, stateFeeds), nil
@@ -849,41 +831,14 @@ func collectSearchFeeds(page *hrod.Page, stateFirst bool) ([]Feed, error) {
 	return nil, stateErr
 }
 
-func readSearchFeedsFromState(page *hrod.Page) ([]Feed, error) {
-	result, err := page.Eval(`() => {
-		if (window.__INITIAL_STATE__ &&
-		    window.__INITIAL_STATE__.search &&
-		    window.__INITIAL_STATE__.search.feeds) {
-			const feeds = window.__INITIAL_STATE__.search.feeds;
-			const feedsData = feeds?.value !== undefined ? feeds.value : (feeds?._value !== undefined ? feeds._value : feeds?._rawValue);
-			if (feedsData) {
-				return JSON.stringify(feedsData);
-			}
-		}
-		return "";
-	}`)
-	if err != nil {
-		return nil, err
-	}
-
-	if result == nil || result.Value.Str() == "" {
-		return nil, errors.ErrNoFeeds
-	}
-
-	var feeds []Feed
-	if err := json.Unmarshal([]byte(result.Value.Str()), &feeds); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal feeds: %w", err)
-	}
-
-	return feeds, nil
-}
-
 type aiStateProbe struct {
 	OneboxInfo         json.RawMessage `json:"onebox_info"`
 	DQAInstantElements json.RawMessage `json:"dqa_instant_elements"`
 	Active             bool            `json:"active"`
 	SearchRoundID      json.RawMessage `json:"search_round_id"`
 	UserMessageID      json.RawMessage `json:"user_message_id"`
+	DomAIMessageID     string          `json:"dom_ai_message_id"`
+	DomAITextLength    int             `json:"dom_ai_text_length"`
 	DomAIText          string          `json:"dom_ai_text"`
 }
 
@@ -891,11 +846,13 @@ func readAIResponseFromState(ctx context.Context, page *hrod.Page, counter *eval
 	if previousState == nil {
 		deadline := time.Now().Add(aiResponseWaitTimeout)
 		var lastReply *AIChatReply
+		previousDOMMessageID := ""
+		previousDOMTextLength := -1
 		for {
 			if !time.Now().Before(deadline) {
 				return lastReply, nil
 			}
-			probe, err := probeAIResponseState(ctx, page, counter)
+			probe, err := probeAIResponseState(ctx, page, counter, previousDOMMessageID, previousDOMTextLength)
 			if err != nil {
 				if IsFatalRendererError(err) {
 					return nil, err
@@ -905,6 +862,8 @@ func readAIResponseFromState(ctx context.Context, page *hrod.Page, counter *eval
 				}
 				return lastReply, nil
 			}
+			previousDOMMessageID = probe.DomAIMessageID
+			previousDOMTextLength = probe.DomAITextLength
 			reply, pending := normalizeAIResponse(probe)
 			if reply != nil {
 				lastReply = reply
@@ -924,7 +883,7 @@ func readAIResponseFromState(ctx context.Context, page *hrod.Page, counter *eval
 
 	// 非 AI 激活搜索 → 读一次即可（没有 AI 内容）
 	if !previousState.Active {
-		probe, err := probeAIResponseState(ctx, page, counter)
+		probe, err := probeAIResponseState(ctx, page, counter, previousState.DomAIMessageID, previousState.DomAITextLength)
 		if err != nil {
 			return nil, err
 		}
@@ -936,6 +895,8 @@ func readAIResponseFromState(ctx context.Context, page *hrod.Page, counter *eval
 	deadline := time.Now().Add(aiResponseWaitTimeout)
 	var lastReply *AIChatReply
 	var prevRoundID, prevMsgID string
+	previousDOMMessageID := previousState.DomAIMessageID
+	previousDOMTextLength := previousState.DomAITextLength
 	if previousState.SearchRoundID != nil {
 		json.Unmarshal(previousState.SearchRoundID, &prevRoundID)
 	}
@@ -948,7 +909,7 @@ func readAIResponseFromState(ctx context.Context, page *hrod.Page, counter *eval
 		if remaining <= 0 {
 			return lastReply, nil
 		}
-		probe, err := probeAIResponseState(ctx, page, counter)
+		probe, err := probeAIResponseState(ctx, page, counter, previousDOMMessageID, previousDOMTextLength)
 		if err != nil {
 			if IsFatalRendererError(err) {
 				return nil, err
@@ -961,6 +922,9 @@ func readAIResponseFromState(ctx context.Context, page *hrod.Page, counter *eval
 			}
 			return nil, err
 		}
+		domChanged := probe.DomAIMessageID != previousDOMMessageID || probe.DomAITextLength != previousDOMTextLength
+		previousDOMMessageID = probe.DomAIMessageID
+		previousDOMTextLength = probe.DomAITextLength
 
 		// 用 round/message ID 判断是否有新回复，不依赖正文内容
 		var curRoundID, curMsgID string
@@ -973,7 +937,7 @@ func readAIResponseFromState(ctx context.Context, page *hrod.Page, counter *eval
 		idsChanged := curRoundID != prevRoundID || curMsgID != prevMsgID
 
 		reply, pending := normalizeAIResponse(probe)
-		if idsChanged && reply != nil {
+		if (idsChanged || domChanged) && reply != nil {
 			lastReply = reply
 		}
 		if !pending {
@@ -995,8 +959,8 @@ func readAIResponseFromState(ctx context.Context, page *hrod.Page, counter *eval
 	}
 }
 
-func probeAIResponseState(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter) (aiStateProbe, error) {
-	result, err := evalJS(ctx, counter, page, `() => {
+func probeAIResponseState(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, previousDOMMessageID string, previousDOMTextLength int) (aiStateProbe, error) {
+	result, err := evalJS(ctx, counter, page, `(previousDOMMessageID, previousDOMTextLength, textLimit) => {
 		const hasOwn = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
 		const isObject = (value) => value !== null && typeof value === "object";
 
@@ -1033,9 +997,84 @@ func probeAIResponseState(ctx context.Context, page *hrod.Page, counter *evalTim
 			return current;
 		};
 
-		const snapshot = (value) => {
-			const json = JSON.stringify(unwrapRef(value), (_key, nested) => unwrapRef(nested));
-			return json === undefined ? undefined : JSON.parse(json);
+		const essentialKey = (key) => {
+			const normalized = key.toLowerCase().replaceAll("_", "");
+			return ["content", "desc", "pending", "done", "status", "round", "searchroundid", "usermessageid", "roundid", "messageid", "id"].includes(normalized);
+		};
+		const essentialMemo = new WeakMap();
+		const containsEssentialKey = (value, visiting = new Set()) => {
+			value = unwrapRef(value);
+			if (!isObject(value)) return false;
+			if (essentialMemo.has(value)) return essentialMemo.get(value);
+			if (visiting.has(value)) return false;
+			visiting.add(value);
+			let found = false;
+			for (const [key, child] of Object.entries(value)) {
+				if (essentialKey(key) || containsEssentialKey(child, visiting)) {
+					found = true;
+					break;
+				}
+			}
+			visiting.delete(value);
+			essentialMemo.set(value, found);
+			return found;
+		};
+		const cloneComplete = (value, seen = new Set()) => {
+			value = unwrapRef(value);
+			if (typeof value === "string" || typeof value === "boolean" || typeof value === "number" || value == null) return value;
+			if (!isObject(value) || seen.has(value)) return undefined;
+			seen.add(value);
+			if (Array.isArray(value)) {
+				const items = value.map((item) => cloneComplete(item, seen)).filter((item) => item !== undefined);
+				seen.delete(value);
+				return items;
+			}
+			const cloned = {};
+			for (const [key, child] of Object.entries(value)) {
+				const nested = cloneComplete(child, seen);
+				if (nested !== undefined) cloned[key] = nested;
+			}
+			seen.delete(value);
+			return cloned;
+		};
+		const project = (value, depth = 0, seen = new Set()) => {
+			value = unwrapRef(value);
+			if (typeof value === "string") return value.slice(0, 3000);
+			if (typeof value === "boolean" || typeof value === "number" || value == null) return value;
+			if (!isObject(value) || seen.has(value)) return undefined;
+			seen.add(value);
+			if (Array.isArray(value)) {
+				const items = [];
+				for (const item of value) {
+					const hasEssential = containsEssentialKey(item);
+					if ((!hasEssential && depth >= 8) || (!hasEssential && items.length >= 50)) continue;
+					const nested = project(item, depth + 1, seen);
+					if (nested !== undefined) items.push(nested);
+				}
+				seen.delete(value);
+				return items;
+			}
+			const exact = new Set([
+				"content", "answer", "summary", "text", "markdown", "desc", "elements", "items", "list",
+				"children", "data", "result", "response", "message", "onebox", "dqa", "hasmore",
+				"isgenerating", "generating", "loading", "streaming", "isend", "finished", "completed", "done", "status",
+			]);
+			const projected = {};
+			for (const [key, child] of Object.entries(value)) {
+				const normalized = key.toLowerCase().replaceAll("_", "");
+				if (essentialKey(key)) {
+					const nested = cloneComplete(child);
+					if (nested !== undefined) projected[key] = nested;
+					continue;
+				}
+				const hasEssential = containsEssentialKey(child);
+				if (!hasEssential && depth >= 8) continue;
+				if (!hasEssential && !exact.has(normalized) && !["content", "answer", "summary", "element", "message"].some((part) => normalized.includes(part))) continue;
+				const nested = project(child, depth + 1, seen);
+				if (nested !== undefined) projected[key] = nested;
+			}
+			seen.delete(value);
+			return projected;
 		};
 
 		const search = unwrapRef(window.__INITIAL_STATE__?.search);
@@ -1057,31 +1096,50 @@ func probeAIResponseState(ctx context.Context, page *hrod.Page, counter *evalTim
 			return undefined;
 		};
 
-		const domAIText = (() => {
+		const domAI = (() => {
 			try {
-				const aiMsg = document.querySelector('.ai-message-finished, .ai-message');
+				const messages = document.querySelectorAll('.ai-message-finished, .ai-message');
+				const aiMsg = messages.length > 0 ? messages[messages.length - 1] : null;
 				if (aiMsg) {
 					const text = aiMsg.textContent.trim();
-					if (text.length > 50) return text.slice(0, 3000);
+					if (text.length > 50) {
+						const messageID = aiMsg.getAttribute("data-message-id") || aiMsg.getAttribute("data-msg-id") || aiMsg.id || "";
+						const textLength = Math.min(text.length, textLimit);
+						return {
+							messageID,
+							textLength,
+							text: messageID !== previousDOMMessageID || textLength !== previousDOMTextLength ? text.slice(0, textLimit) : "",
+						};
+					}
 				}
 				const scrollBody = document.querySelector('.ai-chat-scroll-body');
 				if (scrollBody) {
 					const text = scrollBody.textContent.trim();
-					if (text.length > 50) return text.slice(0, 3000);
+					if (text.length > 50) {
+						const messageID = scrollBody.getAttribute("data-message-id") || scrollBody.id || "";
+						const textLength = Math.min(text.length, textLimit);
+						return {
+							messageID,
+							textLength,
+							text: messageID !== previousDOMMessageID || textLength !== previousDOMTextLength ? text.slice(0, textLimit) : "",
+						};
+					}
 				}
-				return "";
-			} catch (e) { return ""; }
+				return {messageID: "", textLength: 0, text: ""};
+			} catch (e) { return {messageID: "", textLength: 0, text: ""}; }
 		})();
 
-		return JSON.stringify(snapshot({
-			onebox_info: pick("oneboxInfo", "oneBoxInfo"),
-			dqa_instant_elements: pick("dqaInstantElements", "dqaElements"),
+		return JSON.stringify({
+			onebox_info: project(pick("oneboxInfo", "oneBoxInfo")),
+			dqa_instant_elements: project(pick("dqaInstantElements", "dqaElements")),
 			active: Boolean(pick("aiWendianActive", "wendianActive", "aiActive")),
-			search_round_id: pick("currentSearchRoundId", "searchRoundId"),
-			user_message_id: pick("currentUserMessageId", "userMessageId"),
-			dom_ai_text: domAIText,
-		}));
-	}`)
+			search_round_id: cloneComplete(pick("currentSearchRoundId", "searchRoundId")),
+			user_message_id: cloneComplete(pick("currentUserMessageId", "userMessageId")),
+			dom_ai_message_id: domAI.messageID,
+			dom_ai_text_length: domAI.textLength,
+			dom_ai_text: domAI.text,
+		});
+	}`, previousDOMMessageID, previousDOMTextLength, aiResponseTextLimit)
 	if err != nil {
 		return aiStateProbe{}, fmt.Errorf("提取搜索页 AI 状态失败: %w", err)
 	}

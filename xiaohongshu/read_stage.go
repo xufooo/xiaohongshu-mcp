@@ -33,7 +33,8 @@ func NewReadStageAction(page *hrod.Page, state *ActionStateStore) *ReadStageActi
 // swiper image count. It deliberately excludes comments: comments are loaded by
 // the detail API only when requested.
 func (a *ReadStageAction) CalculateDynamicDuration(ctx context.Context) (time.Duration, error) {
-	metrics, err := readContentMetrics(a.page.Context(ctx))
+	counter := &evalTimeoutCounter{}
+	metrics, err := readContentMetrics(ctx, a.page.Context(ctx), counter)
 	if err != nil {
 		return 0, err
 	}
@@ -66,7 +67,7 @@ func (a *ReadStageAction) read(ctx context.Context, counter *evalTimeoutCounter,
 		return nil
 	}
 	page := a.page.Context(ctx)
-	probe, err := carouselReadProbe(page)
+	probe, err := carouselReadProbe(ctx, page, counter)
 	if err != nil {
 		return err
 	}
@@ -89,7 +90,7 @@ func (a *ReadStageAction) read(ctx context.Context, counter *evalTimeoutCounter,
 		if activeIndex < 0 {
 			break
 		}
-		next, err := advanceCarouselRight(page, activeIndex)
+		next, err := advanceCarouselRight(ctx, page, counter, activeIndex)
 		if err != nil {
 			break
 		}
@@ -109,16 +110,16 @@ func (a *ReadStageAction) read(ctx context.Context, counter *evalTimeoutCounter,
 	return a.state.RecordReadStage(feedID, time.Since(start), 1)
 }
 
-func readContentMetrics(page *hrod.Page) (contentMetrics, error) {
-	probe, err := carouselReadProbe(page)
+func readContentMetrics(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter) (contentMetrics, error) {
+	probe, err := carouselReadProbe(ctx, page, counter)
 	if err != nil {
 		return contentMetrics{}, err
 	}
 	return probe.contentMetrics, nil
 }
 
-func carouselReadProbe(page *hrod.Page) (carouselReadState, error) {
-	result, err := page.Eval(carouselReadProbeScript())
+func carouselReadProbe(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter) (carouselReadState, error) {
+	result, err := evalJS(ctx, counter, page, carouselReadProbeScript())
 	if err != nil {
 		return carouselReadState{}, err
 	}
@@ -148,12 +149,12 @@ func carouselReadProbeScript() string {
 	}`
 }
 
-func advanceCarouselRight(page *hrod.Page, previousIndex int) (int, error) {
+func advanceCarouselRight(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, previousIndex int) (int, error) {
 	slide, err := page.Element(".swiper-slide-active")
 	if err != nil {
 		return previousIndex, fmt.Errorf("当前笔记图片轮播页不可用: %w", err)
 	}
-	point, err := carouselRightClickPoint(slide)
+	point, err := carouselRightClickPoint(ctx, page, counter)
 	if err != nil {
 		return previousIndex, err
 	}
@@ -163,7 +164,7 @@ func advanceCarouselRight(page *hrod.Page, previousIndex int) (int, error) {
 
 	// 用一次可等待 Promise/MutationObserver Eval 等待 active index 变化，最长 2 秒，
 	// 不再每 100~150ms 重复完整 carousel probe。
-	result, err := page.Eval(`(previousIndex) => new Promise((resolve) => {
+	result, err := evalJS(ctx, counter, page, `(previousIndex) => new Promise((resolve) => {
 		const read = () => {
 			const el = document.querySelector(".swiper-slide-active");
 			return Number.parseInt(el?.getAttribute("data-swiper-slide-index") || "-1", 10);
@@ -197,13 +198,15 @@ func advanceCarouselRight(page *hrod.Page, previousIndex int) (int, error) {
 	return index, nil
 }
 
-func carouselRightClickPoint(slide *hrod.Element) (proto.Point, error) {
-	result, err := slide.Eval(`() => {
-		const r = this.getBoundingClientRect();
-		const x = Math.min(Math.max(r.left + r.width * 0.8, 1), window.innerWidth - 1);
-		const y = Math.min(Math.max(r.top + r.height / 2, 1), window.innerHeight - 1);
-		const hit = document.elementFromPoint(x, y);
-		if (!this.isConnected || r.width <= 1 || r.height <= 1 || !hit || !this.contains(hit)) return "";
+func carouselRightClickPoint(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter) (proto.Point, error) {
+	result, err := evalJS(ctx, counter, page, `() => {
+			const slide = document.querySelector(".swiper-slide-active");
+			if (!slide) return "";
+			const r = slide.getBoundingClientRect();
+			const x = Math.min(Math.max(r.left + r.width * 0.8, 1), window.innerWidth - 1);
+			const y = Math.min(Math.max(r.top + r.height / 2, 1), window.innerHeight - 1);
+			const hit = document.elementFromPoint(x, y);
+			if (!slide.isConnected || r.width <= 1 || r.height <= 1 || !hit || !slide.contains(hit)) return "";
 		return JSON.stringify({x, y});
 	}`)
 	if err != nil || result == nil || result.Value.Str() == "" {
