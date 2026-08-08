@@ -309,7 +309,7 @@ func findCommentElement(ctx context.Context, page *hrod.Page, counter *evalTimeo
 	logrus.Infof("开始查找评论 - commentID: %s, userID: %s", commentID, userID)
 
 	// 先滚动到评论区（物理滚轮）
-	if err := scrollToCommentsArea(ctx, page, counter); err != nil {
+	if err := scrollToCommentsArea(ctx, page); err != nil {
 		return nil, false, err
 	}
 	if err := sleepForCommentStep(page, 500*time.Millisecond, 1500*time.Millisecond); err != nil {
@@ -407,7 +407,7 @@ func findCommentElement(ctx context.Context, page *hrod.Page, counter *evalTimeo
 		}
 
 		// 未找到时才执行物理滚动
-		moved, err := scrollNoteScrollerMoved(ctx, page, counter, 600)
+		moved, err := scrollNoteScrollerMoved(ctx, page, 600)
 		if err != nil {
 			return nil, scrolled, fmt.Errorf("滚动查找评论失败: %w", err)
 		}
@@ -434,7 +434,7 @@ func commentElementAt(page *hrod.Page, index int) *hrod.Element {
 // browseBeforeComment triggers the post's lazy-loaded content before interacting
 // with the comment box.
 func browseBeforeComment(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter) error {
-	if err := scrollNoteScroller(ctx, page, counter, 400); err != nil {
+	if err := scrollNoteScroller(ctx, page, 400); err != nil {
 		return err
 	}
 	return sleepForCommentStep(page, 500*time.Millisecond, 1200*time.Millisecond)

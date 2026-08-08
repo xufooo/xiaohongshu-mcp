@@ -791,7 +791,7 @@ func (s *BrowseSession) Detail(ctx context.Context, _ bool, _ int) (detail *Sess
 		return nil, err
 	}
 	counter := &evalTimeoutCounter{}
-	comments, err := ExtractCommentsFromDOM(opCtx, page, counter, feedID)
+	comments, err := ExtractCommentsFromDOM(opCtx, page, feedID)
 	if err != nil {
 		return nil, err
 	}
@@ -918,7 +918,7 @@ func (s *BrowseSession) completeDetailCommentsBatch(opCtx context.Context, page 
 			HasMore: hasMore,
 		},
 	}
-	if totalItems, err := knownCommentTotal(opCtx, page, counter); err != nil {
+	if totalItems, err := knownCommentTotal(opCtx, page); err != nil {
 		return nil, nil, false, err
 	} else if totalItems > 0 {
 		resp.Comments.TotalItems = totalItems
