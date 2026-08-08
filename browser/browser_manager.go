@@ -183,6 +183,22 @@ func (m *Manager) Release(page *hrod.Page) {
 	m.releaseToken()
 }
 
+// ReleaseSession 关闭页面并回收整个浏览器实例（会话结束后无保留必要）。
+// 与 Release 的区别：Release 保留常驻浏览器供复用；ReleaseSession 直接销毁。
+func (m *Manager) ReleaseSession(page *hrod.Page) error {
+	defer m.releaseToken()
+	if page == nil {
+		return nil
+	}
+
+	browser := page.Browser()
+	ctx, cancel := context.WithTimeout(context.Background(), pageCloseTimeout)
+	err := page.Context(ctx).Close()
+	cancel()
+	m.discardBrowser(browser)
+	return err
+}
+
 // Reset 关闭常驻浏览器。下次 Acquire 会创建新实例。
 func (m *Manager) Reset(ctx context.Context) error {
 	if err := m.lifecycleLockForOwner(ctx, "reset"); err != nil {
