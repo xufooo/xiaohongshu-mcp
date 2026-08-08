@@ -329,7 +329,10 @@ func loadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 						if isEvalTimeout(waitErr) {
 							logrus.Warnf("等待回复增长超时: %v", waitErr)
 						} else {
+							// 增长停滞：继续点同类按钮只会重复失败，直接 break 收尾。
+							logrus.Infof("回复增长停滞，结束本批展开")
 							replyStall = true
+							break
 						}
 					}
 					more, moreVisible, progress, collectErr = collect(maxItems - len(batch))
@@ -339,9 +342,11 @@ func loadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 					batch = append(batch, more...)
 					continue
 				}
-				// 已达 8 次上限或停滞：不再点当前按钮，落到滚动/收尾路径，
-				// 避免对同一按钮无限 continue 空转（Codex 复审阻塞项）。
-				logrus.Infof("子评论展开受限(replyStall=%v, 已展开%d)，转入滚动", replyStall, replyClicksTotal)
+				// 已达 8 次上限或停滞：不再展开，直接 break 主循环走收尾段。
+				// 继续滚动无意义（按钮位置不随滚动改变，会死循环滚动）；
+				// 剩余合格按钮由收尾 clickMoreReplies 尽力处理 + hasMore=true 留给下一批 cursor 续页。
+				logrus.Infof("子评论展开受限(replyStall=%v, 已展开%d)，结束本批展开", replyStall, replyClicksTotal)
+				break
 			}
 			// 无更多展开按钮：不报"无进展"，继续滚动加载
 			logrus.Infof("子评论展开停止(replyStall=%v, 已展开%d)，继续滚动", replyStall, replyClicksTotal)
@@ -636,7 +641,13 @@ func clickMoreReplies(ctx context.Context, page *hrod.Page, maxRepliesThreshold 
 			return err
 		}
 		if err := waitReplyItemsChanged(ctx, page, button.ParentIndex, before, 7*time.Second); err != nil {
-			logrus.Debugf("等待子评论增长超时，继续下一轮: %v", err)
+			if isEvalTimeout(err) {
+				logrus.Debugf("等待子评论增长超时，继续下一轮: %v", err)
+			} else {
+				// 非超时失败（增长停滞）：继续试同类型按钮只会重复失败，直接返回。
+				logrus.Debugf("等待子评论增长失败，停止展开: %v", err)
+				return nil
+			}
 		}
 		if err := page.Sleep(4 * time.Second); err != nil {
 			return err
