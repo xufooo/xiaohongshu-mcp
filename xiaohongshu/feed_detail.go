@@ -413,15 +413,16 @@ func loadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 
 	idsGrew := len(batchCursor.ReturnedIDs) > inputBase
 
-	if config.ClickMoreReplies {
+	if config.ClickMoreReplies && !replyStall {
 		// 主循环可能因 AtEnd/!moreVisible break 提前结束，剩余 showMore 按钮不会被点
 		// （idsGrew=false 时旧逻辑还会误报"评论滚动无进展"）。收尾调用 clickMoreReplies
 		// 兜底展开剩余按钮，再 collect 收新评论，返回续页或读完——否则大帖子回复
 		// （如 434 评帖 144 父+290 子）只能读到滚动碰到的部分，漏掉未展开的子评论。
+		// replyStall 时跳过：已确认展开停滞，重试同类按钮只会重复失败。
 		if err := clickMoreReplies(ctx, page, config.MaxRepliesThreshold, replyClicksTotal, remaining); err != nil {
 			return partialOrError(fmt.Errorf("全量展开子评论失败: %w", err))
 		}
-		m, moreVis2, _, collectErr2 := collect(maxItems - len(batch))
+		m, moreVis2, progress2, collectErr2 := collect(maxItems - len(batch))
 		if collectErr2 != nil {
 			return partialOrError(collectErr2)
 		}
@@ -431,6 +432,9 @@ func loadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 			// 展开后仍有更多可见新评论（或 batch 未满），更新可见状态，
 			// 让下方 AtEnd/idsGrew 判定基于展开后的真实状态。
 			moreVis = true
+		}
+		if progress2.AtEnd {
+			progress = progress2
 		}
 	}
 
@@ -649,7 +653,12 @@ func clickMoreReplies(ctx context.Context, page *hrod.Page, maxRepliesThreshold 
 				return nil
 			}
 		}
-		if err := page.Sleep(4 * time.Second); err != nil {
+		// 性能：wait 已确认增长则无需再等 4s，短暂休息即可；wait 失败（超时）保留 4s 兜底。
+		sleep := 500 * time.Millisecond
+		if err != nil {
+			sleep = 4 * time.Second
+		}
+		if err := page.Sleep(sleep); err != nil {
 			return err
 		}
 		clicked++
