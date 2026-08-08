@@ -421,7 +421,7 @@ func loadCommentsBatch(ctx context.Context, page *hrod.Page, counter *evalTimeou
 		if err := clickMoreReplies(ctx, page, counter, config.MaxRepliesThreshold, remaining); err != nil {
 			return partialOrError(fmt.Errorf("全量展开子评论失败: %w", err))
 		}
-		m, moreVis2, progress, collectErr2 := collect(maxItems - len(batch))
+		m, moreVis2, _, collectErr2 := collect(maxItems - len(batch))
 		if collectErr2 != nil {
 			return partialOrError(collectErr2)
 		}
