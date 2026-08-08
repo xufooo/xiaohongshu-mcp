@@ -150,7 +150,7 @@ func carouselReadProbeScript() string {
 }
 
 func advanceCarouselRight(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, previousIndex int) (int, error) {
-	slide, err := page.Element(".swiper-slide-active")
+	_, err := page.Element(".swiper-slide-active")
 	if err != nil {
 		return previousIndex, fmt.Errorf("当前笔记图片轮播页不可用: %w", err)
 	}
