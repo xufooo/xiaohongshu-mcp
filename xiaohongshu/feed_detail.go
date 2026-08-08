@@ -823,7 +823,7 @@ func (c *evalTimeoutCounter) add(err error) error {
 	return err
 }
 
-func evalJS(ctx context.Context, counter *evalTimeoutCounter, page *hrod.Page, fn string, args ...interface{}) (*rod.Result, error) {
+func evalJS(ctx context.Context, counter *evalTimeoutCounter, page *hrod.Page, fn string, args ...interface{}) (*proto.RuntimeRemoteObject, error) {
 	evalCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	result, err := page.Context(evalCtx).Eval(fn, args...)
