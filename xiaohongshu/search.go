@@ -144,23 +144,37 @@ func NewSearchActionWithState(page *hrod.Page, state *ActionStateStore) *SearchA
 }
 
 func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...FilterOption) (SearchPageResult, error) {
+	counter := &evalTimeoutCounter{}
 	var previousAIState *aiStateProbe
 	pageBeforeSearch := s.page.Context(ctx)
 	if !isCurrentSearchPage(pageBeforeSearch, keyword) || len(filters) > 0 {
 		previousAIState = &aiStateProbe{}
-		if probe, err := probeAIResponseState(pageBeforeSearch.Timeout(time.Second)); err == nil {
+		probe, err := probeAIResponseState(ctx, pageBeforeSearch, counter)
+		if IsFatalRendererError(err) {
+			return SearchPageResult{}, err
+		}
+		if ctx.Err() != nil {
+			return SearchPageResult{}, ctx.Err()
+		}
+		if err == nil {
 			previousAIState = &probe
 		}
 	}
 
-	page, feeds, err := s.searchFeeds(ctx, keyword, filters...)
+	page, feeds, err := s.searchFeeds(ctx, counter, keyword, filters...)
 	if err != nil {
 		return SearchPageResult{}, err
 	}
 
 	result := SearchPageResult{Feeds: feeds}
-	aiChat, err := readAIResponseFromState(page, previousAIState)
+	aiChat, err := readAIResponseFromState(ctx, page, counter, previousAIState)
 	if err != nil {
+		if IsFatalRendererError(err) {
+			return SearchPageResult{}, err
+		}
+		if ctx.Err() != nil {
+			return SearchPageResult{}, ctx.Err()
+		}
 		logrus.WithError(err).Warn("读取搜索页 AI 回复失败")
 		return result, nil
 	}
@@ -168,7 +182,7 @@ func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...Fi
 	return result, nil
 }
 
-func (s *SearchAction) searchFeeds(ctx context.Context, keyword string, filters ...FilterOption) (*hrod.Page, []Feed, error) {
+func (s *SearchAction) searchFeeds(ctx context.Context, counter *evalTimeoutCounter, keyword string, filters ...FilterOption) (*hrod.Page, []Feed, error) {
 	page := s.page.Context(ctx)
 
 	// 导航前校验筛选值，及时报错
@@ -183,7 +197,7 @@ func (s *SearchAction) searchFeeds(ctx context.Context, keyword string, filters 
 
 	// 检查当前页面是否已在该关键词搜索结果上，是则跳过搜索
 	if !isCurrentSearchPage(page, keyword) {
-		if err := s.searchByUI(page, keyword); err != nil {
+		if err := s.searchByUI(ctx, page, counter, keyword); err != nil {
 			return nil, nil, err
 		}
 		humanize.Delay(ctx, humanize.AfterNavigate)
@@ -198,7 +212,8 @@ func (s *SearchAction) searchFeeds(ctx context.Context, keyword string, filters 
 
 // SearchFeedsOnly 保留仅返回笔记列表的兼容入口。
 func (s *SearchAction) SearchFeedsOnly(ctx context.Context, keyword string, filters ...FilterOption) ([]Feed, error) {
-	_, feeds, err := s.searchFeeds(ctx, keyword, filters...)
+	counter := &evalTimeoutCounter{}
+	_, feeds, err := s.searchFeeds(ctx, counter, keyword, filters...)
 	if err != nil {
 		return nil, err
 	}
@@ -207,11 +222,12 @@ func (s *SearchAction) SearchFeedsOnly(ctx context.Context, keyword string, filt
 
 func (s *SearchAction) SearchByURLFallback(ctx context.Context, keyword string, filters ...FilterOption) ([]Feed, error) {
 	page := s.page.Context(ctx)
+	counter := &evalTimeoutCounter{}
 	searchURL := makeSearchURL(keyword)
 	if err := page.Navigate(searchURL); err != nil {
 		return nil, fmt.Errorf("导航搜索页失败: %w", err)
 	}
-	if err := waitForSearchResults(page, keyword, searchResultsBaseline{}); err != nil {
+	if err := waitForSearchResults(ctx, page, counter, keyword, searchResultsBaseline{}); err != nil {
 		return nil, fmt.Errorf("URL兜底等待搜索结果失败: %w", err)
 	}
 	humanize.Delay(ctx, humanize.AfterNavigate)
@@ -227,7 +243,7 @@ func (s *SearchAction) SearchByURLFallback(ctx context.Context, keyword string, 
 	return s.collectResults(page, keyword, pfs)
 }
 
-func (s *SearchAction) searchByUI(page *hrod.Page, keyword string) error {
+func (s *SearchAction) searchByUI(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, keyword string) error {
 	// 使用 Info() 读取 URL（非阻塞），避免在冷启动/blank 页面上执行 DOM Eval。
 	searchSelector, err := prepareSearchPage(
 		func() string {
@@ -253,7 +269,7 @@ func (s *SearchAction) searchByUI(page *hrod.Page, keyword string) error {
 		return fmt.Errorf("点击搜索框失败: %w", err)
 	}
 	// Vue 控制的输入框需要先 JS 清空再键入，否则旧词残留
-	if _, err := page.Eval(`() => {
+	if _, err := evalJS(ctx, counter, page, `() => {
 		const el = document.activeElement;
 		if (el) { el.select(); document.execCommand('delete', false); }
 	}`); err != nil {
@@ -262,7 +278,7 @@ func (s *SearchAction) searchByUI(page *hrod.Page, keyword string) error {
 	if err := input.Input(keyword); err != nil {
 		return fmt.Errorf("输入关键词失败: %w", err)
 	}
-	baseline, err := captureSearchResultsBaseline(page)
+	baseline, err := captureSearchResultsBaseline(ctx, page, counter)
 	if err != nil {
 		return fmt.Errorf("捕获搜索结果基线失败: %w", err)
 	}
@@ -273,7 +289,7 @@ func (s *SearchAction) searchByUI(page *hrod.Page, keyword string) error {
 
 	if err := waitForSearchResultsWithURLFallback(keyword, baseline, searchResultsFallbackHooks{
 		wait: func(b searchResultsBaseline) error {
-			return waitForSearchResults(page, keyword, b)
+			return waitForSearchResults(ctx, page, counter, keyword, b)
 		},
 		pageErr:  page.Err,
 		navigate: page.Navigate,
@@ -294,6 +310,9 @@ func waitForSearchResultsWithURLFallback(keyword string, baseline searchResultsB
 	if err == nil {
 		return nil
 	}
+	if IsFatalRendererError(err) {
+		return err
+	}
 	if ctxErr := hooks.pageErr(); ctxErr != nil {
 		return fmt.Errorf("等待搜索结果失败: %w (context: %w)", err, ctxErr)
 	}
@@ -312,8 +331,8 @@ type searchResultsBaseline struct {
 	DOMSignature   string
 }
 
-func captureSearchResultsBaseline(page *hrod.Page) (searchResultsBaseline, error) {
-	probe, err := probeSearchResultsKeyword(page, "")
+func captureSearchResultsBaseline(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter) (searchResultsBaseline, error) {
+	probe, err := probeSearchResultsKeyword(ctx, page, counter, "")
 	if err != nil {
 		return searchResultsBaseline{}, err
 	}
@@ -323,7 +342,7 @@ func captureSearchResultsBaseline(page *hrod.Page) (searchResultsBaseline, error
 	}, nil
 }
 
-func waitForSearchResults(page *hrod.Page, keyword string, baseline searchResultsBaseline) error {
+func waitForSearchResults(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, keyword string, baseline searchResultsBaseline) error {
 	deadline := time.Now().Add(searchResultsWaitTimeout)
 	var last searchResultsKeywordProbe
 	var lastErr error
@@ -333,8 +352,11 @@ func waitForSearchResults(page *hrod.Page, keyword string, baseline searchResult
 			return err
 		}
 
-		probe, err := probeSearchResultsKeyword(page, keyword)
+		probe, err := probeSearchResultsKeyword(ctx, page, counter, keyword)
 		if err != nil {
+			if IsFatalRendererError(err) {
+				return err
+			}
 			lastErr = err
 		} else {
 			last = probe
@@ -379,8 +401,8 @@ type searchResultsKeywordProbe struct {
 	DOMSignature     string `json:"dom_signature"`
 }
 
-func probeSearchResultsKeyword(page *hrod.Page, keyword string) (searchResultsKeywordProbe, error) {
-	obj, err := page.Eval(`(keyword, feedCardSelector, searchInputSelector, markedSearchInputSelector) => {
+func probeSearchResultsKeyword(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, keyword string) (searchResultsKeywordProbe, error) {
+	obj, err := evalJS(ctx, counter, page, `(keyword, feedCardSelector, searchInputSelector, markedSearchInputSelector) => {
 		const unwrap = (value) => {
 			if (value && typeof value === "object") {
 				if ("value" in value) return value.value;
@@ -860,8 +882,7 @@ type aiStateProbe struct {
 	DomAIText          string          `json:"dom_ai_text"`
 }
 
-func readAIResponseFromState(page *hrod.Page, previousState *aiStateProbe) (*AIChatReply, error) {
-	// 没有前状态（首次搜索）→ 等 3s 让 AI 异步加载完再读
+func readAIResponseFromState(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, previousState *aiStateProbe) (*AIChatReply, error) {
 	if previousState == nil {
 		deadline := time.Now().Add(aiResponseWaitTimeout)
 		var lastReply *AIChatReply
@@ -869,8 +890,14 @@ func readAIResponseFromState(page *hrod.Page, previousState *aiStateProbe) (*AIC
 			if !time.Now().Before(deadline) {
 				return lastReply, nil
 			}
-			probe, err := probeAIResponseState(page.Timeout(time.Until(deadline)))
+			probe, err := probeAIResponseState(ctx, page, counter)
 			if err != nil {
+				if IsFatalRendererError(err) {
+					return nil, err
+				}
+				if ctx.Err() != nil {
+					return nil, ctx.Err()
+				}
 				return lastReply, nil
 			}
 			reply, pending := normalizeAIResponse(probe)
@@ -882,6 +909,9 @@ func readAIResponseFromState(page *hrod.Page, previousState *aiStateProbe) (*AIC
 			}
 			sleepFor := min(aiResponsePollInterval, time.Until(deadline))
 			if err := page.Sleep(sleepFor); err != nil {
+				if ctx.Err() != nil {
+					return nil, ctx.Err()
+				}
 				return lastReply, nil
 			}
 		}
@@ -889,7 +919,7 @@ func readAIResponseFromState(page *hrod.Page, previousState *aiStateProbe) (*AIC
 
 	// 非 AI 激活搜索 → 读一次即可（没有 AI 内容）
 	if !previousState.Active {
-		probe, err := probeAIResponseState(page.Timeout(aiResponseWaitTimeout))
+		probe, err := probeAIResponseState(ctx, page, counter)
 		if err != nil {
 			return nil, err
 		}
@@ -913,8 +943,14 @@ func readAIResponseFromState(page *hrod.Page, previousState *aiStateProbe) (*AIC
 		if remaining <= 0 {
 			return lastReply, nil
 		}
-		probe, err := probeAIResponseState(page.Timeout(remaining))
+		probe, err := probeAIResponseState(ctx, page, counter)
 		if err != nil {
+			if IsFatalRendererError(err) {
+				return nil, err
+			}
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			if lastReply != nil {
 				return lastReply, nil
 			}
@@ -943,6 +979,9 @@ func readAIResponseFromState(page *hrod.Page, previousState *aiStateProbe) (*AIC
 		}
 		sleepFor := min(aiResponsePollInterval, time.Until(deadline))
 		if err := page.Sleep(sleepFor); err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			if lastReply != nil {
 				return lastReply, nil
 			}
@@ -951,8 +990,8 @@ func readAIResponseFromState(page *hrod.Page, previousState *aiStateProbe) (*AIC
 	}
 }
 
-func probeAIResponseState(page *hrod.Page) (aiStateProbe, error) {
-	result, err := page.Eval(`() => {
+func probeAIResponseState(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter) (aiStateProbe, error) {
+	result, err := evalJS(ctx, counter, page, `() => {
 		const hasOwn = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
 		const isObject = (value) => value !== null && typeof value === "object";
 
@@ -1013,48 +1052,17 @@ func probeAIResponseState(page *hrod.Page) (aiStateProbe, error) {
 			return undefined;
 		};
 
-		// 尝试从 DOM 提取 AI 回答文本（从 __INITIAL_STATE__ 拿不到时兜底）
 		const domAIText = (() => {
 			try {
-				// 方案A：直接取 AI 回复消息（实测 .ai-message-finished 为最优选择器）
 				const aiMsg = document.querySelector('.ai-message-finished, .ai-message');
 				if (aiMsg) {
 					const text = aiMsg.textContent.trim();
 					if (text.length > 50) return text.slice(0, 3000);
 				}
-
-				// 方案B：取 AI 聊天滚动区域
 				const scrollBody = document.querySelector('.ai-chat-scroll-body');
 				if (scrollBody) {
 					const text = scrollBody.textContent.trim();
 					if (text.length > 50) return text.slice(0, 3000);
-				}
-
-				// 方案C：旧策略兜底（兼容未发现的结构）
-				const body = document.body;
-				if (!body) return "";
-				const fullText = (body.innerText || "").trim();
-				if (fullText.length < 500 || fullText.includes("登录") && fullText.length < 2000) return "";
-
-				const containers = document.querySelectorAll(
-					".search-layout, .feeds-container, .note-list, [class*='feeds'], [class*='search_result'], " +
-					"section[class], .ai-chat-section, .ai-chat-inner"
-				);
-				let bestAI = "";
-				for (const c of containers) {
-					const txt = (c.textContent || "").trim();
-					const hasNoteItems = c.querySelectorAll(
-						"section.note-item, .note-item, [class*='note-item'], article, .feed-item"
-					).length;
-					if (txt.length > 100 && hasNoteItems === 0 && !txt.startsWith("沪ICP")) {
-						if (txt.length > bestAI.length) bestAI = txt;
-					}
-				}
-				if (bestAI.length > 120) {
-					return bestAI
-						.replace(/沪ICP.*?号/g, "")
-						.replace(/营业执照|增值电信|违法不良.*|个性化推荐算法.*|广告屏蔽.*|__.*?__=.*/g, "")
-						.replace(/\n{3,}/g, "\n").trim().slice(0, 3000);
 				}
 				return "";
 			} catch (e) { return ""; }

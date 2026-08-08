@@ -121,7 +121,7 @@ type currentFeedDetailProbe struct {
 	StateMatched              bool   `json:"state_matched"`
 }
 
-func probeCurrentFeedDetail(page *hrod.Page, feedID string) (currentFeedDetailProbe, error) {
+func probeCurrentFeedDetail(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, feedID string) (currentFeedDetailProbe, error) {
 	probeJS := `(feedID, detailSelector) => {` + xhsProbeVisibleJS + xhsProbeFeedMatchJS + `
 			const visibleDetails = Array.from(document.querySelectorAll(detailSelector)).filter(visible);
 			const visibleMatchedDetails = visibleDetails.filter(elementMatchesFeedID);
@@ -134,7 +134,7 @@ func probeCurrentFeedDetail(page *hrod.Page, feedID string) (currentFeedDetailPr
 				state_matched: Boolean(feedID && stateMap && Object.prototype.hasOwnProperty.call(stateMap, feedID)),
 		});
 	}`
-	obj, err := page.Eval(probeJS, feedID, SelectorFeedDetailReady)
+	obj, err := evalJS(ctx, counter, page, probeJS, feedID, SelectorFeedDetailReady)
 	if err != nil {
 		return currentFeedDetailProbe{}, err
 	}

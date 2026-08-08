@@ -57,6 +57,11 @@ func dynamicReadDuration(m contentMetrics) time.Duration {
 // scrolls comments. A positive minDuration is an explicit caller lower bound;
 // an unset duration uses the content-aware default above.
 func (a *ReadStageAction) Read(ctx context.Context, feedID string, minDuration time.Duration) error {
+	counter := &evalTimeoutCounter{}
+	return a.read(ctx, counter, feedID, minDuration)
+}
+
+func (a *ReadStageAction) read(ctx context.Context, counter *evalTimeoutCounter, feedID string, minDuration time.Duration) error {
 	if a.state == nil {
 		return nil
 	}
@@ -73,7 +78,7 @@ func (a *ReadStageAction) Read(ctx context.Context, feedID string, minDuration t
 	if err := page.SleepRandom(1*time.Second, 2*time.Second); err != nil {
 		return err
 	}
-	if err := scrollNoteScroller(page, 160); err != nil {
+	if err := scrollNoteScroller(ctx, page, counter, 160); err != nil {
 		return err
 	}
 
@@ -224,10 +229,15 @@ func minInt(a, b int) int {
 // ReadMin guarantees at least minDuration. It is for explicit caller requests;
 // BrowseSession.Read intentionally calls Read with zero for the fast default.
 func (a *ReadStageAction) ReadMin(ctx context.Context, feedID string, minDuration time.Duration) error {
+	counter := &evalTimeoutCounter{}
+	return a.readMin(ctx, counter, feedID, minDuration)
+}
+
+func (a *ReadStageAction) readMin(ctx context.Context, counter *evalTimeoutCounter, feedID string, minDuration time.Duration) error {
 	if a.state == nil || minDuration <= 0 {
 		return nil
 	}
-	return a.Read(ctx, feedID, minDuration)
+	return a.read(ctx, counter, feedID, minDuration)
 }
 
 // RecordCommentDwell 由 FeedDetail 在评论阅读累计时调用，保留为薄 wrapper。

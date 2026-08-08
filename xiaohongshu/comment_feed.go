@@ -36,6 +36,7 @@ func NewCommentFeedActionWithState(page *hrod.Page, state *ActionStateStore) *Co
 
 // PostComment 发表评论到 Feed
 func (f *CommentFeedAction) PostComment(ctx context.Context, feedID, xsecToken, content string) error {
+	counter := &evalTimeoutCounter{}
 	if err := validateFeedAccessArgs(feedID, xsecToken); err != nil {
 		return err
 	}
@@ -51,12 +52,12 @@ func (f *CommentFeedAction) PostComment(ctx context.Context, feedID, xsecToken, 
 			return err
 		}
 		reader := NewReadStageAction(page, f.state)
-		if err := reader.ReadMin(ctx, feedID, 20*time.Second); err != nil {
+		if err := reader.readMin(ctx, counter, feedID, 20*time.Second); err != nil {
 			return fmt.Errorf("评论前阅读阶段失败: %w", err)
 		}
-		page, err = f.preparePage(ctx, feedID, xsecToken, "comment", 120*time.Second)
+		page, err = f.preparePage(ctx, counter, feedID, xsecToken, "comment", 120*time.Second)
 	} else {
-		page, err = f.preparePage(ctx, feedID, xsecToken, "comment", 120*time.Second)
+		page, err = f.preparePage(ctx, counter, feedID, xsecToken, "comment", 120*time.Second)
 	}
 	if err != nil {
 		return err
@@ -67,7 +68,7 @@ func (f *CommentFeedAction) PostComment(ctx context.Context, feedID, xsecToken, 
 		return err
 	}
 	if f.state == nil {
-		if err := browseBeforeComment(page); err != nil {
+		if err := browseBeforeComment(ctx, page, counter); err != nil {
 			return fmt.Errorf("评论前浏览页面失败: %w", err)
 		}
 	}
@@ -134,6 +135,7 @@ func (f *CommentFeedAction) PostComment(ctx context.Context, feedID, xsecToken, 
 // 累计评论阅读由 get_note_detail(max_items/cursor) 等调用记录到 ActionState，
 // 本流程不再固定等待 45s/60s；定位目标后按实际耗时/滚动累计，点击回复按钮前做完整校验。
 func (f *CommentFeedAction) ReplyToComment(ctx context.Context, feedID, xsecToken, commentID, userID, content string) error {
+	counter := &evalTimeoutCounter{}
 	if err := validateFeedAccessArgs(feedID, xsecToken); err != nil {
 		return err
 	}
@@ -153,9 +155,9 @@ func (f *CommentFeedAction) ReplyToComment(ctx context.Context, feedID, xsecToke
 		if err := checkPageAccessible(page); err != nil {
 			return err
 		}
-		page, err = f.preparePage(ctx, feedID, xsecToken, "reply", 5*time.Minute)
+		page, err = f.preparePage(ctx, counter, feedID, xsecToken, "reply", 5*time.Minute)
 	} else {
-		page, err = f.preparePage(ctx, feedID, xsecToken, "reply", 5*time.Minute)
+		page, err = f.preparePage(ctx, counter, feedID, xsecToken, "reply", 5*time.Minute)
 	}
 	if err != nil {
 		return err
@@ -166,7 +168,7 @@ func (f *CommentFeedAction) ReplyToComment(ctx context.Context, feedID, xsecToke
 		return err
 	}
 	if f.state == nil {
-		if err := browseBeforeComment(page); err != nil {
+		if err := browseBeforeComment(ctx, page, counter); err != nil {
 			return fmt.Errorf("回复前浏览页面失败: %w", err)
 		}
 	}
@@ -183,7 +185,7 @@ func (f *CommentFeedAction) ReplyToComment(ctx context.Context, feedID, xsecToke
 	}
 
 	// 使用 Go 实现的查找逻辑
-	commentEl, scrolled, err := findCommentElement(ctx, page, commentID, userID)
+	commentEl, scrolled, err := findCommentElement(ctx, page, counter, commentID, userID)
 	if err != nil {
 		return fmt.Errorf("无法找到评论: %w", err)
 	}
@@ -255,7 +257,7 @@ func (f *CommentFeedAction) ReplyToComment(ctx context.Context, feedID, xsecToke
 	return nil
 }
 
-func (f *CommentFeedAction) preparePage(ctx context.Context, feedID, xsecToken, action string, timeout time.Duration) (*hrod.Page, error) {
+func (f *CommentFeedAction) preparePage(ctx context.Context, counter *evalTimeoutCounter, feedID, xsecToken, action string, timeout time.Duration) (*hrod.Page, error) {
 	page := f.page.Context(ctx).Timeout(timeout)
 	if f.state != nil {
 		// reply 门槛依赖累计评论阅读，定位/滚动后再做完整校验；这里只确认基础风控与目标。
@@ -266,7 +268,7 @@ func (f *CommentFeedAction) preparePage(ctx context.Context, feedID, xsecToken, 
 		} else if err := f.state.ValidateInteraction(feedID, action); err != nil {
 			return nil, fmt.Errorf("%s前置校验失败: %w", commentActionName(action), err)
 		}
-		ok, err := isCurrentFeedDetail(page, feedID)
+		ok, err := isCurrentFeedDetail(ctx, page, counter, feedID)
 		if err != nil {
 			return nil, fmt.Errorf("%s前置校验失败: 检查当前笔记失败: %w", commentActionName(action), err)
 		}
@@ -303,11 +305,11 @@ func commentActionName(action string) string {
 // 每轮一次 Eval 返回 .comment-item 数量、atEnd、commentID 匹配索引、userID 匹配索引数组；
 // commentID 唯一定位优先，userID 只接受唯一匹配（多匹配直接报歧义，禁止选择第一条）。
 // 未找到时才执行物理滚动；ctx 取消、到底或连续停滞停止。
-func findCommentElement(ctx context.Context, page *hrod.Page, commentID, userID string) (*hrod.Element, bool, error) {
+func findCommentElement(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, commentID, userID string) (*hrod.Element, bool, error) {
 	logrus.Infof("开始查找评论 - commentID: %s, userID: %s", commentID, userID)
 
 	// 先滚动到评论区（物理滚轮）
-	if err := scrollToCommentsArea(page); err != nil {
+	if err := scrollToCommentsArea(ctx, page, counter); err != nil {
 		return nil, false, err
 	}
 	if err := sleepForCommentStep(page, 500*time.Millisecond, 1500*time.Millisecond); err != nil {
@@ -325,7 +327,7 @@ func findCommentElement(ctx context.Context, page *hrod.Page, commentID, userID 
 		}
 
 		// 每轮一次 Eval 返回匹配状态
-		result, err := page.Eval(`(commentID, userID) => {
+		result, err := evalJS(ctx, counter, page, `(commentID, userID) => {
 			const items = Array.from(document.querySelectorAll(".comment-item"));
 			let commentIndex = -1;
 			if (commentID) {
@@ -405,7 +407,7 @@ func findCommentElement(ctx context.Context, page *hrod.Page, commentID, userID 
 		}
 
 		// 未找到时才执行物理滚动
-		moved, err := scrollNoteScrollerMoved(page, 600)
+		moved, err := scrollNoteScrollerMoved(ctx, page, counter, 600)
 		if err != nil {
 			return nil, scrolled, fmt.Errorf("滚动查找评论失败: %w", err)
 		}
@@ -431,8 +433,8 @@ func commentElementAt(page *hrod.Page, index int) *hrod.Element {
 
 // browseBeforeComment triggers the post's lazy-loaded content before interacting
 // with the comment box.
-func browseBeforeComment(page *hrod.Page) error {
-	if err := scrollNoteScroller(page, 400); err != nil {
+func browseBeforeComment(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter) error {
+	if err := scrollNoteScroller(ctx, page, counter, 400); err != nil {
 		return err
 	}
 	return sleepForCommentStep(page, 500*time.Millisecond, 1200*time.Millisecond)

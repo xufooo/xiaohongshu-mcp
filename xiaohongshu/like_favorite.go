@@ -47,7 +47,7 @@ func newInteractActionWithState(page *hrod.Page, state *ActionStateStore) *inter
 	return &interactAction{page: page, state: state}
 }
 
-func (a *interactAction) preparePage(ctx context.Context, actionType interactActionType, feedID, xsecToken string) (*hrod.Page, error) {
+func (a *interactAction) preparePage(ctx context.Context, counter *evalTimeoutCounter, actionType interactActionType, feedID, xsecToken string) (*hrod.Page, error) {
 	if err := validateFeedAccessArgs(feedID, xsecToken); err != nil {
 		return nil, fmt.Errorf("%s失败: %w", actionType, err)
 	}
@@ -57,7 +57,7 @@ func (a *interactAction) preparePage(ctx context.Context, actionType interactAct
 		if err := a.state.ValidateInteraction(feedID, interactionValidationAction(actionType)); err != nil {
 			return nil, fmt.Errorf("%s前置校验失败: %w", actionType, err)
 		}
-		ok, err := isCurrentFeedDetail(page, feedID)
+		ok, err := isCurrentFeedDetail(ctx, page, counter, feedID)
 		if err != nil {
 			return nil, fmt.Errorf("%s前置校验失败: 检查当前笔记失败: %w", actionType, err)
 		}
@@ -92,8 +92,8 @@ func interactionValidationAction(actionType interactActionType) string {
 	}
 }
 
-func isCurrentFeedDetail(page *hrod.Page, feedID string) (bool, error) {
-	probe, err := probeCurrentFeedDetail(page, feedID)
+func isCurrentFeedDetail(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, feedID string) (bool, error) {
+	probe, err := probeCurrentFeedDetail(ctx, page, counter, feedID)
 	if err != nil {
 		return false, err
 	}
@@ -120,23 +120,24 @@ type interactActionSpec struct {
 
 // performInteraction 统一执行"阅读 -> 准备页面 -> 读取状态 -> 幂等跳过/至多一次点击并校验"。
 func (a *interactAction) performInteraction(ctx context.Context, spec interactActionSpec, feedID, xsecToken string) error {
+	counter := &evalTimeoutCounter{}
 	var page *hrod.Page
 	var err error
 	if a.state != nil {
 		page = a.page.Context(ctx).Timeout(60 * time.Second)
 		reader := NewReadStageAction(page, a.state)
-		if err := reader.ReadMin(ctx, feedID, 20*time.Second); err != nil {
+		if err := reader.readMin(ctx, counter, feedID, 20*time.Second); err != nil {
 			return fmt.Errorf("%s前阅读阶段失败: %w", spec.actionType, err)
 		}
-		page, err = a.preparePage(ctx, spec.actionType, feedID, xsecToken)
+		page, err = a.preparePage(ctx, counter, spec.actionType, feedID, xsecToken)
 	} else {
-		page, err = a.preparePage(ctx, spec.actionType, feedID, xsecToken)
+		page, err = a.preparePage(ctx, counter, spec.actionType, feedID, xsecToken)
 	}
 	if err != nil {
 		return err
 	}
 
-	liked, collected, err := a.getInteractState(page, feedID)
+	liked, collected, err := a.getInteractState(ctx, page, counter, feedID)
 	if err != nil {
 		return fmt.Errorf("读取%s状态失败，取消点击: %w", spec.actionType, err)
 	}
@@ -150,12 +151,12 @@ func (a *interactAction) performInteraction(ctx context.Context, spec interactAc
 		return nil
 	}
 
-	return a.toggleInteractionOnce(ctx, page, feedID, spec)
+	return a.toggleInteractionOnce(ctx, page, counter, feedID, spec)
 }
 
 // toggleInteractionOnce 统一执行至多一次点击：点击 -> 拟人停留 -> 校验进入目标状态。
 // 状态未确认时返回 state_unknown，取消立即二次点击。
-func (a *interactAction) toggleInteractionOnce(ctx context.Context, page *hrod.Page, feedID string, spec interactActionSpec) error {
+func (a *interactAction) toggleInteractionOnce(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, feedID string, spec interactActionSpec) error {
 	if err := a.performClick(page, spec.selector); err != nil {
 		return fmt.Errorf("%s点击按钮失败: %w", spec.actionType, err)
 	}
@@ -163,7 +164,7 @@ func (a *interactAction) toggleInteractionOnce(ctx context.Context, page *hrod.P
 		return err
 	}
 
-	liked, collected, err := a.getInteractState(page, feedID)
+	liked, collected, err := a.getInteractState(ctx, page, counter, feedID)
 	if err != nil {
 		return fmt.Errorf("state_unknown: 验证%s状态失败，取消立即二次点击: %w", spec.actionType, err)
 	}
@@ -252,6 +253,6 @@ func (a *FavoriteAction) perform(ctx context.Context, feedID, xsecToken string, 
 }
 
 // getInteractState 仅从渲染后的互动按钮读取状态；无法确认时返回错误。
-func (a *interactAction) getInteractState(page *hrod.Page, feedID string) (bool, bool, error) {
-	return ExtractInteractStateFromDOM(page, feedID)
+func (a *interactAction) getInteractState(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, feedID string) (bool, bool, error) {
+	return ExtractInteractStateFromDOM(ctx, page, counter, feedID)
 }
