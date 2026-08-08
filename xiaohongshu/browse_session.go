@@ -790,7 +790,6 @@ func (s *BrowseSession) Detail(ctx context.Context, _ bool, _ int) (detail *Sess
 	if err := WaitForXHSReady(page.Context(opCtx), XHSReadyOptions{Kind: XHSReadyDetail, FeedID: feedID}); err != nil {
 		return nil, err
 	}
-	counter := &evalTimeoutCounter{}
 	comments, err := ExtractCommentsFromDOM(opCtx, page, feedID)
 	if err != nil {
 		return nil, err
@@ -819,7 +818,7 @@ func (s *BrowseSession) DetailCommentsBatch(ctx context.Context, expectedFeedID 
 			return WaitForXHSReady(page.Context(opCtx), XHSReadyOptions{Kind: XHSReadyDetail, FeedID: feedID})
 		},
 		func(loadCtx context.Context, page *hrod.Page, counter *evalTimeoutCounter) ([]Comment, *CommentCursor, bool, error) {
-			return loadCommentsBatch(loadCtx, page.Context(loadCtx), counter, config, cursor, maxItems)
+			return loadCommentsBatch(loadCtx, page.Context(loadCtx), config, cursor, maxItems)
 		},
 	)
 }
@@ -935,7 +934,7 @@ func (s *BrowseSession) completeDetailCommentsBatch(opCtx context.Context, page 
 
 func (s *BrowseSession) recoverCommentBatchSession(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, expectedFeedID string) error {
 	p := page.Context(ctx)
-	feedID, err := currentFeedIDFromPage(ctx, p, counter)
+	feedID, err := currentFeedIDFromPage(ctx, p)
 	if err != nil || feedID == "" {
 		if IsFatalRendererError(err) {
 			return err
@@ -943,7 +942,7 @@ func (s *BrowseSession) recoverCommentBatchSession(ctx context.Context, page *hr
 		if err := p.Sleep(time.Second); err != nil {
 			return err
 		}
-		feedID, err = currentFeedIDFromPage(ctx, p, counter)
+		feedID, err = currentFeedIDFromPage(ctx, p)
 	}
 	if err != nil || feedID == "" {
 		if IsFatalRendererError(err) {
