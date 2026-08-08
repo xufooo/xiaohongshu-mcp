@@ -1,6 +1,7 @@
 package xiaohongshu
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -110,8 +111,8 @@ type OpenedNoteSnapshot struct {
 }
 
 // ExtractOpenedNoteSnapshotFromDOM 单次 Eval 返回打开笔记的完整首屏快照。
-func ExtractOpenedNoteSnapshotFromDOM(page *hrod.Page, feedID string) (*OpenedNoteSnapshot, error) {
-	result, err := page.Eval(`(feedID, likeSel, collectSel) => {` + domCleanJS + domNoteHelpersJS + domCommentExtractorJS + `
+func ExtractOpenedNoteSnapshotFromDOM(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, feedID string) (*OpenedNoteSnapshot, error) {
+	result, err := evalJS(ctx, counter, page, `(feedID, likeSel, collectSel) => {` + domCleanJS + domNoteHelpersJS + domCommentExtractorJS + `
 		const interact = (() => {` + interactStateJS + `})();
 		if (!interact) return "";
 
@@ -285,8 +286,8 @@ func ExtractSearchFeedsFromDOM(page *hrod.Page) ([]Feed, error) {
 }
 
 // ExtractFeedDetailFromDOM 从当前详情页可见 DOM 提取笔记、作者、评论和互动状态。
-func ExtractFeedDetailFromDOM(page *hrod.Page, feedID string) (*FeedDetailResponse, error) {
-	result, err := page.Eval(`(feedID, likeSel, collectSel) => {` + domCleanJS + domNoteHelpersJS + domCommentExtractorJS + `
+func ExtractFeedDetailFromDOM(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, feedID string) (*FeedDetailResponse, error) {
+	result, err := evalJS(ctx, counter, page, `(feedID, likeSel, collectSel) => {` + domCleanJS + domNoteHelpersJS + domCommentExtractorJS + `
 		const interact = (() => {` + interactStateJS + `})();
 		if (!interact) return "";
 
@@ -337,16 +338,16 @@ func ExtractFeedDetailFromDOM(page *hrod.Page, feedID string) (*FeedDetailRespon
 
 // ExtractOpenedNoteContentFromDOM 是兼容薄 wrapper：内部调用单次快照后只返回正文。
 // 图片、视频和评论的后续读取由 session_detail 负责。
-func ExtractOpenedNoteContentFromDOM(page *hrod.Page, feedID string) (*OpenedNoteContent, error) {
-	snapshot, err := ExtractOpenedNoteSnapshotFromDOM(page, feedID)
+func ExtractOpenedNoteContentFromDOM(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, feedID string) (*OpenedNoteContent, error) {
+	snapshot, err := ExtractOpenedNoteSnapshotFromDOM(ctx, page, counter, feedID)
 	if err != nil {
 		return nil, err
 	}
 	return &snapshot.Note, nil
 }
 
-func ExtractCommentsFromDOM(page *hrod.Page, feedID string) ([]Comment, error) {
-	result, err := page.Eval(`(feedID) => {` + domCleanJS + domCommentExtractorJS + `
+func ExtractCommentsFromDOM(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, feedID string) ([]Comment, error) {
+	result, err := evalJS(ctx, counter, page, `(feedID) => {` + domCleanJS + domCommentExtractorJS + `
 		const comments = extractComments(feedID);
 		return JSON.stringify(comments);
 	}`, feedID)
@@ -365,8 +366,8 @@ func ExtractCommentsFromDOM(page *hrod.Page, feedID string) ([]Comment, error) {
 }
 
 // ExtractInteractStateFromDOM 复用唯一 href 状态片段读取点赞/收藏状态。
-func ExtractInteractStateFromDOM(page *hrod.Page, feedID string) (bool, bool, error) {
-	result, err := page.Eval(`(likeSel, collectSel) => {
+func ExtractInteractStateFromDOM(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, feedID string) (bool, bool, error) {
+	result, err := evalJS(ctx, counter, page, `(likeSel, collectSel) => {
 		const interact = (() => {` + interactStateJS + `})();
 		if (!interact) return "";
 		return JSON.stringify(interact);

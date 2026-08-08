@@ -107,3 +107,27 @@ func TestGetInitialCommentIDsDefensiveCopy(t *testing.T) {
 		t.Fatalf("内部 comment IDs 被外部修改: %v", again)
 	}
 }
+
+func TestActionStateOpenReadStages(t *testing.T) {
+	store := newTestActionStateStore(t)
+	if err := store.RecordOpen("feed-1", OpenSourceSearch); err != nil {
+		t.Fatalf("RecordOpen: %v", err)
+	}
+	state, err := store.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if state.LastOpenedFeedID != "feed-1" || !state.LastReadAt.IsZero() {
+		t.Fatalf("第一阶段 ActionState 错误: %+v", state)
+	}
+	if err := store.RecordRead("feed-1", 0); err != nil {
+		t.Fatalf("RecordRead: %v", err)
+	}
+	state, err = store.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if state.LastReadAt.IsZero() || state.ReadDuration != 0 {
+		t.Fatalf("第二阶段 ActionState 错误: %+v", state)
+	}
+}

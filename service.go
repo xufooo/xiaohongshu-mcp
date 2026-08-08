@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -1277,7 +1278,12 @@ func (s *XiaohongshuService) SessionState(ctx context.Context, id string) (*xiao
 	if err != nil {
 		return nil, err
 	}
-	return session.PageState(ctx)
+	state, err := session.PageState(ctx)
+	if err != nil {
+		s.handleSessionOperationError(ctx, id, session, err)
+		return nil, err
+	}
+	return state, nil
 }
 
 // SessionListFeeds 在 session 浏览器中获取首页 Feeds 列表
@@ -1295,7 +1301,7 @@ func (s *XiaohongshuService) SessionListFeeds(ctx context.Context, id, cursorID 
 
 	feeds, nextCursor, hasMore, err := session.ListFeedsBatch(ctx, cursor, maxItems)
 	if err != nil {
-		s.recordRiskFromSession(session, err)
+		s.handleSessionOperationError(ctx, id, session, err)
 		return nil, err
 	}
 
@@ -1327,7 +1333,7 @@ func (s *XiaohongshuService) SessionSearch(ctx context.Context, id, keyword, cur
 
 	searchResult, nextCursor, hasMore, err := session.SearchBatchWithAI(ctx, keyword, filters, cursor, maxItems)
 	if err != nil {
-		s.recordRiskFromSession(session, err)
+		s.handleSessionOperationError(ctx, id, session, err)
 		return nil, err
 	}
 	feeds := searchResult.Feeds
@@ -1350,7 +1356,7 @@ func (s *XiaohongshuService) SessionOpenNote(ctx context.Context, id, resultRef,
 	}
 	result, err := session.OpenNote(ctx, resultRef, xsecToken)
 	if err != nil {
-		s.recordRiskFromSession(session, err)
+		s.handleSessionOperationError(ctx, id, session, err)
 		return nil, err
 	}
 	return result, nil
@@ -1363,7 +1369,7 @@ func (s *XiaohongshuService) SessionDetail(ctx context.Context, id string, loadC
 	}
 	detail, err := session.Detail(ctx, loadComments, pages)
 	if err != nil {
-		s.recordRiskFromSession(session, err)
+		s.handleSessionOperationError(ctx, id, session, err)
 		return nil, err
 	}
 	return detail, nil
@@ -1436,7 +1442,7 @@ func (s *XiaohongshuService) SessionDetailBatch(ctx context.Context, id, cursorI
 		}
 		detail, nextCursor, hasMore, err := session.DetailCommentsBatch(ctx, info.CurrentFeedID, guardCursor, maxItems, config)
 		if err != nil {
-			s.recordRiskFromSession(session, err)
+			s.handleSessionOperationError(ctx, id, session, err)
 			return nil, err
 		}
 		seenCount := 0
@@ -1454,7 +1460,7 @@ func (s *XiaohongshuService) SessionDetailCommentsBatch(ctx context.Context, id,
 	}
 	detail, nextCursor, hasMore, err := session.DetailCommentsBatch(ctx, feedID, cursor, maxItems, config)
 	if err != nil {
-		s.recordRiskFromSession(session, err)
+		s.handleSessionOperationError(ctx, id, session, err)
 		return nil, nil, false, err
 	}
 	return detail, nextCursor, hasMore, nil
@@ -1474,7 +1480,7 @@ func (s *XiaohongshuService) sessionLike(ctx context.Context, id, feedID string,
 		return nil, err
 	}
 	if err := session.LikeForFeed(ctx, feedID, unlike); err != nil {
-		s.recordRiskFromSession(session, err)
+		s.handleSessionOperationError(ctx, id, session, err)
 		return nil, err
 	}
 	info := session.Info()
@@ -1499,7 +1505,7 @@ func (s *XiaohongshuService) sessionFavorite(ctx context.Context, id, feedID str
 		return nil, err
 	}
 	if err := session.FavoriteForFeed(ctx, feedID, unfavorite); err != nil {
-		s.recordRiskFromSession(session, err)
+		s.handleSessionOperationError(ctx, id, session, err)
 		return nil, err
 	}
 	info := session.Info()
@@ -1524,7 +1530,7 @@ func (s *XiaohongshuService) sessionComment(ctx context.Context, id, feedID, con
 		return nil, err
 	}
 	if err := session.CommentForFeed(ctx, feedID, content); err != nil {
-		s.recordRiskFromSession(session, err)
+		s.handleSessionOperationError(ctx, id, session, err)
 		return nil, err
 	}
 	info := session.Info()
@@ -1545,7 +1551,7 @@ func (s *XiaohongshuService) sessionReply(ctx context.Context, id, feedID, comme
 		return nil, err
 	}
 	if err := session.ReplyForFeed(ctx, feedID, commentID, userID, content); err != nil {
-		s.recordRiskFromSession(session, err)
+		s.handleSessionOperationError(ctx, id, session, err)
 		return nil, err
 	}
 	info := session.Info()
@@ -1564,7 +1570,7 @@ func (s *XiaohongshuService) SessionBack(ctx context.Context, id string) (*xiaoh
 		return nil, err
 	}
 	if err := session.Back(ctx); err != nil {
-		s.recordRiskFromSession(session, err)
+		s.handleSessionOperationError(ctx, id, session, err)
 		return nil, err
 	}
 	info := session.Info()
@@ -1579,7 +1585,7 @@ func (s *XiaohongshuService) SessionUnreadNotificationCount(ctx context.Context,
 	}
 	count, err := session.UnreadNotificationCount(ctx)
 	if err != nil {
-		s.recordRiskFromSession(session, err)
+		s.handleSessionOperationError(ctx, id, session, err)
 		return nil, err
 	}
 	return count, nil
@@ -1593,7 +1599,7 @@ func (s *XiaohongshuService) SessionListNotifications(ctx context.Context, id, t
 	}
 	list, err := session.ListNotifications(ctx, tab, cursor, maxItems)
 	if err != nil {
-		s.recordRiskFromSession(session, err)
+		s.handleSessionOperationError(ctx, id, session, err)
 		return nil, err
 	}
 	return list, nil
@@ -1607,7 +1613,7 @@ func (s *XiaohongshuService) SessionLikeNotification(ctx context.Context, id, no
 	}
 	result, err := session.LikeNotification(ctx, notificationRef, unlike)
 	if err != nil {
-		s.recordRiskFromSession(session, err)
+		s.handleSessionOperationError(ctx, id, session, err)
 		return nil, err
 	}
 	return result, nil
@@ -1621,7 +1627,7 @@ func (s *XiaohongshuService) SessionReplyNotification(ctx context.Context, id, n
 	}
 	result, err := session.ReplyNotification(ctx, notificationRef, content)
 	if err != nil {
-		s.recordRiskFromSession(session, err)
+		s.handleSessionOperationError(ctx, id, session, err)
 		return nil, err
 	}
 	return result, nil
@@ -1672,6 +1678,17 @@ func (s *XiaohongshuService) recordRiskFromPage(page *hrod.Page, sourceErr error
 		return
 	}
 	s.recordRiskSignal(signal, sourceErr)
+}
+
+func (s *XiaohongshuService) handleSessionOperationError(ctx context.Context, id string, session *xiaohongshu.BrowseSession, operationErr error) {
+	if operationErr == nil {
+		return
+	}
+	if ctx.Err() != nil || errors.Is(operationErr, context.Canceled) || errors.Is(operationErr, context.DeadlineExceeded) || xiaohongshu.IsFatalRendererError(operationErr) {
+		_ = s.browseSessions.Close(id)
+		return
+	}
+	s.recordRiskFromSession(session, operationErr)
 }
 
 func (s *XiaohongshuService) recordRiskFromSession(session *xiaohongshu.BrowseSession, sourceErr error) {

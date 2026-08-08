@@ -24,17 +24,9 @@ func NewNoteOpenActionWithState(page *hrod.Page, state *ActionStateStore) *NoteO
 	return &NoteOpenAction{page: page, state: state}
 }
 
-func (a *NoteOpenAction) OpenFromCards(ctx context.Context, feedID, xsecToken, source string) error {
+func (a *NoteOpenAction) OpenFromCards(ctx context.Context, counter *evalTimeoutCounter, feedID, xsecToken string) error {
 	page := a.page.Context(ctx).Timeout(60 * time.Second)
-	if source == "" {
-		inferred, err := inferOpenSource(page)
-		if err != nil {
-			return fmt.Errorf("推断打开来源失败: %w", err)
-		}
-		source = inferred
-	}
-
-	anchor, err := findFeedCardAnchor(page, feedID)
+	anchor, err := findFeedCardAnchor(ctx, page, counter, feedID)
 	if err != nil {
 		return err
 	}
@@ -51,25 +43,21 @@ func (a *NoteOpenAction) OpenFromCards(ctx context.Context, feedID, xsecToken, s
 	if err := page.ClickPoint(point); err != nil {
 		return fmt.Errorf("点击目标 anchor 失败: %w", err)
 	}
-	if err := waitFeedDetailVisible(page, feedID); err != nil {
+	if err := waitFeedDetailVisible(ctx, page, counter, feedID); err != nil {
 		return err
-	}
-	if a.state != nil {
-		_ = a.state.RecordOpen(feedID, source)
 	}
 	return nil
 }
 
-// findFeedCardAnchor 用一次页面 Eval 批量扫描卡片 anchor，按 href/data-feed-id/outerHTML 匹配 feedID。
 // 只接受已连接且有尺寸的候选；零匹配报未找到，多匹配报歧义；Go 侧只调用一次 Elements 按索引取 anchor。
-func findFeedCardAnchor(page *hrod.Page, feedID string) (*hrod.Element, error) {
-	result, err := page.Eval(`(feedID) => {
+func findFeedCardAnchor(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, feedID string) (*hrod.Element, error) {
+	result, err := evalJS(ctx, counter, page, `(feedID) => {
 		const anchors = Array.from(document.querySelectorAll("section.note-item a.cover.mask.ld"));
 		const matches = [];
 		anchors.forEach((a, index) => {
 			const href = a.getAttribute("href") || "";
 			const dataFeedID = a.dataset?.feedId || "";
-			if (!(href.includes(feedID) || dataFeedID.includes(feedID) || a.outerHTML.includes(feedID))) return;
+			if (!(href.includes(feedID) || dataFeedID.includes(feedID))) return;
 			if (!a.isConnected) return;
 			const rect = a.getBoundingClientRect();
 			if (rect.width <= 0 || rect.height <= 0) return;
@@ -156,7 +144,7 @@ func feedCardClickPoint(anchor *hrod.Element) (proto.Point, error) {
 	return proto.Point{X: point.X, Y: point.Y}, nil
 }
 
-func waitFeedDetailVisible(page *hrod.Page, feedID string) error {
+func waitFeedDetailVisible(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, feedID string) error {
 	deadline := time.Now().Add(15 * time.Second)
 	var last currentFeedDetailProbe
 	var lastErr error
@@ -165,8 +153,11 @@ func waitFeedDetailVisible(page *hrod.Page, feedID string) error {
 		if err := page.Err(); err != nil {
 			return err
 		}
-		probe, err := probeCurrentFeedDetail(page, feedID)
+		probe, err := probeCurrentFeedDetail(ctx, page, counter, feedID)
 		if err != nil {
+			if IsFatalRendererError(err) {
+				return err
+			}
 			if !isTransientCurrentDetailProbeError(err) {
 				return fmt.Errorf("等待笔记详情可见失败: %w", err)
 			}
@@ -189,8 +180,8 @@ func waitFeedDetailVisible(page *hrod.Page, feedID string) error {
 		last.URL, last.URLMatched, last.VisibleDetailCount, last.VisibleMatchedDetailCount, last.StateMatched)
 }
 
-func inferOpenSource(page *hrod.Page) (string, error) {
-	result, err := page.Eval(`() => location.href`)
+func inferOpenSource(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter) (string, error) {
+	result, err := evalJS(ctx, counter, page, `() => location.href`)
 	if err != nil {
 		return "", err
 	}

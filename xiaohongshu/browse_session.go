@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/go-rod/rod/lib/proto"
+	xerrors "github.com/xpzouying/xiaohongshu-mcp/errors"
 	hrod "github.com/xpzouying/xiaohongshu-mcp/humanize/rod"
 )
 
@@ -365,12 +366,12 @@ func (s *BrowseSession) Renew() BrowseSessionInfo {
 	return s.infoLocked()
 }
 
-func (s *BrowseSession) PageState(ctx context.Context) (*BrowseSessionPageState, error) {
+func (s *BrowseSession) PageState(ctx context.Context) (state *BrowseSessionPageState, err error) {
 	opCtx, err := s.beginLockedOperation(ctx, true)
 	if err != nil {
 		return nil, err
 	}
-	defer s.finishOperation()
+	defer func() { s.finishOperation(err) }()
 
 	s.mu.Lock()
 	page := s.page
@@ -450,12 +451,12 @@ func (s *BrowseSession) Search(ctx context.Context, keyword string, filters ...F
 
 // ListFeedsBatch 在 session 浏览器中分页获取首页 Feeds。
 // cursor 为空时执行首页导航/ready；非空时从当前页继续滚动。
-func (s *BrowseSession) ListFeedsBatch(ctx context.Context, cursor *FeedCursor, maxItems int) ([]Feed, *FeedCursor, bool, error) {
+func (s *BrowseSession) ListFeedsBatch(ctx context.Context, cursor *FeedCursor, maxItems int) (feeds []Feed, nextCursor *FeedCursor, hasMore bool, err error) {
 	opCtx, err := s.beginLockedOperation(ctx, true)
 	if err != nil {
 		return nil, nil, false, err
 	}
-	defer s.finishOperation()
+	defer func() { s.finishOperation(err) }()
 
 	maxItems = normalizeFeedPageSize(maxItems)
 
@@ -467,9 +468,6 @@ func (s *BrowseSession) ListFeedsBatch(ctx context.Context, cursor *FeedCursor, 
 		return nil, nil, false, fmt.Errorf("browse session 页面不存在: %s", s.id)
 	}
 
-	var feeds []Feed
-	var nextCursor *FeedCursor
-	var hasMore bool
 	isFirstPage := cursor == nil
 
 	if cursor == nil {
@@ -530,12 +528,12 @@ func (s *BrowseSession) SearchBatchWithAI(ctx context.Context, keyword string, f
 	return s.searchBatch(ctx, keyword, filters, cursor, maxItems, true)
 }
 
-func (s *BrowseSession) searchBatch(ctx context.Context, keyword string, filters []FilterOption, cursor *FeedCursor, maxItems int, includeAI bool) (SearchPageResult, *FeedCursor, bool, error) {
+func (s *BrowseSession) searchBatch(ctx context.Context, keyword string, filters []FilterOption, cursor *FeedCursor, maxItems int, includeAI bool) (result SearchPageResult, nextCursor *FeedCursor, hasMore bool, err error) {
 	opCtx, err := s.beginLockedOperation(ctx, true)
 	if err != nil {
 		return SearchPageResult{}, nil, false, err
 	}
-	defer s.finishOperation()
+	defer func() { s.finishOperation(err) }()
 
 	maxItems = normalizeFeedPageSize(maxItems)
 
@@ -549,8 +547,6 @@ func (s *BrowseSession) searchBatch(ctx context.Context, keyword string, filters
 
 	var feeds []Feed
 	var aiChat *AIChatReply
-	var nextCursor *FeedCursor
-	var hasMore bool
 
 	if cursor == nil {
 		action := NewSearchActionWithState(page.Context(opCtx), s.state)
@@ -610,60 +606,83 @@ func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, xsecToken strin
 	if err != nil {
 		return nil, err
 	}
-	defer s.finishOperation()
+	var operationErr error
+	defer func() { s.finishOperation(operationErr) }()
+	fail := func(err error) (*SessionOpenNoteResponse, error) {
+		operationErr = err
+		return nil, err
+	}
 
 	feed, ok := s.resolveResult(resultRef)
 	if !ok {
-		return nil, fmt.Errorf("未找到搜索结果引用: %s", resultRef)
+		return fail(fmt.Errorf("未找到搜索结果引用: %s", resultRef))
 	}
 	if xsecToken != "" {
 		feed.XsecToken = xsecToken
 	}
 	if err := validateFeedAccessArgs(feed.ID, feed.XsecToken); err != nil {
-		return nil, fmt.Errorf("搜索结果参数无效: %w", err)
+		return fail(fmt.Errorf("搜索结果参数无效: %w", err))
 	}
 
-	sourceURL, err := s.currentPageURL(opCtx)
-	if err != nil {
-		return nil, fmt.Errorf("读取当前页面 URL: %w", err)
+	s.mu.Lock()
+	page := s.page
+	s.mu.Unlock()
+	if page == nil {
+		return fail(fmt.Errorf("browse session 页面不存在: %s", s.id))
 	}
-	opener := NewNoteOpenActionWithState(s.page.Context(opCtx), s.state)
-	if err := opener.OpenFromCards(opCtx, feed.ID, feed.XsecToken, OpenSourceSearch); err != nil {
-		return nil, fmt.Errorf("从卡片打开笔记失败，请重新搜索或滚动后重试: %w", err)
+	counter := &evalTimeoutCounter{}
+	probe, probeErr := probeCurrentFeedDetail(opCtx, page, counter, feed.ID)
+	if probeErr != nil && IsFatalRendererError(probeErr) {
+		return fail(probeErr)
+	}
+	if probeErr != nil && !isTransientCurrentDetailProbeError(probeErr) {
+		return fail(fmt.Errorf("探测当前笔记详情失败: %w", probeErr))
+	}
+	alreadyOpen := probeErr == nil && currentFeedDetailMatched(probe, feed.ID)
+	sourceURL := ""
+	if !alreadyOpen {
+		sourceURL, err = s.currentPageURL(opCtx, counter)
+		if err != nil {
+			return fail(fmt.Errorf("读取当前页面 URL: %w", err))
+		}
+		opener := NewNoteOpenActionWithState(page.Context(opCtx), s.state)
+		if err := opener.OpenFromCards(opCtx, counter, feed.ID, feed.XsecToken); err != nil {
+			return fail(fmt.Errorf("从卡片打开笔记失败，请重新搜索或滚动后重试: %w", err))
+		}
+	}
+	s.commitOpenNoteStage(feed, sourceURL, resultRef)
+	if s.state != nil {
+		_ = s.state.RecordOpen(feed.ID, OpenSourceSearch)
 	}
 
-	// 单次 DOM 快照一次返回正文、互动状态、图片和首屏评论。
-	snapshot, err := ExtractOpenedNoteSnapshotFromDOM(s.page.Context(opCtx), feed.ID)
+	snapshot, err := pollOpenedNoteSnapshot(opCtx, 4*time.Second, 250*time.Millisecond, func() (*OpenedNoteSnapshot, error) {
+		return ExtractOpenedNoteSnapshotFromDOM(opCtx, page, counter, feed.ID)
+	})
 	if err != nil {
-		return nil, err
+		if errors.Is(err, xerrors.ErrNoFeedDetail) {
+			return fail(fmt.Errorf("笔记已打开但内容未就绪: %w", xerrors.ErrNoFeedDetail))
+		}
+		return fail(err)
 	}
 	content := snapshot.Note
 	mergeOpenedNoteUserFromSearchResult(&content, feed)
 	comments := snapshot.Comments
 
-	s.mu.Lock()
-	s.sourceURL = sourceURL
-	s.currentFeedID = feed.ID
-	s.currentXsecToken = feed.XsecToken
-	s.opened = true
-	s.read = true
-	s.seenNotes[feed.ID] = true
-	// 储存首屏评论 ID 作为初始 cursor，让 get_note_detail 从后续评论开始加载
-	s.initialCommentIDs = s.initialCommentIDs[:0]
+	initialCommentIDs := make([]string, 0)
 	for i, c := range comments {
 		if key := commentBatchKey(i, c); key != "" {
-			s.initialCommentIDs = append(s.initialCommentIDs, key)
+			initialCommentIDs = append(initialCommentIDs, key)
 		}
 		for j, sub := range c.SubComments {
 			if key := commentBatchKey(j, sub); key != "" {
-				s.initialCommentIDs = append(s.initialCommentIDs, key)
+				initialCommentIDs = append(initialCommentIDs, key)
 			}
 		}
 	}
-	s.resetNotificationSurfaceLocked()
-	s.recordTimelineLocked("open_note", feed.ID, "ok", time.Now(), "opened and content read from search result "+resultRef)
-	info := s.infoLocked()
-	s.mu.Unlock()
+	info := s.commitReadNoteStage(feed.ID, initialCommentIDs, resultRef)
+	if s.state != nil {
+		_ = s.state.RecordRead(feed.ID, 0)
+	}
 	s.probeWatchdogSelectorsForKind(opCtx, XHSReadyDetail, feed.ID)
 	return &SessionOpenNoteResponse{
 		BrowseSessionInfo: info,
@@ -671,6 +690,55 @@ func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, xsecToken strin
 		Comments:          comments,
 		Media:             SessionMediaReadStatus{Implemented: false, Message: "图片和视频阅读功能尚未实现，后续由 get_note_detail 支持"},
 	}, nil
+}
+
+func (s *BrowseSession) commitOpenNoteStage(feed Feed, sourceURL, resultRef string) {
+	s.mu.Lock()
+	if sourceURL != "" {
+		s.sourceURL = sourceURL
+	}
+	s.currentFeedID = feed.ID
+	s.currentXsecToken = feed.XsecToken
+	s.opened = true
+	s.read = false
+	s.initialCommentIDs = nil
+	s.resetNotificationSurfaceLocked()
+	s.recordTimelineLocked("open_note", feed.ID, "ok", time.Now(), "opened from search result "+resultRef)
+	s.mu.Unlock()
+}
+
+func (s *BrowseSession) commitReadNoteStage(feedID string, initialCommentIDs []string, resultRef string) BrowseSessionInfo {
+	s.mu.Lock()
+	s.read = true
+	s.seenNotes[feedID] = true
+	s.initialCommentIDs = append([]string(nil), initialCommentIDs...)
+	s.recordTimelineLocked("read_note", feedID, "ok", time.Now(), "content read from search result "+resultRef)
+	info := s.infoLocked()
+	s.mu.Unlock()
+	return info
+}
+
+func pollOpenedNoteSnapshot(ctx context.Context, timeout, interval time.Duration, attempt func() (*OpenedNoteSnapshot, error)) (*OpenedNoteSnapshot, error) {
+	deadline := time.Now().Add(timeout)
+	for {
+		snapshot, err := attempt()
+		if err == nil {
+			return snapshot, nil
+		}
+		if !errors.Is(err, xerrors.ErrNoFeedDetail) {
+			return nil, err
+		}
+		if !time.Now().Before(deadline) {
+			return nil, xerrors.ErrNoFeedDetail
+		}
+		timer := time.NewTimer(min(interval, time.Until(deadline)))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
 }
 
 func mergeOpenedNoteUserFromSearchResult(content *OpenedNoteContent, feed Feed) {
@@ -686,12 +754,12 @@ func mergeOpenedNoteUserFromSearchResult(content *OpenedNoteContent, feed Feed) 
 	}
 }
 
-func (s *BrowseSession) Detail(ctx context.Context, _ bool, _ int) (*SessionDetailResponse, error) {
+func (s *BrowseSession) Detail(ctx context.Context, _ bool, _ int) (detail *SessionDetailResponse, err error) {
 	opCtx, err := s.beginLockedOperation(ctx, true)
 	if err != nil {
 		return nil, err
 	}
-	defer s.finishOperation()
+	defer func() { s.finishOperation(err) }()
 
 	feedID, err := s.currentOpenedFeedID()
 	if err != nil {
@@ -706,7 +774,8 @@ func (s *BrowseSession) Detail(ctx context.Context, _ bool, _ int) (*SessionDeta
 	if err := WaitForXHSReady(page.Context(opCtx), XHSReadyOptions{Kind: XHSReadyDetail, FeedID: feedID}); err != nil {
 		return nil, err
 	}
-	comments, err := ExtractCommentsFromDOM(page.Context(opCtx), feedID)
+	counter := &evalTimeoutCounter{}
+	comments, err := ExtractCommentsFromDOM(opCtx, page, counter, feedID)
 	if err != nil {
 		return nil, err
 	}
@@ -727,14 +796,14 @@ func (s *BrowseSession) Detail(ctx context.Context, _ bool, _ int) (*SessionDeta
 func (s *BrowseSession) DetailCommentsBatch(ctx context.Context, expectedFeedID string, cursor *CommentCursor, maxItems int, config CommentLoadConfig) (*FeedDetailResponse, *CommentCursor, bool, error) {
 	return s.detailCommentsBatchLifecycle(
 		ctx, expectedFeedID, maxItems, cursor,
-		func(opCtx context.Context, page *hrod.Page, feedID string) error {
+		func(opCtx context.Context, page *hrod.Page, counter *evalTimeoutCounter, feedID string) error {
 			if cursor != nil && cursor.Round > 0 {
-				return s.recoverCommentBatchSession(opCtx, page, feedID)
+				return s.recoverCommentBatchSession(opCtx, page, counter, feedID)
 			}
 			return WaitForXHSReady(page.Context(opCtx), XHSReadyOptions{Kind: XHSReadyDetail, FeedID: feedID})
 		},
-		func(loadCtx context.Context, page *hrod.Page) ([]Comment, *CommentCursor, bool, error) {
-			return LoadCommentsBatch(loadCtx, page.Context(loadCtx), config, cursor, maxItems)
+		func(loadCtx context.Context, page *hrod.Page, counter *evalTimeoutCounter) ([]Comment, *CommentCursor, bool, error) {
+			return loadCommentsBatch(loadCtx, page.Context(loadCtx), counter, config, cursor, maxItems)
 		},
 	)
 }
@@ -744,14 +813,14 @@ func (s *BrowseSession) detailCommentsBatchLifecycle(
 	expectedFeedID string,
 	maxItems int,
 	cursor *CommentCursor,
-	pretask func(context.Context, *hrod.Page, string) error,
-	loader func(context.Context, *hrod.Page) ([]Comment, *CommentCursor, bool, error),
-) (*FeedDetailResponse, *CommentCursor, bool, error) {
+	pretask func(context.Context, *hrod.Page, *evalTimeoutCounter, string) error,
+	loader func(context.Context, *hrod.Page, *evalTimeoutCounter) ([]Comment, *CommentCursor, bool, error),
+) (detail *FeedDetailResponse, nextCursor *CommentCursor, hasMore bool, err error) {
 	opCtx, err := s.beginLockedOperation(ctx, true)
 	if err != nil {
 		return nil, nil, false, err
 	}
-	defer s.finishOperation()
+	defer func() { s.finishOperation(err) }()
 
 	feedID, err := s.currentOpenedFeedIDFor(expectedFeedID)
 	if err != nil {
@@ -763,9 +832,10 @@ func (s *BrowseSession) detailCommentsBatchLifecycle(
 	if page == nil {
 		return nil, nil, false, fmt.Errorf("browse session 页面不存在: %s", s.id)
 	}
+	counter := &evalTimeoutCounter{}
 
 	if pretask != nil {
-		if err := pretask(opCtx, page, feedID); err != nil {
+		if err := pretask(opCtx, page, counter, feedID); err != nil {
 			return nil, nil, false, err
 		}
 	}
@@ -776,7 +846,7 @@ func (s *BrowseSession) detailCommentsBatchLifecycle(
 		dwellStart = time.Now()
 	}
 	comments, nextCursor, hasMore, err := runDetailCommentsBatch(opCtx, func(loadCtx context.Context) ([]Comment, *CommentCursor, bool, error) {
-		return loader(loadCtx, page)
+		return loader(loadCtx, page, counter)
 	})
 	if err != nil {
 		return nil, nil, false, err
@@ -791,7 +861,7 @@ func (s *BrowseSession) detailCommentsBatchLifecycle(
 		scrolled := nextCursor != nil && nextCursor.Round > inputRound
 		_ = s.state.RecordCommentDwell(feedID, time.Since(dwellStart), scrolled)
 	}
-	return s.completeDetailCommentsBatch(opCtx, page, feedID, maxItems, comments, nextCursor, hasMore)
+	return s.completeDetailCommentsBatch(opCtx, page, counter, feedID, maxItems, comments, nextCursor, hasMore)
 }
 
 func commentLoadDeadline(ctx context.Context) time.Time {
@@ -819,7 +889,7 @@ func runDetailCommentsBatch(opCtx context.Context, loader func(context.Context) 
 	return comments, nextCursor, hasMore, nil
 }
 
-func (s *BrowseSession) completeDetailCommentsBatch(opCtx context.Context, page *hrod.Page, feedID string, maxItems int, comments []Comment, nextCursor *CommentCursor, hasMore bool) (*FeedDetailResponse, *CommentCursor, bool, error) {
+func (s *BrowseSession) completeDetailCommentsBatch(opCtx context.Context, page *hrod.Page, counter *evalTimeoutCounter, feedID string, maxItems int, comments []Comment, nextCursor *CommentCursor, hasMore bool) (*FeedDetailResponse, *CommentCursor, bool, error) {
 	if opCtx.Err() != nil {
 		return nil, nil, false, opCtx.Err()
 	}
@@ -832,7 +902,9 @@ func (s *BrowseSession) completeDetailCommentsBatch(opCtx context.Context, page 
 			HasMore: hasMore,
 		},
 	}
-	if totalItems := knownCommentTotal(page.Context(opCtx)); totalItems > 0 {
+	if totalItems, err := knownCommentTotal(opCtx, page, counter); err != nil {
+		return nil, nil, false, err
+	} else if totalItems > 0 {
 		resp.Comments.TotalItems = totalItems
 	}
 	if opCtx.Err() != nil {
@@ -845,16 +917,22 @@ func (s *BrowseSession) completeDetailCommentsBatch(opCtx context.Context, page 
 	return resp, nextCursor, hasMore, nil
 }
 
-func (s *BrowseSession) recoverCommentBatchSession(ctx context.Context, page *hrod.Page, expectedFeedID string) error {
+func (s *BrowseSession) recoverCommentBatchSession(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, expectedFeedID string) error {
 	p := page.Context(ctx)
-	feedID, err := currentFeedIDFromPage(p)
+	feedID, err := currentFeedIDFromPage(ctx, p, counter)
 	if err != nil || feedID == "" {
+		if IsFatalRendererError(err) {
+			return err
+		}
 		if err := p.Sleep(time.Second); err != nil {
 			return err
 		}
-		feedID, err = currentFeedIDFromPage(p)
+		feedID, err = currentFeedIDFromPage(ctx, p, counter)
 	}
 	if err != nil || feedID == "" {
+		if IsFatalRendererError(err) {
+			return err
+		}
 		return fmt.Errorf("session 当前页面无法确认 feed: expected=%s, err=%v", expectedFeedID, err)
 	}
 	if feedID != expectedFeedID {
@@ -871,12 +949,12 @@ func (s *BrowseSession) LikeForFeed(ctx context.Context, expectedFeedID string, 
 	return s.like(ctx, expectedFeedID, unlike)
 }
 
-func (s *BrowseSession) like(ctx context.Context, expectedFeedID string, unlike bool) error {
+func (s *BrowseSession) like(ctx context.Context, expectedFeedID string, unlike bool) (err error) {
 	opCtx, err := s.beginLockedOperation(ctx, true)
 	if err != nil {
 		return err
 	}
-	defer s.finishOperation()
+	defer func() { s.finishOperation(err) }()
 
 	feedID, xsecToken, err := s.currentFeedFor(expectedFeedID)
 	if err != nil {
@@ -912,12 +990,12 @@ func (s *BrowseSession) FavoriteForFeed(ctx context.Context, expectedFeedID stri
 	return s.favorite(ctx, expectedFeedID, unfavorite)
 }
 
-func (s *BrowseSession) favorite(ctx context.Context, expectedFeedID string, unfavorite bool) error {
+func (s *BrowseSession) favorite(ctx context.Context, expectedFeedID string, unfavorite bool) (err error) {
 	opCtx, err := s.beginLockedOperation(ctx, true)
 	if err != nil {
 		return err
 	}
-	defer s.finishOperation()
+	defer func() { s.finishOperation(err) }()
 
 	feedID, xsecToken, err := s.currentFeedFor(expectedFeedID)
 	if err != nil {
@@ -953,7 +1031,7 @@ func (s *BrowseSession) CommentForFeed(ctx context.Context, expectedFeedID, cont
 	return s.comment(ctx, expectedFeedID, content)
 }
 
-func (s *BrowseSession) comment(ctx context.Context, expectedFeedID, content string) error {
+func (s *BrowseSession) comment(ctx context.Context, expectedFeedID, content string) (err error) {
 	if strings.TrimSpace(content) == "" {
 		return fmt.Errorf("评论内容不能为空")
 	}
@@ -961,7 +1039,7 @@ func (s *BrowseSession) comment(ctx context.Context, expectedFeedID, content str
 	if err != nil {
 		return err
 	}
-	defer s.finishOperation()
+	defer func() { s.finishOperation(err) }()
 
 	feedID, xsecToken, err := s.currentFeedFor(expectedFeedID)
 	if err != nil {
@@ -987,12 +1065,12 @@ func (s *BrowseSession) ReplyForFeed(ctx context.Context, expectedFeedID, commen
 	return s.reply(ctx, expectedFeedID, commentID, userID, content)
 }
 
-func (s *BrowseSession) reply(ctx context.Context, expectedFeedID, commentID, userID, content string) error {
+func (s *BrowseSession) reply(ctx context.Context, expectedFeedID, commentID, userID, content string) (err error) {
 	opCtx, err := s.beginLockedOperation(ctx, true)
 	if err != nil {
 		return err
 	}
-	defer s.finishOperation()
+	defer func() { s.finishOperation(err) }()
 
 	feedID, xsecToken, err := s.currentFeedFor(expectedFeedID)
 	if err != nil {
@@ -1049,12 +1127,12 @@ func waitForHistoryTargetReady(ctx context.Context, page *hrod.Page, fromURL, so
 	return last, fmt.Errorf("等待 history.back 目标页超时: %s", formatXHSReadyProbe(last))
 }
 
-func (s *BrowseSession) Back(ctx context.Context) error {
+func (s *BrowseSession) Back(ctx context.Context) (err error) {
 	opCtx, err := s.beginLockedOperation(ctx, true)
 	if err != nil {
 		return err
 	}
-	defer s.finishOperation()
+	defer func() { s.finishOperation(err) }()
 
 	s.mu.Lock()
 	page := s.page
@@ -1066,7 +1144,8 @@ func (s *BrowseSession) Back(ctx context.Context) error {
 		return fmt.Errorf("browse session 页面不存在: %s", s.id)
 	}
 
-	fromURL, err := s.currentPageURL(opCtx)
+	counter := &evalTimeoutCounter{}
+	fromURL, err := s.currentPageURL(opCtx, counter)
 	if err != nil {
 		return fmt.Errorf("读取后退前 URL: %w", err)
 	}
@@ -1095,12 +1174,12 @@ func (s *BrowseSession) Back(ctx context.Context) error {
 }
 
 // UnreadNotificationCount 从当前保留页面读取未读数，不点击入口，不清未读。
-func (s *BrowseSession) UnreadNotificationCount(ctx context.Context) (*NotificationCount, error) {
+func (s *BrowseSession) UnreadNotificationCount(ctx context.Context) (count *NotificationCount, err error) {
 	opCtx, err := s.beginLockedOperation(ctx, true)
 	if err != nil {
 		return nil, err
 	}
-	defer s.finishOperation()
+	defer func() { s.finishOperation(err) }()
 
 	s.mu.Lock()
 	page := s.page
@@ -1114,7 +1193,7 @@ func (s *BrowseSession) UnreadNotificationCount(ctx context.Context) (*Notificat
 // ListNotifications 通过侧栏真实点击进入通知页/切换 tab 并分页读取。
 // 传空 cursor：进入通知页/切 tab/fresh 重新读取首批并建立新 generation；
 // 传有效 cursor：同 tab 续页；过期/无效 cursor 明确拒绝，不做静默 fresh list。
-func (s *BrowseSession) ListNotifications(ctx context.Context, rawTab string, cursor string, maxItems int) (*NotificationList, error) {
+func (s *BrowseSession) ListNotifications(ctx context.Context, rawTab string, cursor string, maxItems int) (list *NotificationList, err error) {
 	tab, err := ParseNotificationTab(rawTab)
 	if err != nil {
 		return nil, err
@@ -1125,7 +1204,7 @@ func (s *BrowseSession) ListNotifications(ctx context.Context, rawTab string, cu
 	if err != nil {
 		return nil, err
 	}
-	defer s.finishOperation()
+	defer func() { s.finishOperation(err) }()
 
 	s.mu.Lock()
 	page := s.page
@@ -1139,7 +1218,6 @@ func (s *BrowseSession) ListNotifications(ctx context.Context, rawTab string, cu
 	notif := s.notification
 	s.mu.Unlock()
 
-	var list *NotificationList
 	switch {
 	case cursor == "":
 		list, err = s.startNotificationListLocked(opCtx, page, tab, maxItems)
@@ -1379,19 +1457,19 @@ func (s *BrowseSession) refreshNotificationListLocked(ctx context.Context, page 
 }
 
 // LikeNotification 点赞/取消点赞当前 notification surface 中的评论通知，幂等。
-func (s *BrowseSession) LikeNotification(ctx context.Context, notificationRef string, unlike bool) (*NotificationLikeResult, error) {
+func (s *BrowseSession) LikeNotification(ctx context.Context, notificationRef string, unlike bool) (result *NotificationLikeResult, err error) {
 	opCtx, err := s.beginLockedOperation(ctx, true)
 	if err != nil {
 		return nil, err
 	}
-	defer s.finishOperation()
+	defer func() { s.finishOperation(err) }()
 
 	page, target, err := s.resolveNotificationWriteTarget(opCtx, notificationRef)
 	if err != nil {
 		return nil, err
 	}
 
-	result, err := likeNotificationOnPage(ctx, page, target, unlike)
+	result, err = likeNotificationOnPage(ctx, page, target, unlike)
 	if err != nil {
 		return nil, err
 	}
@@ -1420,7 +1498,7 @@ func (s *BrowseSession) LikeNotification(ctx context.Context, notificationRef st
 }
 
 // ReplyNotification 回复当前 notification surface 中的评论通知。
-func (s *BrowseSession) ReplyNotification(ctx context.Context, notificationRef, content string) (*NotificationReplyResult, error) {
+func (s *BrowseSession) ReplyNotification(ctx context.Context, notificationRef, content string) (result *NotificationReplyResult, err error) {
 	if normalizeNotificationText(content) == "" {
 		return nil, fmt.Errorf("回复内容不能为空")
 	}
@@ -1428,14 +1506,14 @@ func (s *BrowseSession) ReplyNotification(ctx context.Context, notificationRef, 
 	if err != nil {
 		return nil, err
 	}
-	defer s.finishOperation()
+	defer func() { s.finishOperation(err) }()
 
 	page, target, err := s.resolveNotificationWriteTarget(opCtx, notificationRef)
 	if err != nil {
 		return nil, err
 	}
 
-	result, err := replyNotificationOnPage(ctx, page, target, content)
+	result, err = replyNotificationOnPage(ctx, page, target, content)
 	if err != nil {
 		return nil, err
 	}
@@ -1672,12 +1750,12 @@ func (s *BrowseSession) ClassifyRisk() (RiskSignal, error) {
 	return s.ClassifyRiskContext(context.Background())
 }
 
-func (s *BrowseSession) ClassifyRiskContext(ctx context.Context) (RiskSignal, error) {
+func (s *BrowseSession) ClassifyRiskContext(ctx context.Context) (signal RiskSignal, err error) {
 	opCtx, err := s.beginLockedOperation(ctx, false)
 	if err != nil {
 		return RiskSignal{Kind: RiskNone, DetectedAt: time.Now()}, err
 	}
-	defer s.finishOperation()
+	defer func() { s.finishOperation(err) }()
 
 	s.mu.Lock()
 	page := s.page
@@ -1700,14 +1778,11 @@ func (s *BrowseSession) close() {
 		s.timer.Stop()
 	}
 	cancel := s.activeOp
-	hasActiveOp := s.activeOp != nil
 	page := s.page
 	onClose := s.onClose
 	onRemove := s.onRemove
-	if !hasActiveOp {
-		s.page = nil
-		s.onClose = nil
-	}
+	s.page = nil
+	s.onClose = nil
 	s.mu.Unlock()
 
 	if onRemove != nil {
@@ -1716,7 +1791,7 @@ func (s *BrowseSession) close() {
 	if cancel != nil {
 		cancel()
 	}
-	if !hasActiveOp && onClose != nil {
+	if onClose != nil {
 		onClose(page)
 	}
 }
@@ -1756,29 +1831,33 @@ func (s *BrowseSession) beginLockedOperation(ctx context.Context, touchTTL bool)
 	return s.opCtx, nil
 }
 
-func (s *BrowseSession) finishOperation() {
-	s.endOperation()
+func (s *BrowseSession) finishOperation(operationErr error) {
+	s.endOperation(operationErr)
 	s.releaseOperation()
 }
 
-func (s *BrowseSession) endOperation() {
+func (s *BrowseSession) endOperation(operationErr error) {
 	s.mu.Lock()
 	closed := s.closed
 	opCtx := s.opCtx
 	expired := !closed && time.Now().After(s.expiresAt)
 	s.mu.Unlock()
+	fatal := IsFatalRendererError(operationErr) || errors.Is(operationErr, context.Canceled) || errors.Is(operationErr, context.DeadlineExceeded)
+	if opCtx != nil && opCtx.Err() != nil {
+		fatal = true
+	}
 
 	if expired {
 		s.close()
 		return
 	}
 
-	if !closed && opCtx != nil && opCtx.Err() == nil {
+	if !closed && !fatal && opCtx != nil {
 		s.refreshPageState(opCtx)
 	}
 
 	s.mu.Lock()
-	if !s.closed && s.touchOnFinish && opCtx != nil && opCtx.Err() == nil {
+	if !s.closed && !fatal && s.touchOnFinish && opCtx != nil {
 		if time.Now().After(s.expiresAt) {
 			s.mu.Unlock()
 			s.close()
@@ -1792,25 +1871,14 @@ func (s *BrowseSession) endOperation() {
 func (s *BrowseSession) releaseOperation() {
 	s.mu.Lock()
 	cancel := s.activeOp
-	shouldRelease := s.closed
-	page := s.page
-	onClose := s.onClose
 	if cancel != nil {
 		cancel()
 	}
 	s.opCtx = nil
 	s.activeOp = nil
-	if shouldRelease {
-		s.page = nil
-		s.onClose = nil
-	}
 	s.mu.Unlock()
 
 	s.opToken <- struct{}{}
-
-	if shouldRelease && onClose != nil {
-		onClose(page)
-	}
 }
 
 func (s *BrowseSession) resolveResult(resultRef string) (Feed, bool) {
@@ -1938,7 +2006,7 @@ func (s *BrowseSession) probeWatchdogSelectorsForKind(ctx context.Context, kind 
 }
 
 // currentPageURL 先在锁内读取非空缓存 currentURL，仅缓存为空时执行现场 Eval。
-func (s *BrowseSession) currentPageURL(ctx context.Context) (string, error) {
+func (s *BrowseSession) currentPageURL(ctx context.Context, counter *evalTimeoutCounter) (string, error) {
 	s.mu.Lock()
 	cached := s.currentURL
 	s.mu.Unlock()
@@ -1948,9 +2016,7 @@ func (s *BrowseSession) currentPageURL(ctx context.Context) (string, error) {
 	if s.page == nil {
 		return "", nil
 	}
-	evalCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-	defer cancel()
-	result, err := s.page.Context(evalCtx).Eval(`() => location.href`)
+	result, err := evalJS(ctx, counter, s.page, `() => location.href`)
 	if err != nil || result == nil {
 		return "", err
 	}
