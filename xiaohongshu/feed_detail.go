@@ -307,6 +307,7 @@ func loadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 				if len(batch) >= maxItems {
 					return batch, batchCursor, true, nil
 				}
+				roundClicked := 0
 				for _, button := range buttons {
 					if ctx.Err() != nil {
 						return partialOrError(ctx.Err())
@@ -325,6 +326,7 @@ func loadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 							return partialOrError(fmt.Errorf("回复展开点击失败: %w", err))
 						}
 						replyClicksTotal++
+						roundClicked++
 						batchCursor.ExpandRound++
 						if waitErr := waitReplyItemsChanged(ctx, page, button.ParentIndex, before, 3*time.Second); waitErr != nil {
 							if isEvalTimeout(waitErr) {
@@ -335,13 +337,18 @@ func loadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 						}
 					}
 				}
-				// 点完本轮所有可见按钮后统一收集，避免每点一个按钮就 collect 一次
-				// （重型全量快照），这是 test 相对 pre 的主要性能劣化点。
-				more, moreVisible, progress, collectErr = collect(maxItems - len(batch))
-				if collectErr != nil {
-					return partialOrError(collectErr)
+				if roundClicked == 0 {
+					// 本轮零有效点击（已达 8 次上限或停滞）：不 collect 空转，继续滚动。
+					logrus.Infof("子评论展开零点击(replyStall=%v, 已展开%d)，继续滚动", replyStall, replyClicksTotal)
+				} else {
+					// 点完本轮所有可见按钮后统一收集，避免每点一个按钮就 collect 一次
+					// （重型全量快照），这是 test 相对 pre 的主要性能劣化点。
+					more, moreVisible, progress, collectErr = collect(maxItems - len(batch))
+					if collectErr != nil {
+						return partialOrError(collectErr)
+					}
+					batch = append(batch, more...)
 				}
-				batch = append(batch, more...)
 				continue
 			}
 			// 无更多展开按钮：不报"无进展"，继续滚动加载
@@ -414,7 +421,7 @@ func loadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 		// （idsGrew=false 时旧逻辑还会误报"评论滚动无进展"）。收尾调用 clickMoreReplies
 		// 兜底展开剩余按钮，再 collect 收新评论，返回续页或读完——否则大帖子回复
 		// （如 434 评帖 144 父+290 子）只能读到滚动碰到的部分，漏掉未展开的子评论。
-		if err := clickMoreReplies(ctx, page, config.MaxRepliesThreshold, remaining); err != nil {
+		if err := clickMoreReplies(ctx, page, config.MaxRepliesThreshold, replyClicksTotal, remaining); err != nil {
 			return partialOrError(fmt.Errorf("全量展开子评论失败: %w", err))
 		}
 		m, moreVis2, _, collectErr2 := collect(maxItems - len(batch))
@@ -591,7 +598,7 @@ type showMoreButtonSnapshot struct {
 	ParentIndex int     `json:"parentIndex"`
 }
 
-func clickMoreReplies(ctx context.Context, page *hrod.Page, maxRepliesThreshold int, remainingDeadline func() time.Duration) error {
+func clickMoreReplies(ctx context.Context, page *hrod.Page, maxRepliesThreshold int, clickedSoFar int, remainingDeadline func() time.Duration) error {
 	const maxRounds = 20
 	for i := 0; i < maxRounds; i++ {
 		if remainingDeadline != nil {
@@ -615,6 +622,17 @@ func clickMoreReplies(ctx context.Context, page *hrod.Page, maxRepliesThreshold 
 		for _, button := range buttons {
 			if ctx.Err() != nil {
 				return ctx.Err()
+			}
+			if remainingDeadline != nil {
+				if remaining := remainingDeadline(); remaining < 15*time.Second {
+					logrus.Warnf("评论加载剩余时间不足(%s)，停止展开子评论", remaining.Round(time.Second))
+					return nil
+				}
+			}
+			// 正数阈值下严格执行累计 8 次上限；reply_limit=0 才允许不限次数。
+			if maxRepliesThreshold > 0 && clickedSoFar+clicked >= 8 {
+				logrus.Infof("子评论展开达到 8 次上限，停止")
+				return nil
 			}
 			logrus.Infof("点击展开子评论: %s", button.Text)
 			before, err := countReplyItems(ctx, page, button.ParentIndex)
@@ -650,13 +668,12 @@ func clickMoreReplies(ctx context.Context, page *hrod.Page, maxRepliesThreshold 
 	return nil
 }
 
-// nextShowMoreButtons 单次 Eval 返回所有合格"展开子评论"按钮的坐标列表，
-// 并在 Eval 内把按钮滚动到评论区容器可见区域（对齐 pre 遍历全部按钮的语义，
-// 替代此前只查第一个按钮导致大帖读不全的问题）。
+// nextShowMoreButtons 单次 Eval 返回当前 viewport 内所有合格"展开子评论"按钮的坐标列表。
+// 只收集可见按钮（不做 scrollIntoView 滚动定位），保证返回坐标在点击时有效；
+// 点击完当前可见按钮后由滚动/查询循环带出下一批（对齐 pre 遍历全部按钮的语义）。
 func nextShowMoreButtons(ctx context.Context, page *hrod.Page, maxRepliesThreshold int) ([]showMoreButtonSnapshot, error) {
 	result, err := evalQuick(ctx, page, `(maxRepliesThreshold) => {
 		const clean = (value) => (value || "").replace(/\s+/g, " ").trim();
-		const scroller = document.querySelector(".note-scroller");
 		// reply_limit=-1：一个子评论都不展开（跳过所有展开按钮）。
 		if (maxRepliesThreshold === -1) return "[]";
 		const parents = Array.from(document.querySelectorAll(".parent-comment"));
@@ -670,26 +687,16 @@ func nextShowMoreButtons(ctx context.Context, page *hrod.Page, maxRepliesThresho
 			if (!parent) continue;
 			const parentIndex = parents.indexOf(parent);
 			if (parentIndex < 0) continue;
-			let rect = btn.getBoundingClientRect();
+			const rect = btn.getBoundingClientRect();
 			if (rect.width <= 0 || rect.height <= 0) continue;
+			// 只收当前视口内可见按钮：坐标在点击时有效，避免滚动定位导致的坐标漂移。
+			if (rect.top < 0 || rect.bottom > window.innerHeight) continue;
 			const match = text.match(/(\d+(?:\.\d+)?)\s*([万千])?/);
 			let count = match ? Number(match[1]) : 0;
 			if (match?.[2] === "万") count *= 10000;
 			if (match?.[2] === "千") count *= 1000;
 			count = Math.floor(count);
 			if (maxRepliesThreshold > 0 && count > maxRepliesThreshold) continue;
-			btn.scrollIntoView({ block: "center", inline: "nearest" });
-			rect = btn.getBoundingClientRect();
-			if (scroller) {
-				const sRect = scroller.getBoundingClientRect();
-				const visibleTop = Math.max(0, sRect.top);
-				const visibleBottom = Math.min(window.innerHeight, sRect.bottom);
-				if (rect.top < visibleTop || rect.bottom > visibleBottom) {
-					scroller.scrollBy(0, rect.top - sRect.top - sRect.height / 2 + rect.height / 2);
-					rect = btn.getBoundingClientRect();
-				}
-			}
-			if (rect.width <= 0 || rect.height <= 0) continue;
 			hits.push({
 				text,
 				x: rect.left + rect.width / 2,
