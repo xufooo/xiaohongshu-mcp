@@ -326,14 +326,10 @@ func loadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 					replyClicksTotal++
 					batchCursor.ExpandRound++
 					if waitErr := waitReplyItemsChanged(ctx, page, button.ParentIndex, before, 3*time.Second); waitErr != nil {
-						if isEvalTimeout(waitErr) {
-							logrus.Warnf("等待回复增长超时: %v", waitErr)
-						} else {
-							// 增长停滞：继续点同类按钮只会重复失败，直接 break 收尾。
-							logrus.Infof("回复增长停滞，结束本批展开")
-							replyStall = true
-							break
-						}
+						// 对齐 pre：wait 失败（含增长停滞）只标记 replyStall，不 break，
+						// collect 后 continue 下一轮；下一轮受限时走 pre 式 return 路径。
+						logrus.Warnf("等待回复增长: %v", waitErr)
+						replyStall = true
 					}
 					more, moreVisible, progress, collectErr = collect(maxItems - len(batch))
 					if collectErr != nil {
@@ -650,13 +646,8 @@ func clickMoreReplies(ctx context.Context, page *hrod.Page, maxRepliesThreshold 
 		}
 		waitErr := waitReplyItemsChanged(ctx, page, button.ParentIndex, before, 7*time.Second)
 		if waitErr != nil {
-			if isEvalTimeout(waitErr) {
-				logrus.Debugf("等待子评论增长超时，继续下一轮: %v", waitErr)
-			} else {
-				// 非超时失败（增长停滞）：继续试同类型按钮只会重复失败，直接返回。
-				logrus.Debugf("等待子评论增长失败，停止展开: %v", waitErr)
-				return nil
-			}
+			// 对齐 pre：wait 失败只记录，继续下一轮（20 轮上限兜底）。
+			logrus.Debugf("等待子评论增长超时，继续下一轮: %v", waitErr)
 		}
 		if err := page.Sleep(4 * time.Second); err != nil {
 			return err
