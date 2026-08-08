@@ -295,7 +295,7 @@ func loadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 		}
 
 		if config.ClickMoreReplies {
-			buttons, err := nextShowMoreButtons(ctx, page, config.MaxRepliesThreshold)
+			button, err := nextShowMoreButton(ctx, page, config.MaxRepliesThreshold)
 			if err != nil {
 				if isEvalTimeout(err) {
 					logrus.Warnf("查询展开按钮超时，跳过本轮: %v", err)
@@ -303,46 +303,34 @@ func loadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 					return partialOrError(fmt.Errorf("查询展开按钮失败: %w", err))
 				}
 			}
-			if len(buttons) > 0 {
+			if button != nil {
 				if len(batch) >= maxItems {
 					return batch, batchCursor, true, nil
 				}
-				roundClicked := 0
-				for _, button := range buttons {
-					if ctx.Err() != nil {
-						return partialOrError(ctx.Err())
-					}
-					if !replyStall && (replyClicksTotal < 8 || config.MaxRepliesThreshold == 0) {
-						before, countErr := countReplyItems(ctx, page, button.ParentIndex)
-						if countErr != nil {
-							if isEvalTimeout(countErr) {
-								logrus.Warnf("回复计数超时，继续: %v", countErr)
-								before = 0
-							} else {
-								return partialOrError(fmt.Errorf("回复计数失败: %w", countErr))
-							}
-						}
-						if err := clickShowMoreButton(page, &button); err != nil {
-							return partialOrError(fmt.Errorf("回复展开点击失败: %w", err))
-						}
-						replyClicksTotal++
-						roundClicked++
-						batchCursor.ExpandRound++
-						if waitErr := waitReplyItemsChanged(ctx, page, button.ParentIndex, before, 3*time.Second); waitErr != nil {
-							if isEvalTimeout(waitErr) {
-								logrus.Warnf("等待回复增长超时: %v", waitErr)
-							} else {
-								replyStall = true
-							}
+				// 每次只处理一个按钮：点击后 DOM 重排，其余按钮坐标漂移失效；
+				// 点完 collect 后 continue 下一轮重新查询，保证坐标最新（对齐 pre 语义）。
+				if !replyStall && (replyClicksTotal < 8 || config.MaxRepliesThreshold == 0) {
+					before, countErr := countReplyItems(ctx, page, button.ParentIndex)
+					if countErr != nil {
+						if isEvalTimeout(countErr) {
+							logrus.Warnf("回复计数超时，继续: %v", countErr)
+							before = 0
+						} else {
+							return partialOrError(fmt.Errorf("回复计数失败: %w", countErr))
 						}
 					}
-				}
-				if roundClicked == 0 {
-					// 本轮零有效点击（已达 8 次上限或停滞）：不 collect 空转，继续滚动。
-					logrus.Infof("子评论展开零点击(replyStall=%v, 已展开%d)，继续滚动", replyStall, replyClicksTotal)
-				} else {
-					// 点完本轮所有可见按钮后统一收集，避免每点一个按钮就 collect 一次
-					// （重型全量快照），这是 test 相对 pre 的主要性能劣化点。
+					if err := clickShowMoreButton(page, button); err != nil {
+						return partialOrError(fmt.Errorf("回复展开点击失败: %w", err))
+					}
+					replyClicksTotal++
+					batchCursor.ExpandRound++
+					if waitErr := waitReplyItemsChanged(ctx, page, button.ParentIndex, before, 3*time.Second); waitErr != nil {
+						if isEvalTimeout(waitErr) {
+							logrus.Warnf("等待回复增长超时: %v", waitErr)
+						} else {
+							replyStall = true
+						}
+					}
 					more, moreVisible, progress, collectErr = collect(maxItems - len(batch))
 					if collectErr != nil {
 						return partialOrError(collectErr)
@@ -600,6 +588,7 @@ type showMoreButtonSnapshot struct {
 
 func clickMoreReplies(ctx context.Context, page *hrod.Page, maxRepliesThreshold int, clickedSoFar int, remainingDeadline func() time.Duration) error {
 	const maxRounds = 20
+	clicked := 0
 	for i := 0; i < maxRounds; i++ {
 		if remainingDeadline != nil {
 			if remaining := remainingDeadline(); remaining < 15*time.Second {
@@ -607,7 +596,7 @@ func clickMoreReplies(ctx context.Context, page *hrod.Page, maxRepliesThreshold 
 				break
 			}
 		}
-		buttons, err := nextShowMoreButtons(ctx, page, maxRepliesThreshold)
+		button, err := nextShowMoreButton(ctx, page, maxRepliesThreshold)
 		if err != nil {
 			if isEvalTimeout(err) {
 				logrus.Warnf("检查子评论展开按钮超时，跳过本轮: %v", err)
@@ -615,89 +604,74 @@ func clickMoreReplies(ctx context.Context, page *hrod.Page, maxRepliesThreshold 
 			}
 			return err
 		}
-		if len(buttons) == 0 {
+		if button == nil {
 			return nil
 		}
-		clicked := 0
-		for _, button := range buttons {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			if remainingDeadline != nil {
-				if remaining := remainingDeadline(); remaining < 15*time.Second {
-					logrus.Warnf("评论加载剩余时间不足(%s)，停止展开子评论", remaining.Round(time.Second))
-					return nil
-				}
-			}
-			// 正数阈值下严格执行累计 8 次上限；reply_limit=0 才允许不限次数。
-			if maxRepliesThreshold > 0 && clickedSoFar+clicked >= 8 {
-				logrus.Infof("子评论展开达到 8 次上限，停止")
-				return nil
-			}
-			logrus.Infof("点击展开子评论: %s", button.Text)
-			before, err := countReplyItems(ctx, page, button.ParentIndex)
-			if err != nil {
-				if isEvalTimeout(err) {
-					logrus.Warnf("获取展开前子评论数量超时: %v", err)
-					before = 0
-				} else {
-					logrus.Warnf("获取展开前子评论数量失败: %v", err)
-					before = 0
-				}
-			}
-			if err := clickShowMoreButton(page, &button); err != nil {
-				return err
-			}
-			if err := waitReplyItemsChanged(ctx, page, button.ParentIndex, before, 7*time.Second); err != nil {
-				if isEvalTimeout(err) {
-					logrus.Warnf("等待子评论增长超时，继续: %v", err)
-				} else {
-					logrus.Debugf("等待子评论增长超时，继续下一轮: %v", err)
-				}
-			}
-			if err := page.Sleep(4 * time.Second); err != nil {
-				return err
-			}
-			clicked++
-		}
-		if clicked == 0 {
+		// 正数阈值下严格执行累计 8 次上限；reply_limit=0 才允许不限次数。
+		if maxRepliesThreshold > 0 && clickedSoFar+clicked >= 8 {
+			logrus.Infof("子评论展开达到 8 次上限，停止")
 			return nil
 		}
+		logrus.Infof("点击展开子评论: %s", button.Text)
+		before, err := countReplyItems(ctx, page, button.ParentIndex)
+		if err != nil {
+			logrus.Warnf("获取展开前子评论数量失败: %v", err)
+			before = 0
+		}
+		if err := clickShowMoreButton(page, button); err != nil {
+			return err
+		}
+		if err := waitReplyItemsChanged(ctx, page, button.ParentIndex, before, 7*time.Second); err != nil {
+			logrus.Debugf("等待子评论增长超时，继续下一轮: %v", err)
+		}
+		if err := page.Sleep(4 * time.Second); err != nil {
+			return err
+		}
+		clicked++
 	}
 	logrus.Infof("展开子评论达到最大轮数(%d)，停止", maxRounds)
 	return nil
 }
 
-// nextShowMoreButtons 单次 Eval 返回当前 viewport 内所有合格"展开子评论"按钮的坐标列表。
-// 只收集可见按钮（不做 scrollIntoView 滚动定位），保证返回坐标在点击时有效；
-// 点击完当前可见按钮后由滚动/查询循环带出下一批（对齐 pre 遍历全部按钮的语义）。
-func nextShowMoreButtons(ctx context.Context, page *hrod.Page, maxRepliesThreshold int) ([]showMoreButtonSnapshot, error) {
+// nextShowMoreButton 单次 Eval 返回第一个合格"展开子评论"按钮的坐标/父评论索引/文本/数量，
+// 并在 Eval 内将按钮滚动到评论区容器可见区域（pre 验证过的定位方式）。
+func nextShowMoreButton(ctx context.Context, page *hrod.Page, maxRepliesThreshold int) (*showMoreButtonSnapshot, error) {
 	result, err := evalQuick(ctx, page, `(maxRepliesThreshold) => {
 		const clean = (value) => (value || "").replace(/\s+/g, " ").trim();
 		// reply_limit=-1：一个子评论都不展开（跳过所有展开按钮）。
-		if (maxRepliesThreshold === -1) return "[]";
+		if (maxRepliesThreshold === -1) return "";
+		const scroller = document.querySelector(".note-scroller");
 		const parents = Array.from(document.querySelectorAll(".parent-comment"));
-		const buttons = parents.flatMap((parent) =>
-			Array.from(parent.querySelectorAll(":scope > .children-comments .show-more, :scope > .reply-container .show-more")));
-		const hits = [];
+		const buttons = parents
+			.flatMap((parent) => Array.from(parent.querySelectorAll(":scope > .children-comments .show-more, :scope > .reply-container .show-more")));
 		for (const btn of buttons) {
 			const text = clean(btn.innerText || btn.textContent);
-			if (!text || !text.includes("展开") || text.includes("收起")) continue;
+			if (!text) continue;
+			if (!text.includes("展开") || text.includes("收起")) continue;
 			const parent = btn.closest(".parent-comment");
-			if (!parent) continue;
 			const parentIndex = parents.indexOf(parent);
 			if (parentIndex < 0) continue;
-			const rect = btn.getBoundingClientRect();
+			let rect = btn.getBoundingClientRect();
 			if (rect.width <= 0 || rect.height <= 0) continue;
-			// 只收当前视口内可见按钮：坐标在点击时有效，避免滚动定位导致的坐标漂移。
-			if (rect.top < 0 || rect.bottom > window.innerHeight) continue;
 			const match = text.match(/(\d+(?:\.\d+)?)\s*([万千])?/);
 			let count = match ? Number(match[1]) : 0;
 			if (match?.[2] === "万") count *= 10000;
 			if (match?.[2] === "千") count *= 1000;
 			count = Math.floor(count);
 			if (maxRepliesThreshold > 0 && count > maxRepliesThreshold) continue;
-			hits.push({
+			btn.scrollIntoView({ block: "center", inline: "nearest" });
+			rect = btn.getBoundingClientRect();
+			if (scroller) {
+				const sRect = scroller.getBoundingClientRect();
+				const visibleTop = Math.max(0, sRect.top);
+				const visibleBottom = Math.min(window.innerHeight, sRect.bottom);
+				if (rect.top < visibleTop || rect.bottom > visibleBottom) {
+					scroller.scrollBy(0, rect.top - sRect.top - sRect.height / 2 + rect.height / 2);
+					rect = btn.getBoundingClientRect();
+				}
+			}
+			if (rect.width <= 0 || rect.height <= 0) continue;
+			return JSON.stringify({
 				text,
 				x: rect.left + rect.width / 2,
 				y: rect.top + rect.height / 2,
@@ -705,7 +679,7 @@ func nextShowMoreButtons(ctx context.Context, page *hrod.Page, maxRepliesThresho
 				parentIndex,
 			});
 		}
-		return JSON.stringify(hits);
+		return "";
 	}`, maxRepliesThreshold)
 	if err != nil {
 		return nil, err
@@ -713,11 +687,11 @@ func nextShowMoreButtons(ctx context.Context, page *hrod.Page, maxRepliesThresho
 	if result == nil || strings.TrimSpace(result.Value.Str()) == "" {
 		return nil, nil
 	}
-	var buttons []showMoreButtonSnapshot
-	if err := json.Unmarshal([]byte(result.Value.Str()), &buttons); err != nil {
+	var button showMoreButtonSnapshot
+	if err := json.Unmarshal([]byte(result.Value.Str()), &button); err != nil {
 		return nil, fmt.Errorf("解析展开按钮位置失败: %w", err)
 	}
-	return buttons, nil
+	return &button, nil
 }
 
 // clickShowMoreButton 按坐标真实点击展开按钮（pre 验证过的点击方式）。
