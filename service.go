@@ -31,36 +31,41 @@ type XiaohongshuService struct {
 	browseSessions *xiaohongshu.BrowseSessionManager
 	rateLimiter    *ratelimit.Limiter
 
-	commentCursors     sync.Map
-	commentCursorTTL   time.Duration
-	commentReplays     sync.Map
-	feedCursors        sync.Map
-	feedCursorTTL      time.Duration
-	commentCursorGen   int64
-	commentReplayGen   int64
-	cursorGuardMu   sync.Mutex
-	cursorGuardMap  map[string]*cursorGuardEntry
+	commentCursors   sync.Map
+	commentCursorTTL time.Duration
+	commentReplays   sync.Map
+	feedCursors      sync.Map
+	feedCursorTTL    time.Duration
+	commentCursorGen int64
+	commentReplayGen int64
+	feedCursorGen    int64
+	cursorGuardMu    sync.Mutex
+	cursorGuardMap   map[string]*cursorGuardEntry
 
 	createSessionMu sync.Mutex
 }
 
 // NewXiaohongshuService 创建小红书服务实例
-func NewXiaohongshuService() *XiaohongshuService {
+func NewXiaohongshuService() (*XiaohongshuService, error) {
+	actionState, err := xiaohongshu.DefaultActionStateStore(
+		configs.Username,
+		configs.GetProfileDir(),
+		cookies.GetCookiesFilePath(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("初始化风控状态存储失败: %w", err)
+	}
 	return &XiaohongshuService{
 		browserManager: browser.NewManager(
 			newBrowser,
 			browser.WithIdleTimeout(configs.GetBrowserIdleTimeout()),
 		),
-		actionState: xiaohongshu.DefaultActionStateStore(
-			configs.Username,
-			configs.GetProfileDir(),
-			cookies.GetCookiesFilePath(),
-		),
+		actionState: actionState,
 		browseSessions: xiaohongshu.NewBrowseSessionManager(xiaohongshu.DefaultBrowseSessionTimeout),
 		commentCursorTTL: 15 * time.Minute,
 		feedCursorTTL:   5 * time.Minute,
 		cursorGuardMap:  make(map[string]*cursorGuardEntry),
-	}
+	}, nil
 }
 
 func (s *XiaohongshuService) SetRateLimiter(limiter *ratelimit.Limiter) {
@@ -80,8 +85,19 @@ func (s *XiaohongshuService) setCommentCursor(id string, cursor *xiaohongshu.Com
 	entry := &commentCursorEntry{Cursor: cursor, Generation: gen, Scope: scope}
 	s.commentCursors.Store(id, entry)
 	time.AfterFunc(ttl, func() {
-		s.commentCursors.CompareAndDelete(id, entry)
+		s.expireCommentCursor(id, gen)
 	})
+}
+
+func (s *XiaohongshuService) expireCommentCursor(id string, generation int64) {
+	value, ok := s.commentCursors.Load(id)
+	if !ok {
+		return
+	}
+	entry, ok := value.(*commentCursorEntry)
+	if ok && entry != nil && entry.Generation == generation {
+		s.commentCursors.CompareAndDelete(id, entry)
+	}
 }
 
 func normalizeMaxItems(maxItems int) int {
@@ -149,7 +165,7 @@ func (s *XiaohongshuService) getCommentCursor(id string, expected replayScope) (
 		ttl = 15 * time.Minute
 	}
 	time.AfterFunc(ttl, func() {
-		s.commentCursors.CompareAndDelete(id, newEntry)
+		s.expireCommentCursor(id, gen)
 	})
 	return entry.Cursor, nil
 }
@@ -302,13 +318,24 @@ func (s *XiaohongshuService) commitCommentBatchResult(
 			Scope:      scope,
 		}
 		s.commentReplays.Store(cursorID, replayEntry)
-		time.AfterFunc(3*time.Minute, func() {
-			s.commentReplays.CompareAndDelete(cursorID, replayEntry)
+		time.AfterFunc(2*time.Minute, func() {
+			s.expireCommentReplay(cursorID, gen)
 		})
 		s.delCommentCursor(cursorID)
 	}
 
 	return result, nil
+}
+
+func (s *XiaohongshuService) expireCommentReplay(id string, generation int64) {
+	value, ok := s.commentReplays.Load(id)
+	if !ok {
+		return
+	}
+	entry, ok := value.(*commentReplayEntry)
+	if ok && entry != nil && entry.Generation == generation {
+		s.commentReplays.CompareAndDelete(id, entry)
+	}
 }
 
 func (s *XiaohongshuService) setFeedCursor(id string, entry feedCursorEntry) {
@@ -319,11 +346,13 @@ func (s *XiaohongshuService) setFeedCursor(id string, entry feedCursorEntry) {
 	if ttl <= 0 {
 		ttl = 5 * time.Minute
 	}
+	entry.Generation = atomic.AddInt64(&s.feedCursorGen, 1)
 	s.feedCursors.Store(id, entry)
+	generation := entry.Generation
 	time.AfterFunc(ttl, func() {
 		if value, ok := s.feedCursors.Load(id); ok {
-			if e, ok := value.(feedCursorEntry); ok && e.SessionID == entry.SessionID {
-				s.feedCursors.Delete(id)
+			if e, ok := value.(feedCursorEntry); ok && e.Generation == generation {
+				s.feedCursors.CompareAndDelete(id, value)
 			}
 		}
 	})
@@ -541,9 +570,10 @@ func deepCopyFinalResult(src *FeedDetailResponse) *FeedDetailResponse {
 }
 
 type feedCursorEntry struct {
-	SessionID string
-	QueryKey  string
-	Cursor    *xiaohongshu.FeedCursor
+	SessionID  string
+	QueryKey   string
+	Cursor     *xiaohongshu.FeedCursor
+	Generation int64
 }
 
 func cloneFeedCursor(cursor *xiaohongshu.FeedCursor) *xiaohongshu.FeedCursor {
@@ -922,7 +952,7 @@ func (s *XiaohongshuService) SearchFeeds(ctx context.Context, keyword string, fi
 	}
 	defer s.browserManager.Release(page)
 
-	action := xiaohongshu.NewSearchActionWithState(page.Context(searchCtx), s.actionState)
+	action := xiaohongshu.NewSearchAction(page.Context(searchCtx))
 	capture := s.startReadNetworkCapture(page)
 
 	feeds, err := action.SearchFeedsOnly(searchCtx, keyword, filters...)

@@ -169,13 +169,15 @@ func (p *Page) Context(ctx context.Context) *Page {
 // ctx 从本 page 的 ctx 派生（继承外部 deadline），clone 不改写共享 actor。
 func (p *Page) Timeout(d time.Duration) *Page {
 	page := p.wrapPage(p.Rod.Timeout(d))
-	page.ctx, _ = context.WithTimeout(p.ctx, d)
+	page.ctx = page.Rod.GetContext()
 	return page
 }
 
 // CancelTimeout returns a humanized clone with the timeout cancelled.
 func (p *Page) CancelTimeout() *Page {
-	return p.wrapPage(p.Rod.CancelTimeout())
+	page := p.wrapPage(p.Rod.CancelTimeout())
+	page.ctx = page.Rod.GetContext()
+	return page
 }
 
 // Sleep waits for d, or returns immediately when this page's context is cancelled.
@@ -973,8 +975,8 @@ func (el *Element) MustRemove() *Element {
 // Timeout returns a humanized clone with the specified timeout.
 // clone 只更新自己的 ctx，不改写共享 actor。
 func (el *Element) Timeout(d time.Duration) *Element {
-	cloneCtx, _ := context.WithTimeout(el.ctx, d)
-	return newElement(el.Rod.Timeout(d), el.actor, el.browser, cloneCtx)
+	rodElement := el.Rod.Timeout(d)
+	return newElement(rodElement, el.actor, el.browser, rodElement.GetContext())
 }
 
 // Context returns a humanized clone with the specified context.

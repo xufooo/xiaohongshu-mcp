@@ -23,10 +23,11 @@ type NotificationLikeResult struct {
 // 初始状态直接复用 findNotificationRowElement 返回的 DOM 快照，避免重复读取完整 snapshot；
 // 点击使用 hrod 真实 Click；点击后轮询重新读取 snapshot 确认翻转，未确认报 state_unknown。
 func likeNotificationOnPage(ctx context.Context, page *hrod.Page, target notificationTarget, unlike bool) (*NotificationLikeResult, error) {
-	if err := verifyNotificationTargetInState(page, target); err != nil {
+	counter := &evalTimeoutCounter{}
+	if err := verifyNotificationTargetInState(ctx, page, counter, target); err != nil {
 		return nil, err
 	}
-	row, matched, err := findNotificationRowElement(page, target)
+	row, matched, err := findNotificationRowElement(ctx, page, counter, target)
 	if err != nil {
 		return nil, err
 	}
@@ -60,7 +61,7 @@ func likeNotificationOnPage(ctx context.Context, page *hrod.Page, target notific
 		if err := page.SleepRandom(400*time.Millisecond, 800*time.Millisecond); err != nil {
 			return nil, err
 		}
-		got, readErr := readNotificationLikeState(page, target)
+		got, readErr := readNotificationLikeState(ctx, page, counter, target)
 		if readErr != nil {
 			continue
 		}
@@ -99,8 +100,8 @@ func matchNotificationDOMItem(dom *notificationDOMSnapshot, target notificationT
 
 // readNotificationLikeState 重新读取 DOM 快照，按指纹唯一匹配通知行并解析 svg use href。
 // 点击后的轮询继续使用，以兼容前端重新渲染。
-func readNotificationLikeState(page *hrod.Page, target notificationTarget) (bool, error) {
-	dom, err := readNotificationDOMSnapshot(page)
+func readNotificationLikeState(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, target notificationTarget) (bool, error) {
+	dom, err := readNotificationDOMSnapshot(ctx, page, counter)
 	if err != nil {
 		return false, err
 	}
@@ -113,8 +114,8 @@ func readNotificationLikeState(page *hrod.Page, target notificationTarget) (bool
 
 // findNotificationRowElement 按指纹唯一匹配当前通知列表中的 DOM 行元素，并返回该行的快照条目。
 // 返回行元素、匹配快照；歧义或未匹配报错。
-func findNotificationRowElement(page *hrod.Page, target notificationTarget) (*hrod.Element, *notificationDOMItem, error) {
-	dom, err := readNotificationDOMSnapshot(page)
+func findNotificationRowElement(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, target notificationTarget) (*hrod.Element, *notificationDOMItem, error) {
+	dom, err := readNotificationDOMSnapshot(ctx, page, counter)
 	if err != nil {
 		return nil, nil, err
 	}

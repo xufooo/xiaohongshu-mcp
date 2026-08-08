@@ -69,7 +69,10 @@ func main() {
 	}
 
 	// 初始化服务
-	xiaohongshuService := NewXiaohongshuService()
+	xiaohongshuService, err := NewXiaohongshuService()
+	if err != nil {
+		logrus.Fatalf("failed to initialize service: %v", err)
+	}
 
 	// 创建并启动应用服务器
 	appServer := NewAppServer(xiaohongshuService)

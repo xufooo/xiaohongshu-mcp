@@ -22,6 +22,7 @@ const (
 	DefaultBrowseSessionTimeout     = 10 * time.Minute
 	browseSessionRefreshTimeout     = 2 * time.Second
 	maxBrowseSessionTimelineEntries = 10
+	maxBrowseSessionResults         = 500
 	browseSessionBackTimeout        = 15 * time.Second
 	healthCheckTimeout              = 30 * time.Second
 )
@@ -199,6 +200,7 @@ type BrowseSession struct {
 	scrollY           int
 	seenNotes         map[string]bool
 	results           map[string]Feed
+	nextResultIndex   int
 	currentFeedID     string
 	currentXsecToken  string
 	opened            bool
@@ -500,10 +502,15 @@ func (s *BrowseSession) ListFeedsBatch(ctx context.Context, cursor *FeedCursor, 
 		s.opened = false
 		s.read = false
 		s.initialCommentIDs = nil
-		s.results = replaceSessionResults(feeds)
+		s.results, s.nextResultIndex = replaceSessionResults(feeds)
 		s.resetNotificationSurfaceLocked()
 	} else {
-		s.results = appendSessionResults(s.results, feeds)
+		originalCount := len(feeds)
+		s.results, s.nextResultIndex, feeds = appendSessionResults(s.results, s.nextResultIndex, feeds)
+		if len(feeds) < originalCount {
+			hasMore = false
+			trimFeedCursorTail(nextCursor, originalCount-len(feeds))
+		}
 	}
 	s.recordTimelineLocked("list_feeds", "", "ok", time.Now(), fmt.Sprintf("results=%d", len(feeds)))
 	s.mu.Unlock()
@@ -549,7 +556,7 @@ func (s *BrowseSession) searchBatch(ctx context.Context, keyword string, filters
 	var aiChat *AIChatReply
 
 	if cursor == nil {
-		action := NewSearchActionWithState(page.Context(opCtx), s.state)
+		action := NewSearchAction(page.Context(opCtx))
 		var allFeeds []Feed
 		if includeAI {
 			searchResult, searchErr := action.Search(opCtx, keyword, filters...)
@@ -580,7 +587,7 @@ func (s *BrowseSession) searchBatch(ctx context.Context, keyword string, filters
 		s.currentXsecToken = ""
 		s.opened = false
 		s.read = false
-		s.results = replaceSessionResults(feeds)
+		s.results, s.nextResultIndex = replaceSessionResults(feeds)
 		s.resetNotificationSurfaceLocked()
 		s.recordTimelineLocked("search", keyword, "ok", time.Now(), fmt.Sprintf("results=%d", len(feeds)))
 		s.mu.Unlock()
@@ -588,15 +595,21 @@ func (s *BrowseSession) searchBatch(ctx context.Context, keyword string, filters
 		return SearchPageResult{Feeds: feeds, AIChat: aiChat}, cursor, hasMore, nil
 	}
 
+	counter := &evalTimeoutCounter{}
 	feeds, nextCursor, hasMore, err = LoadFeedBatch(opCtx, page.Context(opCtx), FeedPageSearch, cursor, maxItems, func() ([]Feed, error) {
-		return collectSearchFeeds(page.Context(opCtx), false)
+		return collectSearchFeeds(opCtx, page.Context(opCtx), counter)
 	})
 	if err != nil {
 		return SearchPageResult{}, nil, false, err
 	}
 
 	s.mu.Lock()
-	s.results = appendSessionResults(s.results, feeds)
+	originalCount := len(feeds)
+	s.results, s.nextResultIndex, feeds = appendSessionResults(s.results, s.nextResultIndex, feeds)
+	if len(feeds) < originalCount {
+		hasMore = false
+		trimFeedCursorTail(nextCursor, originalCount-len(feeds))
+	}
 	s.mu.Unlock()
 	return SearchPageResult{Feeds: feeds}, nextCursor, hasMore, nil
 }
@@ -613,9 +626,9 @@ func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, xsecToken strin
 		return nil, err
 	}
 
-	feed, ok := s.resolveResult(resultRef)
-	if !ok {
-		return fail(fmt.Errorf("未找到搜索结果引用: %s", resultRef))
+	feed, err := s.resolveResult(resultRef)
+	if err != nil {
+		return fail(err)
 	}
 	if xsecToken != "" {
 		feed.XsecToken = xsecToken
@@ -963,7 +976,13 @@ func (s *BrowseSession) like(ctx context.Context, expectedFeedID string, unlike 
 	if err != nil {
 		return err
 	}
-	action := NewLikeActionWithState(s.page.Context(opCtx), s.state)
+	s.mu.Lock()
+	page := s.page
+	s.mu.Unlock()
+	if page == nil {
+		return fmt.Errorf("browse session 页面不存在: %s", s.id)
+	}
+	action := NewLikeActionWithState(page.Context(opCtx), s.state)
 	if unlike {
 		if err := action.Unlike(opCtx, feedID, xsecToken); err != nil {
 			return err
@@ -1004,7 +1023,13 @@ func (s *BrowseSession) favorite(ctx context.Context, expectedFeedID string, unf
 	if err != nil {
 		return err
 	}
-	action := NewFavoriteActionWithState(s.page.Context(opCtx), s.state)
+	s.mu.Lock()
+	page := s.page
+	s.mu.Unlock()
+	if page == nil {
+		return fmt.Errorf("browse session 页面不存在: %s", s.id)
+	}
+	action := NewFavoriteActionWithState(page.Context(opCtx), s.state)
 	if unfavorite {
 		if err := action.Unfavorite(opCtx, feedID, xsecToken); err != nil {
 			return err
@@ -1048,7 +1073,13 @@ func (s *BrowseSession) comment(ctx context.Context, expectedFeedID, content str
 	if err != nil {
 		return err
 	}
-	action := NewCommentFeedActionWithState(s.page.Context(opCtx), s.state)
+	s.mu.Lock()
+	page := s.page
+	s.mu.Unlock()
+	if page == nil {
+		return fmt.Errorf("browse session 页面不存在: %s", s.id)
+	}
+	action := NewCommentFeedActionWithState(page.Context(opCtx), s.state)
 	if err := action.PostComment(opCtx, feedID, xsecToken, content); err != nil {
 		return err
 	}
@@ -1079,7 +1110,13 @@ func (s *BrowseSession) reply(ctx context.Context, expectedFeedID, commentID, us
 	if err != nil {
 		return err
 	}
-	action := NewCommentFeedActionWithState(s.page.Context(opCtx), s.state)
+	s.mu.Lock()
+	page := s.page
+	s.mu.Unlock()
+	if page == nil {
+		return fmt.Errorf("browse session 页面不存在: %s", s.id)
+	}
+	action := NewCommentFeedActionWithState(page.Context(opCtx), s.state)
 	if err := action.ReplyToComment(opCtx, feedID, xsecToken, commentID, userID, content); err != nil {
 		return err
 	}
@@ -1154,7 +1191,7 @@ func (s *BrowseSession) Back(ctx context.Context) (err error) {
 	}
 
 	// 通用后退：从任意页面返回上一步
-	if _, err := page.Context(opCtx).Eval(`() => window.history.back()`); err != nil {
+	if _, err := evalJS(opCtx, counter, page, `() => window.history.back()`); err != nil {
 		return fmt.Errorf("history.back 失败: %w", err)
 	}
 
@@ -1190,7 +1227,8 @@ func (s *BrowseSession) UnreadNotificationCount(ctx context.Context) (count *Not
 	if page == nil {
 		return nil, fmt.Errorf("browse session 页面不存在: %s", s.id)
 	}
-	return readNotificationCount(page.Context(opCtx))
+	counter := &evalTimeoutCounter{}
+	return readNotificationCount(opCtx, page.Context(opCtx), counter)
 }
 
 // ListNotifications 通过侧栏真实点击进入通知页/切换 tab 并分页读取。
@@ -1216,6 +1254,7 @@ func (s *BrowseSession) ListNotifications(ctx context.Context, rawTab string, cu
 		return nil, fmt.Errorf("browse session 页面不存在: %s", s.id)
 	}
 	page = page.Context(opCtx)
+	counter := &evalTimeoutCounter{}
 
 	s.mu.Lock()
 	notif := s.notification
@@ -1223,9 +1262,9 @@ func (s *BrowseSession) ListNotifications(ctx context.Context, rawTab string, cu
 
 	switch {
 	case cursor == "":
-		list, err = s.startNotificationListLocked(opCtx, page, tab, maxItems)
+		list, err = s.startNotificationListLocked(opCtx, page, counter, tab, maxItems)
 	case notif.active && notif.tab == tab && notif.cursor == cursor:
-		list, err = s.continueNotificationListLocked(opCtx, page, tab, maxItems)
+		list, err = s.continueNotificationListLocked(opCtx, page, counter, tab, maxItems)
 	default:
 		return nil, fmt.Errorf("cursor 已过期或无效（tab/generation 已变化），请传空 cursor 重新 list_notifications")
 	}
@@ -1237,16 +1276,16 @@ func (s *BrowseSession) ListNotifications(ctx context.Context, rawTab string, cu
 
 // startNotificationListLocked 建立/刷新通知 surface generation，并读取首批。
 // 首次真实点击通知入口；跨 tab 真实切换 tab；同 tab fresh list 视为新 generation。
-func (s *BrowseSession) startNotificationListLocked(ctx context.Context, page *hrod.Page, tab NotificationTab, maxItems int) (*NotificationList, error) {
+func (s *BrowseSession) startNotificationListLocked(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, tab NotificationTab, maxItems int) (*NotificationList, error) {
 	s.mu.Lock()
 	notif := s.notification
 	s.mu.Unlock()
 	if !notif.active {
-		if err := enterNotificationPage(ctx, page); err != nil {
+		if err := enterNotificationPage(ctx, page, counter); err != nil {
 			return nil, err
 		}
 	} else if notif.tab != tab {
-		if err := switchNotificationTab(ctx, page, tab); err != nil {
+		if err := switchNotificationTab(ctx, page, counter, tab); err != nil {
 			return nil, err
 		}
 	}
@@ -1254,13 +1293,13 @@ func (s *BrowseSession) startNotificationListLocked(ctx context.Context, page *h
 	s.mu.Lock()
 	s.beginNotificationSurfaceLocked(tab)
 	s.mu.Unlock()
-	return s.refreshNotificationListLocked(ctx, page, tab, maxItems)
+	return s.refreshNotificationListLocked(ctx, page, counter, tab, maxItems)
 }
 
 // continueNotificationListLocked 同 tab 续页：逐轮拟人滚动并累计各轮 fresh 到本次最终结果（事务式）：
 // 每轮只把条目收集到局部 batch，任何中途错误都不提交 returned/items/targets（可原样重试）；
 // 只有最终响应组装成功后，才一次性提交并返回。提前停止条件照旧：已达 maxItems、hasMore=false 或连续两轮无新增。
-func (s *BrowseSession) continueNotificationListLocked(ctx context.Context, page *hrod.Page, tab NotificationTab, maxItems int) (*NotificationList, error) {
+func (s *BrowseSession) continueNotificationListLocked(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, tab NotificationTab, maxItems int) (*NotificationList, error) {
 	batch := make([]NotificationItem, 0, maxItems)
 	totalFiltered := 0
 	consecutiveNoNew := 0
@@ -1286,7 +1325,7 @@ func (s *BrowseSession) continueNotificationListLocked(ctx context.Context, page
 		if maxItems > 0 {
 			budget = maxItems - len(batch)
 		}
-		fresh, filteredNew, hasMore, err := s.collectNotificationItems(ctx, page, tab, budget, seen, &emptySeen)
+		fresh, filteredNew, hasMore, err := s.collectNotificationItems(ctx, page, counter, tab, budget, seen, &emptySeen)
 		if err != nil {
 			return nil, err
 		}
@@ -1340,12 +1379,12 @@ func (s *BrowseSession) commitNotificationListLocked(_ context.Context, tab Noti
 // 候选集 = 会话 returnedIDs ∪ 本次调用已见集合（seen）。返回本批条目、本批新过滤数、hasMore；
 // 不标记 returned/不更新 items/targets，由调用方在最终响应组装成功后统一提交，中途错误可原样重试。
 // 超过正预算（budget>0）的不标记，留待下次续页（budget<=0 视为不设上限）。
-func (s *BrowseSession) collectNotificationItems(ctx context.Context, page *hrod.Page, tab NotificationTab, budget int, seen map[string]bool, emptySeen *int) (fresh []NotificationItem, filteredNew int, hasMore bool, err error) {
-	state, err := readNotificationTabState(page, tab)
+func (s *BrowseSession) collectNotificationItems(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, tab NotificationTab, budget int, seen map[string]bool, emptySeen *int) (fresh []NotificationItem, filteredNew int, hasMore bool, err error) {
+	state, err := readNotificationTabState(ctx, page, counter, tab)
 	if err != nil {
 		return nil, 0, false, err
 	}
-	dom, err := readNotificationDOMSnapshot(page)
+	dom, err := readNotificationDOMSnapshot(ctx, page, counter)
 	if err != nil {
 		return nil, 0, false, err
 	}
@@ -1449,10 +1488,10 @@ func (s *BrowseSession) commitNotificationSelectionsLocked(tab NotificationTab, 
 }
 
 // refreshNotificationListLocked 单轮刷新（fresh 起始调用）：挑选首批，成功后再统一提交并组装响应。
-func (s *BrowseSession) refreshNotificationListLocked(ctx context.Context, page *hrod.Page, tab NotificationTab, maxItems int) (*NotificationList, error) {
+func (s *BrowseSession) refreshNotificationListLocked(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, tab NotificationTab, maxItems int) (*NotificationList, error) {
 	seen := make(map[string]bool)
 	emptySeen := 0
-	fresh, filtered, hasMore, err := s.collectNotificationItems(ctx, page, tab, maxItems, seen, &emptySeen)
+	fresh, filtered, hasMore, err := s.collectNotificationItems(ctx, page, counter, tab, maxItems, seen, &emptySeen)
 	if err != nil {
 		return nil, err
 	}
@@ -1881,14 +1920,22 @@ func (s *BrowseSession) releaseOperation() {
 	s.opToken <- struct{}{}
 }
 
-func (s *BrowseSession) resolveResult(resultRef string) (Feed, bool) {
+func (s *BrowseSession) resolveResult(resultRef string) (Feed, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if resultRef == "" {
-		return Feed{}, false
+		return Feed{}, fmt.Errorf("搜索结果引用不能为空")
+	}
+	if index, err := strconv.Atoi(resultRef); err == nil {
+		if index < 0 || index >= s.nextResultIndex {
+			return Feed{}, fmt.Errorf("搜索结果引用索引越界: %s（有效范围 0-%d）", resultRef, max(0, s.nextResultIndex-1))
+		}
 	}
 	feed, ok := s.results[resultRef]
-	return feed, ok
+	if !ok {
+		return Feed{}, fmt.Errorf("未找到搜索结果引用: %s", resultRef)
+	}
+	return feed, nil
 }
 
 func (s *BrowseSession) currentOpenedFeedID() (string, error) {
@@ -1912,6 +1959,9 @@ func (s *BrowseSession) currentFeedFor(expectedFeedID string) (string, string, e
 	defer s.mu.Unlock()
 	if !s.opened || s.currentFeedID == "" {
 		return "", "", fmt.Errorf("互动只能对已打开的笔记执行")
+	}
+	if !s.read {
+		return "", "", fmt.Errorf("互动只能对已阅读的笔记执行")
 	}
 	if expectedFeedID != "" && s.currentFeedID != expectedFeedID {
 		return "", "", fmt.Errorf("session 当前笔记 %s 与目标笔记 %s 不一致", s.currentFeedID, expectedFeedID)
@@ -2009,14 +2059,15 @@ func (s *BrowseSession) probeWatchdogSelectorsForKind(ctx context.Context, kind 
 func (s *BrowseSession) currentPageURL(ctx context.Context, counter *evalTimeoutCounter) (string, error) {
 	s.mu.Lock()
 	cached := s.currentURL
+	page := s.page
 	s.mu.Unlock()
 	if cached != "" {
 		return cached, nil
 	}
-	if s.page == nil {
+	if page == nil {
 		return "", nil
 	}
-	result, err := evalJS(ctx, counter, s.page, `() => location.href`)
+	result, err := evalJS(ctx, counter, page, `() => location.href`)
 	if err != nil || result == nil {
 		return "", err
 	}
@@ -2057,17 +2108,18 @@ func (s *BrowseSession) currentStateLocked(kind XHSReadyKind, resultsCount int, 
 
 func (s *BrowseSession) nextHintLocked(resultsCount int) string {
 	switch {
-	case s.opened:
+	case s.read:
 		return "笔记已打开：首屏标题/正文/首页评论/作者/互动数据/图片列表已在 open_note 返回。可继续操作：get_note_detail(分批加载更多评论)、like_feed、favorite_feed、comment_feed、reply_comment_in_feed(回复当前笔记中的评论)。图片和视频浏览功能尚未实现"
+	case s.opened:
+		return "笔记已打开，内容尚未读取完成；可 go_back 返回搜索结果"
 	case s.notification.active:
 		return "已进入通知页：可切换 tab 读取列表 (list_notifications)、对 mentions tab 条目点赞 (like_notification) 或回复 (reply_notification)，或 go_back 返回"
 	case resultsCount > 0:
 		return "可继续：搜索新关键词 (search_feeds)、打开其他笔记 (open_note)、或滚动浏览 feed"
-	case !s.opened && resultsCount == 0:
-		return "可搜索关键词 (search_feeds) 查找笔记"
-	default:
+	case resultsCount == 0:
 		return "可搜索关键词 (search_feeds) 查找笔记"
 	}
+	return ""
 }
 
 func (s *BrowseSession) uniqueResultCountLocked() int {
@@ -2119,8 +2171,10 @@ func (s *BrowseSession) availableActionsLocked(resultsCount int) []string {
 	if resultsCount > 0 && !s.opened {
 		actions = append(actions, "open_note")
 	}
-	if s.opened {
+	if s.read {
 		actions = append(actions, "get_note_detail", "like_feed", "favorite_feed", "comment_feed", "reply_comment_in_feed", "go_back")
+	} else if s.opened {
+		actions = append(actions, "go_back")
 	}
 	return actions
 }
@@ -2180,7 +2234,7 @@ func (s *BrowseSession) semanticActionsLocked(resultsCount int) []BrowseSessionA
 			})
 		}
 	}
-	if s.opened {
+	if s.read {
 		actions = append(actions,
 			BrowseSessionAction{
 				Ref:      "get_note_detail",
@@ -2377,18 +2431,12 @@ func normalizeFeedPageSize(maxItems int) int {
 	return maxItems
 }
 
-func appendSessionResults(results map[string]Feed, feeds []Feed) map[string]Feed {
+func appendSessionResults(results map[string]Feed, next int, feeds []Feed) (map[string]Feed, int, []Feed) {
 	if results == nil {
 		results = make(map[string]Feed, len(feeds)*2)
 	}
-	next := 0
-	for {
-		if _, exists := results[strconv.Itoa(next)]; !exists {
-			break
-		}
-		next++
-	}
-	for i := range feeds {
+	registered := min(len(feeds), max(0, maxBrowseSessionResults-next))
+	for i := 0; i < registered; i++ {
 		feeds[i].Index = next
 		results[strconv.Itoa(next)] = feeds[i]
 		if feeds[i].ID != "" {
@@ -2396,19 +2444,28 @@ func appendSessionResults(results map[string]Feed, feeds []Feed) map[string]Feed
 		}
 		next++
 	}
-	return results
+	return results, next, feeds[:registered]
 }
 
-func replaceSessionResults(feeds []Feed) map[string]Feed {
-	results := make(map[string]Feed, len(feeds)*2)
-	for i := range feeds {
+func trimFeedCursorTail(cursor *FeedCursor, count int) {
+	if cursor == nil || count <= 0 {
+		return
+	}
+	remaining := max(0, len(cursor.ReturnedIDs)-count)
+	cursor.ReturnedIDs = cursor.ReturnedIDs[:remaining]
+}
+
+func replaceSessionResults(feeds []Feed) (map[string]Feed, int) {
+	capacity := min(len(feeds), maxBrowseSessionResults)
+	results := make(map[string]Feed, capacity*2)
+	for i := 0; i < capacity; i++ {
 		feeds[i].Index = i
 		results[strconv.Itoa(i)] = feeds[i]
 		if feeds[i].ID != "" {
 			results[feeds[i].ID] = feeds[i]
 		}
 	}
-	return results
+	return results, capacity
 }
 
 func inferXHSReadyKindFromSessionURL(rawURL string) XHSReadyKind {

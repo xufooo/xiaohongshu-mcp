@@ -60,13 +60,9 @@ func NewActionStateStore(root string, accountKey string) (*ActionStateStore, err
 	}, nil
 }
 
-func DefaultActionStateStore(accountParts ...string) *ActionStateStore {
+func DefaultActionStateStore(accountParts ...string) (*ActionStateStore, error) {
 	key := strings.Join(accountParts, "|")
-	store, err := NewActionStateStore("", key)
-	if err != nil {
-		return &ActionStateStore{}
-	}
-	return store
+	return NewActionStateStore("", key)
 }
 
 func defaultActionStateRoot() string {
