@@ -309,7 +309,8 @@ func loadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 				}
 				// 每次只处理一个按钮：点击后 DOM 重排，其余按钮坐标漂移失效；
 				// 点完 collect 后 continue 下一轮重新查询，保证坐标最新（对齐 pre 语义）。
-				if !replyStall && (replyClicksTotal < 8 || config.MaxRepliesThreshold == 0) {
+				// 点击条件不满足（replyStall/8次上限）时**不 continue**，落到滚动路径打破空转。
+				if canClickReplies(replyStall, replyClicksTotal, config.MaxRepliesThreshold) {
 					before, countErr := countReplyItems(ctx, page, button.ParentIndex)
 					if countErr != nil {
 						if isEvalTimeout(countErr) {
@@ -336,8 +337,11 @@ func loadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 						return partialOrError(collectErr)
 					}
 					batch = append(batch, more...)
+					continue
 				}
-				continue
+				// 已达 8 次上限或停滞：不再点当前按钮，落到滚动/收尾路径，
+				// 避免对同一按钮无限 continue 空转（Codex 复审阻塞项）。
+				logrus.Infof("子评论展开受限(replyStall=%v, 已展开%d)，转入滚动", replyStall, replyClicksTotal)
 			}
 			// 无更多展开按钮：不报"无进展"，继续滚动加载
 			logrus.Infof("子评论展开停止(replyStall=%v, 已展开%d)，继续滚动", replyStall, replyClicksTotal)
@@ -584,6 +588,16 @@ type showMoreButtonSnapshot struct {
 	Y           float64 `json:"y"`
 	Count       int     `json:"count"`
 	ParentIndex int     `json:"parentIndex"`
+}
+
+// canClickReplies 判定本轮是否允许继续点击"展开子评论"按钮。
+// replyStall（展开停滞）或正数阈值下累计点击已达 8 次上限时返回 false，
+// 调用方应转入滚动/收尾路径而非对同一按钮继续空转。
+func canClickReplies(replyStall bool, clicked int, maxRepliesThreshold int) bool {
+	if replyStall {
+		return false
+	}
+	return clicked < 8 || maxRepliesThreshold == 0
 }
 
 func clickMoreReplies(ctx context.Context, page *hrod.Page, maxRepliesThreshold int, clickedSoFar int, remainingDeadline func() time.Duration) error {
