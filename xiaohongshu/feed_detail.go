@@ -413,13 +413,14 @@ func loadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 
 	idsGrew := len(batchCursor.ReturnedIDs) > inputBase
 
-	if config.ClickMoreReplies && !replyStall {
+	if config.ClickMoreReplies {
 		// 主循环可能因 AtEnd/!moreVisible break 提前结束，剩余 showMore 按钮不会被点
 		// （idsGrew=false 时旧逻辑还会误报"评论滚动无进展"）。收尾调用 clickMoreReplies
 		// 兜底展开剩余按钮，再 collect 收新评论，返回续页或读完——否则大帖子回复
 		// （如 434 评帖 144 父+290 子）只能读到滚动碰到的部分，漏掉未展开的子评论。
-		// replyStall 时跳过：已确认展开停滞，重试同类按钮只会重复失败。
-		if err := clickMoreReplies(ctx, page, config.MaxRepliesThreshold, replyClicksTotal, remaining); err != nil {
+		// 对齐 pre：无条件兜底（含 stall/受限后走收尾的情况），按钮耗尽或 20 轮上限由
+		// clickMoreReplies 内部处理，之后 idsGrew 判定决定续页/读完/无进展。
+		if err := clickMoreReplies(ctx, page, config.MaxRepliesThreshold, remaining); err != nil {
 			return partialOrError(fmt.Errorf("全量展开子评论失败: %w", err))
 		}
 		m, moreVis2, progress2, collectErr2 := collect(maxItems - len(batch))
@@ -609,7 +610,7 @@ func canClickReplies(replyStall bool, clicked int, maxRepliesThreshold int) bool
 	return clicked < 8 || maxRepliesThreshold == 0
 }
 
-func clickMoreReplies(ctx context.Context, page *hrod.Page, maxRepliesThreshold int, clickedSoFar int, remainingDeadline func() time.Duration) error {
+func clickMoreReplies(ctx context.Context, page *hrod.Page, maxRepliesThreshold int, remainingDeadline func() time.Duration) error {
 	const maxRounds = 20
 	clicked := 0
 	for i := 0; i < maxRounds; i++ {
@@ -628,11 +629,6 @@ func clickMoreReplies(ctx context.Context, page *hrod.Page, maxRepliesThreshold 
 			return err
 		}
 		if button == nil {
-			return nil
-		}
-		// 正数阈值下严格执行累计 8 次上限；reply_limit=0 才允许不限次数。
-		if maxRepliesThreshold > 0 && clickedSoFar+clicked >= 8 {
-			logrus.Infof("子评论展开达到 8 次上限，停止")
 			return nil
 		}
 		logrus.Infof("点击展开子评论: %s", button.Text)
