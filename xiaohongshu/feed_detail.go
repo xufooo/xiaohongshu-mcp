@@ -644,18 +644,19 @@ func clickMoreReplies(ctx context.Context, page *hrod.Page, maxRepliesThreshold 
 		if err := clickShowMoreButton(page, button); err != nil {
 			return err
 		}
-		if err := waitReplyItemsChanged(ctx, page, button.ParentIndex, before, 7*time.Second); err != nil {
-			if isEvalTimeout(err) {
-				logrus.Debugf("等待子评论增长超时，继续下一轮: %v", err)
+		waitErr := waitReplyItemsChanged(ctx, page, button.ParentIndex, before, 7*time.Second)
+		if waitErr != nil {
+			if isEvalTimeout(waitErr) {
+				logrus.Debugf("等待子评论增长超时，继续下一轮: %v", waitErr)
 			} else {
 				// 非超时失败（增长停滞）：继续试同类型按钮只会重复失败，直接返回。
-				logrus.Debugf("等待子评论增长失败，停止展开: %v", err)
+				logrus.Debugf("等待子评论增长失败，停止展开: %v", waitErr)
 				return nil
 			}
 		}
-		// 性能：wait 已确认增长则无需再等 4s，短暂休息即可；wait 失败（超时）保留 4s 兜底。
+		// 性能：wait 已确认增长则无需再等 4s，短暂休息即可；wait 超时保留 4s 兜底。
 		sleep := 500 * time.Millisecond
-		if err != nil {
+		if waitErr != nil {
 			sleep = 4 * time.Second
 		}
 		if err := page.Sleep(sleep); err != nil {
