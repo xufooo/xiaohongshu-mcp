@@ -275,45 +275,6 @@ func (s *AppServer) listFeedsHandler(c *gin.Context) {
 	respondSuccess(c, result, "获取Feeds列表成功")
 }
 
-// searchFeedsHandler 搜索Feeds
-func (s *AppServer) searchFeedsHandler(c *gin.Context) {
-	var keyword string
-	var filters xiaohongshu.FilterOption
-
-	switch c.Request.Method {
-	case http.MethodPost:
-		// 对于POST请求，从JSON中获取keyword
-		var searchReq SearchFeedsRequest
-		if err := c.ShouldBindJSON(&searchReq); err != nil {
-			respondError(c, http.StatusBadRequest, "INVALID_REQUEST",
-				"请求参数错误", err.Error())
-			return
-		}
-		keyword = searchReq.Keyword
-		filters = searchReq.Filters
-	default:
-		keyword = c.Query("keyword")
-	}
-
-	if keyword == "" {
-		respondError(c, http.StatusBadRequest, "MISSING_KEYWORD",
-			"缺少关键词参数", "keyword parameter is required")
-		return
-	}
-
-
-	// 搜索 Feeds
-	result, err := s.xiaohongshuService.SearchFeeds(c.Request.Context(), keyword, filters)
-	if err != nil {
-		respondServiceError(c, http.StatusInternalServerError, "SEARCH_FEEDS_FAILED",
-			"搜索Feeds失败", err)
-		return
-	}
-
-	c.Set("account", "ai-report")
-	respondSuccess(c, result, "搜索Feeds成功")
-}
-
 // userProfileHandler 用户主页
 func (s *AppServer) userProfileHandler(c *gin.Context) {
 	var req UserProfileRequest
