@@ -872,7 +872,7 @@ func isConfirmedRendererDead(err error) bool {
 	message := strings.ToLower(err.Error())
 	for _, marker := range []string{
 		"connection closed", "connection reset", "target closed", "target crashed",
-		"session closed", "browser closed", "websocket: close", "websocket closed",
+		"session closed", "browser has been closed", "websocket: close", "websocket closed",
 		"cdp: closed", "broken pipe",
 	} {
 		if strings.Contains(message, marker) {
