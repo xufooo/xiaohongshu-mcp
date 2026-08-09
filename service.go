@@ -1179,6 +1179,9 @@ func (s *XiaohongshuService) CreateBrowseSession(ctx context.Context, forceRecre
 			debugReadyElapsed = time.Since(reuseStartedAt)
 			return reuseResult, nil
 		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 	}
 
 	s.browseSessions.CloseAll()
@@ -1245,13 +1248,26 @@ func (s *XiaohongshuService) tryReuseSession(ctx context.Context) *xiaohongshu.C
 				LastError: "session 正在执行操作",
 			},
 		}
-	case xiaohongshu.SessionExpired, xiaohongshu.SessionNotReady:
+	case xiaohongshu.SessionExpired, xiaohongshu.SessionNotReady, xiaohongshu.SessionUnhealthy:
+		if ctx.Err() != nil {
+			return &xiaohongshu.CreateBrowseSessionResult{
+				Outcome:           "blocked",
+				RecommendedAction: "retry",
+				Status: xiaohongshu.BrowseSessionStatusInfo{
+					Status:    check.Status,
+					LastError: check.LastError,
+				},
+			}
+		}
+		if session.TryCloseIdle() {
+			return nil
+		}
 		return &xiaohongshu.CreateBrowseSessionResult{
 			Outcome:           "blocked",
-			RecommendedAction: "retry",
+			RecommendedAction: "wait",
 			Status: xiaohongshu.BrowseSessionStatusInfo{
-				Status:    check.Status,
-				LastError: check.LastError,
+				Status:    xiaohongshu.SessionBusy,
+				LastError: "session 正在执行操作",
 			},
 		}
 	default:

@@ -24,7 +24,7 @@ const (
 	maxBrowseSessionTimelineEntries = 10
 	maxBrowseSessionResults         = 500
 	browseSessionBackTimeout        = 15 * time.Second
-	healthCheckTimeout              = 30 * time.Second
+	healthCheckTimeout              = 5 * time.Second
 )
 
 type BrowseSessionStatus string
@@ -85,6 +85,11 @@ type ReuseCheck struct {
 	HealthCheckedAt time.Time
 	Ready           bool
 	Risk            string
+}
+
+type reusePageState struct {
+	URL        string `json:"url"`
+	ReadyState string `json:"readyState"`
 }
 
 type BrowseSessionPageState struct {
@@ -1800,39 +1805,60 @@ func (s *BrowseSession) CheckReusable(ctx context.Context) ReuseCheck {
 		return ReuseCheck{Status: SessionNotReady, LastError: "session 页面不存在", HealthCheckedAt: checkedAt, Ready: false}
 	}
 
-	evalCtx, cancel := context.WithTimeout(ctx, healthCheckTimeout)
-	defer cancel()
+	probeScript := `() => JSON.stringify({url: location.href, readyState: document.readyState})`
 
-	result, err := s.evalJS(evalCtx, page, `() => JSON.stringify({url: location.href, readyState: document.readyState})`)
-	if err != nil || result == nil {
-		if errors.Is(ctx.Err(), context.Canceled) || errors.Is(evalCtx.Err(), context.DeadlineExceeded) {
+	var errProbeTimeout = fmt.Errorf("健康检查超时")
+	var errProbeCDP = fmt.Errorf("CDP 连接异常")
+	var errProbeJS = fmt.Errorf("页面 JS 不可用")
+
+	probe := func(budget time.Duration) (*reusePageState, error) {
+		evalCtx, cancel := context.WithTimeout(ctx, budget)
+		defer cancel()
+		result, err := s.evalJS(evalCtx, page, probeScript)
+		if err != nil || result == nil {
+			if errors.Is(ctx.Err(), context.Canceled) {
+				return nil, ctx.Err()
+			}
+			if errors.Is(evalCtx.Err(), context.DeadlineExceeded) {
+				return nil, errProbeTimeout
+			}
+			return nil, errProbeCDP
+		}
+		var pageState reusePageState
+		if err := json.Unmarshal([]byte(result.Value.Str()), &pageState); err != nil || pageState.URL == "" || pageState.ReadyState == "" {
+			return nil, errProbeJS
+		}
+		return &pageState, nil
+	}
+
+	const firstProbeBudget = 2 * time.Second
+
+	pageState, err := probe(firstProbeBudget)
+	if err != nil {
+		if errors.Is(err, context.Canceled) {
 			return ReuseCheck{
 				Status:          SessionNotReady,
-				LastError:       "健康检查超时或被取消",
-				HealthCheckedAt: checkedAt,
+				LastError:       "请求已取消",
+				HealthCheckedAt: time.Now(),
 				Ready:           false,
 			}
 		}
-		return ReuseCheck{
-			Status:          SessionUnhealthy,
-			LastError:       "CDP 连接异常",
-			HealthCheckedAt: checkedAt,
-			Ready:           false,
-			Risk:            "cdp_disconnected",
+		if errors.Is(err, errProbeTimeout) {
+			time.Sleep(150 * time.Millisecond)
+			pageState, err = probe(healthCheckTimeout - firstProbeBudget - 150*time.Millisecond)
 		}
-	}
-
-	var pageState struct {
-		URL        string `json:"url"`
-		ReadyState string `json:"readyState"`
-	}
-	if err := json.Unmarshal([]byte(result.Value.Str()), &pageState); err != nil || pageState.URL == "" || pageState.ReadyState == "" {
-		return ReuseCheck{
-			Status:          SessionUnhealthy,
-			LastError:       "页面 JS 不可用",
-			HealthCheckedAt: checkedAt,
-			Ready:           false,
-			Risk:            "js_unavailable",
+		if err != nil {
+			risk := "cdp_disconnected"
+			if errors.Is(err, errProbeJS) {
+				risk = "js_unavailable"
+			}
+			return ReuseCheck{
+				Status:          SessionUnhealthy,
+				LastError:       err.Error(),
+				HealthCheckedAt: time.Now(),
+				Ready:           false,
+				Risk:            risk,
+			}
 		}
 	}
 
@@ -1840,7 +1866,7 @@ func (s *BrowseSession) CheckReusable(ctx context.Context) ReuseCheck {
 		return ReuseCheck{
 			Status:          SessionNotReady,
 			LastError:       "页面URL异常",
-			HealthCheckedAt: checkedAt,
+			HealthCheckedAt: time.Now(),
 			Ready:           false,
 		}
 	}
@@ -1851,20 +1877,35 @@ func (s *BrowseSession) CheckReusable(ctx context.Context) ReuseCheck {
 		return ReuseCheck{
 			Status:          SessionNotReady,
 			LastError:       fmt.Sprintf("页面未就绪: %s", readyState),
-			HealthCheckedAt: checkedAt,
+			HealthCheckedAt: time.Now(),
 			Ready:           false,
 		}
 	}
 
 	return ReuseCheck{
 		Status:          SessionReady,
-		HealthCheckedAt: checkedAt,
+		HealthCheckedAt: time.Now(),
 		Ready:           true,
 	}
 }
 
 func (s *BrowseSession) Close() {
 	s.close()
+}
+
+// TryCloseIdle 非阻塞尝试关闭空闲 session。
+// 获取 opToken 成功说明当前无操作，原子关闭并释放页面，返回 true；
+// 失败说明有操作正在执行，返回 false（调用方应返回 blocked 而非自动重建）。
+func (s *BrowseSession) TryCloseIdle() bool {
+	select {
+	case <-s.opToken:
+	default:
+		return false
+	}
+	defer func() { s.opToken <- struct{}{} }()
+
+	s.close()
+	return true
 }
 
 func (s *BrowseSession) ClassifyRisk() (RiskSignal, error) {
