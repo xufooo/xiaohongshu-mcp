@@ -573,3 +573,27 @@ func TestMismatchActionsExcludeDetailTools(t *testing.T) {
 		t.Fatalf("mismatch semantic actions 应包含 open_note: %+v", actions)
 	}
 }
+
+func TestIsExploreHomeURL(t *testing.T) {
+	cases := []struct {
+		url  string
+		want bool
+	}{
+		{"https://www.xiaohongshu.com/explore", true},
+		{"https://www.xiaohongshu.com/explore/", true},
+		{"https://www.xiaohongshu.com:443/explore", true},
+		{"https://www.xiaohongshu.com/explore?xsec_token=abc", true},
+		{"https://www.xiaohongshu.com/explore/#foo", true},
+		{"https://www.xiaohongshu.com/explore/note-id", false},
+		{"https://www.xiaohongshu.com/search_result?keyword=x", false},
+		{"https://www.xiaohongshu.com/user/profile/123", false},
+		{"https://www.xiaohongshu.com/notification", false},
+		{"about:blank", false},
+		{"https://evil.com/explore", false},
+	}
+	for _, tc := range cases {
+		if got := isExploreHomeURL(tc.url); got != tc.want {
+			t.Fatalf("isExploreHomeURL(%q) = %v, 期望 %v", tc.url, got, tc.want)
+		}
+	}
+}

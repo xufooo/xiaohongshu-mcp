@@ -32,6 +32,51 @@ type XHSReadyOptions struct {
 	SelectorWatchdog *SelectorWatchdog // 非必填，有则 probe 相关选择器
 }
 
+const (
+	homeSearchStableWindow = 3 * time.Second
+	defaultReadyPollMin    = 300 * time.Millisecond
+	defaultReadyPollMax    = 500 * time.Millisecond
+	homeSearchPollMin      = 800 * time.Millisecond
+	homeSearchPollMax      = 1200 * time.Millisecond
+)
+
+// xhsReadyStability 记录 HomeSearch 连续就绪时长，满足稳定窗后才算就绪。
+type xhsReadyStability struct {
+	readySince time.Time
+}
+
+func (s *xhsReadyStability) Observe(now time.Time, ready bool) bool {
+	if !ready {
+		s.readySince = time.Time{}
+		return false
+	}
+	if s.readySince.IsZero() {
+		s.readySince = now
+		return false
+	}
+	if now.Sub(s.readySince) < homeSearchStableWindow {
+		return false
+	}
+	return true
+}
+
+// xhsReadyPollRange 按 kind 返回轮询间隔范围；HomeSearch 低频以减轻冷启动 CPU 压力。
+func xhsReadyPollRange(kind XHSReadyKind) (time.Duration, time.Duration) {
+	if kind == XHSReadyHomeSearch {
+		return homeSearchPollMin, homeSearchPollMax
+	}
+	return defaultReadyPollMin, defaultReadyPollMax
+}
+
+// xhsReadyDecision 按 kind 决定本轮 probe 结果是否算就绪。
+// HomeSearch 走连续稳定窗；其他 kind 单次就绪即成功。
+func xhsReadyDecision(kind XHSReadyKind, st *xhsReadyStability, now time.Time, ready bool) bool {
+	if kind == XHSReadyHomeSearch {
+		return st.Observe(now, ready)
+	}
+	return ready
+}
+
 type xhsReadyProbe struct {
 	URL                string `json:"url"`
 	Title              string `json:"title"`
@@ -60,8 +105,9 @@ type xhsReadyProbe struct {
 }
 
 // WaitForXHSReady 等待页面就绪，按 kind 判断条件。
-// 每 300-500ms 轮询一次按 kind 缩小的 scoped probe；超时后额外执行一次 full probe，
-// 用于 URL fallback 与最终诊断。同时检测风险信号，发现风险立即返回。
+// HomeSearch 需连续稳定 homeSearchStableWindow 才返回（低频 800-1200ms 轮询）；
+// 其他 kind 首次命中即成功（300-500ms 轮询）。超时后使用最后一次 scoped probe
+// 完成 URL fallback 与诊断（对齐 pre，不换 full probe）。同时检测风险信号，发现风险立即返回。
 func WaitForXHSReady(page *hrod.Page, opts XHSReadyOptions) error {
 	if opts.Kind == "" {
 		opts.Kind = XHSReadyHome
@@ -73,6 +119,8 @@ func WaitForXHSReady(page *hrod.Page, opts XHSReadyOptions) error {
 	deadline := time.Now().Add(opts.Timeout)
 	var last xhsReadyProbe
 	var lastErr error
+	var stability xhsReadyStability
+	pollMin, pollMax := xhsReadyPollRange(opts.Kind)
 
 	for {
 		if err := page.Err(); err != nil {
@@ -82,13 +130,15 @@ func WaitForXHSReady(page *hrod.Page, opts XHSReadyOptions) error {
 		probe, err := probeXHSReady(page, opts.Kind, opts.FeedID)
 		if err != nil {
 			lastErr = err
+			stability.Observe(time.Now(), false)
 		} else {
 			lastErr = nil
 			last = probe
 			if probe.RiskText != "" {
 				return fmt.Errorf("页面出现风险信号: %s; %s", probe.RiskText, formatXHSReadyProbe(probe))
 			}
-			if isXHSReady(probe, opts.Kind, opts.FeedID, false) {
+			ready := isXHSReady(probe, opts.Kind, opts.FeedID, false)
+			if xhsReadyDecision(opts.Kind, &stability, time.Now(), ready) {
 				probeWatchdogSelectors(page, opts)
 				return nil
 			}
@@ -96,13 +146,14 @@ func WaitForXHSReady(page *hrod.Page, opts XHSReadyOptions) error {
 
 		if !time.Now().Before(deadline) {
 			// 超时直接用最后一次 scoped probe 结果完成 URL fallback 与诊断（对齐 pre，不换 full probe）。
-			if lastErr == nil && isXHSReady(last, opts.Kind, opts.FeedID, true) {
+			// HomeSearch 不允许 fallback 绕过稳定窗：未连续稳定满窗即使最后一次为 true 也返回 timeout。
+			if opts.Kind != XHSReadyHomeSearch && lastErr == nil && isXHSReady(last, opts.Kind, opts.FeedID, true) {
 				probeWatchdogSelectors(page, opts)
 				return nil
 			}
 			break
 		}
-		if err := page.SleepRandom(300*time.Millisecond, 500*time.Millisecond); err != nil {
+		if err := page.SleepRandom(pollMin, pollMax); err != nil {
 			return err
 		}
 	}
