@@ -3,6 +3,7 @@ package browser
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/xpzouying/headless_browser"
 )
@@ -72,6 +73,29 @@ func TestMaskProxyCredentials(t *testing.T) {
 				if strings.Contains(got, secret) {
 					t.Fatalf("凭据泄露: %q contains %q", got, secret)
 				}
+			}
+		})
+	}
+}
+
+func TestIdleCloseDelay(t *testing.T) {
+	cases := []struct {
+		name       string
+		owner      string
+		configured time.Duration
+		want       time.Duration
+	}{
+		{"普通 owner 保留配置", "browser_operation", 5 * time.Minute, 5 * time.Minute},
+		{"session owner 上限 1 分钟", "session:test-id", 5 * time.Minute, sessionIdleGrace},
+		{"session owner 尊重更短配置", "session:test-id", 30 * time.Second, 30 * time.Second},
+		{"session owner 保持零禁用", "session:test-id", 0, 0},
+		{"session owner 保持负值禁用", "session:test-id", -1 * time.Second, -1 * time.Second},
+		{"无冒号前缀不算 session owner", "session", 5 * time.Minute, 5 * time.Minute},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := idleCloseDelay(tc.owner, tc.configured); got != tc.want {
+				t.Fatalf("idleCloseDelay(%q, %v) = %v, 期望 %v", tc.owner, tc.configured, got, tc.want)
 			}
 		})
 	}
