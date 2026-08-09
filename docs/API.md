@@ -95,7 +95,6 @@ start_page
 | POST | `/api/v1/publish` | 发布图文内容 |
 | POST | `/api/v1/publish_video` | 发布视频内容 |
 | GET | `/api/v1/feeds/list` | 获取 Feeds 列表 |
-| GET/POST | `/api/v1/feeds/search` | 搜索 Feeds |
 | POST | `/api/v1/user/profile` | 获取用户主页信息 |
 | GET | `/api/v1/user/me` | 获取当前登录用户信息 |
 | POST | `/api/v1/feeds/comment` | 发表评论 |
@@ -382,93 +381,6 @@ GET /api/v1/feeds/list
   - `sharedCount`: 分享数
 ```
 
-#### 4.2 搜索 Feeds
-
-根据关键词搜索 Feeds，支持 GET 和 POST 两种请求方式。
-
-**请求方式一：GET**
-```
-GET /api/v1/feeds/search?keyword=搜索关键词
-```
-
-**查询参数:**
-- `keyword` (string, required): 搜索关键词
-
-**请求方式二：POST（支持高级筛选）**
-```
-POST /api/v1/feeds/search
-Content-Type: application/json
-```
-
-**请求体**
-```json
-{
-  "keyword": "搜索关键词",
-  "filters": {
-    "sort_by": "综合",
-    "note_type": "不限",
-    "publish_time": "不限",
-    "search_scope": "不限",
-    "location": "不限"
-  }
-}
-```
-
-**筛选参数说明:**
-- `sort_by` (string, optional): 排序依据，可选值：`综合`(默认) | `最新` | `最多点赞` | `最多评论` | `最多收藏`
-- `note_type` (string, optional): 笔记类型，可选值：`不限`(默认) | `视频` | `图文`
-- `publish_time` (string, optional): 发布时间，可选值：`不限`(默认) | `一天内` | `一周内` | `半年内`
-- `search_scope` (string, optional): 搜索范围，可选值：`不限`(默认) | `已看过` | `未看过` | `已关注`
-- `location` (string, optional): 位置距离，可选值：`不限`(默认) | `同城` | `附近`
-
-**响应**
-```json
-{
-  "success": true,
-  "data": {
-    "feeds": [
-      {
-        "xsecToken": "security_token_value",
-        "id": "feed_id_1",
-        "modelType": "note",
-        "noteCard": {
-          "type": "normal",
-          "displayTitle": "相关笔记标题",
-          "user": {
-            "userId": "user_id_1",
-            "nickname": "用户昵称",
-            "avatar": "https://example.com/avatar.jpg"
-          },
-          "interactInfo": {
-            "liked": false,
-            "likedCount": "80",
-            "collected": false,
-            "collectedCount": "40",
-            "commentCount": "35",
-            "sharedCount": "15"
-          },
-          "cover": {
-            "width": 1080,
-            "height": 1440,
-            "url": "https://example.com/cover.jpg",
-            "urlDefault": "https://example.com/cover_default.jpg"
-          },
-          "video": null
-        },
-        "index": 0
-      }
-    ],
-    "count": 5
-  },
-  "message": "搜索Feeds成功"
-}
-```
-
-**响应字段说明:**
-- 响应结构与"获取 Feeds 列表"接口相同
-- `video`: 视频笔记时有此字段，图文笔记为 null
-```
-
 ### 5. 用户信息
 
 #### 5.1 获取用户主页信息
@@ -725,7 +637,6 @@ Content-Type: application/json
 | `PUBLISH_FAILED` | 500 | 发布图文内容失败 |
 | `PUBLISH_VIDEO_FAILED` | 500 | 发布视频内容失败 |
 | `LIST_FEEDS_FAILED` | 500 | 获取 Feeds 列表失败 |
-| `SEARCH_FEEDS_FAILED` | 500 | 搜索 Feeds 失败 |
 | `GET_USER_PROFILE_FAILED` | 500 | 获取用户主页信息失败 |
 | `GET_MY_PROFILE_FAILED` | 500 | 获取当前用户信息失败 |
 | `POST_COMMENT_FAILED` | 500 | 发表评论失败 |
