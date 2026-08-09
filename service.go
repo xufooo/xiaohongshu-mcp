@@ -1152,7 +1152,20 @@ func (s *XiaohongshuService) ReplyCommentToFeed(ctx context.Context, feedID, xse
 	}, nil
 }
 
-func (s *XiaohongshuService) CreateBrowseSession(ctx context.Context, forceRecreate bool) (*xiaohongshu.CreateBrowseSessionResult, error) {
+func (s *XiaohongshuService) CreateBrowseSession(ctx context.Context, forceRecreate bool) (result *xiaohongshu.CreateBrowseSessionResult, err error) {
+	debugTotalStartedAt := time.Now()
+	var debugStartupElapsed time.Duration
+	var debugReadyElapsed time.Duration
+	defer func() {
+		if result == nil {
+			return
+		}
+		result.DebugTotalMS = time.Since(debugTotalStartedAt).Milliseconds()
+		result.DebugStartupMS = debugStartupElapsed.Milliseconds()
+		result.DebugReadyMS = debugReadyElapsed.Milliseconds()
+		result.DebugReused = result.Outcome == "reused"
+	}()
+
 	s.createSessionMu.Lock()
 	if err := ctx.Err(); err != nil {
 		s.createSessionMu.Unlock()
@@ -1161,26 +1174,32 @@ func (s *XiaohongshuService) CreateBrowseSession(ctx context.Context, forceRecre
 	defer s.createSessionMu.Unlock()
 
 	if !forceRecreate {
-		if result := s.tryReuseSession(ctx); result != nil {
-			return result, nil
+		reuseStartedAt := time.Now()
+		if reuseResult := s.tryReuseSession(ctx); reuseResult != nil {
+			debugReadyElapsed = time.Since(reuseStartedAt)
+			return reuseResult, nil
 		}
 	}
 
 	s.browseSessions.CloseAll()
 
+	startupStartedAt := time.Now()
 	page, err := s.acquirePageFor(ctx, "session")
+	debugStartupElapsed = time.Since(startupStartedAt)
 	if err != nil {
 		return nil, err
 	}
 
+	readyStartedAt := time.Now()
 	if err := page.Navigate("https://www.xiaohongshu.com/explore"); err != nil {
 		s.browserManager.Release(page)
 		return nil, fmt.Errorf("导航探索页失败: %w", err)
 	}
-	if err := xiaohongshu.WaitForXHSReady(page, xiaohongshu.XHSReadyOptions{Kind: xiaohongshu.XHSReadyHomeSearch}); err != nil {
+	if err := xiaohongshu.WaitForXHSReady(page, xiaohongshu.XHSReadyOptions{Kind: xiaohongshu.XHSReadyHomeSearch, Timeout: 120 * time.Second}); err != nil {
 		s.browserManager.Release(page)
 		return nil, fmt.Errorf("等待探索页就绪失败: %w", err)
 	}
+	debugReadyElapsed = time.Since(readyStartedAt)
 
 	session := s.browseSessions.Create(page, s.actionState, func(page *hrod.Page) {
 		s.browserManager.Release(page)

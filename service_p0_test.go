@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -107,5 +109,48 @@ func TestBuildBrowseSessionReuseResultAcceptsExtendedTTL(t *testing.T) {
 	}
 	if !result.Status.HealthCheckedAt.Equal(now) {
 		t.Fatalf("HealthCheckedAt = %v, 期望 %v", result.Status.HealthCheckedAt, now)
+	}
+}
+
+func TestCreateBrowseSessionResultDebugFieldsJSON(t *testing.T) {
+	result := &xiaohongshu.CreateBrowseSessionResult{
+		Outcome:           "created",
+		RecommendedAction: "continue",
+		DebugStartupMS:    68432,
+		DebugReadyMS:      27118,
+		DebugTotalMS:      95674,
+		DebugReused:       false,
+	}
+	data, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("marshal 失败: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("unmarshal 失败: %v", err)
+	}
+	for _, key := range []string{"debug_startup_ms", "debug_ready_ms", "debug_total_ms", "debug_reused"} {
+		if _, ok := m[key]; !ok {
+			t.Fatalf("JSON 缺少探针字段 %s: %s", key, string(data))
+		}
+	}
+	if v, ok := m["debug_startup_ms"].(float64); !ok || int64(v) != 68432 {
+		t.Fatalf("debug_startup_ms = %v, 期望 68432", m["debug_startup_ms"])
+	}
+	if v, ok := m["debug_reused"].(bool); !ok || v {
+		t.Fatalf("debug_reused = %v, 期望 false", m["debug_reused"])
+	}
+}
+
+func TestCreateBrowseSessionResultDebugZeroValuesAreVisible(t *testing.T) {
+	result := &xiaohongshu.CreateBrowseSessionResult{Outcome: "reused"}
+	data, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("marshal 失败: %v", err)
+	}
+	for _, key := range []string{"debug_startup_ms", "debug_ready_ms", "debug_total_ms", "debug_reused"} {
+		if !strings.Contains(string(data), key) {
+			t.Fatalf("零值探针字段 %s 必须可见（不得 omitempty）: %s", key, string(data))
+		}
 	}
 }
