@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
-	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -1857,38 +1856,11 @@ func (s *BrowseSession) CheckReusable(ctx context.Context) ReuseCheck {
 		}
 	}
 
-	if isExploreHomeURL(pageState.URL) {
-		waitHomeCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
-		defer cancel()
-		if err := WaitForXHSReady(page.Context(waitHomeCtx), XHSReadyOptions{Kind: XHSReadyHomeSearch, Timeout: 120 * time.Second}); err != nil {
-			return ReuseCheck{
-				Status:    SessionNotReady,
-				LastError: "探索页业务未就绪: " + err.Error(),
-				Ready:     false,
-			}
-		}
-		checkedAt = time.Now()
-	}
-
 	return ReuseCheck{
 		Status:          SessionReady,
 		HealthCheckedAt: checkedAt,
 		Ready:           true,
 	}
-}
-
-// isExploreHomeURL 判定 URL 是否精确指向 xiaohongshu.com 的 /explore 首页。
-// /explore/<note-id>、search、profile 等页面均不匹配。
-func isExploreHomeURL(rawURL string) bool {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return false
-	}
-	host := strings.ToLower(u.Hostname())
-	if host != "xiaohongshu.com" && !strings.HasSuffix(host, ".xiaohongshu.com") {
-		return false
-	}
-	return strings.TrimSuffix(u.Path, "/") == "/explore"
 }
 
 func (s *BrowseSession) Close() {
