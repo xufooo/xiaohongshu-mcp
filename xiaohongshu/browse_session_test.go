@@ -269,45 +269,45 @@ func TestFinishOperationKeepsDeadlineNonFatal(t *testing.T) {
 	}
 }
 
-func TestOpenNoteTwoStageState(t *testing.T) {
+func TestOpenNoteAtomicCommit(t *testing.T) {
 	session := &BrowseSession{
 		seenNotes:         map[string]bool{"old": true},
 		initialCommentIDs: []string{"old-comment"},
 		notification:      browseNotificationState{active: true},
 	}
 	feed := Feed{ID: "feed-1", XsecToken: "token-1"}
-	session.commitOpenNoteStage(feed, "https://example.test/search", "ref-1")
-	info := session.Info()
-	if !info.Opened || info.Read || info.SeenNotes[feed.ID] {
-		t.Fatalf("第一阶段状态错误: %+v", info)
-	}
-	if len(session.GetInitialCommentIDs()) != 0 || session.notification.active {
-		t.Fatal("第一阶段应清空评论 cursor 并重置通知 surface")
-	}
-	if len(session.timeline) != 1 || session.timeline[0].Action != "open_note" {
-		t.Fatalf("第一阶段 timeline 错误: %+v", session.timeline)
-	}
-	firstStageTools := strings.Join(session.availableActionsLocked(1), ",")
-	for _, tool := range []string{"get_note_detail", "like_feed", "favorite_feed", "comment_feed", "reply_comment_in_feed"} {
-		if strings.Contains(firstStageTools, tool) {
-			t.Fatalf("第一阶段不得暴露依赖阅读完成的工具 %s: %s", tool, firstStageTools)
-		}
-	}
-	info = session.commitReadNoteStage(feed.ID, []string{"c1", "c2"}, "ref-1")
+	info := session.commitOpenedNote(feed, "https://example.test/search", "ref-1", []string{"c1", "c2"})
 	if !info.Opened || !info.Read || !info.SeenNotes[feed.ID] {
-		t.Fatalf("第二阶段状态错误: %+v", info)
+		t.Fatalf("原子提交状态错误: %+v", info)
 	}
 	if got := session.GetInitialCommentIDs(); len(got) != 2 || got[0] != "c1" {
-		t.Fatalf("第二阶段评论 cursor 错误: %v", got)
+		t.Fatalf("原子提交评论 cursor 错误: %v", got)
 	}
-	if len(session.timeline) != 2 || session.timeline[1].Action != "read_note" {
-		t.Fatalf("第二阶段 timeline 错误: %+v", session.timeline)
+	if session.notification.active {
+		t.Fatal("原子提交应重置通知 surface")
 	}
-	secondStageTools := strings.Join(session.availableActionsLocked(1), ",")
+	if len(session.timeline) != 2 || session.timeline[0].Action != "open_note" || session.timeline[1].Action != "read_note" {
+		t.Fatalf("原子提交 timeline 错误: %+v", session.timeline)
+	}
+	stageTools := strings.Join(session.availableActionsLocked(1), ",")
 	for _, tool := range []string{"get_note_detail", "like_feed", "favorite_feed", "comment_feed", "reply_comment_in_feed"} {
-		if !strings.Contains(secondStageTools, tool) {
-			t.Fatalf("第二阶段应暴露工具 %s: %s", tool, secondStageTools)
+		if !strings.Contains(stageTools, tool) {
+			t.Fatalf("原子提交应暴露工具 %s: %s", tool, stageTools)
 		}
+	}
+}
+
+func TestLivePageKindPrefersVisibleDetail(t *testing.T) {
+	probe := xhsReadyProbe{
+		URL:               "https://www.xiaohongshu.com/search_result?keyword=%E4%B8%89%E4%BA%9A",
+		VisibleDetailCount: 1,
+	}
+	if kind := inferLivePageKind(probe, true); kind != XHSReadyDetail {
+		t.Fatalf("搜索 URL + 详情弹层可见时应判 detail: %s", kind)
+	}
+	probe.VisibleDetailCount = 0
+	if kind := inferLivePageKind(probe, false); kind != XHSReadySearch {
+		t.Fatalf("详情弹层消失后应判 search: %s", kind)
 	}
 }
 
@@ -407,5 +407,91 @@ func TestPollOpenedNoteSnapshotRetriesEvalTimeout(t *testing.T) {
 	})
 	if err != nil || got != want || calls != 2 {
 		t.Fatalf("Eval timeout 后应在预算内重试成功: calls=%d err=%v", calls, err)
+	}
+}
+
+func TestHistoryTargetReadyDetailOverlay(t *testing.T) {
+	fromProbe := xhsReadyProbe{
+		URL:               "https://www.xiaohongshu.com/search_result?keyword=%E4%B8%89%E4%BA%9A",
+		VisibleDetailCount: 1,
+	}
+	fromURL := "https://www.xiaohongshu.com/search_result?keyword=%E4%B8%89%E4%BA%9A"
+	targetProbe := xhsReadyProbe{
+		URL:               fromURL,
+		VisibleDetailCount: 0,
+		SearchResultCount:  12,
+		SearchFeedCount:    12,
+	}
+	if !historyTargetReady(targetProbe, fromURL, XHSReadySearch, true) {
+		t.Fatalf("详情弹层返回：URL 不变且 VisibleDetailCount=0 时应成功")
+	}
+	if historyTargetReady(fromProbe, fromURL, XHSReadySearch, true) {
+		t.Fatalf("详情弹层返回：VisibleDetailCount 仍为正数时不得判定成功")
+	}
+}
+
+func TestHistoryTargetReadyNonDetailRequiresURLChange(t *testing.T) {
+	fromURL := "https://www.xiaohongshu.com/search_result?keyword=%E4%B8%89%E4%BA%9A"
+	probe := xhsReadyProbe{
+		URL:          fromURL,
+		HomeFeedCount: 10,
+	}
+	if historyTargetReady(probe, fromURL, XHSReadyHome, false) {
+		t.Fatalf("非详情后退：URL 未改变时不得判定成功")
+	}
+	probe.URL = "https://www.xiaohongshu.com/explore"
+	if !historyTargetReady(probe, fromURL, XHSReadyHome, false) {
+		t.Fatalf("非详情后退：URL 改变且目标页 ready 时应成功")
+	}
+}
+
+func TestMismatchActionsExcludeDetailTools(t *testing.T) {
+	session := &BrowseSession{
+		results: map[string]Feed{
+			"0": {ID: "feed-0"},
+			"1": {ID: "feed-1"},
+		},
+		nextResultIndex: 2,
+	}
+	results := session.semanticResultsLocked()
+	available, actions := session.mismatchActionsLocked(results)
+	for _, tool := range []string{"get_note_detail", "like_feed", "favorite_feed", "comment_feed", "reply_comment_in_feed", "go_back"} {
+		for _, a := range available {
+			if a == tool {
+				t.Fatalf("mismatch available actions 不得暴露详情/后退工具: %s", tool)
+			}
+		}
+	}
+	for _, tool := range []string{"open_note", "search_feeds", "get_page_state", "close_page"} {
+		found := false
+		for _, a := range available {
+			if a == tool {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("mismatch available actions 应包含 %s: %v", tool, available)
+		}
+	}
+	if len(actions) != 5 {
+		t.Fatalf("mismatch semantic actions 数量错误: %d -> %+v", len(actions), actions)
+	}
+	for _, action := range actions {
+		switch action.Tool {
+		case "get_note_detail", "like_feed", "favorite_feed", "comment_feed", "reply_comment_in_feed", "go_back":
+			t.Fatalf("mismatch semantic actions 不得暴露详情/后退工具: %s", action.Tool)
+		}
+		if action.Tool == "open_note" && action.ResultRef == "" {
+			t.Fatalf("mismatch open_note 必须带 result_ref: %+v", action)
+		}
+	}
+	hasOpenNote := false
+	for _, action := range actions {
+		if action.Tool == "open_note" {
+			hasOpenNote = true
+		}
+	}
+	if !hasOpenNote {
+		t.Fatalf("mismatch semantic actions 应包含 open_note: %+v", actions)
 	}
 }

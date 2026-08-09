@@ -138,12 +138,6 @@ func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...Fi
 	if !isCurrentSearchPage(pageBeforeSearch, keyword) || len(filters) > 0 {
 		previousAIState = &aiStateProbe{}
 		probe, err := probeAIResponseState(ctx, pageBeforeSearch, preSearchCounter, "", -1)
-		if IsFatalRendererError(err) {
-			return SearchPageResult{}, err
-		}
-		if ctx.Err() != nil {
-			return SearchPageResult{}, ctx.Err()
-		}
 		if err == nil {
 			previousAIState = &probe
 		}
@@ -159,12 +153,6 @@ func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...Fi
 	postSearchCounter := &evalTimeoutCounter{}
 	aiChat, err := readAIResponseFromState(ctx, page, postSearchCounter, previousAIState)
 	if err != nil {
-		if IsFatalRendererError(err) {
-			return SearchPageResult{}, err
-		}
-		if ctx.Err() != nil {
-			return SearchPageResult{}, ctx.Err()
-		}
 		logrus.WithError(err).Warn("读取搜索页 AI 回复失败")
 		return result, nil
 	}

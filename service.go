@@ -544,11 +544,13 @@ func deepCopyFeedDetailResponse(src *xiaohongshu.FeedDetailResponse) *xiaohongsh
 	return &xiaohongshu.FeedDetailResponse{
 		Note: noteCopy,
 		Comments: xiaohongshu.CommentList{
-			List:       deepCopyCommentList(src.Comments.List),
-			Cursor:     src.Comments.Cursor,
-			HasMore:    src.Comments.HasMore,
-			TotalItems: src.Comments.TotalItems,
-			SeenCount:  src.Comments.SeenCount,
+			List:            deepCopyCommentList(src.Comments.List),
+			Cursor:          src.Comments.Cursor,
+			HasMore:         src.Comments.HasMore,
+			TotalItems:      src.Comments.TotalItems,
+			SeenCount:       src.Comments.SeenCount,
+			Complete:        src.Comments.Complete,
+			IncompleteReason: src.Comments.IncompleteReason,
 		},
 	}
 }
@@ -1320,11 +1322,6 @@ func (s *XiaohongshuService) SessionListFeeds(ctx context.Context, id, cursorID 
 }
 
 func (s *XiaohongshuService) SessionSearch(ctx context.Context, id, keyword, cursorID string, maxItems int, filters ...xiaohongshu.FilterOption) (*FeedsListResponse, error) {
-	// 搜索级 deadline：RPi 上 AI 提取/state 序列化可能慢，120s 内必须返回结果，
-	// 避免裸奔到 MCP 300s 上限（上层直接超时）。
-	searchCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
-	defer cancel()
-
 	session, err := s.browseSessions.Get(id)
 	if err != nil {
 		return nil, err
@@ -1340,9 +1337,9 @@ func (s *XiaohongshuService) SessionSearch(ctx context.Context, id, keyword, cur
 		return nil, err
 	}
 
-	searchResult, nextCursor, hasMore, err := session.SearchBatchWithAI(searchCtx, keyword, filters, cursor, maxItems)
+	searchResult, nextCursor, hasMore, err := session.SearchBatchWithAI(ctx, keyword, filters, cursor, maxItems)
 	if err != nil {
-		s.handleSessionOperationError(searchCtx, id, session, err)
+		s.handleSessionOperationError(ctx, id, session, err)
 		return nil, err
 	}
 	feeds := searchResult.Feeds

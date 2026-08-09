@@ -155,11 +155,13 @@ type DetailImageInfo struct {
 
 // CommentList 表示评论列表
 type CommentList struct {
-	List       []Comment `json:"list"`
-	Cursor     string    `json:"cursor"`
-	HasMore    bool      `json:"hasMore"`
-	TotalItems int       `json:"totalItems,omitempty"`
-	SeenCount  int       `json:"seenCount"`
+	List             []Comment `json:"list"`
+	Cursor           string    `json:"cursor"`
+	HasMore          bool      `json:"hasMore"`
+	TotalItems       int       `json:"totalItems,omitempty"`
+	SeenCount        int       `json:"seenCount"`
+	Complete         bool      `json:"complete"`
+	IncompleteReason string    `json:"incomplete_reason,omitempty"`
 }
 
 // Comment 表示单条评论

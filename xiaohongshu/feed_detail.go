@@ -405,7 +405,7 @@ func loadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 		return nil, nil, false, ctx.Err()
 	}
 
-	m, moreVis, progress, collectErr := collect(maxItems - len(batch))
+	m, _, progress, collectErr := collect(maxItems - len(batch))
 	if collectErr != nil {
 		return partialOrError(collectErr)
 	}
@@ -423,41 +423,36 @@ func loadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 		if err := clickMoreReplies(ctx, page, config.MaxRepliesThreshold, remaining); err != nil {
 			return partialOrError(fmt.Errorf("全量展开子评论失败: %w", err))
 		}
-		m, moreVis2, progress2, collectErr2 := collect(maxItems - len(batch))
+		m, _, progress2, collectErr2 := collect(maxItems - len(batch))
 		if collectErr2 != nil {
 			return partialOrError(collectErr2)
 		}
 		batch = append(batch, m...)
 		idsGrew = len(batchCursor.ReturnedIDs) > inputBase
-		if moreVis2 {
-			// 展开后仍有更多可见新评论（或 batch 未满），更新可见状态，
-			// 让下方 AtEnd/idsGrew 判定基于展开后的真实状态。
-			moreVis = true
-		}
 		if progress2.AtEnd {
 			progress = progress2
 		}
-	}
 
-	if len(batch) == 0 && !progress.AtEnd {
-		if ctx.Err() != nil {
-			return nil, nil, false, ctx.Err()
+		button, buttonErr := nextShowMoreButton(ctx, page, config.MaxRepliesThreshold)
+		if buttonErr != nil {
+			return partialOrError(fmt.Errorf("评论展开按钮复检失败: %w", buttonErr))
 		}
-		return partialOrError(fmt.Errorf("评论滚动无进展，请重试"))
-	}
-
-	if progress.AtEnd && !moreVis {
-		return batch, batchCursor, false, nil
-	}
-
-	if !idsGrew {
-		if ctx.Err() != nil {
-			return nil, nil, false, ctx.Err()
+		if button != nil {
+			if idsGrew && ctx.Err() == nil {
+				return batch, batchCursor, true, nil
+			}
+			return nil, nil, false, fmt.Errorf("评论滚动无进展，请重试")
 		}
-		return partialOrError(fmt.Errorf("评论滚动无进展，请重试"))
 	}
 
-	return batch, batchCursor, true, nil
+	if !progress.AtEnd {
+		if idsGrew && ctx.Err() == nil {
+			return batch, batchCursor, true, nil
+		}
+		return nil, nil, false, fmt.Errorf("评论滚动无进展，请重试")
+	}
+
+	return batch, batchCursor, false, nil
 }
 
 func commentBatchKey(_ int, comment Comment) string {
@@ -465,6 +460,31 @@ func commentBatchKey(_ int, comment Comment) string {
 		return comment.ID
 	}
 	return ""
+}
+
+func decideCommentCompletion(progress commentProgress, config CommentLoadConfig, totalItems, seenCount int, hasMore bool) (bool, string, bool) {
+	if hasMore {
+		return false, "more_comments_available", false
+	}
+	if progress.NoComments {
+		return true, "", false
+	}
+	if !progress.AtEnd {
+		return false, "parent_comments_not_at_end", false
+	}
+	if !config.ClickMoreReplies || config.MaxRepliesThreshold == -1 {
+		return false, "reply_expansion_disabled", false
+	}
+	if config.MaxRepliesThreshold == 0 {
+		if totalItems > 0 && seenCount < totalItems {
+			return false, "seen_count_below_total_items", true
+		}
+		return true, "", false
+	}
+	if totalItems > seenCount {
+		return false, "reply_limit_excludes_replies", false
+	}
+	return true, "", false
 }
 
 func flattenComments(comments []Comment) []Comment {
