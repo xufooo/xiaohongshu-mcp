@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/go-rod/rod/lib/proto"
+	"github.com/ysmood/gson"
 	xerrors "github.com/xpzouying/xiaohongshu-mcp/errors"
 	hrod "github.com/xpzouying/xiaohongshu-mcp/humanize/rod"
 )
@@ -574,26 +575,32 @@ func TestMismatchActionsExcludeDetailTools(t *testing.T) {
 	}
 }
 
-func TestIsExploreHomeURL(t *testing.T) {
-	cases := []struct {
-		url  string
-		want bool
-	}{
-		{"https://www.xiaohongshu.com/explore", true},
-		{"https://www.xiaohongshu.com/explore/", true},
-		{"https://www.xiaohongshu.com:443/explore", true},
-		{"https://www.xiaohongshu.com/explore?xsec_token=abc", true},
-		{"https://www.xiaohongshu.com/explore/#foo", true},
-		{"https://www.xiaohongshu.com/explore/note-id", false},
-		{"https://www.xiaohongshu.com/search_result?keyword=x", false},
-		{"https://www.xiaohongshu.com/user/profile/123", false},
-		{"https://www.xiaohongshu.com/notification", false},
-		{"about:blank", false},
-		{"https://evil.com/explore", false},
+func TestCheckReusableExploreUsesLightweightHealthCheck(t *testing.T) {
+	page := &hrod.Page{}
+	evalCalls := 0
+	session := &BrowseSession{
+		page:      page,
+		opToken:   make(chan struct{}, 1),
+		expiresAt: time.Now().Add(time.Minute),
+		evalJS: func(ctx context.Context, p *hrod.Page, script string) (*proto.RuntimeRemoteObject, error) {
+			evalCalls++
+			return &proto.RuntimeRemoteObject{
+				Type:  proto.RuntimeRemoteObjectTypeString,
+				Value: gson.NewFrom(`"{\"url\":\"https://www.xiaohongshu.com/explore\",\"readyState\":\"complete\"}"`),
+			}, nil
+		},
 	}
-	for _, tc := range cases {
-		if got := isExploreHomeURL(tc.url); got != tc.want {
-			t.Fatalf("isExploreHomeURL(%q) = %v, 期望 %v", tc.url, got, tc.want)
-		}
+	session.opToken <- struct{}{}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	check := session.CheckReusable(ctx)
+	if check.Status != SessionReady || !check.Ready {
+		t.Fatalf("explore 页健康时应 SessionReady，得到 %+v", check)
+	}
+	if check.LastError != "" {
+		t.Fatalf("explore 页健康时不应有错误: %s", check.LastError)
+	}
+	if evalCalls != 1 {
+		t.Fatalf("explore 复用应只执行一次健康 Eval，实际 %d", evalCalls)
 	}
 }
