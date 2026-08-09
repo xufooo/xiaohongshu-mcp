@@ -468,7 +468,6 @@ Content-Type: application/json
   - `name`: 显示名称
   - `count`: 数量
 - `feeds`: 用户发布的笔记列表（结构同 Feed 列表）
-```
 
 #### 5.2 获取当前登录用户信息
 
@@ -535,7 +534,6 @@ GET /api/v1/user/me
 **响应字段说明:**
 - 响应结构与"获取用户主页信息"接口相同
 - 此接口无需 `user_id` 和 `xsec_token` 参数，自动获取当前登录用户信息
-```
 
 ---
 
