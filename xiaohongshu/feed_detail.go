@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"strconv"
 	"strings"
 	"time"
@@ -808,10 +810,76 @@ func (c *evalTimeoutCounter) add(ctx context.Context, err error, probe func() er
 		c.reset()
 		return err
 	}
-	if isEvalTimeout(probeErr) {
-		return fmt.Errorf("%w: business eval: %v; renderer probe: %v", ErrFatalRendererError, err, probeErr)
+	if errors.Is(probeErr, ErrFatalRendererError) {
+		return probeErr
 	}
-	return fmt.Errorf("%w: business eval: %v; renderer probe failed: %v", ErrFatalRendererError, err, probeErr)
+	c.reset()
+	return err
+}
+
+// confirmRendererAlive 在业务 Eval 连续 timeout 后做 renderer/browser 二次确认：
+// probe 成功或 Health 超时（未确认）返回 nil（慢 renderer，清零容忍）；
+// 只有明确 CDP transport/browser closed 类错误才返回 ErrFatalRendererError。
+func confirmRendererAlive(ctx context.Context, page *hrod.Page) error {
+	probeCtx, probeCancel := context.WithTimeout(ctx, 2*time.Second)
+	defer probeCancel()
+	_, probeErr := page.Context(probeCtx).Eval(`() => 1`)
+	if ctx.Err() != nil {
+		return nil
+	}
+	if err := classifyProbeError(probeErr); err != nil {
+		return err
+	}
+	if probeErr == nil || !isEvalTimeout(probeErr) {
+		return nil
+	}
+	healthCtx, healthCancel := context.WithTimeout(ctx, 2*time.Second)
+	defer healthCancel()
+	if healthErr := page.Browser().Health(healthCtx); healthErr != nil {
+		if ctx.Err() != nil || healthCtx.Err() != nil || isEvalTimeout(healthErr) {
+			return nil
+		}
+		if isConfirmedRendererDead(healthErr) {
+			return fmt.Errorf("%w: browser health: %v", ErrFatalRendererError, healthErr)
+		}
+		return nil
+	}
+	return nil
+}
+
+// classifyProbeError 分类 renderer probe 错误：
+// 明确断连返回 fatal 哨兵；取消/超时/普通错误返回 nil（容忍，走 Health 或清零）。
+func classifyProbeError(probeErr error) error {
+	if probeErr == nil {
+		return nil
+	}
+	if isConfirmedRendererDead(probeErr) {
+		return fmt.Errorf("%w: renderer probe: %v", ErrFatalRendererError, probeErr)
+	}
+	return nil
+}
+
+// isConfirmedRendererDead 判断 Health 错误是否属于明确断连/浏览器关闭，
+// 只有这类错误才升级 fatal；超时、取消、普通 CDP 错误均不算确认。
+func isConfirmedRendererDead(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, net.ErrClosed) {
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"connection closed", "connection reset", "target closed", "target crashed",
+		"session closed", "browser closed", "websocket: close", "websocket closed",
+		"cdp: closed", "broken pipe",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func evalJS(ctx context.Context, counter *evalTimeoutCounter, page *hrod.Page, fn string, args ...interface{}) (*proto.RuntimeRemoteObject, error) {
@@ -820,13 +888,7 @@ func evalJS(ctx context.Context, counter *evalTimeoutCounter, page *hrod.Page, f
 	result, err := page.Context(evalCtx).Eval(fn, args...)
 	if counter != nil {
 		err = counter.add(ctx, err, func() error {
-			probeCtx, probeCancel := context.WithTimeout(ctx, 2*time.Second)
-			defer probeCancel()
-			_, probeErr := page.Context(probeCtx).Eval(`() => 1`)
-			if ctx.Err() != nil {
-				return nil
-			}
-			return probeErr
+			return confirmRendererAlive(ctx, page)
 		})
 	}
 	return result, err
@@ -855,13 +917,7 @@ func evalElementJS(ctx context.Context, counter *evalTimeoutCounter, element *hr
 	if counter != nil {
 		page := element.Page()
 		err = counter.add(ctx, err, func() error {
-			probeCtx, probeCancel := context.WithTimeout(ctx, 2*time.Second)
-			defer probeCancel()
-			_, probeErr := page.Context(probeCtx).Eval(`() => 1`)
-			if ctx.Err() != nil {
-				return nil
-			}
-			return probeErr
+			return confirmRendererAlive(ctx, page)
 		})
 	}
 	return result, err

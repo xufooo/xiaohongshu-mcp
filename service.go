@@ -1183,9 +1183,7 @@ func (s *XiaohongshuService) CreateBrowseSession(ctx context.Context, forceRecre
 	}
 
 	session := s.browseSessions.Create(page, s.actionState, func(page *hrod.Page) {
-		if err := s.browserManager.ReleaseSession(page); err != nil {
-			logrus.Debugf("release browse session failed: %v", err)
-		}
+		s.browserManager.Release(page)
 	})
 	s.browserManager.UpdateOwner("session:" + session.ID())
 	info := session.Info()

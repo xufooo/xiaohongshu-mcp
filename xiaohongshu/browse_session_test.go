@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"strconv"
 	"strings"
 	"sync"
@@ -115,11 +117,14 @@ func TestEvalTimeoutCounterConsecutiveTimeouts(t *testing.T) {
 	if err := counter.add(context.Background(), timeoutErr, probeTimeout); IsFatalRendererError(err) {
 		t.Fatal("连续第二次 timeout 不应 fatal")
 	}
-	if err := counter.add(context.Background(), timeoutErr, probeTimeout); !IsFatalRendererError(err) {
-		t.Fatalf("连续第三次 timeout 且 probe timeout 应 fatal: %v", err)
+	if err := counter.add(context.Background(), timeoutErr, probeTimeout); IsFatalRendererError(err) {
+		t.Fatalf("probe timeout 但无确认失效证据不应 fatal: %v", err)
 	}
 	if probeCalls != 1 {
 		t.Fatalf("第三次 timeout 应执行一次 probe，实际 %d", probeCalls)
+	}
+	if counter.timeouts != 0 {
+		t.Fatalf("probe 无法确认失效后应清零计数: %d", counter.timeouts)
 	}
 	counter = &evalTimeoutCounter{}
 	_ = counter.add(context.Background(), timeoutErr, probeTimeout)
@@ -150,18 +155,36 @@ func TestEvalTimeoutCounterProbeSuccessResetsCounter(t *testing.T) {
 	}
 }
 
-func TestEvalTimeoutCounterProbeErrorIsFatal(t *testing.T) {
+func TestEvalTimeoutCounterProbeFatalSentinelIsFatal(t *testing.T) {
+	counter := &evalTimeoutCounter{}
+	timeoutErr := context.DeadlineExceeded
+	fatalErr := fmt.Errorf("%w: browser health: %v", ErrFatalRendererError, errors.New("cdp disconnected"))
+	_ = counter.add(context.Background(), timeoutErr, func() error { return nil })
+	_ = counter.add(context.Background(), timeoutErr, func() error { return nil })
+	err := counter.add(context.Background(), timeoutErr, func() error { return fatalErr })
+	if !IsFatalRendererError(err) {
+		t.Fatalf("probe 返回 fatal 哨兵应 fatal: %v", err)
+	}
+	if !strings.Contains(err.Error(), "browser health") {
+		t.Fatalf("fatal 错误应包含 probe 详情: %v", err)
+	}
+}
+
+func TestEvalTimeoutCounterProbePlainErrorIsTolerated(t *testing.T) {
 	counter := &evalTimeoutCounter{}
 	timeoutErr := context.DeadlineExceeded
 	probeErr := errors.New("renderer connection closed")
 	_ = counter.add(context.Background(), timeoutErr, func() error { return nil })
 	_ = counter.add(context.Background(), timeoutErr, func() error { return nil })
 	err := counter.add(context.Background(), timeoutErr, func() error { return probeErr })
-	if !IsFatalRendererError(err) {
-		t.Fatalf("probe 返回非 timeout 错误应 fatal: %v", err)
+	if IsFatalRendererError(err) {
+		t.Fatalf("无法确认失效的 probe 错误不应 fatal: %v", err)
 	}
-	if !strings.Contains(err.Error(), probeErr.Error()) {
-		t.Fatalf("fatal 错误应包含 probe 错误详情: %v", err)
+	if !errors.Is(err, timeoutErr) {
+		t.Fatalf("应返回原业务 timeout: %v", err)
+	}
+	if counter.timeouts != 0 {
+		t.Fatalf("probe 普通错误后应清零计数: %d", counter.timeouts)
 	}
 }
 
@@ -179,6 +202,61 @@ func TestEvalTimeoutCounterParentContextCancellationResetsCounter(t *testing.T) 
 	}
 	if counter.timeouts != 0 || probeCalls != 0 {
 		t.Fatalf("父 context 取消后应清零且不 probe: timeouts=%d calls=%d", counter.timeouts, probeCalls)
+	}
+}
+
+func TestIsConfirmedRendererDead(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil", err: nil, want: false},
+		{name: "io.EOF", err: io.EOF, want: true},
+		{name: "io.ErrUnexpectedEOF", err: io.ErrUnexpectedEOF, want: true},
+		{name: "net.ErrClosed", err: net.ErrClosed, want: true},
+		{name: "connection closed", err: errors.New("rpc: connection closed"), want: true},
+		{name: "connection reset", err: errors.New("connection reset by peer"), want: true},
+		{name: "target closed", err: errors.New("target closed"), want: true},
+		{name: "target crashed", err: errors.New("target crashed"), want: true},
+		{name: "session closed", err: errors.New("session closed"), want: true},
+		{name: "browser closed", err: errors.New("browser has been closed"), want: true},
+		{name: "websocket close", err: errors.New("websocket: close 1006"), want: true},
+		{name: "broken pipe", err: errors.New("write: broken pipe"), want: true},
+		{name: "cdp closed", err: errors.New("cdp: closed"), want: true},
+		{name: "deadline", err: context.DeadlineExceeded, want: false},
+		{name: "canceled", err: context.Canceled, want: false},
+		{name: "普通 CDP 错误", err: errors.New("protocol error: some rpc failed"), want: false},
+		{name: "上下文销毁", err: errors.New("Execution context was destroyed"), want: false},
+		{name: "websocket 普通错误", err: errors.New("websocket bad handshake"), want: false},
+	}
+	for _, tc := range cases {
+		if got := isConfirmedRendererDead(tc.err); got != tc.want {
+			t.Errorf("%s: isConfirmedRendererDead(%v) = %v, want %v", tc.name, tc.err, got, tc.want)
+		}
+	}
+}
+
+func TestClassifyProbeError(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		fatal bool
+	}{
+		{name: "nil", err: nil, fatal: false},
+		{name: "io.EOF 直接断连", err: io.EOF, fatal: true},
+		{name: "net.ErrClosed 直接断连", err: net.ErrClosed, fatal: true},
+		{name: "wrapped EOF", err: fmt.Errorf("eval: %w", io.EOF), fatal: true},
+		{name: "connection reset", err: errors.New("connection reset by peer"), fatal: true},
+		{name: "普通 CDP 错误容忍", err: errors.New("protocol error: some rpc failed"), fatal: false},
+		{name: "上下文销毁容忍", err: errors.New("Execution context was destroyed"), fatal: false},
+		{name: "websocket handshake 容忍", err: errors.New("websocket bad handshake"), fatal: false},
+	}
+	for _, tc := range cases {
+		err := classifyProbeError(tc.err)
+		if got := IsFatalRendererError(err); got != tc.fatal {
+			t.Errorf("%s: classifyProbeError(%v) fatal=%v, want %v (err=%v)", tc.name, tc.err, got, tc.fatal, err)
+		}
 	}
 }
 

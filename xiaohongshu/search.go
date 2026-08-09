@@ -3,6 +3,7 @@ package xiaohongshu
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"sort"
@@ -12,7 +13,7 @@ import (
 	rodinput "github.com/go-rod/rod/lib/input"
 	"github.com/go-rod/rod/lib/proto"
 	"github.com/sirupsen/logrus"
-	"github.com/xpzouying/xiaohongshu-mcp/errors"
+	xerrors "github.com/xpzouying/xiaohongshu-mcp/errors"
 	"github.com/xpzouying/xiaohongshu-mcp/humanize"
 	hrod "github.com/xpzouying/xiaohongshu-mcp/humanize/rod"
 )
@@ -23,7 +24,7 @@ const (
 	searchFilterRefreshWaitTimeout = 20 * time.Second
 	aiResponseWaitTimeout          = 3 * time.Second
 	aiResponsePollInterval         = 500 * time.Millisecond
-	aiResponseTextLimit            = 20_000
+	aiResponseTextLimit            = 3_000
 )
 
 // FilterOption 筛选选项结构体
@@ -248,6 +249,11 @@ func (s *SearchAction) searchByUI(ctx context.Context, page *hrod.Page, counter 
 		},
 		pageErr:  page.Err,
 		navigate: func(url string) error {
+			if info, infoErr := page.Rod.Info(); infoErr == nil && info != nil {
+				if isSearchResultPage(info.URL) {
+					return errAlreadyOnSearchPage
+				}
+			}
 			counter.reset()
 			return page.Navigate(url)
 		},
@@ -263,6 +269,8 @@ type searchResultsFallbackHooks struct {
 	navigate func(string) error
 }
 
+var errAlreadyOnSearchPage = errors.New("already on search page")
+
 func waitForSearchResultsWithURLFallback(keyword string, baseline searchResultsBaseline, hooks searchResultsFallbackHooks) error {
 	err := hooks.wait(baseline)
 	if err == nil {
@@ -276,6 +284,9 @@ func waitForSearchResultsWithURLFallback(keyword string, baseline searchResultsB
 	}
 	logrus.Warnf("UI搜索结果未就绪，使用搜索URL兜底: %v", err)
 	if navErr := hooks.navigate(makeSearchURL(keyword)); navErr != nil {
+		if errors.Is(navErr, errAlreadyOnSearchPage) {
+			return fmt.Errorf("等待搜索结果失败: %w; 已在搜索页不重复导航", err)
+		}
 		return fmt.Errorf("等待搜索结果失败: %w; URL兜底导航失败: %w", err, navErr)
 	}
 	if waitErr := hooks.wait(searchResultsBaseline{}); waitErr != nil {
@@ -584,6 +595,9 @@ func waitForSearchInput(ctx context.Context, page *hrod.Page, counter *evalTimeo
 
 		probe, err := probeSearchInput(ctx, page, counter, searchSelector, SelectorSearchInputInFeeds+", "+SelectorSearchInputInSearchResult)
 		if err != nil {
+			if IsFatalRendererError(err) {
+				return nil, err
+			}
 			lastErr = err
 		} else {
 			last = probe
@@ -766,10 +780,10 @@ func (s *SearchAction) collectResults(ctx context.Context, page *hrod.Page, coun
 	domFeeds, stateFeeds := sources.DOM, sources.State
 	domErr, stateErr := sourceErr, sourceErr
 	if sourceErr == nil && len(domFeeds) == 0 {
-		domErr = errors.ErrNoFeeds
+		domErr = xerrors.ErrNoFeeds
 	}
 	if sourceErr == nil && len(stateFeeds) == 0 {
-		stateErr = errors.ErrNoFeeds
+		stateErr = xerrors.ErrNoFeeds
 	}
 
 	if appliedFilters {
@@ -802,10 +816,10 @@ func collectSearchFeeds(ctx context.Context, page *hrod.Page, counter *evalTimeo
 	domFeeds, stateFeeds := sources.DOM, sources.State
 	domErr, stateErr := sourceErr, sourceErr
 	if sourceErr == nil && len(domFeeds) == 0 {
-		domErr = errors.ErrNoFeeds
+		domErr = xerrors.ErrNoFeeds
 	}
 	if sourceErr == nil && len(stateFeeds) == 0 {
-		stateErr = errors.ErrNoFeeds
+		stateErr = xerrors.ErrNoFeeds
 	}
 	if domErr == nil && len(domFeeds) > 0 {
 		return mergeFeedsByID(domFeeds, stateFeeds), nil
@@ -985,83 +999,39 @@ func probeAIResponseState(ctx context.Context, page *hrod.Page, counter *evalTim
 			return current;
 		};
 
-		const essentialKey = (key) => {
-			const normalized = key.toLowerCase().replaceAll("_", "");
-			return ["content", "desc", "pending", "done", "status", "round", "searchroundid", "usermessageid", "roundid", "messageid", "id"].includes(normalized);
-		};
-		const essentialMemo = new WeakMap();
-		const containsEssentialKey = (value, visiting = new Set()) => {
+		const WHITELIST = new Set([
+			"content", "answer", "summary", "text", "markdown", "desc", "elements", "items", "list",
+			"children", "data", "result", "response", "message", "onebox", "dqa", "hasmore",
+			"isgenerating", "generating", "loading", "streaming", "isend", "finished", "completed", "done", "status",
+		]);
+		const MAX_DEPTH = 4;
+		const MAX_NODES = 64;
+		const MAX_ARRAY = 8;
+
+		const project = (value, depth = 0, budget = {nodes: 0}) => {
 			value = unwrapRef(value);
-			if (!isObject(value)) return false;
-			if (essentialMemo.has(value)) return essentialMemo.get(value);
-			if (visiting.has(value)) return false;
-			visiting.add(value);
-			let found = false;
-			for (const [key, child] of Object.entries(value)) {
-				if (essentialKey(key) || containsEssentialKey(child, visiting)) {
-					found = true;
-					break;
-				}
-			}
-			visiting.delete(value);
-			essentialMemo.set(value, found);
-			return found;
-		};
-		const cloneComplete = (value, seen = new Set()) => {
-			value = unwrapRef(value);
-			if (typeof value === "string" || typeof value === "boolean" || typeof value === "number" || value == null) return value;
-			if (!isObject(value) || seen.has(value)) return undefined;
-			seen.add(value);
-			if (Array.isArray(value)) {
-				const items = value.map((item) => cloneComplete(item, seen)).filter((item) => item !== undefined);
-				seen.delete(value);
-				return items;
-			}
-			const cloned = {};
-			for (const [key, child] of Object.entries(value)) {
-				const nested = cloneComplete(child, seen);
-				if (nested !== undefined) cloned[key] = nested;
-			}
-			seen.delete(value);
-			return cloned;
-		};
-		const project = (value, depth = 0, seen = new Set()) => {
-			value = unwrapRef(value);
-			if (typeof value === "string") return value.slice(0, 3000);
+			if (typeof value === "string") return value.slice(0, textLimit);
 			if (typeof value === "boolean" || typeof value === "number" || value == null) return value;
-			if (!isObject(value) || seen.has(value)) return undefined;
-			seen.add(value);
+			if (!isObject(value)) return undefined;
+			budget.nodes++;
+			if (budget.nodes > MAX_NODES || depth > MAX_DEPTH) return undefined;
 			if (Array.isArray(value)) {
 				const items = [];
-				for (const item of value) {
-					const hasEssential = containsEssentialKey(item);
-					if ((!hasEssential && depth >= 8) || (!hasEssential && items.length >= 50)) continue;
-					const nested = project(item, depth + 1, seen);
+				for (let i = 0; i < value.length && items.length < MAX_ARRAY; i++) {
+					const nested = project(value[i], depth + 1, budget);
 					if (nested !== undefined) items.push(nested);
 				}
-				seen.delete(value);
 				return items;
 			}
-			const exact = new Set([
-				"content", "answer", "summary", "text", "markdown", "desc", "elements", "items", "list",
-				"children", "data", "result", "response", "message", "onebox", "dqa", "hasmore",
-				"isgenerating", "generating", "loading", "streaming", "isend", "finished", "completed", "done", "status",
-			]);
 			const projected = {};
 			for (const [key, child] of Object.entries(value)) {
+				if (budget.nodes > MAX_NODES) break;
 				const normalized = key.toLowerCase().replaceAll("_", "");
-				if (essentialKey(key)) {
-					const nested = cloneComplete(child);
-					if (nested !== undefined) projected[key] = nested;
-					continue;
-				}
-				const hasEssential = containsEssentialKey(child);
-				if (!hasEssential && depth >= 8) continue;
-				if (!hasEssential && !exact.has(normalized) && !["content", "answer", "summary", "element", "message"].some((part) => normalized.includes(part))) continue;
-				const nested = project(child, depth + 1, seen);
+				if (!WHITELIST.has(normalized) &&
+					!["content", "answer", "summary", "element", "message"].some((part) => normalized.includes(part))) continue;
+				const nested = project(child, depth + 1, budget);
 				if (nested !== undefined) projected[key] = nested;
 			}
-			seen.delete(value);
 			return projected;
 		};
 
@@ -1086,25 +1056,12 @@ func probeAIResponseState(ctx context.Context, page *hrod.Page, counter *evalTim
 
 		const domAI = (() => {
 			try {
-				const messages = document.querySelectorAll('.ai-message-finished, .ai-message');
-				const aiMsg = messages.length > 0 ? messages[messages.length - 1] : null;
+				const finished = document.querySelectorAll('.ai-message-finished');
+				const aiMsg = finished.length > 0 ? finished[finished.length - 1] : null;
 				if (aiMsg) {
 					const text = aiMsg.textContent.trim();
 					if (text.length > 50) {
 						const messageID = aiMsg.getAttribute("data-message-id") || aiMsg.getAttribute("data-msg-id") || aiMsg.id || "";
-						const textLength = Math.min(text.length, textLimit);
-						return {
-							messageID,
-							textLength,
-							text: messageID !== previousDOMMessageID || textLength !== previousDOMTextLength ? text.slice(0, textLimit) : "",
-						};
-					}
-				}
-				const scrollBody = document.querySelector('.ai-chat-scroll-body');
-				if (scrollBody) {
-					const text = scrollBody.textContent.trim();
-					if (text.length > 50) {
-						const messageID = scrollBody.getAttribute("data-message-id") || scrollBody.id || "";
 						const textLength = Math.min(text.length, textLimit);
 						return {
 							messageID,
@@ -1121,8 +1078,8 @@ func probeAIResponseState(ctx context.Context, page *hrod.Page, counter *evalTim
 			onebox_info: project(pick("oneboxInfo", "oneBoxInfo")),
 			dqa_instant_elements: project(pick("dqaInstantElements", "dqaElements")),
 			active: Boolean(pick("aiWendianActive", "wendianActive", "aiActive")),
-			search_round_id: cloneComplete(pick("currentSearchRoundId", "searchRoundId")),
-			user_message_id: cloneComplete(pick("currentUserMessageId", "userMessageId")),
+			search_round_id: project(pick("currentSearchRoundId", "searchRoundId")),
+			user_message_id: project(pick("currentUserMessageId", "userMessageId")),
 			dom_ai_message_id: domAI.messageID,
 			dom_ai_text_length: domAI.textLength,
 			dom_ai_text: domAI.text,
