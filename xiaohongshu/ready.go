@@ -42,6 +42,7 @@ type xhsReadyProbe struct {
 	SearchInputCount   int    `json:"search_input_count"`
 	SearchResultCount  int    `json:"search_result_count"`
 	DetailCount        int    `json:"detail_count"`
+	VisibleDetailCount int    `json:"visible_detail_count"`
 	CommentBoxCount    int    `json:"comment_box_count"`
 	LikeButtonCount    int    `json:"like_button_count"`
 	HomeFeedCount      int    `json:"home_feed_count"`
@@ -163,6 +164,7 @@ func probeXHSReady(page *hrod.Page, kind XHSReadyKind, feedID string) (xhsReadyP
 			const visibleDetails = Array.from(document.querySelectorAll(detailSelector)).filter(visible);
 			const visibleDetailMatched = Boolean(feedID && visibleDetails.some(elementMatchesFeedID));
 			out.detail_count = detailCount;
+			out.visible_detail_count = visibleDetails.length;
 			out.detail_url_matched = detailURLMatched;
 			out.detail_state = feedID ? Boolean(detail) : sizeOf(detailMap) > 0;
 			out.detail_feed_matched = feedID ? ((detailURLMatched && visibleDetails.length > 0) || visibleDetailMatched) : detailCount > 0;
@@ -237,6 +239,7 @@ func probeXHSReadyFull(page *hrod.Page, feedID string) (xhsReadyProbe, error) {
 			search_input_count: visibleCount(searchInputSelector),
 			search_result_count: count(searchResultSelector),
 			detail_count: detailCount,
+			visible_detail_count: visibleDetails.length,
 			comment_box_count: visibleCount(commentBoxSelector),
 			like_button_count: visibleCount(likeButtonSelector),
 			home_feed_count: homeFeedCount,
