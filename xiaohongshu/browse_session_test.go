@@ -604,3 +604,95 @@ func TestCheckReusableExploreUsesLightweightHealthCheck(t *testing.T) {
 		t.Fatalf("explore 复用应只执行一次健康 Eval，实际 %d", evalCalls)
 	}
 }
+
+func TestCheckReusableRetriesOnceAfterTimeout(t *testing.T) {
+	page := &hrod.Page{}
+	evalCalls := 0
+	session := &BrowseSession{
+		page:      page,
+		opToken:   make(chan struct{}, 1),
+		expiresAt: time.Now().Add(time.Minute),
+		evalJS: func(ctx context.Context, p *hrod.Page, script string) (*proto.RuntimeRemoteObject, error) {
+			evalCalls++
+			if evalCalls == 1 {
+				time.Sleep(3 * time.Second)
+				return nil, fmt.Errorf("健康检查超时")
+			}
+			return &proto.RuntimeRemoteObject{
+				Type:  proto.RuntimeRemoteObjectTypeString,
+				Value: gson.NewFrom(`"{\"url\":\"https://www.xiaohongshu.com/explore\",\"readyState\":\"complete\"}"`),
+			}, nil
+		},
+	}
+	session.opToken <- struct{}{}
+	start := time.Now()
+	check := session.CheckReusable(context.Background())
+	elapsed := time.Since(start)
+	if check.Status != SessionReady || !check.Ready {
+		t.Fatalf("第一次超时后重试应 SessionReady，得到 %+v", check)
+	}
+	if evalCalls != 2 {
+		t.Fatalf("超时后应重试一次，实际 %d 次 Eval", evalCalls)
+	}
+	if elapsed > 4*time.Second {
+		t.Fatalf("总预算应约 5s（首次2s+退避+重试），实际 %v", elapsed)
+	}
+}
+
+func TestCheckReusableParentContextCanceled(t *testing.T) {
+	page := &hrod.Page{}
+	session := &BrowseSession{
+		page:      page,
+		opToken:   make(chan struct{}, 1),
+		expiresAt: time.Now().Add(time.Minute),
+		evalJS: func(ctx context.Context, p *hrod.Page, script string) (*proto.RuntimeRemoteObject, error) {
+			return nil, ctx.Err()
+		},
+	}
+	session.opToken <- struct{}{}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	check := session.CheckReusable(ctx)
+	if check.LastError != "请求已取消" {
+		t.Fatalf("父 ctx 取消应返回请求已取消，得到 %s", check.LastError)
+	}
+	if check.HealthCheckedAt.IsZero() {
+		t.Fatalf("HealthCheckedAt 应为完成时间，得到零值")
+	}
+}
+
+func TestTryCloseIdleClosesWhenFree(t *testing.T) {
+	page := &hrod.Page{}
+	closed := false
+	session := &BrowseSession{
+		page:      page,
+		opToken:   make(chan struct{}, 1),
+		closedCh:  make(chan struct{}),
+		onRemove:  func(s *BrowseSession) { closed = true },
+	}
+	session.opToken <- struct{}{}
+	if !session.TryCloseIdle() {
+		t.Fatalf("空闲 session 应可关闭")
+	}
+	if !closed {
+		t.Fatalf("onRemove 应被调用")
+	}
+}
+
+func TestTryCloseIdleRefusesWhenBusy(t *testing.T) {
+	page := &hrod.Page{}
+	closed := false
+	session := &BrowseSession{
+		page:      page,
+		opToken:   make(chan struct{}, 1),
+		closedCh:  make(chan struct{}),
+		onRemove:  func(s *BrowseSession) { closed = true },
+	}
+	// opToken 空 = 操作占用中（busy）
+	if session.TryCloseIdle() {
+		t.Fatalf("busy session 不应可关闭")
+	}
+	if closed {
+		t.Fatalf("busy session 不应触发 onRemove")
+	}
+}

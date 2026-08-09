@@ -154,3 +154,36 @@ func TestCreateBrowseSessionResultDebugZeroValuesAreVisible(t *testing.T) {
 		}
 	}
 }
+
+func TestTryReuseSessionDegradesToCreateOnUnhealthy(t *testing.T) {
+	manager := xiaohongshu.NewBrowseSessionManager(time.Minute)
+	service := &XiaohongshuService{browseSessions: manager}
+
+	// page=nil 使 CheckReusable 返回 SessionNotReady，触发降级路径
+	session := manager.Create(nil, nil, nil)
+
+	result := service.tryReuseSession(context.Background())
+	if result != nil {
+		t.Fatalf("not-ready session 应降级为创建（返回 nil），得到 %+v", result)
+	}
+	if _, err := manager.Get(session.ID()); err == nil {
+		t.Fatalf("降级创建后旧 session 应已关闭")
+	}
+}
+
+func TestTryReuseSessionCanceledContextDoesNotDegrade(t *testing.T) {
+	manager := xiaohongshu.NewBrowseSessionManager(time.Minute)
+	service := &XiaohongshuService{browseSessions: manager}
+
+	session := manager.Create(nil, nil, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	result := service.tryReuseSession(ctx)
+	if result == nil || result.Outcome != "blocked" {
+		t.Fatalf("取消请求不应降级创建，得到 %+v", result)
+	}
+	if _, err := manager.Get(session.ID()); err != nil {
+		t.Fatalf("取消请求不应关闭 session: %v", err)
+	}
+}
