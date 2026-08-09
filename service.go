@@ -1214,18 +1214,9 @@ func (s *XiaohongshuService) tryReuseSession(ctx context.Context) *xiaohongshu.C
 
 	switch check.Status {
 	case xiaohongshu.SessionReady:
+		previous := info
 		info = session.Renew()
-		return &xiaohongshu.CreateBrowseSessionResult{
-			Outcome:           "reused",
-			Session:           &info,
-			RecommendedAction: "continue",
-			Status: xiaohongshu.BrowseSessionStatusInfo{
-				Status:          xiaohongshu.SessionReady,
-				Session:         &info,
-				HealthCheckedAt: check.HealthCheckedAt,
-				Ready:           true,
-			},
-		}
+		return buildBrowseSessionReuseResult(previous, info, check.HealthCheckedAt)
 	case xiaohongshu.SessionBusy:
 		return &xiaohongshu.CreateBrowseSessionResult{
 			Outcome:           "blocked",
@@ -1258,6 +1249,33 @@ func (s *XiaohongshuService) tryReuseSession(ctx context.Context) *xiaohongshu.C
 
 func (s *XiaohongshuService) CloseBrowseSession(id string) error {
 	return s.browseSessions.Close(id)
+}
+
+// buildBrowseSessionReuseResult 构造 session 复用结果。
+// Renew 未严格延长 TTL（健康检查期间已到期）时返回 expired/blocked，否则返回 reused/ready。
+func buildBrowseSessionReuseResult(previous, renewed xiaohongshu.BrowseSessionInfo, healthCheckedAt time.Time) *xiaohongshu.CreateBrowseSessionResult {
+	if !renewed.ExpiresAt.After(previous.ExpiresAt) {
+		return &xiaohongshu.CreateBrowseSessionResult{
+			Outcome:           "blocked",
+			RecommendedAction: "retry",
+			Status: xiaohongshu.BrowseSessionStatusInfo{
+				Status:    xiaohongshu.SessionExpired,
+				LastError: "session 已过期",
+				Ready:     false,
+			},
+		}
+	}
+	return &xiaohongshu.CreateBrowseSessionResult{
+		Outcome:           "reused",
+		Session:           &renewed,
+		RecommendedAction: "continue",
+		Status: xiaohongshu.BrowseSessionStatusInfo{
+			Status:          xiaohongshu.SessionReady,
+			Session:         &renewed,
+			HealthCheckedAt: healthCheckedAt,
+			Ready:           true,
+		},
+	}
 }
 
 func (s *XiaohongshuService) ActiveBrowseSessionInfo() (xiaohongshu.BrowseSessionInfo, bool) {

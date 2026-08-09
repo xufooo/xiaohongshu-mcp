@@ -18,6 +18,7 @@ const (
 	defaultStartupTimeout   = 120 * time.Second
 	operationAcquireTimeout = 5 * time.Second
 	lifecycleAcquireTimeout = 30 * time.Second
+	sessionIdleGrace        = time.Minute
 )
 
 // BusyError reports that the single browser is currently owned by another operation.
@@ -179,8 +180,25 @@ func (m *Manager) Release(page *hrod.Page) {
 			m.discardBrowser(page.Browser())
 		}
 	}
-	m.scheduleIdleClose()
+	m.mu.Lock()
+	owner := m.owner
+	configuredIdleTimeout := m.idleTimeout
+	m.mu.Unlock()
+	m.scheduleIdleCloseAfter(idleCloseDelay(owner, configuredIdleTimeout))
 	m.releaseToken()
+}
+
+// idleCloseDelay 选择页面释放后的浏览器空闲关闭延迟。
+// session owner 使用 sessionIdleGrace 上限，普通 owner 保留配置值；
+// 配置小于等于零表示不自动关闭，原样返回。
+func idleCloseDelay(owner string, configured time.Duration) time.Duration {
+	if configured <= 0 {
+		return configured
+	}
+	if len(owner) >= len("session:") && owner[:len("session:")] == "session:" && configured > sessionIdleGrace {
+		return sessionIdleGrace
+	}
+	return configured
 }
 
 // Reset 关闭常驻浏览器。下次 Acquire 会创建新实例。
@@ -380,15 +398,15 @@ func (m *Manager) failStartup(started *browserStartup) {
 	started.finish()
 }
 
-func (m *Manager) scheduleIdleClose() {
+func (m *Manager) scheduleIdleCloseAfter(delay time.Duration) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.closed || m.browser == nil || m.idleTimeout <= 0 {
+	if m.closed || m.browser == nil || delay <= 0 {
 		return
 	}
 	m.cancelIdleCloseLocked()
 	version := m.idleVersion
-	m.idleTimer = time.AfterFunc(m.idleTimeout, func() {
+	m.idleTimer = time.AfterFunc(delay, func() {
 		m.closeIfIdle(version)
 	})
 }
