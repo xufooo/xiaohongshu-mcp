@@ -379,7 +379,6 @@ GET /api/v1/feeds/list
   - `collectedCount`: 收藏数
   - `commentCount`: 评论数
   - `sharedCount`: 分享数
-```
 
 ### 5. 用户信息
 
@@ -631,7 +630,6 @@ Content-Type: application/json
 | 错误代码 | HTTP 状态码 | 描述 |
 |----------|-------------|------|
 | `INVALID_REQUEST` | 400 | 请求参数错误或格式不正确 |
-| `MISSING_KEYWORD` | 400 | 搜索时缺少关键词参数 |
 | `STATUS_CHECK_FAILED` | 500 | 检查登录状态失败 |
 | `DELETE_COOKIES_FAILED` | 500 | 删除 Cookies 失败 |
 | `PUBLISH_FAILED` | 500 | 发布图文内容失败 |
