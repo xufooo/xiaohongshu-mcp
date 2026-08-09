@@ -941,36 +941,6 @@ func (s *XiaohongshuService) ListFeeds(ctx context.Context) (*FeedsListResponse,
 
 	return response, nil
 }
-// SearchFeeds 搜索 Feeds
-func (s *XiaohongshuService) SearchFeeds(ctx context.Context, keyword string, filters ...xiaohongshu.FilterOption) (*FeedsListResponse, error) {
-	searchCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
-	defer cancel()
-
-	page, err := s.acquirePageFor(searchCtx, "search")
-	if err != nil {
-		return nil, err
-	}
-	defer s.browserManager.Release(page)
-
-	action := xiaohongshu.NewSearchAction(page.Context(searchCtx))
-	capture := s.startReadNetworkCapture(page)
-
-	feeds, err := action.SearchFeedsOnly(searchCtx, keyword, filters...)
-	network := stopReadNetworkCapture(capture)
-	if err != nil {
-		s.recordRiskFromPage(page, err)
-		return nil, err
-	}
-
-	response := &FeedsListResponse{
-		Feeds:   feeds,
-		Count:   len(feeds),
-		Network: network,
-	}
-
-	return response, nil
-}
-
 func (s *XiaohongshuService) GetFeedDetailCommentsBatch(ctx context.Context, feedID, xsecToken, cursorID string, maxItems int, config xiaohongshu.CommentLoadConfig) (*FeedDetailResponse, error) {
 	maxItems = normalizeMaxItems(maxItems)
 	config.ScrollSpeed = normalizeScopeSpeed(config.ScrollSpeed)

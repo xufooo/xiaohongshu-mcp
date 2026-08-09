@@ -200,7 +200,7 @@ func (s *SearchAction) searchFeeds(ctx context.Context, counter *evalTimeoutCoun
 	return page, feeds, nil
 }
 
-// SearchFeedsOnly 保留仅返回笔记列表的兼容入口。
+// SearchFeedsOnly 仅返回笔记列表（不附带 AI 回复），供无需 AI 的搜索路径使用。
 func (s *SearchAction) SearchFeedsOnly(ctx context.Context, keyword string, filters ...FilterOption) ([]Feed, error) {
 	counter := &evalTimeoutCounter{}
 	_, feeds, err := s.searchFeeds(ctx, counter, keyword, filters...)

@@ -39,12 +39,6 @@ type MCPContent struct {
 	Data     string `json:"data"`
 }
 
-// SearchFeedsRequest 搜索Feeds请求
-type SearchFeedsRequest struct {
-	Keyword string                   `json:"keyword" binding:"required"`
-	Filters xiaohongshu.FilterOption `json:"filters,omitempty"`
-}
-
 // FeedDetailResponse Feed详情响应
 type FeedDetailResponse struct {
 	FeedID  string                            `json:"feed_id"`
