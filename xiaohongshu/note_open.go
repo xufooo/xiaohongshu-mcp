@@ -31,7 +31,21 @@ func (a *NoteOpenAction) OpenFromCards(ctx context.Context, counter *evalTimeout
 		return err
 	}
 	if err := anchor.ScrollIntoView(); err != nil {
-		return fmt.Errorf("滚动到目标 anchor 失败: %w", err)
+		if strings.Contains(err.Error(), "scroll made no progress") {
+			// SPA 列表重挂载可能导致 anchor 失效，等待后重取 anchor 重试一次。
+			if err := page.SleepRandom(300*time.Millisecond, 800*time.Millisecond); err != nil {
+				return fmt.Errorf("滚动到目标 anchor 失败: %w", err)
+			}
+			anchor, err = findFeedCardAnchor(ctx, page, counter, feedID)
+			if err == nil {
+				err = anchor.ScrollIntoView()
+			}
+			if err != nil {
+				return fmt.Errorf("滚动到目标 anchor 失败: %w", err)
+			}
+		} else {
+			return fmt.Errorf("滚动到目标 anchor 失败: %w", err)
+		}
 	}
 	if err := page.SleepRandom(600*time.Millisecond, 1800*time.Millisecond); err != nil {
 		return err
