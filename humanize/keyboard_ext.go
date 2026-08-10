@@ -258,7 +258,7 @@ func (k *Keyboard) dispatchScroll(deltaX, deltaY float64) error {
 	defer k.state.dispatchMu.Unlock()
 	bound := k.boundPage()
 	snap := k.state.mouseSnapshot()
-	if err := proto.InputDispatchMouseEvent{
+	if err := (proto.InputDispatchMouseEvent{
 		Type:      proto.InputDispatchMouseEventTypeMouseWheel,
 		X:         snap.pos.X,
 		Y:         snap.pos.Y,
@@ -266,7 +266,7 @@ func (k *Keyboard) dispatchScroll(deltaX, deltaY float64) error {
 		DeltaY:    deltaY,
 		Buttons:   gson.Int(snap.buttons),
 		Modifiers: snap.modifiers,
-	}.Call(bound); err != nil {
+	}).Call(bound); err != nil {
 		return err
 	}
 	return nil

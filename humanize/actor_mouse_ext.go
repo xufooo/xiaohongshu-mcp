@@ -54,14 +54,14 @@ func (m *Mouse) dispatchMouseMove(bound *rod.Page, p Point) error {
 	m.state.dispatchMu.Lock()
 	defer m.state.dispatchMu.Unlock()
 	snap := m.state.mouseSnapshot()
-	if err := proto.InputDispatchMouseEvent{
+	if err := (proto.InputDispatchMouseEvent{
 		Type:      proto.InputDispatchMouseEventTypeMouseMoved,
 		X:         p.X,
 		Y:         p.Y,
 		Button:    proto.InputMouseButtonNone,
 		Buttons:   gson.Int(snap.buttons),
 		Modifiers: snap.modifiers,
-	}.Call(bound); err != nil {
+	}).Call(bound); err != nil {
 		return err
 	}
 	m.state.mu.Lock()
@@ -101,7 +101,7 @@ func (m *Mouse) dispatchMouseButton(typ proto.InputDispatchMouseEventType, butto
 	snap := mouseSnapshot{pos: m.state.pos, buttons: flag, modifiers: m.state.modifiersLocked()}
 	m.state.mu.Unlock()
 
-	if err := proto.InputDispatchMouseEvent{
+	if err := (proto.InputDispatchMouseEvent{
 		Type:       typ,
 		X:          snap.pos.X,
 		Y:          snap.pos.Y,
@@ -109,7 +109,7 @@ func (m *Mouse) dispatchMouseButton(typ proto.InputDispatchMouseEventType, butto
 		Buttons:    gson.Int(snap.buttons),
 		ClickCount: clickCount,
 		Modifiers:  snap.modifiers,
-	}.Call(bound); err != nil {
+	}).Call(bound); err != nil {
 		return err
 	}
 
@@ -125,7 +125,7 @@ func (m *Mouse) dispatchMouseScroll(deltaX, deltaY float64) error {
 	defer m.state.dispatchMu.Unlock()
 	bound := m.boundPage()
 	snap := m.state.mouseSnapshot()
-	if err := proto.InputDispatchMouseEvent{
+	if err := (proto.InputDispatchMouseEvent{
 		Type:      proto.InputDispatchMouseEventTypeMouseWheel,
 		X:         snap.pos.X,
 		Y:         snap.pos.Y,
@@ -133,7 +133,7 @@ func (m *Mouse) dispatchMouseScroll(deltaX, deltaY float64) error {
 		DeltaY:    deltaY,
 		Buttons:   gson.Int(snap.buttons),
 		Modifiers: snap.modifiers,
-	}.Call(bound); err != nil {
+	}).Call(bound); err != nil {
 		return err
 	}
 	return nil
