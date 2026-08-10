@@ -737,10 +737,10 @@ func probeSearchInput(ctx context.Context, page *hrod.Page, counter *evalTimeout
 		if (navSearchInput && visible(navSearchInput)) {
 			searchInput = navSearchInput;
 		}
-		if (!searchInput && (!navSearchInput || document.readyState === "complete")) {
+		if (!searchInput) {
 			searchInput = Array.from(document.querySelectorAll(primarySelector)).find((el) => visible(el) && clickHit(el));
 		}
-		if (!searchInput && (!navSearchInput || document.readyState === "complete")) {
+		if (!searchInput) {
 			searchInput = Array.from(document.querySelectorAll(searchSelector)).find((el) => visible(el) && clickHit(el));
 		}
 		if (searchInput) {
