@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -601,6 +602,7 @@ func (s *BrowseSession) searchBatch(ctx context.Context, keyword string, filters
 		} else {
 			rec.fillResult(&result)
 		}
+		s.reconcileAfterFailedSearch(err)
 		s.finishOperation(err)
 	}()
 
@@ -2136,6 +2138,36 @@ func (s *BrowseSession) closeExpired(expiresAt time.Time) {
 		return
 	}
 	s.close()
+}
+
+func (s *BrowseSession) reconcileAfterFailedSearch(operationErr error) {
+	if operationErr == nil {
+		return
+	}
+	s.mu.Lock()
+	page := s.page
+	closed := s.closed
+	s.mu.Unlock()
+	if closed || page == nil {
+		return
+	}
+	info, err := page.Rod.Info()
+	if err != nil {
+		return
+	}
+	u, err := url.Parse(info.URL)
+	if err != nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.opened && s.currentFeedID != "" && !strings.HasPrefix(u.Path, "/explore/"+s.currentFeedID) {
+		s.sourceURL = ""
+		s.currentFeedID = ""
+		s.currentXsecToken = ""
+		s.opened = false
+		s.read = false
+	}
 }
 
 func (s *BrowseSession) refreshPageState(ctx context.Context) {
