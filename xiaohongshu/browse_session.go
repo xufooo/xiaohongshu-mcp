@@ -582,13 +582,24 @@ func (s *BrowseSession) searchBatch(ctx context.Context, keyword string, filters
 	searchCtx, cancel := context.WithTimeout(ctx, sessionSearchTimeout)
 	defer cancel()
 
+	rec := newDebugSearchRecorder()
+	rec.beginStage("precheck")
+	searchCtx = withDebugSearchRecorder(searchCtx, rec)
+
 	opCtx, err := s.beginLockedOperation(searchCtx, true)
 	if err != nil {
-		return SearchPageResult{}, nil, false, err
+		rec.finish()
+		return SearchPageResult{}, nil, false, fmt.Errorf("%w; debug_search=%s", err, rec.marshalSummary())
 	}
 	defer func() {
 		if err != nil && searchCtx.Err() == context.DeadlineExceeded && ctx.Err() == nil {
 			err = fmt.Errorf("搜索操作超过内部时限 %s: %w", sessionSearchTimeout, err)
+		}
+		rec.finish()
+		if err != nil {
+			err = fmt.Errorf("%w; debug_search=%s", err, rec.marshalSummary())
+		} else {
+			rec.fillResult(&result)
 		}
 		s.finishOperation(err)
 	}()
@@ -643,7 +654,9 @@ func (s *BrowseSession) searchBatch(ctx context.Context, keyword string, filters
 		s.recordTimelineLocked("search", keyword, "ok", time.Now(), fmt.Sprintf("results=%d", len(feeds)))
 		s.mu.Unlock()
 		s.probeWatchdogSelectorsForKind(opCtx, XHSReadySearch, "")
-		return SearchPageResult{Feeds: feeds, AIChat: aiChat}, cursor, hasMore, nil
+		result.Feeds = feeds
+		result.AIChat = aiChat
+		return result, cursor, hasMore, nil
 	}
 
 	counter := &evalTimeoutCounter{}
