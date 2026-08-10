@@ -216,6 +216,10 @@ func (s *SearchAction) searchByUI(ctx context.Context, page *hrod.Page, counter 
 	}
 
 	// 等搜索框出现，不使用WaitLoad因为小红书是SPA。
+	rec := debugSearchFromContext(ctx)
+	if rec != nil {
+		rec.beginStage("input")
+	}
 	input, err := waitForSearchInput(ctx, page, counter, searchInputWaitTimeout, searchSelector)
 	if err != nil {
 		return fmt.Errorf("未找到搜索框: %w", err)
@@ -239,6 +243,9 @@ func (s *SearchAction) searchByUI(ctx context.Context, page *hrod.Page, counter 
 		return fmt.Errorf("捕获搜索结果基线失败: %w", err)
 	}
 
+	if rec := debugSearchFromContext(ctx); rec != nil {
+		rec.beginStage("submit")
+	}
 	if err := page.Actor().Keyboard.Press(rodinput.Enter); err != nil {
 		return fmt.Errorf("提交搜索失败: %w", err)
 	}
@@ -255,6 +262,9 @@ func (s *SearchAction) searchByUI(ctx context.Context, page *hrod.Page, counter 
 				}
 			}
 			counter.reset()
+			if rec := debugSearchFromContext(ctx); rec != nil {
+				rec.Fallback = true
+			}
 			return page.Navigate(url)
 		},
 	}); err != nil {
@@ -312,18 +322,33 @@ func captureSearchResultsBaseline(ctx context.Context, page *hrod.Page, counter 
 }
 
 func waitForSearchResults(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, keyword string, baseline searchResultsBaseline) error {
+	rec := debugSearchFromContext(ctx)
+	if rec != nil {
+		rec.beginStage("wait")
+		rec.WaitRounds++
+	}
 	deadline := time.Now().Add(searchResultsWaitTimeout)
 	var last searchResultsKeywordProbe
 	var lastErr error
 
 	for time.Now().Before(deadline) {
 		if err := page.Err(); err != nil {
+			if rec != nil {
+				rec.setWaitExit("page_error")
+			}
 			return err
 		}
 
+		probeStartedAt := time.Now()
 		probe, err := probeSearchResultsKeyword(ctx, page, counter, keyword)
+		if rec != nil {
+			rec.recordResultProbe(time.Since(probeStartedAt).Milliseconds(), err)
+		}
 		if err != nil {
 			if IsFatalRendererError(err) {
+				if rec != nil {
+					rec.setWaitExit("fatal_renderer")
+				}
 				return err
 			}
 			lastErr = err
@@ -331,12 +356,30 @@ func waitForSearchResults(ctx context.Context, page *hrod.Page, counter *evalTim
 			last = probe
 			lastErr = nil
 			if searchResultsReady(probe, baseline) {
+				if rec != nil {
+					rec.setWaitExit("ready")
+				}
 				return nil
 			}
 		}
 
 		if err := page.Sleep(300 * time.Millisecond); err != nil {
+			if rec != nil {
+				rec.setWaitExit("sleep_error")
+			}
 			return err
+		}
+	}
+
+	if rec != nil {
+		if lastErr != nil {
+			rec.setWaitExit("probe_error")
+		} else if last.HasStateKeyword && !last.KeywordMatched {
+			rec.setWaitExit("keyword_mismatch")
+		} else if last.HasStateKeyword && !last.HasStateFeeds {
+			rec.setWaitExit("state_feeds_missing")
+		} else {
+			rec.setWaitExit("results_missing")
 		}
 	}
 
@@ -585,6 +628,7 @@ type searchInputProbe struct {
 
 func waitForSearchInput(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, timeout time.Duration, searchSelector string) (*hrod.Element, error) {
 	deadline := time.Now().Add(timeout)
+	rec := debugSearchFromContext(ctx)
 	var last searchInputProbe
 	var lastErr error
 
@@ -593,7 +637,11 @@ func waitForSearchInput(ctx context.Context, page *hrod.Page, counter *evalTimeo
 			return nil, err
 		}
 
+		probeStartedAt := time.Now()
 		probe, err := probeSearchInput(ctx, page, counter, searchSelector, SelectorSearchInputInFeeds+", "+SelectorSearchInputInSearchResult)
+		if rec != nil {
+			rec.recordInputProbe(time.Since(probeStartedAt).Milliseconds(), err)
+		}
 		if err != nil {
 			if IsFatalRendererError(err) {
 				return nil, err
@@ -704,6 +752,9 @@ func formatSearchInputProbe(probe searchInputProbe) string {
 }
 
 func (s *SearchAction) collectResults(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, pfs []pendingFilter) ([]Feed, error) {
+	if rec := debugSearchFromContext(ctx); rec != nil {
+		rec.beginStage("extract")
+	}
 	appliedFilters := false
 	var stateRefreshed bool
 

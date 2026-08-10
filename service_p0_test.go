@@ -155,6 +155,52 @@ func TestCreateBrowseSessionResultDebugZeroValuesAreVisible(t *testing.T) {
 	}
 }
 
+func TestSearchDebugFieldsSerialization(t *testing.T) {
+	result := xiaohongshu.SearchPageResult{
+		Feeds:                        nil,
+		DebugSearchTotalMS:           31842,
+		DebugSearchWaitMS:            30112,
+		DebugSearchResultProbeMs:     []int64{5001, 5000},
+		DebugSearchResultProbeCount:  2,
+		DebugSearchResultProbeFailed: 1,
+		DebugSearchWaitExit:          "keyword_mismatch",
+		DebugSearchFallback:          true,
+		DebugSearchWaitRounds:        2,
+	}
+	data, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("marshal 失败: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("unmarshal 失败: %v", err)
+	}
+	for _, key := range []string{"debug_search_total_ms", "debug_search_wait_ms", "debug_search_result_probe_ms", "debug_search_result_probe_count", "debug_search_result_probe_failed", "debug_search_wait_exit", "debug_search_fallback", "debug_search_wait_rounds"} {
+		if _, ok := m[key]; !ok {
+			t.Fatalf("JSON 缺少探针字段 %s: %s", key, string(data))
+		}
+	}
+	if v, ok := m["debug_search_total_ms"].(float64); !ok || int64(v) != 31842 {
+		t.Fatalf("debug_search_total_ms = %v, 期望 31842", m["debug_search_total_ms"])
+	}
+	if v, ok := m["debug_search_fallback"].(bool); !ok || !v {
+		t.Fatalf("debug_search_fallback = %v, 期望 true", m["debug_search_fallback"])
+	}
+}
+
+func TestSearchDebugZeroValuesAreVisible(t *testing.T) {
+	result := xiaohongshu.SearchPageResult{}
+	data, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("marshal 失败: %v", err)
+	}
+	for _, key := range []string{"debug_search_total_ms", "debug_search_wait_ms", "debug_search_result_probe_ms", "debug_search_wait_exit", "debug_search_fallback", "debug_search_wait_rounds"} {
+		if !strings.Contains(string(data), key) {
+			t.Fatalf("零值探针字段 %s 必须可见（不得 omitempty）: %s", key, string(data))
+		}
+	}
+}
+
 func TestTryReuseSessionDegradesToCreateOnUnhealthy(t *testing.T) {
 	manager := xiaohongshu.NewBrowseSessionManager(time.Minute)
 	service := &XiaohongshuService{browseSessions: manager}
