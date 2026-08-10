@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-rod/rod"
+	"github.com/go-rod/rod/lib/input"
 	"github.com/go-rod/rod/lib/proto"
 	"github.com/stretchr/testify/assert"
 )
@@ -52,6 +54,51 @@ func TestDelay_RespectsContextCancel(t *testing.T) {
 	start := time.Now()
 	Delay(ctx, AfterNavigate)
 	assert.Less(t, time.Since(start), 100*time.Millisecond, "已取消的 ctx 应让 Delay 立即返回")
+}
+
+func TestActorMouseKeyboardShareState(t *testing.T) {
+	actor := New(&rod.Page{}, Config{})
+	if actor.Mouse.state != actor.Keyboard.state {
+		t.Fatal("Mouse 与 Keyboard 应共享同一 inputState")
+	}
+}
+
+func TestKeyboardOwnsStateWhenNoMouse(t *testing.T) {
+	kb := NewKeyboard(&rod.Page{}, Config{}, nil)
+	if kb.state == nil {
+		t.Fatal("无 Mouse 的 Keyboard 应有自己的 inputState")
+	}
+	kb.state.mu.Lock()
+	kb.state.pressed[input.ShiftLeft] = true
+	kb.state.mu.Unlock()
+	if kb.state.modifiers()&input.ModifierShift == 0 {
+		t.Fatal("无 Mouse 的 Keyboard modifiers 应正常工作")
+	}
+}
+
+func TestInputStateModifiers(t *testing.T) {
+	state := newInputState()
+	if state.modifiers() != 0 {
+		t.Fatalf("无按键时 modifiers 应为 0，得到 %d", state.modifiers())
+	}
+	state.mu.Lock()
+	state.pressed[input.ShiftLeft] = true
+	state.mu.Unlock()
+	if state.modifiers()&input.ModifierShift == 0 {
+		t.Fatalf("Shift 按下后 modifiers 应含 Shift 位")
+	}
+}
+
+func TestBoundPageInheritsCanceledContext(t *testing.T) {
+	m := NewMouse(&rod.Page{}, Config{})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	m.setContext(ctx)
+
+	bound := m.boundPage()
+	if err := bound.GetContext().Err(); err == nil {
+		t.Fatal("boundPage 应继承已取消的 ctx")
+	}
 }
 
 func TestCubicBezier_Endpoints(t *testing.T) {

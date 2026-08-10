@@ -25,6 +25,7 @@ const (
 	maxBrowseSessionResults         = 500
 	browseSessionBackTimeout        = 15 * time.Second
 	healthCheckTimeout              = 5 * time.Second
+	sessionSearchTimeout            = 180 * time.Second
 )
 
 type BrowseSessionStatus string
@@ -578,11 +579,19 @@ func (s *BrowseSession) SearchBatchWithAI(ctx context.Context, keyword string, f
 }
 
 func (s *BrowseSession) searchBatch(ctx context.Context, keyword string, filters []FilterOption, cursor *FeedCursor, maxItems int, includeAI bool) (result SearchPageResult, nextCursor *FeedCursor, hasMore bool, err error) {
-	opCtx, err := s.beginLockedOperation(ctx, true)
+	searchCtx, cancel := context.WithTimeout(ctx, sessionSearchTimeout)
+	defer cancel()
+
+	opCtx, err := s.beginLockedOperation(searchCtx, true)
 	if err != nil {
 		return SearchPageResult{}, nil, false, err
 	}
-	defer func() { s.finishOperation(err) }()
+	defer func() {
+		if err != nil && searchCtx.Err() == context.DeadlineExceeded && ctx.Err() == nil {
+			err = fmt.Errorf("搜索操作超过内部时限 %s: %w", sessionSearchTimeout, err)
+		}
+		s.finishOperation(err)
+	}()
 
 	maxItems = normalizeFeedPageSize(maxItems)
 

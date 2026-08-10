@@ -767,7 +767,7 @@ func (s *SearchAction) collectResults(ctx context.Context, page *hrod.Page, coun
 			}
 
 			t0 = time.Now()
-			if err := humanize.ClickNoWait(option.Rod); err != nil {
+			if err := option.Actor().Mouse.ClickNoScroll(option.Rod); err != nil {
 				return nil, stageErr("filter_option_click", t0, err, pf.OptionText)
 			}
 		}
