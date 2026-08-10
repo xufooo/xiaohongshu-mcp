@@ -732,8 +732,15 @@ func probeSearchInput(ctx context.Context, page *hrod.Page, counter *evalTimeout
 			const hit = document.elementFromPoint(x, y);
 			return !!hit && (hit === el || el.contains(hit));
 		};
-		let searchInput = Array.from(document.querySelectorAll(primarySelector)).find((el) => visible(el) && clickHit(el));
-		if (!searchInput) {
+		let searchInput = null;
+		const navSearchInput = document.querySelector("#search-input");
+		if (navSearchInput && visible(navSearchInput)) {
+			searchInput = navSearchInput;
+		}
+		if (!searchInput && (!navSearchInput || document.readyState === "complete")) {
+			searchInput = Array.from(document.querySelectorAll(primarySelector)).find((el) => visible(el) && clickHit(el));
+		}
+		if (!searchInput && (!navSearchInput || document.readyState === "complete")) {
 			searchInput = Array.from(document.querySelectorAll(searchSelector)).find((el) => visible(el) && clickHit(el));
 		}
 		if (searchInput) {
