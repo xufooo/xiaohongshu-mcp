@@ -20,7 +20,7 @@ import (
 
 const (
 	searchInputWaitTimeout         = 45 * time.Second
-	searchResultsWaitTimeout       = 30 * time.Second
+	searchResultsWaitTimeout       = 45 * time.Second
 	searchFilterRefreshWaitTimeout = 20 * time.Second
 	aiResponseWaitTimeout          = 3 * time.Second
 	aiResponsePollInterval         = 500 * time.Millisecond
