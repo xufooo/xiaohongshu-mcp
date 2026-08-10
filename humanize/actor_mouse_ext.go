@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/go-rod/rod"
+	"github.com/go-rod/rod/lib/input"
 	"github.com/go-rod/rod/lib/proto"
 	"github.com/ysmood/gson"
 )
@@ -25,16 +26,117 @@ type Mouse struct {
 	page        *rod.Page
 	cfg         Config
 	ctx         context.Context
+	state       *inputState
 	initialized bool
 }
 
 // NewMouse creates a new humanized mouse wrapper.
 func NewMouse(page *rod.Page, cfg Config) *Mouse {
-	return &Mouse{page: page, cfg: cfg, ctx: context.Background()}
+	return newMouseWithState(page, cfg, newInputState())
+}
+
+func newMouseWithState(page *rod.Page, cfg Config, state *inputState) *Mouse {
+	return &Mouse{page: page, cfg: cfg, ctx: context.Background(), state: state}
 }
 
 func (m *Mouse) setContext(ctx context.Context) {
 	m.ctx = ctx
+}
+
+// boundPage 返回绑定当前 ctx 的 page clone。真实 CDP 调用必须走它，
+// 否则 renderer 卡死时 rod.Mouse 内部未绑定 ctx 的调用不响应取消。
+func (m *Mouse) boundPage() *rod.Page {
+	return m.page.Context(m.ctx)
+}
+
+// dispatchMouseMove 发送 Input.dispatchMouseEvent(mouseMoved) 到绑定 ctx 的页面。
+func (m *Mouse) dispatchMouseMove(bound *rod.Page, p Point) error {
+	m.state.dispatchMu.Lock()
+	defer m.state.dispatchMu.Unlock()
+	snap := m.state.mouseSnapshot()
+	if err := proto.InputDispatchMouseEvent{
+		Type:      proto.InputDispatchMouseEventTypeMouseMoved,
+		X:         p.X,
+		Y:         p.Y,
+		Button:    proto.InputMouseButtonNone,
+		Buttons:   gson.Int(snap.buttons),
+		Modifiers: snap.modifiers,
+	}.Call(bound); err != nil {
+		return err
+	}
+	m.state.mu.Lock()
+	m.state.pos = p
+	m.state.mu.Unlock()
+	return nil
+}
+
+// posSnapshot 返回当前鼠标位置（锁内快照）。
+func (m *Mouse) posSnapshot() Point {
+	m.state.mu.Lock()
+	defer m.state.mu.Unlock()
+	return m.state.pos
+}
+
+// dispatchMouseButton 发送按下/释放事件。全程持 dispatchMu 串行化，
+// CDP 成功后才提交按钮状态，失败时不提交本地候选状态。
+func (m *Mouse) dispatchMouseButton(typ proto.InputDispatchMouseEventType, button proto.InputMouseButton, clickCount int) error {
+	m.state.dispatchMu.Lock()
+	defer m.state.dispatchMu.Unlock()
+	bound := m.boundPage()
+
+	m.state.mu.Lock()
+	nextButtons := make(map[proto.InputMouseButton]int, len(m.state.buttons)+1)
+	for btn, cnt := range m.state.buttons {
+		nextButtons[btn] = cnt
+	}
+	if typ == proto.InputDispatchMouseEventTypeMousePressed {
+		nextButtons[button] = clickCount
+	} else {
+		delete(nextButtons, button)
+	}
+	flag := 0
+	for btn := range nextButtons {
+		flag |= input.MouseKeys[btn]
+	}
+	snap := mouseSnapshot{pos: m.state.pos, buttons: flag, modifiers: m.state.modifiersLocked()}
+	m.state.mu.Unlock()
+
+	if err := proto.InputDispatchMouseEvent{
+		Type:       typ,
+		X:          snap.pos.X,
+		Y:          snap.pos.Y,
+		Button:     button,
+		Buttons:    gson.Int(snap.buttons),
+		ClickCount: clickCount,
+		Modifiers:  snap.modifiers,
+	}.Call(bound); err != nil {
+		return err
+	}
+
+	m.state.mu.Lock()
+	m.state.buttons = nextButtons
+	m.state.mu.Unlock()
+	return nil
+}
+
+// dispatchMouseScroll 发送滚轮事件。全程持 dispatchMu 串行化。
+func (m *Mouse) dispatchMouseScroll(deltaX, deltaY float64) error {
+	m.state.dispatchMu.Lock()
+	defer m.state.dispatchMu.Unlock()
+	bound := m.boundPage()
+	snap := m.state.mouseSnapshot()
+	if err := proto.InputDispatchMouseEvent{
+		Type:      proto.InputDispatchMouseEventTypeMouseWheel,
+		X:         snap.pos.X,
+		Y:         snap.pos.Y,
+		DeltaX:    deltaX,
+		DeltaY:    deltaY,
+		Buttons:   gson.Int(snap.buttons),
+		Modifiers: snap.modifiers,
+	}.Call(bound); err != nil {
+		return err
+	}
+	return nil
 }
 
 // initPosition moves the cursor from the rod default (0,0) to a plausible
@@ -102,12 +204,20 @@ func (m *Mouse) moveTo(target Point, scrollingAllowed bool) error {
 		m.ensureDebugOverlay()
 	}
 
+	bound := m.boundPage()
+
 	// Start from a plausible position instead of rod's default (0,0).
 	if err := m.initPosition(); err != nil {
 		return err
 	}
 
-	start := m.page.Mouse.Position()
+	start := m.posSnapshot()
+	if start == (Point{}) {
+		start = m.page.Mouse.Position()
+		m.state.mu.Lock()
+		m.state.pos = start
+		m.state.mu.Unlock()
+	}
 	straightDist := math.Hypot(target.X-start.X, target.Y-start.Y)
 
 	// Derive step count from distance so short moves finish quickly and long
@@ -186,7 +296,7 @@ func (m *Mouse) moveTo(target Point, scrollingAllowed bool) error {
 				Y: last.Y + (p.Y-last.Y)*ratio,
 			}
 
-			if err := m.page.Mouse.MoveTo(subP); err != nil {
+			if err := m.dispatchMouseMove(bound, subP); err != nil {
 				return err
 			}
 
@@ -235,7 +345,7 @@ func (m *Mouse) ClickWithOptions(el *rod.Element, button proto.InputMouseButton,
 	}
 	// Re-calculate the target after scrolling, because fixed/sticky elements
 	// move with the viewport and the old page-absolute coordinates are stale.
-	target, err := elementTarget(el)
+	target, err := elementTarget(el.Context(m.ctx))
 	if err != nil {
 		return err
 	}
@@ -248,13 +358,13 @@ func (m *Mouse) ClickWithOptions(el *rod.Element, button proto.InputMouseButton,
 		return err
 	}
 
-	if err := m.page.Mouse.Down(button, clickCount); err != nil {
+	if err := m.dispatchMouseButton(proto.InputDispatchMouseEventTypeMousePressed, button, clickCount); err != nil {
 		return err
 	}
 	if err := sleepWithContext(m.ctx, randDuration(40*time.Millisecond, 120*time.Millisecond)); err != nil {
 		return err
 	}
-	if err := m.page.Mouse.Up(button, clickCount); err != nil {
+	if err := m.dispatchMouseButton(proto.InputDispatchMouseEventTypeMouseReleased, button, clickCount); err != nil {
 		return err
 	}
 	return nil
@@ -265,7 +375,7 @@ func (m *Mouse) ClickWithOptions(el *rod.Element, button proto.InputMouseButton,
 // sticky/fixed elements) to avoid the overhead or infinite loops caused by
 // ScrollIntoView.
 func (m *Mouse) ClickNoScroll(el *rod.Element) error {
-	target, err := elementTarget(el)
+	target, err := elementTarget(el.Context(m.ctx))
 	if err != nil {
 		return err
 	}
@@ -278,13 +388,13 @@ func (m *Mouse) ClickNoScroll(el *rod.Element) error {
 		return err
 	}
 
-	if err := m.page.Mouse.Down(proto.InputMouseButtonLeft, 1); err != nil {
+	if err := m.dispatchMouseButton(proto.InputDispatchMouseEventTypeMousePressed, proto.InputMouseButtonLeft, 1); err != nil {
 		return err
 	}
 	if err := sleepWithContext(m.ctx, randDuration(40*time.Millisecond, 120*time.Millisecond)); err != nil {
 		return err
 	}
-	if err := m.page.Mouse.Up(proto.InputMouseButtonLeft, 1); err != nil {
+	if err := m.dispatchMouseButton(proto.InputDispatchMouseEventTypeMouseReleased, proto.InputMouseButtonLeft, 1); err != nil {
 		return err
 	}
 	return nil
@@ -298,13 +408,13 @@ func (m *Mouse) ClickPoint(target Point) error {
 	if err := sleepWithContext(m.ctx, randDuration(80*time.Millisecond, 350*time.Millisecond)); err != nil {
 		return err
 	}
-	if err := m.page.Mouse.Down(proto.InputMouseButtonLeft, 1); err != nil {
+	if err := m.dispatchMouseButton(proto.InputDispatchMouseEventTypeMousePressed, proto.InputMouseButtonLeft, 1); err != nil {
 		return err
 	}
 	if err := sleepWithContext(m.ctx, randDuration(40*time.Millisecond, 120*time.Millisecond)); err != nil {
 		return err
 	}
-	if err := m.page.Mouse.Up(proto.InputMouseButtonLeft, 1); err != nil {
+	if err := m.dispatchMouseButton(proto.InputDispatchMouseEventTypeMouseReleased, proto.InputMouseButtonLeft, 1); err != nil {
 		return err
 	}
 	return nil
@@ -322,7 +432,7 @@ func (m *Mouse) Scroll(deltaX, deltaY float64) error {
 	stepY := deltaY / float64(steps)
 
 	for i := 0; i < steps; i++ {
-		if err := m.page.Mouse.Scroll(stepX, stepY, 1); err != nil {
+		if err := m.dispatchMouseScroll(stepX, stepY); err != nil {
 			return err
 		}
 		// Variable scroll speed: faster at start, slower near end.
@@ -355,8 +465,9 @@ func (m *Mouse) ScrollIntoView(el *rod.Element) error {
 		clientHeight                  float64
 		viewportWidth, viewportHeight float64
 	}
+	boundEl := el.Context(m.ctx)
 	readProbe := func() (probe, error) {
-		obj, err := el.Eval(`() => {
+		obj, err := boundEl.Eval(`() => {
 			const r = this.getBoundingClientRect();
 			const target = {left: r.left, top: r.top, right: r.right, bottom: r.bottom};
 			const centerX = (r.left + r.right) / 2;
@@ -386,7 +497,7 @@ func (m *Mouse) ScrollIntoView(el *rod.Element) error {
 		if err != nil {
 			return probe{}, err
 		}
-		value, err := m.page.ObjectToJSON(obj)
+		value, err := m.boundPage().ObjectToJSON(obj)
 		if err != nil {
 			return probe{}, err
 		}
@@ -405,7 +516,7 @@ func (m *Mouse) ScrollIntoView(el *rod.Element) error {
 	}
 	windowScroll := func() error {
 		for i := 0; i < maxAttempts; i++ {
-			shape, err := el.Shape()
+			shape, err := boundEl.Shape()
 			if err != nil {
 				return err
 			}
@@ -491,7 +602,7 @@ func (m *Mouse) Hover(el *rod.Element) error {
 	if err := m.ScrollIntoView(el); err != nil {
 		return err
 	}
-	target, err := elementTarget(el)
+	target, err := elementTarget(el.Context(m.ctx))
 	if err != nil {
 		return err
 	}
@@ -503,7 +614,7 @@ func (m *Mouse) Hover(el *rod.Element) error {
 
 func (m *Mouse) scrollRandom() error {
 	deltaY := randomSign() * (m.cfg.Mouse.ScrollMin + rand.Float64()*(m.cfg.Mouse.ScrollMax-m.cfg.Mouse.ScrollMin))
-	return m.page.Mouse.Scroll(0, deltaY, 1)
+	return m.dispatchMouseScroll(0, deltaY)
 }
 
 type viewport struct {
@@ -512,7 +623,7 @@ type viewport struct {
 }
 
 func (m *Mouse) viewport() (viewport, error) {
-	obj, err := m.page.Eval(`() => ({
+	obj, err := m.boundPage().Eval(`() => ({
 		scrollX: window.scrollX,
 		scrollY: window.scrollY,
 		innerWidth: window.innerWidth,
@@ -521,7 +632,7 @@ func (m *Mouse) viewport() (viewport, error) {
 	if err != nil {
 		return viewport{}, err
 	}
-	res, err := m.page.ObjectToJSON(obj)
+	res, err := m.boundPage().ObjectToJSON(obj)
 	if err != nil {
 		return viewport{}, err
 	}
@@ -571,7 +682,7 @@ func (m *Mouse) scrollToVisible(target Point) error {
 // ensureDebugOverlay injects a canvas to visualize mouse movement.
 // It is only called when HUMANIZE_DEBUG=1.
 func (m *Mouse) ensureDebugOverlay() {
-	_, _ = m.page.Eval(`() => {
+	_, _ = m.boundPage().Eval(`() => {
 		if (window.__humanizeCanvas) return;
 		const canvas = document.createElement('canvas');
 		canvas.id = '__humanize_mouse_trace';
@@ -590,7 +701,7 @@ func (m *Mouse) ensureDebugOverlay() {
 
 // tracePoint draws a dot on the debug overlay at (x, y).
 func (m *Mouse) tracePoint(x, y float64, first bool) error {
-	_, err := m.page.Eval(`(x, y, first) => {
+	_, err := m.boundPage().Eval(`(x, y, first) => {
 		const ctx = window.__humanizeCtx;
 		if (!ctx) return;
 		ctx.fillStyle = first ? 'rgba(0, 255, 0, 0.8)' : 'rgba(255, 0, 0, 0.5)';

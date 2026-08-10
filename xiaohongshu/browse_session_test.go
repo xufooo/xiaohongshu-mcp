@@ -696,3 +696,82 @@ func TestTryCloseIdleRefusesWhenBusy(t *testing.T) {
 		t.Fatalf("busy session 不应触发 onRemove")
 	}
 }
+
+func TestSearchTimeoutIs180Seconds(t *testing.T) {
+	if sessionSearchTimeout != 180*time.Second {
+		t.Fatalf("sessionSearchTimeout = %v, 期望 180s", sessionSearchTimeout)
+	}
+}
+
+func TestSearchDeadlineKeepsEarlierCallerDeadline(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	searchCtx, searchCancel := context.WithTimeout(ctx, sessionSearchTimeout)
+	defer searchCancel()
+	if d, ok := searchCtx.Deadline(); !ok || time.Until(d) > 30*time.Second {
+		t.Fatalf("search ctx deadline 不应长于 caller 的 30s，得到 %v", time.Until(d))
+	}
+}
+
+func TestSearchDeadlineReleasesOperationToken(t *testing.T) {
+	session := &BrowseSession{
+		page:      &hrod.Page{},
+		opToken:   make(chan struct{}, 1),
+		closedCh:  make(chan struct{}),
+		expiresAt: time.Now().Add(time.Minute),
+		timeout:   time.Minute,
+		evalJS: func(ctx context.Context, p *hrod.Page, script string) (*proto.RuntimeRemoteObject, error) {
+			return &proto.RuntimeRemoteObject{
+				Type:  proto.RuntimeRemoteObjectTypeString,
+				Value: gson.NewFrom(`"{\"url\":\"https://www.xiaohongshu.com/explore\",\"scroll_y\":0}"`),
+			}, nil
+		},
+	}
+	defer session.close()
+	session.opToken <- struct{}{}
+	opCtx, err := session.beginLockedOperation(context.Background(), true)
+	if err != nil {
+		t.Fatalf("beginLockedOperation 失败: %v", err)
+	}
+	_ = opCtx
+	session.finishOperation(context.DeadlineExceeded)
+	select {
+	case <-session.opToken:
+	default:
+		t.Fatalf("deadline 后 opToken 应可再次取得")
+	}
+}
+
+func TestSearchDeadlineKeepsSession(t *testing.T) {
+	session := &BrowseSession{
+		page:      &hrod.Page{},
+		opToken:   make(chan struct{}, 1),
+		closedCh:  make(chan struct{}),
+		expiresAt: time.Now().Add(time.Minute),
+		timeout:   time.Minute,
+		evalJS: func(ctx context.Context, p *hrod.Page, script string) (*proto.RuntimeRemoteObject, error) {
+			return &proto.RuntimeRemoteObject{
+				Type:  proto.RuntimeRemoteObjectTypeString,
+				Value: gson.NewFrom(`"{\"url\":\"https://www.xiaohongshu.com/explore\",\"scroll_y\":0}"`),
+			}, nil
+		},
+	}
+	defer session.close()
+	session.opToken <- struct{}{}
+	before := session.expiresAt
+	opCtx, err := session.beginLockedOperation(context.Background(), true)
+	if err != nil {
+		t.Fatalf("beginLockedOperation 失败: %v", err)
+	}
+	_ = opCtx
+	session.finishOperation(context.DeadlineExceeded)
+	if session.closed {
+		t.Fatalf("deadline 不应关闭 session")
+	}
+	if session.page == nil {
+		t.Fatalf("deadline 不应清空 page")
+	}
+	if !session.expiresAt.After(before) {
+		t.Fatalf("deadline 后 TTL 应被续期")
+	}
+}

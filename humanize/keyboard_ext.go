@@ -8,34 +8,48 @@ import (
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/input"
 	"github.com/go-rod/rod/lib/proto"
+	"github.com/ysmood/gson"
 )
 
 // Keyboard provides human-like keyboard input.
 type Keyboard struct {
-	page     *rod.Page
-	cfg      Config
-	ctx      context.Context
-	mouse    *Mouse
-	lastEl   *rod.Element
+	page   *rod.Page
+	cfg    Config
+	ctx    context.Context
+	mouse  *Mouse
+	state  *inputState
+	lastEl *rod.Element
 }
 
 // NewKeyboard creates a new humanized keyboard wrapper.
 func NewKeyboard(page *rod.Page, cfg Config, mouse *Mouse) *Keyboard {
-	return &Keyboard{page: page, cfg: cfg, ctx: context.Background(), mouse: mouse}
+	var state *inputState
+	if mouse != nil {
+		state = mouse.state
+	} else {
+		state = newInputState()
+	}
+	return &Keyboard{page: page, cfg: cfg, ctx: context.Background(), mouse: mouse, state: state}
 }
 
 func (k *Keyboard) setContext(ctx context.Context) {
 	k.ctx = ctx
 }
 
+// boundPage 返回绑定当前 ctx 的 page clone。
+func (k *Keyboard) boundPage() *rod.Page {
+	return k.page.Context(k.ctx)
+}
+
 // Type types text into el with realistic timing, occasional typos, and corrections.
 // ASCII characters are typed key-by-key; CJK and other non-keyboard characters
 // are inserted via simulated voice/IME composition events.
 func (k *Keyboard) Type(el *rod.Element, text string) error {
+	boundEl := el.Context(k.ctx)
 	// Ensure the element is rendered before typing, so the cursor lands on a
 	// visible input area even when the page is long.
 	if k.mouse == nil {
-		if err := el.ScrollIntoView(); err != nil {
+		if err := boundEl.ScrollIntoView(); err != nil {
 			return err
 		}
 	} else if k.lastEl == el {
@@ -56,7 +70,7 @@ func (k *Keyboard) Type(el *rod.Element, text string) error {
 	}
 	k.lastEl = el
 
-	if err := el.Focus(); err != nil {
+	if err := boundEl.Focus(); err != nil {
 		return err
 	}
 
@@ -161,24 +175,38 @@ func (k *Keyboard) Press(key input.Key) error {
 }
 
 func (k *Keyboard) press(key input.Key) error {
-	return k.page.Keyboard.Press(key)
+	k.state.dispatchMu.Lock()
+	defer k.state.dispatchMu.Unlock()
+	bound := k.boundPage()
+	mods := k.state.modifiers() | key.Modifier()
+	if err := key.Encode(proto.InputDispatchKeyEventTypeKeyDown, mods).Call(bound); err != nil {
+		return err
+	}
+	k.state.mu.Lock()
+	k.state.pressed[key] = true
+	k.state.mu.Unlock()
+	return nil
 }
 
 // pressBackspace sends a Backspace key via CDP directly.
 func (k *Keyboard) pressBackspace() error {
+	k.state.dispatchMu.Lock()
+	defer k.state.dispatchMu.Unlock()
+	bound := k.boundPage()
 	return proto.InputDispatchKeyEvent{
 		Type:                  proto.InputDispatchKeyEventTypeKeyDown,
 		Key:                   "Backspace",
 		Code:                  "Backspace",
 		WindowsVirtualKeyCode: 8,
-	}.Call(k.page)
+		Modifiers:             k.state.modifiers(),
+	}.Call(bound)
 }
 
 // scrollToCursor scrolls the page so the text cursor remains visible while
 // typing long content. It is best-effort and ignores errors to avoid breaking
 // the typing flow.
 func (k *Keyboard) scrollToCursor(el *rod.Element) error {
-	obj, err := el.Eval(`() => {
+	obj, err := el.Context(k.ctx).Eval(`() => {
 		const sel = window.getSelection();
 		if (!sel || sel.rangeCount === 0) return null;
 		const range = sel.getRangeAt(0);
@@ -197,7 +225,7 @@ func (k *Keyboard) scrollToCursor(el *rod.Element) error {
 	if obj == nil {
 		return nil
 	}
-	val, err := k.page.ObjectToJSON(obj)
+	val, err := k.boundPage().ObjectToJSON(obj)
 	if err != nil {
 		return err
 	}
@@ -219,7 +247,27 @@ func (k *Keyboard) scrollToCursor(el *rod.Element) error {
 	}
 
 	if deltaY != 0 {
-		return k.page.Mouse.Scroll(0, deltaY, 1)
+		return k.dispatchScroll(0, deltaY)
+	}
+	return nil
+}
+
+// dispatchScroll 发送滚轮事件到绑定 ctx 的页面，不依赖 k.mouse。
+func (k *Keyboard) dispatchScroll(deltaX, deltaY float64) error {
+	k.state.dispatchMu.Lock()
+	defer k.state.dispatchMu.Unlock()
+	bound := k.boundPage()
+	snap := k.state.mouseSnapshot()
+	if err := proto.InputDispatchMouseEvent{
+		Type:      proto.InputDispatchMouseEventTypeMouseWheel,
+		X:         snap.pos.X,
+		Y:         snap.pos.Y,
+		DeltaX:    deltaX,
+		DeltaY:    deltaY,
+		Buttons:   gson.Int(snap.buttons),
+		Modifiers: snap.modifiers,
+	}.Call(bound); err != nil {
+		return err
 	}
 	return nil
 }
@@ -232,7 +280,8 @@ func (k *Keyboard) viewport() (struct {
 		scrollX, scrollY float64
 		width, height    float64
 	}
-	obj, err := k.page.Eval(`() => ({
+	bound := k.boundPage()
+	obj, err := bound.Eval(`() => ({
 		scrollX: window.scrollX,
 		scrollY: window.scrollY,
 		innerWidth: window.innerWidth,
@@ -241,7 +290,7 @@ func (k *Keyboard) viewport() (struct {
 	if err != nil {
 		return vp, err
 	}
-	res, err := k.page.ObjectToJSON(obj)
+	res, err := bound.ObjectToJSON(obj)
 	if err != nil {
 		return vp, err
 	}
@@ -254,7 +303,9 @@ func (k *Keyboard) viewport() (struct {
 
 // insertText inserts text directly via CDP Input.insertText.
 func (k *Keyboard) insertText(text string) error {
-	return proto.InputInsertText{Text: text}.Call(k.page)
+	k.state.dispatchMu.Lock()
+	defer k.state.dispatchMu.Unlock()
+	return proto.InputInsertText{Text: text}.Call(k.boundPage())
 }
 
 // insertCompositionText inserts CJK and other IME text through CDP so the
