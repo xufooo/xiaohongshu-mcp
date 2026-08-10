@@ -650,11 +650,13 @@ func waitForSearchInput(ctx context.Context, page *hrod.Page, counter *evalTimeo
 		} else {
 			last = probe
 			if probe.HasSearchInput && probe.SearchInputVisible {
-				input, err := page.Element(SelectorSelectedSearchInput)
-				if err == nil {
+				found, input, err := page.Has(SelectorSelectedSearchInput)
+				if err == nil && found {
 					return input, nil
 				}
-				lastErr = err
+				if err != nil {
+					lastErr = err
+				}
 			}
 		}
 
@@ -827,7 +829,7 @@ func (s *SearchAction) collectResults(ctx context.Context, page *hrod.Page, coun
 		appliedFilters = true
 	}
 
-	sources, sourceErr := extractSearchFeedSources(ctx, page, counter, true)
+	sources, sourceErr := extractSearchFeedSourcesWithRetry(ctx, page, counter, true)
 	domFeeds, stateFeeds := sources.DOM, sources.State
 	domErr, stateErr := sourceErr, sourceErr
 	if sourceErr == nil && len(domFeeds) == 0 {
@@ -863,7 +865,7 @@ func (s *SearchAction) collectResults(ctx context.Context, page *hrod.Page, coun
 }
 
 func collectSearchFeeds(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter) ([]Feed, error) {
-	sources, sourceErr := extractSearchFeedSources(ctx, page, counter, true)
+	sources, sourceErr := extractSearchFeedSourcesWithRetry(ctx, page, counter, true)
 	domFeeds, stateFeeds := sources.DOM, sources.State
 	domErr, stateErr := sourceErr, sourceErr
 	if sourceErr == nil && len(domFeeds) == 0 {
@@ -1469,4 +1471,12 @@ func isCurrentSearchPage(page *hrod.Page, keyword string) bool {
 	}
 	q := u.Query()
 	return q.Get("keyword") == keyword
+}
+
+func extractSearchFeedSourcesWithRetry(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, includeState bool) (searchFeedSources, error) {
+	sources, err := extractSearchFeedSources(ctx, page, counter, includeState)
+	if err != nil && isEvalTimeout(err) && !IsFatalRendererError(err) && ctx.Err() == nil {
+		sources, err = extractSearchFeedSources(ctx, page, counter, includeState)
+	}
+	return sources, err
 }
