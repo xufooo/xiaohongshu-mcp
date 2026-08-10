@@ -226,7 +226,21 @@ func (s *SearchAction) searchByUI(ctx context.Context, page *hrod.Page, counter 
 	}
 
 	if err := input.Click(proto.InputMouseButtonLeft, 1); err != nil {
-		return fmt.Errorf("点击搜索框失败: %w", err)
+		if strings.Contains(err.Error(), "no content quads") {
+			// SPA 重挂载可能导致句柄失效，等待后重取句柄重试一次。
+			if err := page.SleepRandom(200*time.Millisecond, 300*time.Millisecond); err != nil {
+				return fmt.Errorf("点击搜索框失败: %w", err)
+			}
+			input, err = waitForSearchInput(ctx, page, counter, searchInputWaitTimeout, searchSelector)
+			if err == nil {
+				err = input.Click(proto.InputMouseButtonLeft, 1)
+			}
+			if err != nil {
+				return fmt.Errorf("点击搜索框失败: %w", err)
+			}
+		} else {
+			return fmt.Errorf("点击搜索框失败: %w", err)
+		}
 	}
 	// Vue 控制的输入框需要先 JS 清空再键入，否则旧词残留
 	if _, err := evalJS(ctx, counter, page, `() => {
