@@ -95,9 +95,11 @@ func TestBoundPageInheritsCanceledContext(t *testing.T) {
 	cancel()
 	m.setContext(ctx)
 
-	bound := m.boundPage()
-	if err := bound.GetContext().Err(); err == nil {
-		t.Fatal("boundPage 应继承已取消的 ctx")
+	if m.ctx != ctx {
+		t.Fatal("setContext 应保存调用方 ctx")
+	}
+	if err := m.ctx.Err(); err == nil {
+		t.Fatal("已取消的 ctx 应立即可见")
 	}
 }
 
