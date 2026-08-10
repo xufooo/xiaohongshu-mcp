@@ -636,6 +636,7 @@ type searchInputProbe struct {
 	HasApp             bool     `json:"hasApp"`
 	HasSearchInput     bool     `json:"hasSearchInput"`
 	SearchInputVisible bool     `json:"searchInputVisible"`
+	SelectedSelector   string   `json:"selectedSelector"`
 	InputSummary       []string `json:"inputSummary"`
 	BodyText           string   `json:"bodyText"`
 }
@@ -664,7 +665,15 @@ func waitForSearchInput(ctx context.Context, page *hrod.Page, counter *evalTimeo
 		} else {
 			last = probe
 			if probe.HasSearchInput && probe.SearchInputVisible {
-				found, input, err := page.Has(SelectorSelectedSearchInput)
+				selector := probe.SelectedSelector
+				if selector == "" {
+					selector = SelectorSelectedSearchInput
+				}
+				found, input, err := page.Has(selector)
+				if (err != nil || !found) && selector != SelectorSelectedSearchInput {
+					// 稳定 ID 未命中时回退临时标记（SPA 重挂载窗口）。
+					found, input, err = page.Has(SelectorSelectedSearchInput)
+				}
 				if err == nil && found {
 					return input, nil
 				}
@@ -730,6 +739,10 @@ func probeSearchInput(ctx context.Context, page *hrod.Page, counter *evalTimeout
 		if (searchInput) {
 			searchInput.setAttribute("data-xhs-mcp-search-input", "selected");
 		}
+		const selectedSelector = searchInput && searchInput.id &&
+			(searchInput.id === "search-input" || searchInput.id === "search-input-in-feeds")
+			? "#" + searchInput.id
+			: "";
 		const inputs = Array.from(document.querySelectorAll('input, textarea, [contenteditable="true"]'))
 			.slice(0, 8)
 			.map((el) => label(el).replace(/\s+/g, " ").trim() + " visible=" + visible(el));
@@ -740,6 +753,7 @@ func probeSearchInput(ctx context.Context, page *hrod.Page, counter *evalTimeout
 			hasApp: !!document.querySelector("#app"),
 			hasSearchInput: !!searchInput,
 			searchInputVisible: !!searchInput && visible(searchInput),
+			selectedSelector: selectedSelector,
 			inputSummary: inputs,
 			bodyText: (document.body?.innerText || "").replace(/\s+/g, " ").slice(0, 180),
 		});
