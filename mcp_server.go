@@ -424,7 +424,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 	mcp.AddTool(server,
 		&mcp.Tool{
 			Name:        "open_note",
-			Description: "在页面会话内从搜索结果卡片点击打开笔记，并直接返回首屏标题和正文。result_ref可传搜索结果index或feed_id，xsec_token可选",
+			Description: "在页面会话内从搜索结果卡片点击打开笔记，并直接返回首屏标题、正文、作者、互动数据、首屏评论及笔记图片 URL（data.note.imageList[].urlDefault/urlPre，图文笔记）；如需理解图片内容，请将 data.note.imageList 中的 URL 交给 vision 工具。result_ref可传搜索结果index或feed_id，xsec_token可选",
 			Annotations: &mcp.ToolAnnotations{
 				Title:        "Open Note",
 				ReadOnlyHint: true,
@@ -440,7 +440,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 	mcp.AddTool(server,
 		&mcp.Tool{
 			Name:        "get_note_detail",
-			Description: "在页面会话当前已打开的笔记页面上继续读取当前可见评论。传 max_items 和 cursor 可分批加载更多评论（去重、支持子评论展开）。笔记首屏标题和正文已由 open_note 返回；图片、视频读取暂未实现。",
+			Description: "在页面会话当前已打开的笔记页面上继续读取当前可见评论；传 max_items 和 cursor 可分批加载更多评论（去重、支持子评论展开），cursor/hasMore/complete 等分页字段保留。不返回图片 URL（笔记图片 URL 已由 open_note 的 data.note.imageList 返回）。笔记首屏标题、正文已由 open_note 返回，本工具只读评论。",
 			Annotations: &mcp.ToolAnnotations{
 				Title:        "Get Note Detail",
 				ReadOnlyHint: true,

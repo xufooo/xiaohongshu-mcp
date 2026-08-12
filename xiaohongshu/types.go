@@ -133,11 +133,11 @@ type FeedDetail struct {
 	IPLocation   string            `json:"ipLocation"`
 	User         User              `json:"user"`
 	InteractInfo InteractInfo      `json:"interactInfo"`
-	ImageList    []DetailImageInfo `json:"imageList"`
+	ImageList    []DetailImageInfo `json:"imageList"` // 图文笔记的具体图片 URL，视频笔记不填
 }
 
-// OpenedNoteContent 是打开笔记时读取的首屏正文，包含笔记完整信息。
-// 后续 session_detail 不再重复读取这些内容。
+// OpenedNoteContent 是打开笔记时读取的首屏内容：正文、作者、互动数据。
+// 图片 URL 随 open_note 返回，是 agent 后续调用 vision 理解图片的直接输入。
 type OpenedNoteContent struct {
 	NoteID       string            `json:"note_id"`
 	Title        string            `json:"title"`
@@ -148,18 +148,10 @@ type OpenedNoteContent struct {
 	ImageList    []DetailImageInfo `json:"imageList"`
 }
 
-// SessionMediaReadStatus 明确说明按需媒体读取能力的当前状态。
-type SessionMediaReadStatus struct {
-	Implemented bool   `json:"implemented"`
-	Message     string `json:"message"`
-}
-
-// SessionDetailResponse 是打开后继续读取的结果；当前仅提供可见评论。
+// SessionDetailResponse 是打开后继续读取评论的结果；不承担图片读取。
 type SessionDetailResponse struct {
-	NoteID   string                 `json:"note_id"`
-	Comments []Comment              `json:"comments"`
-	Images   SessionMediaReadStatus `json:"images"`
-	Video    SessionMediaReadStatus `json:"video"`
+	NoteID   string    `json:"note_id"`
+	Comments []Comment `json:"comments"`
 }
 
 // DetailImageInfo 表示详情页的图片信息

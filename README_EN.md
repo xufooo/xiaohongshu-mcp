@@ -788,7 +788,7 @@ After successful connection, you can use the following MCP tools:
     - `publish_time`: Publish time - `unlimited` (default) | `last day` | `last week` | `last 6 months`
     - `search_scope`: Search scope - `unlimited` (default) | `viewed` | `not viewed` | `followed`
     - `location`: Location - `unlimited` (default) | `same city` | `nearby`
-- `open_note` - Click to open a note from search result cards, returns first-screen title and content (required: session_id, result_ref; optional: xsec_token)
+- `open_note` - Click to open a note from search result cards, returns first-screen title, content, author, interaction data, first-screen comments and note image URLs (`data.note.imageList[].urlDefault/urlPre`, image-text notes; can be handed to agent vision to understand image content) (required: session_id, result_ref; optional: xsec_token)
 - `get_note_detail` - Read comments of the currently opened note, supports batched loading (required: session_id; optional: max_items, cursor, click_more_replies, reply_limit, scroll_speed)
 - `go_back` - Go back to the previous page within the page session (required: session_id)
 - `like_feed` - Like / unlike the current session note (required: session_id; optional: unlike, confirm_token)
