@@ -985,3 +985,33 @@ func assertJSONAbsent(t *testing.T, raw []byte, key string) {
 		t.Errorf("响应不应包含 %q 占位字段: %s", key, raw)
 	}
 }
+
+func TestFilterStubContentImages(t *testing.T) {
+	images := []DetailImageInfo{
+		{Width: 400, Height: 300, URLDefault: "https://example.com/real.jpg"},
+		{Width: 48, Height: 48, URLDefault: "https://example.com/logo.jpg"},
+		{Width: 0, Height: 0, URLDefault: ""},
+	}
+	got := filterStubContentImages(images)
+	if len(got) != 1 || got[0].URLDefault != "https://example.com/real.jpg" {
+		t.Fatalf("过滤后应仅保留真实图片: %+v", got)
+	}
+	if filtered := filterStubContentImages([]DetailImageInfo{{Width: 48, Height: 48, URLDefault: "https://example.com/logo.jpg"}}); len(filtered) != 0 {
+		t.Fatalf("仅有 48x48 占位 logo 时正文图片结果应为空: %+v", filtered)
+	}
+}
+
+func TestMergePreferredImageLists(t *testing.T) {
+	state := []DetailImageInfo{{Width: 400, Height: 300, URLDefault: "https://example.com/state.jpg"}}
+	domStub := []DetailImageInfo{{Width: 48, Height: 48, URLDefault: "https://example.com/logo.jpg"}}
+	domReal := []DetailImageInfo{{Width: 800, Height: 600, URLDefault: "https://example.com/dom.jpg"}}
+	if got := mergePreferredImageLists(state, domStub); len(got) != 1 || got[0].URLDefault != "https://example.com/state.jpg" {
+		t.Fatalf("state 有图时应优先采用 state: %+v", got)
+	}
+	if got := mergePreferredImageLists(nil, domStub); len(got) != 0 {
+		t.Fatalf("state 不可用且 DOM 仅有 48x48 占位时应返回空: %+v", got)
+	}
+	if got := mergePreferredImageLists(nil, domReal); len(got) != 1 || got[0].URLDefault != "https://example.com/dom.jpg" {
+		t.Fatalf("state 不可用时保留 DOM 真实图片: %+v", got)
+	}
+}

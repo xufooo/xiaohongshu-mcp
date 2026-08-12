@@ -27,6 +27,8 @@ const (
 	browseSessionBackTimeout        = 15 * time.Second
 	healthCheckTimeout              = 5 * time.Second
 	sessionSearchTimeout            = 180 * time.Second
+	openedNoteStateImageWait        = 2 * time.Second
+	openedNoteStateImageInterval    = 250 * time.Millisecond
 )
 
 type BrowseSessionStatus string
@@ -741,6 +743,10 @@ func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, xsecToken strin
 	content := snapshot.Note
 	mergeOpenedNoteUserFromSearchResult(&content, feed)
 	comments := snapshot.Comments
+	content.ImageList, err = preferOpenedNoteImages(opCtx, page, counter, feed.ID, content.ImageList)
+	if err != nil {
+		return fail(err)
+	}
 
 	initialCommentIDs := make([]string, 0)
 	for i, c := range comments {
@@ -822,6 +828,58 @@ func mergeOpenedNoteUserFromSearchResult(content *OpenedNoteContent, feed Feed) 
 	if content.User.XsecToken == "" {
 		content.User.XsecToken = searchUser.XsecToken
 	}
+}
+
+func preferOpenedNoteImages(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, feedID string, domImages []DetailImageInfo) ([]DetailImageInfo, error) {
+	stateImages, err := readOpenedNoteStateImageList(ctx, page, counter, feedID)
+	if err != nil {
+		return nil, err
+	}
+	return mergePreferredImageLists(stateImages, domImages), nil
+}
+
+func readOpenedNoteStateImageList(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, feedID string) ([]DetailImageInfo, error) {
+	imageCtx, cancel := context.WithTimeout(ctx, openedNoteStateImageWait)
+	defer cancel()
+	for {
+		detail, err := readFeedDetailStateOnce(imageCtx, page, counter, feedID)
+		if err == nil && len(detail.Note.ImageList) > 0 {
+			return detail.Note.ImageList, nil
+		}
+		if err != nil && IsFatalRendererError(err) {
+			return nil, err
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if err := imageCtx.Err(); err != nil {
+			return nil, nil
+		}
+		if err := page.Sleep(openedNoteStateImageInterval); err != nil {
+			return nil, err
+		}
+	}
+}
+
+func mergePreferredImageLists(stateImages, domImages []DetailImageInfo) []DetailImageInfo {
+	if len(stateImages) > 0 {
+		return stateImages
+	}
+	return filterStubContentImages(domImages)
+}
+
+func filterStubContentImages(images []DetailImageInfo) []DetailImageInfo {
+	filtered := make([]DetailImageInfo, 0, len(images))
+	for _, img := range images {
+		if strings.TrimSpace(img.URLDefault) == "" {
+			continue
+		}
+		if img.Width == 48 && img.Height == 48 {
+			continue
+		}
+		filtered = append(filtered, img)
+	}
+	return filtered
 }
 
 func (s *BrowseSession) Detail(ctx context.Context, _ bool, _ int) (detail *SessionDetailResponse, err error) {
