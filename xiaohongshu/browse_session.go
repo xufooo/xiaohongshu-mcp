@@ -51,12 +51,11 @@ type BrowseSessionInfo struct {
 	ExpiresAt     time.Time       `json:"expires_at"`
 }
 
-// SessionOpenNoteResponse 在打开笔记后直接返回首屏标题和正文。
+// SessionOpenNoteResponse 在打开笔记后直接返回首屏正文、作者、互动数据、首屏评论及笔记图片 URL。
 type SessionOpenNoteResponse struct {
 	BrowseSessionInfo
-	Note     OpenedNoteContent      `json:"note"`
-	Comments []Comment              `json:"comments"`
-	Media    SessionMediaReadStatus `json:"media"`
+	Note     OpenedNoteContent `json:"note"`
+	Comments []Comment         `json:"comments"`
 }
 
 type CreateBrowseSessionResult struct {
@@ -764,7 +763,6 @@ func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, xsecToken strin
 		BrowseSessionInfo: info,
 		Note:              content,
 		Comments:          comments,
-		Media:             SessionMediaReadStatus{Implemented: false, Message: "图片和视频阅读功能尚未实现，后续由 get_note_detail 支持"},
 	}, nil
 }
 
@@ -855,12 +853,9 @@ func (s *BrowseSession) Detail(ctx context.Context, _ bool, _ int) (detail *Sess
 	s.recordTimelineLocked("detail", feedID, "ok", time.Now(), fmt.Sprintf("visible_comments=%d", len(comments)))
 	s.mu.Unlock()
 	s.probeWatchdogSelectorsForKind(opCtx, XHSReadyDetail, feedID)
-	unimplemented := SessionMediaReadStatus{Implemented: false, Message: "暂未实现"}
 	return &SessionDetailResponse{
 		NoteID:   feedID,
 		Comments: comments,
-		Images:   unimplemented,
-		Video:    unimplemented,
 	}, nil
 }
 
@@ -2278,7 +2273,7 @@ func (s *BrowseSession) currentStateLocked(kind XHSReadyKind, resultsCount int, 
 func (s *BrowseSession) nextHintLocked(resultsCount int) string {
 	switch {
 	case s.read:
-		return "笔记已打开：首屏标题/正文/首页评论/作者/互动数据/图片列表已在 open_note 返回。可继续操作：get_note_detail(分批加载更多评论)、like_feed、favorite_feed、comment_feed、reply_comment_in_feed(回复当前笔记中的评论)。图片和视频浏览功能尚未实现"
+		return "笔记已打开：首屏标题/正文/作者/互动数据/首页评论/笔记图片 URL（data.note.imageList[].urlDefault/urlPre）已在 open_note 返回；如需理解图片内容，请将 data.note.imageList 中的 URL 交给 vision 工具。可继续操作：get_note_detail(分批加载更多评论)、like_feed、favorite_feed、comment_feed、reply_comment_in_feed(回复当前笔记中的评论)"
 	case s.opened:
 		return "笔记已打开，内容尚未读取完成；可 go_back 返回搜索结果"
 	case s.notification.active:

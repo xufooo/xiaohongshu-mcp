@@ -1,7 +1,9 @@
 package xiaohongshu
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -773,5 +775,213 @@ func TestSearchDeadlineKeepsSession(t *testing.T) {
 	}
 	if !session.expiresAt.After(before) {
 		t.Fatalf("deadline 后 TTL 应被续期")
+	}
+}
+
+// externalMCPResult 等价复刻 mcp_handlers.go 的 jsonMCPResultWithTools 外部 JSON 包装结构，
+// 使测试锁定 agent 实际看到的真实外部路径（data.*）。
+type externalMCPResult struct {
+	Data           any      `json:"data"`
+	AvailableTools []string `json:"available_tools"`
+}
+
+// TestOpenNoteJSONImageListContract 锁定 open_note 外部 JSON：正文/作者/互动/首屏评论保留，
+// 且 data.note.imageList[].urlDefault/urlPre 必须随 open_note 返回；不含 media/implemented 占位。
+func TestOpenNoteJSONImageListContract(t *testing.T) {
+	open := &SessionOpenNoteResponse{
+		BrowseSessionInfo: BrowseSessionInfo{ID: "s1", Opened: true, Read: true},
+		Note: OpenedNoteContent{
+			NoteID:       "n1",
+			Title:        "标题",
+			Desc:         "正文",
+			Type:         "normal",
+			User:         User{Nickname: "作者"},
+			InteractInfo: InteractInfo{LikedCount: "10"},
+			ImageList: []DetailImageInfo{
+				{Width: 400, Height: 300, URLDefault: "https://example.com/image-default.jpg", URLPre: "https://example.com/image-pre.jpg"},
+			},
+		},
+		Comments: []Comment{{ID: "c1"}},
+	}
+	raw, err := json.Marshal(externalMCPResult{Data: open, AvailableTools: []string{"get_note_detail"}})
+	if err != nil {
+		t.Fatalf("open_note 外部 JSON 序列化失败: %v", err)
+	}
+	for _, absent := range []string{"media", "implemented", "video", "images"} {
+		assertJSONAbsent(t, raw, absent)
+	}
+	var payload struct {
+		Data struct {
+			Note struct {
+				NoteID       string        `json:"note_id"`
+				Title        string        `json:"title"`
+				Desc         string        `json:"desc"`
+				Type         string        `json:"type"`
+				User         User          `json:"user"`
+				InteractInfo InteractInfo  `json:"interactInfo"`
+				ImageList    []struct {
+					URLDefault string `json:"urlDefault"`
+					URLPre     string `json:"urlPre"`
+				} `json:"imageList"`
+			} `json:"note"`
+			Comments []Comment `json:"comments"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("open_note 外部 JSON 解析失败: %v", err)
+	}
+	note := payload.Data.Note
+	if note.NoteID != "n1" || note.Title != "标题" || note.Desc != "正文" {
+		t.Fatalf("open_note data.note 基础信息/正文缺失: %+v", note)
+	}
+	if note.User.Nickname != "作者" || note.InteractInfo.LikedCount != "10" {
+		t.Fatalf("open_note 作者/互动数据缺失: %+v", note)
+	}
+	if len(payload.Data.Comments) != 1 || payload.Data.Comments[0].ID != "c1" {
+		t.Fatalf("open_note 首屏评论缺失: %+v", payload.Data.Comments)
+	}
+	images := note.ImageList
+	if len(images) != 1 || images[0].URLDefault != "https://example.com/image-default.jpg" || images[0].URLPre != "https://example.com/image-pre.jpg" {
+		t.Fatalf("open_note data.note.imageList[].urlDefault/urlPre 缺失或不准确: %+v", images)
+	}
+}
+
+// TestGetNoteDetailSessionDetailNoMediaPlaceholders 锁定无分页 get_note_detail 外部 JSON：
+// 只读评论，data.note_id/data.comments 保留，不含 images/video/implemented/media 占位字段。
+func TestGetNoteDetailSessionDetailNoMediaPlaceholders(t *testing.T) {
+	detail := &SessionDetailResponse{
+		NoteID:   "n1",
+		Comments: []Comment{{ID: "c1"}, {ID: "c2"}},
+	}
+	raw, err := json.Marshal(externalMCPResult{Data: detail, AvailableTools: []string{"get_note_detail"}})
+	if err != nil {
+		t.Fatalf("get_note_detail 外部 JSON 序列化失败: %v", err)
+	}
+	for _, absent := range []string{"imageList", "images", "media", "implemented", "video"} {
+		assertJSONAbsent(t, raw, absent)
+	}
+	var payload struct {
+		Data struct {
+			NoteID   string    `json:"note_id"`
+			Comments []Comment `json:"comments"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("get_note_detail 外部 JSON 解析失败: %v", err)
+	}
+	if payload.Data.NoteID != "n1" || len(payload.Data.Comments) != 2 {
+		t.Fatalf("get_note_detail 外部 JSON 应保留 data.note_id 与 data.comments: %+v", payload.Data)
+	}
+}
+
+// TestGetNoteDetailPaginationKeepsComments 锁定分页 get_note_detail 外部 JSON：
+// 真实路径为 data.data.comments.cursor/hasMore/complete（详情数据嵌套在 service FeedDetailResponse.data 内），
+// 评论分页字段保留，不含媒体占位字段。
+func TestGetNoteDetailPaginationKeepsComments(t *testing.T) {
+	paged := struct {
+		FeedID string             `json:"feed_id"`
+		Data   FeedDetailResponse `json:"data"`
+	}{
+		FeedID: "n1",
+		Data: FeedDetailResponse{
+			Note: FeedDetail{NoteID: "n1"},
+			Comments: CommentList{
+				List:             []Comment{{ID: "c1"}},
+				Cursor:           "cc_n1_1",
+				HasMore:          true,
+				TotalItems:       3,
+				SeenCount:        1,
+				Complete:         false,
+				IncompleteReason: "more_comments_available",
+			},
+		},
+	}
+	raw, err := json.Marshal(externalMCPResult{Data: paged, AvailableTools: []string{"get_note_detail"}})
+	if err != nil {
+		t.Fatalf("get_note_detail 分页外部 JSON 序列化失败: %v", err)
+	}
+	for _, absent := range []string{"images", "media", "implemented", "video"} {
+		assertJSONAbsent(t, raw, absent)
+	}
+	var payload struct {
+		Data struct {
+			Data struct {
+				Comments CommentList `json:"comments"`
+			} `json:"data"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("get_note_detail 分页外部 JSON 解析失败: %v", err)
+	}
+	comments := payload.Data.Data.Comments
+	if comments.Cursor != "cc_n1_1" || !comments.HasMore || comments.TotalItems != 3 || comments.SeenCount != 1 ||
+		comments.Complete || comments.IncompleteReason != "more_comments_available" || len(comments.List) != 1 {
+		t.Fatalf("data.data.comments 分页字段未保留: %+v", comments)
+	}
+}
+
+// TestVideoNoteFieldPreserved 锁定搜索/发布链路合法视频字段：解析对象并精确断言 noteCard.video.capa.duration。
+func TestVideoNoteFieldPreserved(t *testing.T) {
+	feed := Feed{
+		ID: "v1",
+		NoteCard: NoteCard{
+			Type:  "video",
+			Video: &Video{Capa: VideoCapability{Duration: 360}},
+		},
+	}
+	raw, err := json.Marshal(feed)
+	if err != nil {
+		t.Fatalf("feed 序列化失败: %v", err)
+	}
+	var payload struct {
+		NoteCard struct {
+			Video *struct {
+				Capa *struct {
+					Duration int `json:"duration"`
+				} `json:"capa"`
+			} `json:"video"`
+		} `json:"noteCard"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("feed 解析失败: %v", err)
+	}
+	if payload.NoteCard.Video == nil || payload.NoteCard.Video.Capa == nil || payload.NoteCard.Video.Capa.Duration != 360 {
+		t.Fatalf("noteCard.video.capa.duration 缺失或不准确: %s", raw)
+	}
+}
+
+// TestFeedDetailKeepsImageList 锁定详情页 FeedDetail.imageList 合法字段不被误删。
+func TestFeedDetailKeepsImageList(t *testing.T) {
+	detail := FeedDetail{
+		NoteID: "n1",
+		ImageList: []DetailImageInfo{
+			{Width: 400, Height: 300, URLDefault: "https://example.com/d.jpg", URLPre: "https://example.com/p.jpg"},
+		},
+	}
+	raw, err := json.Marshal(detail)
+	if err != nil {
+		t.Fatalf("FeedDetail 序列化失败: %v", err)
+	}
+	var payload struct {
+		NoteID    string `json:"noteId"`
+		ImageList []struct {
+			URLDefault string `json:"urlDefault"`
+			URLPre     string `json:"urlPre"`
+		} `json:"imageList"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("FeedDetail 解析失败: %v", err)
+	}
+	if payload.NoteID != "n1" || len(payload.ImageList) != 1 ||
+		payload.ImageList[0].URLDefault != "https://example.com/d.jpg" || payload.ImageList[0].URLPre != "https://example.com/p.jpg" {
+		t.Fatalf("FeedDetail.imageList 缺失或不准确: %s", raw)
+	}
+}
+
+// assertJSONAbsent 断言外部 JSON 字节中不存在指定 key 的占位字段。
+func assertJSONAbsent(t *testing.T, raw []byte, key string) {
+	t.Helper()
+	if bytes.Contains(raw, []byte(`"`+key+`"`)) {
+		t.Errorf("响应不应包含 %q 占位字段: %s", key, raw)
 	}
 }

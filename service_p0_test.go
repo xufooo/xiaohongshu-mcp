@@ -233,3 +233,72 @@ func TestTryReuseSessionCanceledContextDoesNotDegrade(t *testing.T) {
 		t.Fatalf("取消请求不应关闭 session: %v", err)
 	}
 }
+
+// TestJsonMCPResultWithToolsOpenNoteImagePath 实际经过项目的 jsonMCPResultWithTools 外部包装，
+// 断言 open_note 图片真实外部路径为 data.note.imageList[].urlDefault/urlPre。
+func TestJsonMCPResultWithToolsOpenNoteImagePath(t *testing.T) {
+	open := &xiaohongshu.SessionOpenNoteResponse{
+		BrowseSessionInfo: xiaohongshu.BrowseSessionInfo{ID: "s1", Opened: true, Read: true},
+		Note: xiaohongshu.OpenedNoteContent{
+			NoteID: "n1",
+			ImageList: []xiaohongshu.DetailImageInfo{
+				{Width: 400, Height: 300, URLDefault: "https://example.com/image-default.jpg", URLPre: "https://example.com/image-pre.jpg"},
+			},
+		},
+		Comments: []xiaohongshu.Comment{{ID: "c1"}},
+	}
+	result := jsonMCPResultWithTools(open, afterOpenTools)
+	if result.IsError || len(result.Content) != 1 {
+		t.Fatalf("jsonMCPResultWithTools 结果异常: %+v", result)
+	}
+	raw := []byte(result.Content[0].Text)
+	var payload struct {
+		Data struct {
+			Note struct {
+				ImageList []struct {
+					URLDefault string `json:"urlDefault"`
+					URLPre     string `json:"urlPre"`
+				} `json:"imageList"`
+			} `json:"note"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("外部 JSON 解析失败: %v\n%s", err, result.Content[0].Text)
+	}
+	images := payload.Data.Note.ImageList
+	if len(images) != 1 || images[0].URLDefault != "https://example.com/image-default.jpg" || images[0].URLPre != "https://example.com/image-pre.jpg" {
+		t.Fatalf("open_note 图片路径应为 data.note.imageList[].urlDefault/urlPre: %s", result.Content[0].Text)
+	}
+}
+
+// TestPublishArgsKeepImagesVideoKeys 锁定发布参数合法 key：publish_content 的 images 与 publish_with_video 的 video 不得误删。
+func TestPublishArgsKeepImagesVideoKeys(t *testing.T) {
+	content := PublishContentArgs{Title: "图文", Content: "正文", Images: []string{"/tmp/a.jpg"}}
+	raw, err := json.Marshal(content)
+	if err != nil {
+		t.Fatalf("publish_content 序列化失败: %v", err)
+	}
+	var payload struct {
+		Images []string `json:"images"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("publish_content 解析失败: %v", err)
+	}
+	if len(payload.Images) != 1 || payload.Images[0] != "/tmp/a.jpg" {
+		t.Fatalf("publish_content images key 缺失或不准确: %s", raw)
+	}
+	video := PublishVideoArgs{Title: "视频", Content: "正文", Video: "/tmp/v.mp4"}
+	rawV, err := json.Marshal(video)
+	if err != nil {
+		t.Fatalf("publish_with_video 序列化失败: %v", err)
+	}
+	var vp struct {
+		Video string `json:"video"`
+	}
+	if err := json.Unmarshal(rawV, &vp); err != nil {
+		t.Fatalf("publish_with_video 解析失败: %v", err)
+	}
+	if vp.Video != "/tmp/v.mp4" {
+		t.Fatalf("publish_with_video video key 缺失或不准确: %s", rawV)
+	}
+}

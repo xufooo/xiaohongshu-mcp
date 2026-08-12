@@ -887,7 +887,7 @@ npx mcporter list xiaohongshu-mcp
     - `publish_time`: 发布时间 - `不限`（默认）| `一天内` | `一周内` | `半年内`
     - `search_scope`: 搜索范围 - `不限`（默认）| `已看过` | `未看过` | `已关注`
     - `location`: 位置距离 - `不限`（默认）| `同城` | `附近`
-- `open_note` - 从搜索结果卡片点击打开笔记，返回首屏标题和正文（必需：session_id, result_ref；可选：xsec_token）
+- `open_note` - 从搜索结果卡片点击打开笔记，返回首屏标题、正文、作者、互动数据、首屏评论及笔记图片 URL（`data.note.imageList[].urlDefault/urlPre`，图文笔记；可交给 agent vision 理解图片内容）（必需：session_id, result_ref；可选：xsec_token）
 - `get_note_detail` - 读取当前已打开笔记的评论，支持分批加载（必需：session_id；可选：max_items, cursor, click_more_replies, reply_limit, scroll_speed）
 - `go_back` - 在页面会话内后退到上一页（必需：session_id）
 - `like_feed` - 点赞/取消点赞当前 session 笔记（必需：session_id；可选：unlike, confirm_token）
