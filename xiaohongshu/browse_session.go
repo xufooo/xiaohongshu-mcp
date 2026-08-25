@@ -224,6 +224,7 @@ type BrowseSession struct {
 	timeline          []BrowseSessionEvent
 	initialCommentIDs []string
 	notification      browseNotificationState
+	openedNoteContent OpenedNoteContent
 }
 
 type BrowseSessionManager struct {
@@ -763,7 +764,7 @@ func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, xsecToken strin
 		_ = s.state.RecordOpen(feed.ID, OpenSourceSearch)
 		_ = s.state.RecordRead(feed.ID, 0)
 	}
-	info := s.commitOpenedNote(feed, sourceURL, resultRef, initialCommentIDs)
+	info := s.commitOpenedNote(feed, sourceURL, resultRef, initialCommentIDs, content)
 	s.probeWatchdogSelectorsForKind(opCtx, XHSReadyDetail, feed.ID)
 	return &SessionOpenNoteResponse{
 		BrowseSessionInfo: info,
@@ -772,7 +773,35 @@ func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, xsecToken strin
 	}, nil
 }
 
-func (s *BrowseSession) commitOpenedNote(feed Feed, sourceURL, resultRef string, initialCommentIDs []string) BrowseSessionInfo {
+func cloneOpenedNoteContent(src OpenedNoteContent) OpenedNoteContent {
+	clone := src
+	if len(src.ImageList) > 0 {
+		clone.ImageList = make([]DetailImageInfo, len(src.ImageList))
+		copy(clone.ImageList, src.ImageList)
+	}
+	return clone
+}
+
+func (s *BrowseSession) openedNoteFeedDetail(feedID string) FeedDetail {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.opened || s.currentFeedID != feedID || s.openedNoteContent.NoteID != feedID {
+		return FeedDetail{}
+	}
+	content := cloneOpenedNoteContent(s.openedNoteContent)
+	return FeedDetail{
+		NoteID:       content.NoteID,
+		XsecToken:    s.currentXsecToken,
+		Title:        content.Title,
+		Desc:         content.Desc,
+		Type:         content.Type,
+		User:         content.User,
+		InteractInfo: content.InteractInfo,
+		ImageList:    append([]DetailImageInfo(nil), content.ImageList...),
+	}
+}
+
+func (s *BrowseSession) commitOpenedNote(feed Feed, sourceURL, resultRef string, initialCommentIDs []string, content OpenedNoteContent) BrowseSessionInfo {
 	s.mu.Lock()
 	if sourceURL != "" {
 		s.sourceURL = sourceURL
@@ -783,6 +812,7 @@ func (s *BrowseSession) commitOpenedNote(feed Feed, sourceURL, resultRef string,
 	s.read = true
 	s.seenNotes[feed.ID] = true
 	s.initialCommentIDs = append([]string(nil), initialCommentIDs...)
+	s.openedNoteContent = cloneOpenedNoteContent(content)
 	s.resetNotificationSurfaceLocked()
 	s.recordTimelineLocked("open_note", feed.ID, "ok", time.Now(), "opened from search result "+resultRef)
 	s.recordTimelineLocked("read_note", feed.ID, "ok", time.Now(), "content read from search result "+resultRef)
@@ -1014,6 +1044,16 @@ func runDetailCommentsBatch(opCtx context.Context, loader func(context.Context) 
 	return comments, nextCursor, hasMore, nil
 }
 
+func detailBatchResponse(note FeedDetail, comments []Comment, hasMore bool) *FeedDetailResponse {
+	return &FeedDetailResponse{
+		Note: note,
+		Comments: CommentList{
+			List:    comments,
+			HasMore: hasMore,
+		},
+	}
+}
+
 func (s *BrowseSession) completeDetailCommentsBatch(
 	opCtx context.Context,
 	page *hrod.Page,
@@ -1032,12 +1072,9 @@ func (s *BrowseSession) completeDetailCommentsBatch(
 	if nextCursor != nil && nextCursor.FeedID == "" {
 		nextCursor.FeedID = feedID
 	}
-	resp := &FeedDetailResponse{
-		Comments: CommentList{
-			List:    comments,
-			HasMore: hasMore,
-		},
-	}
+
+	note := s.openedNoteFeedDetail(feedID)
+	resp := detailBatchResponse(note, comments, hasMore)
 	seenCount := len(comments)
 	if nextCursor != nil {
 		seenCount = len(nextCursor.ReturnedIDs)
