@@ -15,19 +15,25 @@ import (
 // #collected→true / #collect→false。use 缺失、未知 href 或任一 wrapper 缺失
 // 均返回 null（unknown，fail-closed）。
 const interactStateJS = `
+	const hrefHash = (href) => {
+		const idx = href.indexOf("#");
+		return idx >= 0 ? href.slice(idx) : "";
+	};
 	const likeWrapper = document.querySelector(likeSel);
 	const collectWrapper = document.querySelector(collectSel);
 	if (!likeWrapper || !collectWrapper) return null;
 	const likeUse = likeWrapper.querySelector("use");
 	if (!likeUse) return null;
-	const likeHref = likeUse.getAttribute("xlink:href") || likeUse.getAttribute("href") || "";
+	const likeRaw = likeUse.getAttribute("xlink:href") || likeUse.getAttribute("href") || "";
+	const likeHref = hrefHash(likeRaw);
 	let liked;
 	if (likeHref === "#liked") liked = true;
 	else if (likeHref === "#like") liked = false;
 	else return null;
 	const collectUse = collectWrapper.querySelector("use");
 	if (!collectUse) return null;
-	const collectHref = collectUse.getAttribute("xlink:href") || collectUse.getAttribute("href") || "";
+	const collectRaw = collectUse.getAttribute("xlink:href") || collectUse.getAttribute("href") || "";
+	const collectHref = hrefHash(collectRaw);
 	let collected;
 	if (collectHref === "#collected") collected = true;
 	else if (collectHref === "#collect") collected = false;
