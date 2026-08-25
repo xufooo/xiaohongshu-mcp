@@ -350,6 +350,54 @@ func TestFinishOperationKeepsDeadlineNonFatal(t *testing.T) {
 	}
 }
 
+func TestDetailBatchResponseKeepsNote(t *testing.T) {
+	note := FeedDetail{NoteID: "feed-1", Title: "title", ImageList: []DetailImageInfo{{URLDefault: "default"}}}
+	resp := detailBatchResponse(note, []Comment{{ID: "comment-1"}}, true)
+	if resp.Note.NoteID != "feed-1" || resp.Note.Title != "title" || len(resp.Note.ImageList) != 1 {
+		t.Fatalf("详情响应丢失 note: %+v", resp.Note)
+	}
+	if len(resp.Comments.List) != 1 || resp.Comments.List[0].ID != "comment-1" || !resp.Comments.HasMore {
+		t.Fatalf("详情响应评论字段错误: %+v", resp.Comments)
+	}
+}
+
+func TestOpenedNoteFeedDetailCopiesContent(t *testing.T) {
+	session := &BrowseSession{seenNotes: map[string]bool{}}
+	content := OpenedNoteContent{
+		NoteID:       "feed-1",
+		Title:        "title",
+		Desc:         "desc",
+		Type:         "normal",
+		User:         User{UserID: "user-1", XsecToken: "author-token"},
+		InteractInfo: InteractInfo{Liked: true, Collected: true, CommentCount: "3"},
+		ImageList:    []DetailImageInfo{{URLDefault: "default", URLPre: "pre"}},
+	}
+	session.commitOpenedNote(Feed{ID: "feed-1", XsecToken: "note-token"}, "", "", nil, content)
+	content.ImageList[0].URLDefault = "mutated-input"
+
+	got := session.openedNoteFeedDetail("feed-1")
+	if got.NoteID != "feed-1" || got.Title != "title" || got.Desc != "desc" || got.Type != "normal" {
+		t.Fatalf("正文映射错误: %+v", got)
+	}
+	if got.XsecToken != "note-token" || got.User.XsecToken != "author-token" || got.User.UserID != "user-1" {
+		t.Fatalf("token或作者映射错误: %+v", got)
+	}
+	if !got.InteractInfo.Liked || !got.InteractInfo.Collected || got.InteractInfo.CommentCount != "3" {
+		t.Fatalf("互动信息映射错误: %+v", got.InteractInfo)
+	}
+	if len(got.ImageList) != 1 || got.ImageList[0].URLDefault != "default" {
+		t.Fatalf("写入时未隔离 ImageList: %+v", got.ImageList)
+	}
+	got.ImageList[0].URLDefault = "mutated-output"
+	again := session.openedNoteFeedDetail("feed-1")
+	if again.ImageList[0].URLDefault != "default" {
+		t.Fatalf("读取时未隔离 ImageList: %+v", again.ImageList)
+	}
+	if got := session.openedNoteFeedDetail("other-feed"); got.NoteID != "" || got.Title != "" || got.Desc != "" || len(got.ImageList) != 0 || got.XsecToken != "" {
+		t.Fatalf("feed 不匹配时应返回零值: %+v", got)
+	}
+}
+
 func TestOpenNoteAtomicCommit(t *testing.T) {
 	session := &BrowseSession{
 		seenNotes:         map[string]bool{"old": true},
@@ -357,7 +405,8 @@ func TestOpenNoteAtomicCommit(t *testing.T) {
 		notification:      browseNotificationState{active: true},
 	}
 	feed := Feed{ID: "feed-1", XsecToken: "token-1"}
-	info := session.commitOpenedNote(feed, "https://example.test/search", "ref-1", []string{"c1", "c2"})
+	content := OpenedNoteContent{NoteID: "feed-1", Title: "t", Desc: "d", Type: "normal"}
+	info := session.commitOpenedNote(feed, "https://example.test/search", "ref-1", []string{"c1", "c2"}, content)
 	if !info.Opened || !info.Read || !info.SeenNotes[feed.ID] {
 		t.Fatalf("原子提交状态错误: %+v", info)
 	}

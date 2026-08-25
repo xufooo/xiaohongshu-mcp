@@ -440,7 +440,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 	mcp.AddTool(server,
 		&mcp.Tool{
 			Name:        "get_note_detail",
-			Description: "在页面会话当前已打开的笔记页面上继续读取当前可见评论；传 max_items 和 cursor 可分批加载更多评论（去重、支持子评论展开），cursor/hasMore/complete 等分页字段保留。不返回图片 URL（笔记图片 URL 已由 open_note 的 data.note.imageList 返回）。笔记首屏标题、正文已由 open_note 返回，本工具只读评论。",
+			Description: "在页面会话当前已打开的笔记页面上继续读取当前可见评论；传 max_items 和 cursor 可分批加载更多评论（去重、支持子评论展开），cursor/hasMore/complete 等分页字段保留。笔记首屏正文、作者、互动数据和图片 URL 已由 open_note 返回；本工具在分页结果中继续返回同一笔记的 note 字段，并补充评论分页数据。",
 			Annotations: &mcp.ToolAnnotations{
 				Title:        "Get Note Detail",
 				ReadOnlyHint: true,
