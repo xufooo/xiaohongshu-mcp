@@ -653,7 +653,7 @@ func waitForSearchInput(ctx context.Context, page *hrod.Page, counter *evalTimeo
 		}
 
 		probeStartedAt := time.Now()
-		probe, err := probeSearchInput(ctx, page, counter, searchSelector, SelectorSearchInputInFeeds+", "+SelectorSearchInputInSearchResult)
+		probe, err := probeSearchInput(ctx, page, counter, searchSelector, SelectorSearchInputInFeeds+", "+SelectorSearchInputInSearchResult+", #search-input-ai")
 		if rec != nil {
 			rec.recordInputProbe(time.Since(probeStartedAt).Milliseconds(), err)
 		}
@@ -747,7 +747,7 @@ func probeSearchInput(ctx context.Context, page *hrod.Page, counter *evalTimeout
 			searchInput.setAttribute("data-xhs-mcp-search-input", "selected");
 		}
 		const selectedSelector = searchInput && searchInput.id &&
-			(searchInput.id === "search-input" || searchInput.id === "search-input-in-feeds")
+			(searchInput.id === "search-input" || searchInput.id === "search-input-in-feeds" || searchInput.id === "search-input-ai")
 			? "#" + searchInput.id
 			: "";
 		const inputs = Array.from(document.querySelectorAll('input, textarea, [contenteditable="true"]'))
