@@ -71,6 +71,12 @@ func TestSearchFallbackNavigatesWhenNotOnSearchPage(t *testing.T) {
 	}
 }
 
+func TestSelectorSearchInputCoversTextarea(t *testing.T) {
+	if !strings.Contains(SelectorSearchInput, "textarea.search-input-ai") {
+		t.Fatalf("SelectorSearchInput must include textarea.search-input-ai, got: %s", SelectorSearchInput)
+	}
+}
+
 func TestIsSearchResultPage(t *testing.T) {
 	cases := []struct {
 		name string
