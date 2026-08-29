@@ -179,6 +179,20 @@ func probeWatchdogSelectors(page *hrod.Page, opts XHSReadyOptions) {
 	wd.ProbeForKind(page, opts.Kind)
 }
 
+func xhsReadyProbeSelectorArgs() []interface{} {
+	return []interface{}{
+		SelectorSearchInput,
+		SelectorSearchResult,
+		SelectorFeedCard,
+		SelectorFeedDetailReady,
+		SelectorCommentBox,
+		SelectorLikeButton,
+		SelectorSearchInput,
+		SelectorNotificationPage,
+		SelectorNotificationTab,
+	}
+}
+
 // probeXHSReady 按 kind 缩小范围的 scoped probe：只计算当前 kind 需要的信号，
 // 公共字段（URL/title/readyState/scrollY/app/risk）始终计算。
 func probeXHSReady(page *hrod.Page, kind XHSReadyKind, feedID string) (xhsReadyProbe, error) {
@@ -233,7 +247,7 @@ func probeXHSReady(page *hrod.Page, kind XHSReadyKind, feedID string) (xhsReadyP
 		}
 		return JSON.stringify(out);
 	}`
-	obj, err := page.Eval(probeJS, string(kind), feedID, SelectorSearchInput, SelectorSearchResult, SelectorFeedCard, SelectorFeedDetailReady, SelectorCommentBox, SelectorLikeButton, SelectorSearchInputInFeeds, SelectorNotificationPage, SelectorNotificationTab)
+	obj, err := page.Eval(probeJS, append([]interface{}{string(kind), feedID}, xhsReadyProbeSelectorArgs()...)...)
 	return decodeXHSReadyProbe(obj, err)
 }
 
@@ -307,7 +321,7 @@ func probeXHSReadyFull(page *hrod.Page, feedID string) (xhsReadyProbe, error) {
 			risk_text: riskText.slice(0, 180),
 		});
 	}`
-	obj, err := page.Eval(probeJS, feedID, SelectorSearchInput, SelectorSearchResult, SelectorFeedCard, SelectorFeedDetailReady, SelectorCommentBox, SelectorLikeButton, SelectorSearchInputInFeeds, SelectorNotificationPage, SelectorNotificationTab)
+	obj, err := page.Eval(probeJS, append([]interface{}{feedID}, xhsReadyProbeSelectorArgs()...)...)
 	return decodeXHSReadyProbe(obj, err)
 }
 
