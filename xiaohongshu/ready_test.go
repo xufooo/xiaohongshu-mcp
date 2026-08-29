@@ -5,23 +5,7 @@ import (
 	"time"
 )
 
-// TestHomeSearchSelectorIsDedicated 确认专用搜索输入框选择器与宽泛选择器不相等。
-func TestHomeSearchSelectorIsDedicated(t *testing.T) {
-	if SelectorSearchInputInFeeds == SelectorSearchInput {
-		t.Fatalf("SelectorSearchInputInFeeds 必须独立于宽泛 SelectorSearchInput")
-	}
-	if !selectorSearchInputInFeedsIsDedicated(SelectorSearchInputInFeeds) {
-		t.Fatalf("SelectorSearchInputInFeeds 应只指向首页专用输入框")
-	}
-}
-
-func selectorSearchInputInFeedsIsDedicated(sel string) bool {
-	// 专用选择器必须精确指向 #search-input-in-feeds，且不含宽泛兜底片段。
-	return sel == `#search-input-in-feeds`
-}
-
-// TestHomeSearchReadyRequiresDedicatedInputSignal 首页搜索输入框未就绪时，即使存在 feed 也不得判定 ready。
-func TestHomeSearchReadyRequiresDedicatedInputSignal(t *testing.T) {
+func TestHomeSearchReadyRequiresInputSignal(t *testing.T) {
 	probe := xhsReadyProbe{
 		URL:                    "https://www.xiaohongshu.com/explore",
 		HomeFeedCount:          10,
@@ -34,6 +18,46 @@ func TestHomeSearchReadyRequiresDedicatedInputSignal(t *testing.T) {
 	probe.SearchInputInFeedsReady = true
 	if !isXHSReady(probe, XHSReadyHomeSearch, "", false) {
 		t.Fatalf("SearchInputInFeedsReady=true 且 feed 存在时应判定 ready")
+	}
+}
+
+func TestXHSReadyProbeSelectorArgsWiring(t *testing.T) {
+	args := xhsReadyProbeSelectorArgs()
+	if len(args) != 9 {
+		t.Fatalf("selector args 长度应为 9，实际 %d", len(args))
+	}
+	if args[0] != SelectorSearchInput {
+		t.Fatalf("args[0] searchInputSelector 应为 SelectorSearchInput，实际 %v", args[0])
+	}
+	if args[6] != SelectorSearchInput {
+		t.Fatalf("args[6] searchInputInFeedsSelector 应为 SelectorSearchInput，实际 %v", args[6])
+	}
+	if args[0].(string) == SelectorSearchInputInFeeds {
+		t.Fatalf("searchInputSelector 不得为 SelectorSearchInputInFeeds")
+	}
+	if args[6].(string) == SelectorSearchInputInFeeds {
+		t.Fatalf("searchInputInFeedsSelector 不得为 SelectorSearchInputInFeeds")
+	}
+	if args[1] != SelectorSearchResult {
+		t.Fatalf("args[1] 应为 SelectorSearchResult，实际 %v", args[1])
+	}
+	if args[2] != SelectorFeedCard {
+		t.Fatalf("args[2] 应为 SelectorFeedCard，实际 %v", args[2])
+	}
+	if args[3] != SelectorFeedDetailReady {
+		t.Fatalf("args[3] 应为 SelectorFeedDetailReady，实际 %v", args[3])
+	}
+	if args[4] != SelectorCommentBox {
+		t.Fatalf("args[4] 应为 SelectorCommentBox，实际 %v", args[4])
+	}
+	if args[5] != SelectorLikeButton {
+		t.Fatalf("args[5] 应为 SelectorLikeButton，实际 %v", args[5])
+	}
+	if args[7] != SelectorNotificationPage {
+		t.Fatalf("args[7] 应为 SelectorNotificationPage，实际 %v", args[7])
+	}
+	if args[8] != SelectorNotificationTab {
+		t.Fatalf("args[8] 应为 SelectorNotificationTab，实际 %v", args[8])
 	}
 }
 
@@ -72,7 +96,6 @@ func TestHomeSearchStableWindowResetsOnProbeError(t *testing.T) {
 	base := time.Now()
 	st.Observe(base, true)
 	st.Observe(base.Add(2*time.Second), true)
-	// 模拟 probe error：等价于 Observe(false) 重置
 	if st.Observe(base.Add(3*time.Second), false) {
 		t.Fatalf("probe error 后不应成功")
 	}
@@ -88,7 +111,6 @@ func TestOtherReadyKindsDoNotRequireStableWindow(t *testing.T) {
 			t.Fatalf("kind=%s 单次就绪应立即成功（不得走稳定窗）", kind)
 		}
 	}
-	// HomeSearch 首次 true 必须走稳定窗不立即成功
 	var st xhsReadyStability
 	if xhsReadyDecision(XHSReadyHomeSearch, &st, time.Now(), true) {
 		t.Fatalf("home_search 首次 true 不应立即成功（必须走稳定窗）")
