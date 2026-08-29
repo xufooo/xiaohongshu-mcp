@@ -10,7 +10,7 @@ import (
 const (
 	SelectorSearchInputInFeeds        = `#search-input-in-feeds`
 	SelectorSearchInputInSearchResult = `#search-input`
-	SelectorSearchInput               = SelectorSearchInputInFeeds + `, ` + SelectorSearchInputInSearchResult + `, input[placeholder*="搜索"]` // 兜底：匹配 placeholder 含"搜索"的输入框
+	SelectorSearchInput               = SelectorSearchInputInFeeds + `, ` + SelectorSearchInputInSearchResult + `, textarea.search-input-ai, input[placeholder*="搜索"]` // 兜底：匹配 placeholder 含"搜索"的输入框
 	SelectorMarkedSearchInput         = `[data-xhs-mcp-search-input="1"]`
 	SelectorSelectedSearchInput       = `[data-xhs-mcp-search-input="selected"]:not([aria-hidden="true"])`
 	SelectorSearchButton              = `.search-icon, .search-btn, button[type="submit"]`
