@@ -1442,12 +1442,12 @@ func (s *XiaohongshuService) SessionSearch(ctx context.Context, id, keyword, cur
 	}, nil
 }
 
-func (s *XiaohongshuService) SessionOpenNote(ctx context.Context, id, resultRef, xsecToken string) (*xiaohongshu.SessionOpenNoteResponse, error) {
+func (s *XiaohongshuService) SessionOpenNote(ctx context.Context, id, resultRef, shareURL, xsecToken string) (*xiaohongshu.SessionOpenNoteResponse, error) {
 	session, err := s.browseSessions.Get(id)
 	if err != nil {
 		return nil, err
 	}
-	result, err := session.OpenNote(ctx, resultRef, xsecToken)
+	result, err := session.OpenNote(ctx, resultRef, shareURL, xsecToken)
 	if err != nil {
 		s.handleSessionOperationError(ctx, id, session, err)
 		return nil, err

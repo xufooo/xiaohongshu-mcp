@@ -642,15 +642,27 @@ func (s *AppServer) handleSessionSearch(ctx context.Context, args SessionSearchA
 func (s *AppServer) handleSessionOpenNote(ctx context.Context, args SessionOpenNoteArgs) *MCPToolResult {
 	args.SessionID = strings.TrimSpace(args.SessionID)
 	args.ResultRef = strings.TrimSpace(args.ResultRef)
+	args.ShareURL = strings.TrimSpace(args.ShareURL)
 	args.XsecToken = strings.TrimSpace(args.XsecToken)
 	if args.SessionID == "" {
 		return sessionMCPErrorResult("打开笔记失败: 缺少session_id参数", sessionNextStepCreateSession())
 	}
-	if args.ResultRef == "" {
-		return sessionMCPErrorResult("打开笔记失败: 缺少result_ref参数", sessionNextStepState())
+	hasResultRef := args.ResultRef != ""
+	hasShareURL := args.ShareURL != ""
+	if !hasResultRef && !hasShareURL {
+		return sessionMCPErrorResult("打开笔记失败: result_ref与share_url必须且只能提供一个", sessionNextStepState())
 	}
-	info, err := s.xiaohongshuService.SessionOpenNote(ctx, args.SessionID, args.ResultRef, args.XsecToken)
+	if hasResultRef && hasShareURL {
+		return sessionMCPErrorResult("打开笔记失败: result_ref与share_url必须且只能提供一个", sessionNextStepState())
+	}
+	if hasShareURL && args.XsecToken != "" {
+		return sessionMCPErrorResult("打开笔记失败: share_url不能与xsec_token同时使用", sessionNextStepState())
+	}
+	info, err := s.xiaohongshuService.SessionOpenNote(ctx, args.SessionID, args.ResultRef, args.ShareURL, args.XsecToken)
 	if err != nil {
+		if hasShareURL {
+			return sessionMCPErrorResult("打开笔记失败: 分享链接打开未完成", sessionNextStepState())
+		}
 		return sessionMCPErrorFromErr("打开笔记失败", err, sessionNextStepState())
 	}
 	return jsonMCPResultWithTools(info, afterOpenTools)

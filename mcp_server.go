@@ -104,8 +104,9 @@ type SessionSearchArgs struct {
 
 type SessionOpenNoteArgs struct {
 	SessionID string `json:"session_id" jsonschema:"浏览会话ID，由start_page返回"`
-	ResultRef string `json:"result_ref" jsonschema:"搜索结果引用。可传搜索结果的index或feed_id"`
-	XsecToken string `json:"xsec_token,omitempty" jsonschema:"访问令牌。通常可省略，session会使用搜索结果里的xsecToken"`
+	ResultRef string `json:"result_ref,omitempty" jsonschema:"搜索结果引用。可传搜索结果的index或feed_id；与share_url恰好传一个"`
+	ShareURL  string `json:"share_url,omitempty" jsonschema:"分享链接。支持官方完整笔记URL(www.xiaohongshu.com/explore/{24位hex}或/discovery/item/{24位hex})或xhslink.com、www.xhslink.com、xhslink.cn、www.xhslink.cn短链。与result_ref恰好传一个"`
+	XsecToken string `json:"xsec_token,omitempty" jsonschema:"访问令牌。仅与result_ref配合使用，不能与share_url同时使用"`
 }
 
 type SessionLikeArgs struct {
@@ -424,7 +425,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 	mcp.AddTool(server,
 		&mcp.Tool{
 			Name:        "open_note",
-			Description: "在页面会话内从搜索结果卡片点击打开笔记，并直接返回首屏标题、正文、作者、互动数据、首屏评论及笔记图片 URL（data.note.imageList[].urlDefault/urlPre，图文笔记）；如需理解图片内容，请将 data.note.imageList 中的 URL 交给 vision 工具。result_ref可传搜索结果index或feed_id，xsec_token可选",
+			Description: "在页面会话内打开笔记并返回首屏标题、正文、作者、互动数据、首屏评论及笔记图片 URL。支持两种互斥方式：(1) result_ref传搜索结果index或feed_id（可配合xsec_token）；(2) share_url传官方完整笔记URL(www.xiaohongshu.com/explore/{24hex}或/discovery/item/{24hex})或xhslink.com、www.xhslink.com、xhslink.cn、www.xhslink.cn短链。两种方式恰好传一个",
 			Annotations: &mcp.ToolAnnotations{
 				Title:        "Open Note",
 				ReadOnlyHint: true,

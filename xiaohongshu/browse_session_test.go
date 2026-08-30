@@ -404,8 +404,8 @@ func TestOpenNoteAtomicCommit(t *testing.T) {
 		initialCommentIDs: []string{"old-comment"},
 		notification:      browseNotificationState{active: true},
 	}
-	feed := Feed{ID: "feed-1", XsecToken: "token-1"}
-	content := OpenedNoteContent{NoteID: "feed-1", Title: "t", Desc: "d", Type: "normal"}
+	feed := Feed{ID: "5f4d8e7b00000000010001a2", XsecToken: "token-1"}
+	content := OpenedNoteContent{NoteID: "5f4d8e7b00000000010001a2", Title: "t", Desc: "d", Type: "normal"}
 	info := session.commitOpenedNote(feed, "https://example.test/search", "ref-1", []string{"c1", "c2"}, content)
 	if !info.Opened || !info.Read || !info.SeenNotes[feed.ID] {
 		t.Fatalf("原子提交状态错误: %+v", info)
@@ -419,11 +419,54 @@ func TestOpenNoteAtomicCommit(t *testing.T) {
 	if len(session.timeline) != 2 || session.timeline[0].Action != "open_note" || session.timeline[1].Action != "read_note" {
 		t.Fatalf("原子提交 timeline 错误: %+v", session.timeline)
 	}
+	if !strings.Contains(session.timeline[0].Note, "ref-1") {
+		t.Fatalf("result_ref timeline detail 应包含 ref-1: %s", session.timeline[0].Note)
+	}
 	stageTools := strings.Join(session.availableActionsLocked(1), ",")
 	for _, tool := range []string{"get_note_detail", "like_feed", "favorite_feed", "comment_feed", "reply_comment_in_feed"} {
 		if !strings.Contains(stageTools, tool) {
 			t.Fatalf("原子提交应暴露工具 %s: %s", tool, stageTools)
 		}
+	}
+
+	session2 := &BrowseSession{
+		seenNotes:         map[string]bool{},
+		initialCommentIDs: []string{},
+		notification:      browseNotificationState{active: false},
+	}
+	feed2 := Feed{ID: "6a5e9f8c10000000020002b3", XsecToken: "token-share"}
+	content2 := OpenedNoteContent{NoteID: "6a5e9f8c10000000020002b3", Title: "shared", Desc: "desc", Type: "normal"}
+	info2 := session2.commitOpenedNote(feed2, "https://example.test/redacted?xsec_token=***", "share_url", []string{"sc1"}, content2)
+	if !info2.Opened || !info2.Read || !info2.SeenNotes[feed2.ID] {
+		t.Fatalf("share原子提交状态错误: %+v", info2)
+	}
+	if got := session2.GetInitialCommentIDs(); len(got) != 1 || got[0] != "sc1" {
+		t.Fatalf("share原子提交评论 cursor 错误: %v", got)
+	}
+	if len(session2.timeline) != 2 {
+		t.Fatalf("share原子提交 timeline 数量错误: %+v", session2.timeline)
+	}
+	if session2.timeline[0].Action != "open_note" || session2.timeline[1].Action != "read_note" {
+		t.Fatalf("share原子提交 timeline action 错误: %+v", session2.timeline)
+	}
+	if !strings.Contains(session2.timeline[0].Note, "share_url") {
+		t.Fatalf("share timeline detail 应包含 share_url: %s", session2.timeline[0].Note)
+	}
+	if strings.Contains(info2.SourceURL, "token-share") || !strings.Contains(info2.SourceURL, "xsec_token") {
+		t.Fatalf("sourceURL 应仅保留脱敏参数名和值: %s", info2.SourceURL)
+	}
+	rawURL := "https://www.xiaohongshu.com/explore/5f4d8e7b00000000010001a2?xsec_token=secret-value"
+	redactedURL := redactSensitiveURL(rawURL)
+	if strings.Contains(redactedURL, "secret-value") || !strings.Contains(redactedURL, "xsec_token") {
+		t.Fatalf("URL脱敏错误: %s", redactedURL)
+	}
+	session2.currentURL = rawURL
+	session2.sourceURL = rawURL
+	session2.mu.Lock()
+	redactedInfo := session2.infoLocked()
+	session2.mu.Unlock()
+	if strings.Contains(redactedInfo.CurrentURL, "secret-value") || strings.Contains(redactedInfo.SourceURL, "secret-value") {
+		t.Fatalf("状态URL脱敏错误: %+v", redactedInfo)
 	}
 }
 
@@ -1062,5 +1105,134 @@ func TestMergePreferredImageLists(t *testing.T) {
 	}
 	if got := mergePreferredImageLists(nil, domReal); len(got) != 1 || got[0].URLDefault != "https://example.com/dom.jpg" {
 		t.Fatalf("state 不可用时保留 DOM 真实图片: %+v", got)
+	}
+}
+
+func TestParseAndValidateShareURL(t *testing.T) {
+	tests := []struct {
+		name        string
+		input       string
+		wantErr     bool
+		isShort     bool
+		expectedID  string
+		xsecToken   string
+		errContains string
+	}{
+		{name: "合法explore", input: "https://www.xiaohongshu.com/explore/5f4d8e7b00000000010001a2", expectedID: "5f4d8e7b00000000010001a2"},
+		{name: "合法discovery", input: "https://www.xiaohongshu.com/discovery/item/6a5e9f8c10000000020002b3", expectedID: "6a5e9f8c10000000020002b3"},
+		{name: "带xsec_token", input: "https://www.xiaohongshu.com/explore/5f4d8e7b00000000010001a2?xsec_token=tok123", expectedID: "5f4d8e7b00000000010001a2", xsecToken: "tok123"},
+		{name: "合法短链xhslink", input: "https://xhslink.com/abc123", isShort: true},
+		{name: "合法短链www", input: "https://www.xhslink.com/abc123", isShort: true},
+		{name: "合法短链xhslink.cn", input: "https://xhslink.cn/abc123", isShort: true},
+		{name: "合法短链www.xhslink.cn", input: "https://www.xhslink.cn/abc123", isShort: true},
+		{name: "非HTTPS", input: "http://www.xiaohongshu.com/explore/5f4d8e7b00000000010001a2", wantErr: true, errContains: "HTTPS"},
+		{name: "相对URL", input: "/explore/5f4d8e7b00000000010001a2", wantErr: true, errContains: "绝对URL"},
+		{name: "协议相对", input: "//www.xiaohongshu.com/explore/5f4d8e7b00000000010001a2", wantErr: true, errContains: "绝对URL"},
+		{name: "userinfo", input: "https://user:pass@www.xiaohongshu.com/explore/5f4d8e7b00000000010001a2", wantErr: true, errContains: "userinfo"},
+		{name: "fragment", input: "https://www.xiaohongshu.com/explore/5f4d8e7b00000000010001a2#section", wantErr: true, errContains: "fragment"},
+		{name: "显式端口", input: "https://www.xiaohongshu.com:443/explore/5f4d8e7b00000000010001a2", wantErr: true, errContains: "端口"},
+		{name: "第三方host", input: "https://evil.com/explore/5f4d8e7b00000000010001a2", wantErr: true, errContains: "host"},
+		{name: "伪后缀host", input: "https://xiaohongshu.com.evil.com/explore/5f4d8e7b00000000010001a2", wantErr: true, errContains: "host"},
+		{name: "非www完整URL", input: "https://xiaohongshu.com/explore/5f4d8e7b00000000010001a2", wantErr: true, errContains: "host"},
+		{name: "空短链path", input: "https://xhslink.com/", wantErr: true, errContains: "path"},
+		{name: "完整URL缺少noteID", input: "https://www.xiaohongshu.com/explore/", wantErr: true, errContains: "笔记页面"},
+		{name: "完整URL额外segment", input: "https://www.xiaohongshu.com/explore/5f4d8e7b00000000010001a2/extra", wantErr: true, errContains: "笔记页面"},
+		{name: "非24hex-太短", input: "https://www.xiaohongshu.com/explore/abc123", wantErr: true, errContains: "笔记页面"},
+		{name: "非24hex-太长", input: "https://www.xiaohongshu.com/explore/5f4d8e7b00000000010001a200", wantErr: true, errContains: "笔记页面"},
+		{name: "非24hex-非hex字符", input: "https://www.xiaohongshu.com/explore/5f4d8e7b00000000010001zz", wantErr: true, errContains: "笔记页面"},
+		{name: "非24hex-大写有效", input: "https://www.xiaohongshu.com/explore/5F4D8E7B00000000010001A2", expectedID: "5F4D8E7B00000000010001A2"},
+		{name: "编码斜杠", input: "https://www.xiaohongshu.com/explore/5f4d8e7b0000%2F00010001a2", wantErr: true, errContains: "笔记页面"},
+		{name: "编码点号", input: "https://www.xiaohongshu.com/explore/5f4d8e7b0000%2e00010001a2", wantErr: true, errContains: "笔记页面"},
+		{name: "编码双点", input: "https://www.xiaohongshu.com/explore/5f4d8e7b0000%2e%2e00010001a2", wantErr: true, errContains: "笔记页面"},
+		{name: "点号", input: "https://www.xiaohongshu.com/explore/5f4d8e7b0000.00010001a2", wantErr: true, errContains: "笔记页面"},
+		{name: "双点", input: "https://www.xiaohongshu.com/explore/5f4d8e7b0000..00010001a2", wantErr: true, errContains: "笔记页面"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parsed, err := parseAndValidateShareURL(tt.input)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("期望错误但得到 nil")
+				}
+				if tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains) {
+					t.Fatalf("错误信息应包含 %q: %v", tt.errContains, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("不期望错误: %v", err)
+			}
+			if parsed.IsShortLink != tt.isShort {
+				t.Fatalf("IsShortLink = %v, 期望 %v", parsed.IsShortLink, tt.isShort)
+			}
+			if !parsed.IsShortLink && parsed.ExpectedID != tt.expectedID {
+				t.Fatalf("ExpectedID = %q, 期望 %q", parsed.ExpectedID, tt.expectedID)
+			}
+			if tt.xsecToken != "" && parsed.XsecToken != tt.xsecToken {
+				t.Fatalf("XsecToken = %q, 期望 %q", parsed.XsecToken, tt.xsecToken)
+			}
+		})
+	}
+}
+
+func TestValidateFinalNoteURL(t *testing.T) {
+	tests := []struct {
+		name        string
+		input       string
+		wantErr     bool
+		noteID      string
+		xsecToken   string
+		errContains string
+	}{
+		{name: "合法explore", input: "https://www.xiaohongshu.com/explore/5f4d8e7b00000000010001a2", noteID: "5f4d8e7b00000000010001a2"},
+		{name: "合法discovery", input: "https://www.xiaohongshu.com/discovery/item/6a5e9f8c10000000020002b3", noteID: "6a5e9f8c10000000020002b3"},
+		{name: "带token", input: "https://www.xiaohongshu.com/explore/5f4d8e7b00000000010001a2?xsec_token=tok", noteID: "5f4d8e7b00000000010001a2", xsecToken: "tok"},
+		{name: "非HTTPS", input: "http://www.xiaohongshu.com/explore/5f4d8e7b00000000010001a2", wantErr: true, errContains: "HTTPS"},
+		{name: "相对URL", input: "/explore/5f4d8e7b00000000010001a2", wantErr: true, errContains: "绝对URL"},
+		{name: "userinfo", input: "https://user:pass@www.xiaohongshu.com/explore/5f4d8e7b00000000010001a2", wantErr: true, errContains: "userinfo"},
+		{name: "fragment", input: "https://www.xiaohongshu.com/explore/5f4d8e7b00000000010001a2#section", wantErr: true, errContains: "fragment"},
+		{name: "显式端口", input: "https://www.xiaohongshu.com:443/explore/5f4d8e7b00000000010001a2", wantErr: true, errContains: "端口"},
+		{name: "非www", input: "https://xiaohongshu.com/explore/5f4d8e7b00000000010001a2", wantErr: true, errContains: "host"},
+		{name: "错误路径", input: "https://www.xiaohongshu.com/search", wantErr: true, errContains: "笔记页面"},
+		{name: "额外segment", input: "https://www.xiaohongshu.com/explore/5f4d8e7b00000000010001a2/extra", wantErr: true, errContains: "笔记页面"},
+		{name: "空noteID", input: "https://www.xiaohongshu.com/explore/", wantErr: true, errContains: "笔记页面"},
+		{name: "非24hex-太短", input: "https://www.xiaohongshu.com/explore/abc123", wantErr: true, errContains: "笔记页面"},
+		{name: "非24hex-太长", input: "https://www.xiaohongshu.com/explore/5f4d8e7b00000000010001a200", wantErr: true, errContains: "笔记页面"},
+		{name: "非24hex-非hex", input: "https://www.xiaohongshu.com/explore/5f4d8e7b00000000010001zz", wantErr: true, errContains: "笔记页面"},
+		{name: "编码斜杠", input: "https://www.xiaohongshu.com/explore/5f4d8e7b0000%2F00010001a2", wantErr: true, errContains: "笔记页面"},
+		{name: "编码点号", input: "https://www.xiaohongshu.com/explore/5f4d8e7b0000%2e00010001a2", wantErr: true, errContains: "笔记页面"},
+		{name: "短链未展开", input: "https://xhslink.com/abc123", wantErr: true, errContains: "host"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			noteID, token, err := validateFinalNoteURL(tt.input)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("期望错误但得到 nil")
+				}
+				if tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains) {
+					t.Fatalf("错误信息应包含 %q: %v", tt.errContains, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("不期望错误: %v", err)
+			}
+			if noteID != tt.noteID {
+				t.Fatalf("noteID = %q, 期望 %q", noteID, tt.noteID)
+			}
+			if tt.xsecToken != "" && token != tt.xsecToken {
+				t.Fatalf("token = %q, 期望 %q", token, tt.xsecToken)
+			}
+		})
+	}
+}
+
+func TestShareURLTokenPrecedence(t *testing.T) {
+	if got := shareURLToken("final-token", "input-token"); got != "final-token" {
+		t.Fatalf("最终 URL token 应优先: %q", got)
+	}
+	if got := shareURLToken("", "input-token"); got != "input-token" {
+		t.Fatalf("最终 URL 无 token 时应回退输入 token: %q", got)
 	}
 }
