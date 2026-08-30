@@ -1192,7 +1192,7 @@ func TestValidateFinalNoteURL(t *testing.T) {
 		{name: "userinfo", input: "https://user:pass@www.xiaohongshu.com/explore/5f4d8e7b00000000010001a2", wantErr: true, errContains: "userinfo"},
 		{name: "fragment", input: "https://www.xiaohongshu.com/explore/5f4d8e7b00000000010001a2#section", wantErr: true, errContains: "fragment"},
 		{name: "显式端口", input: "https://www.xiaohongshu.com:443/explore/5f4d8e7b00000000010001a2", wantErr: true, errContains: "端口"},
-		{name: "非www", input: "https://xiaohongshu.com/explore/5f4d8e7b00000000010001a2", wantErr: true, errContains: "host"},
+		{name: "非www", input: "https://xiaohongshu.com/explore/5f4d8e7b00000000010001a2", wantErr: true, errContains: "笔记页面"},
 		{name: "错误路径", input: "https://www.xiaohongshu.com/search", wantErr: true, errContains: "笔记页面"},
 		{name: "额外segment", input: "https://www.xiaohongshu.com/explore/5f4d8e7b00000000010001a2/extra", wantErr: true, errContains: "笔记页面"},
 		{name: "空noteID", input: "https://www.xiaohongshu.com/explore/", wantErr: true, errContains: "笔记页面"},
@@ -1201,7 +1201,7 @@ func TestValidateFinalNoteURL(t *testing.T) {
 		{name: "非24hex-非hex", input: "https://www.xiaohongshu.com/explore/5f4d8e7b00000000010001zz", wantErr: true, errContains: "笔记页面"},
 		{name: "编码斜杠", input: "https://www.xiaohongshu.com/explore/5f4d8e7b0000%2F00010001a2", wantErr: true, errContains: "笔记页面"},
 		{name: "编码点号", input: "https://www.xiaohongshu.com/explore/5f4d8e7b0000%2e00010001a2", wantErr: true, errContains: "笔记页面"},
-		{name: "短链未展开", input: "https://xhslink.com/abc123", wantErr: true, errContains: "host"},
+		{name: "短链未展开", input: "https://xhslink.com/abc123", wantErr: true, errContains: "笔记页面"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
