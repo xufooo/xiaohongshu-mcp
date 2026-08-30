@@ -438,7 +438,7 @@ func (s *BrowseSession) PageState(ctx context.Context) (state *BrowseSessionPage
 		}
 		current = BrowseSessionCurrent{
 			Kind:           kind,
-			URL:            s.currentURL,
+			URL:            redactSensitiveURL(s.currentURL),
 			FeedID:         "",
 			Opened:         false,
 			Read:           false,
@@ -682,7 +682,7 @@ func (s *BrowseSession) searchBatch(ctx context.Context, keyword string, filters
 	return SearchPageResult{Feeds: feeds}, nextCursor, hasMore, nil
 }
 
-func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, xsecToken string) (*SessionOpenNoteResponse, error) {
+func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, shareURL, xsecToken string) (*SessionOpenNoteResponse, error) {
 	opCtx, err := s.beginLockedOperation(ctx, true)
 	if err != nil {
 		return nil, err
@@ -694,15 +694,101 @@ func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, xsecToken strin
 		return nil, err
 	}
 
-	feed, err := s.resolveResult(resultRef)
-	if err != nil {
-		return fail(err)
+	hasResultRef := resultRef != ""
+	hasShareURL := shareURL != ""
+	if !hasResultRef && !hasShareURL {
+		return fail(fmt.Errorf("result_ref与share_url必须且只能提供一个"))
 	}
-	if xsecToken != "" {
-		feed.XsecToken = xsecToken
+	if hasResultRef && hasShareURL {
+		return fail(fmt.Errorf("result_ref与share_url必须且只能提供一个"))
 	}
-	if err := validateFeedAccessArgs(feed.ID, feed.XsecToken); err != nil {
-		return fail(fmt.Errorf("搜索结果参数无效: %w", err))
+	if hasShareURL && xsecToken != "" {
+		return fail(fmt.Errorf("share_url不能与xsec_token同时使用"))
+	}
+
+	var feed Feed
+	var sourceURL string
+	var resultRefForTimeline string
+	var finalURL string
+
+	if hasShareURL {
+		parsed, parseErr := parseAndValidateShareURL(shareURL)
+		if parseErr != nil {
+			return fail(parseErr)
+		}
+		s.mu.Lock()
+		page := s.page
+		s.mu.Unlock()
+		if page == nil {
+			return fail(fmt.Errorf("browse session 页面不存在: %s", s.id))
+		}
+		counter := &evalTimeoutCounter{}
+		sourceURLCandidate, urlErr := s.currentPageURL(opCtx, counter)
+		if urlErr != nil {
+			return fail(fmt.Errorf("读取当前页面URL: %w", urlErr))
+		}
+		sourceURL = sourceURLCandidate
+		if navErr := page.Context(opCtx).Navigate(parsed.NormalizedURL); navErr != nil {
+			return fail(fmt.Errorf("导航到share_url失败"))
+		}
+		finalURLCandidate, finalErr := s.currentPageURL(opCtx, counter)
+		if finalErr != nil {
+			return fail(fmt.Errorf("读取最终URL失败: %w", finalErr))
+		}
+		finalURL = finalURLCandidate
+		finalNoteID, finalToken, validationErr := validateFinalNoteURL(finalURL)
+		if validationErr != nil {
+			return fail(validationErr)
+		}
+		if !parsed.IsShortLink && parsed.ExpectedID != finalNoteID {
+			return fail(fmt.Errorf("最终note ID与预期不一致"))
+		}
+		feed = Feed{ID: finalNoteID, XsecToken: shareURLToken(finalToken, parsed.XsecToken)}
+		resultRefForTimeline = "share_url"
+		probe, probeErr := probeCurrentFeedDetail(opCtx, page, counter, feed.ID)
+		if probeErr != nil {
+			return fail(fmt.Errorf("探测笔记详情失败: %w", probeErr))
+		}
+		if !currentFeedDetailMatched(probe, feed.ID) {
+			return fail(fmt.Errorf("笔记页面未匹配目标笔记"))
+		}
+	} else {
+		feed, err = s.resolveResult(resultRef)
+		if err != nil {
+			return fail(err)
+		}
+		if xsecToken != "" {
+			feed.XsecToken = xsecToken
+		}
+		if err := validateFeedAccessArgs(feed.ID, feed.XsecToken); err != nil {
+			return fail(fmt.Errorf("搜索结果参数无效: %w", err))
+		}
+		s.mu.Lock()
+		page := s.page
+		s.mu.Unlock()
+		if page == nil {
+			return fail(fmt.Errorf("browse session 页面不存在: %s", s.id))
+		}
+		counter := &evalTimeoutCounter{}
+		resultRefForTimeline = resultRef
+		probe, probeErr := probeCurrentFeedDetail(opCtx, page, counter, feed.ID)
+		if probeErr != nil && IsFatalRendererError(probeErr) {
+			return fail(probeErr)
+		}
+		if probeErr != nil && !isTransientCurrentDetailProbeError(probeErr) {
+			return fail(fmt.Errorf("探测当前笔记详情失败: %w", probeErr))
+		}
+		alreadyOpen := probeErr == nil && currentFeedDetailMatched(probe, feed.ID)
+		if !alreadyOpen {
+			sourceURL, err = s.currentPageURL(opCtx, counter)
+			if err != nil {
+				return fail(fmt.Errorf("读取当前页面 URL: %w", err))
+			}
+			opener := NewNoteOpenActionWithState(page.Context(opCtx), s.state)
+			if err := opener.OpenFromCards(opCtx, counter, feed.ID, feed.XsecToken); err != nil {
+				return fail(fmt.Errorf("从卡片打开笔记失败，请重新搜索或滚动后重试: %w", err))
+			}
+		}
 	}
 
 	s.mu.Lock()
@@ -712,25 +798,6 @@ func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, xsecToken strin
 		return fail(fmt.Errorf("browse session 页面不存在: %s", s.id))
 	}
 	counter := &evalTimeoutCounter{}
-	probe, probeErr := probeCurrentFeedDetail(opCtx, page, counter, feed.ID)
-	if probeErr != nil && IsFatalRendererError(probeErr) {
-		return fail(probeErr)
-	}
-	if probeErr != nil && !isTransientCurrentDetailProbeError(probeErr) {
-		return fail(fmt.Errorf("探测当前笔记详情失败: %w", probeErr))
-	}
-	alreadyOpen := probeErr == nil && currentFeedDetailMatched(probe, feed.ID)
-	sourceURL := ""
-	if !alreadyOpen {
-		sourceURL, err = s.currentPageURL(opCtx, counter)
-		if err != nil {
-			return fail(fmt.Errorf("读取当前页面 URL: %w", err))
-		}
-		opener := NewNoteOpenActionWithState(page.Context(opCtx), s.state)
-		if err := opener.OpenFromCards(opCtx, counter, feed.ID, feed.XsecToken); err != nil {
-			return fail(fmt.Errorf("从卡片打开笔记失败，请重新搜索或滚动后重试: %w", err))
-		}
-	}
 
 	snapshot, err := pollOpenedNoteSnapshot(opCtx, 15*time.Second, 250*time.Millisecond, func() (*OpenedNoteSnapshot, error) {
 		return ExtractOpenedNoteSnapshotFromDOM(opCtx, page, counter, feed.ID)
@@ -742,7 +809,16 @@ func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, xsecToken strin
 		return fail(err)
 	}
 	content := snapshot.Note
-	mergeOpenedNoteUserFromSearchResult(&content, feed)
+	if hasShareURL {
+		if strings.TrimSpace(content.Title) == "" {
+			return fail(fmt.Errorf("笔记标题为空"))
+		}
+		if strings.TrimSpace(content.User.Nickname) == "" {
+			return fail(fmt.Errorf("笔记作者为空"))
+		}
+	} else {
+		mergeOpenedNoteUserFromSearchResult(&content, feed)
+	}
 	comments := snapshot.Comments
 	content.ImageList, err = preferOpenedNoteImages(opCtx, page, counter, feed.ID, content.ImageList)
 	if err != nil {
@@ -760,11 +836,14 @@ func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, xsecToken strin
 			}
 		}
 	}
-	if s.state != nil {
+	if !hasShareURL && s.state != nil {
 		_ = s.state.RecordOpen(feed.ID, OpenSourceSearch)
 		_ = s.state.RecordRead(feed.ID, 0)
 	}
-	info := s.commitOpenedNote(feed, sourceURL, resultRef, initialCommentIDs, content)
+	info := s.commitOpenedNote(feed, redactSensitiveURL(sourceURL), resultRefForTimeline, initialCommentIDs, content)
+	if hasShareURL && finalURL != "" {
+		info.CurrentURL = redactSensitiveURL(finalURL)
+	}
 	s.probeWatchdogSelectorsForKind(opCtx, XHSReadyDetail, feed.ID)
 	return &SessionOpenNoteResponse{
 		BrowseSessionInfo: info,
@@ -814,8 +893,14 @@ func (s *BrowseSession) commitOpenedNote(feed Feed, sourceURL, resultRef string,
 	s.initialCommentIDs = append([]string(nil), initialCommentIDs...)
 	s.openedNoteContent = cloneOpenedNoteContent(content)
 	s.resetNotificationSurfaceLocked()
-	s.recordTimelineLocked("open_note", feed.ID, "ok", time.Now(), "opened from search result "+resultRef)
-	s.recordTimelineLocked("read_note", feed.ID, "ok", time.Now(), "content read from search result "+resultRef)
+	openDetail := "opened from search result " + resultRef
+	readDetail := "content read from search result " + resultRef
+	if resultRef == "share_url" {
+		openDetail = "opened from share_url"
+		readDetail = "content read from share_url"
+	}
+	s.recordTimelineLocked("open_note", feed.ID, "ok", time.Now(), openDetail)
+	s.recordTimelineLocked("read_note", feed.ID, "ok", time.Now(), readDetail)
 	info := s.infoLocked()
 	s.mu.Unlock()
 	return info
@@ -2340,8 +2425,8 @@ func (s *BrowseSession) infoLocked() BrowseSessionInfo {
 	}
 	return BrowseSessionInfo{
 		ID:            s.id,
-		CurrentURL:    s.currentURL,
-		SourceURL:     s.sourceURL,
+		CurrentURL:    redactSensitiveURL(s.currentURL),
+		SourceURL:     redactSensitiveURL(s.sourceURL),
 		ScrollY:       s.scrollY,
 		CurrentFeedID: s.currentFeedID,
 		Opened:        s.opened,
@@ -2354,7 +2439,7 @@ func (s *BrowseSession) infoLocked() BrowseSessionInfo {
 func (s *BrowseSession) currentStateLocked(kind XHSReadyKind, resultsCount int, availableActions []string) BrowseSessionCurrent {
 	return BrowseSessionCurrent{
 		Kind:           kind,
-		URL:            s.currentURL,
+		URL:            redactSensitiveURL(s.currentURL),
 		FeedID:         s.currentFeedID,
 		Opened:         s.opened,
 		Read:           s.read,
@@ -2772,4 +2857,132 @@ func newBrowseSessionID() string {
 		return hex.EncodeToString(buf[:])
 	}
 	return strconv.FormatInt(time.Now().UnixNano(), 36)
+}
+
+type parsedShareURL struct {
+	NormalizedURL string
+	IsShortLink   bool
+	ExpectedID    string
+	XsecToken     string
+}
+
+func strictValidateHTTPSURL(raw string) (*url.URL, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("URL解析失败")
+	}
+	if !u.IsAbs() {
+		return nil, fmt.Errorf("URL必须是绝对URL")
+	}
+	if u.Scheme != "https" {
+		return nil, fmt.Errorf("URL必须使用HTTPS")
+	}
+	if u.User != nil {
+		return nil, fmt.Errorf("URL不能包含userinfo")
+	}
+	if strings.TrimSpace(u.Fragment) != "" {
+		return nil, fmt.Errorf("URL不能包含fragment")
+	}
+	if u.Port() != "" {
+		return nil, fmt.Errorf("URL不能包含显式端口")
+	}
+	return u, nil
+}
+
+func isHex24(s string) bool {
+	if len(s) != 24 {
+		return false
+	}
+	for i := 0; i < 24; i++ {
+		c := s[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
+func parseOfficialNoteURL(u *url.URL) (noteID string, xsecToken string, ok bool) {
+	host := strings.ToLower(u.Hostname())
+	if host != "www.xiaohongshu.com" {
+		return "", "", false
+	}
+	path := u.EscapedPath()
+	var prefix string
+	if strings.HasPrefix(path, "/explore/") {
+		prefix = "/explore/"
+	} else if strings.HasPrefix(path, "/discovery/item/") {
+		prefix = "/discovery/item/"
+	} else {
+		return "", "", false
+	}
+	rest := strings.TrimPrefix(path, prefix)
+	if rest == "" || rest == "/" {
+		return "", "", false
+	}
+	decoded, err := url.PathUnescape(rest)
+	if err != nil {
+		return "", "", false
+	}
+	if decoded != rest {
+		return "", "", false
+	}
+	if !isHex24(decoded) {
+		return "", "", false
+	}
+	return decoded, u.Query().Get("xsec_token"), true
+}
+
+func shareURLToken(finalToken, inputToken string) string {
+	if finalToken != "" {
+		return finalToken
+	}
+	return inputToken
+}
+
+func parseAndValidateShareURL(raw string) (*parsedShareURL, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, fmt.Errorf("share_url不能为空")
+	}
+	u, err := strictValidateHTTPSURL(raw)
+	if err != nil {
+		return nil, err
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == "xhslink.com" || host == "www.xhslink.com" || host == "xhslink.cn" || host == "www.xhslink.cn" {
+		path := u.EscapedPath()
+		if path == "" || path == "/" {
+			return nil, fmt.Errorf("短链path不能为空")
+		}
+		return &parsedShareURL{
+			NormalizedURL: raw,
+			IsShortLink:   true,
+		}, nil
+	}
+	if strings.ToLower(u.Hostname()) != "www.xiaohongshu.com" {
+		return nil, fmt.Errorf("share_url host必须是www.xiaohongshu.com或xhslink.com")
+	}
+	noteID, xsecToken, ok := parseOfficialNoteURL(u)
+	if !ok {
+		return nil, fmt.Errorf("share_url path不是有效的笔记页面")
+	}
+	return &parsedShareURL{
+		NormalizedURL: raw,
+		IsShortLink:   false,
+		ExpectedID:    noteID,
+		XsecToken:     xsecToken,
+	}, nil
+}
+
+func validateFinalNoteURL(finalURL string) (noteID string, xsecToken string, err error) {
+	u, err := strictValidateHTTPSURL(finalURL)
+	if err != nil {
+		return "", "", err
+	}
+	noteID, xsecToken, ok := parseOfficialNoteURL(u)
+	if !ok {
+		return "", "", fmt.Errorf("最终URL不是有效的笔记页面")
+	}
+	return noteID, xsecToken, nil
 }

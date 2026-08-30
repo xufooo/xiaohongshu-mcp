@@ -39,27 +39,25 @@ reply_notification
 
 要点：
 
-- `start_page` 返回 `session_id`，所有页面操作都需要传入 `session_id`。
+- `start_page` 返回 `session_id`，所有页面操作都需要传入 `session_id`；`start_page` 不接受 `share_url`。
 - 写操作（点赞、收藏、评论、回复、通知点赞、通知回复）使用 `confirm_token` 进行二次确认。
-- `open_note` 保留可选参数 `xsec_token`。
+- `open_note` 支持两种互斥方式：(1) result_ref传搜索结果index或feed_id（可配合xsec_token）；(2) share_url传官方完整笔记URL(www.xiaohongshu.com/explore/{24hex}或/discovery/item/{24hex})或xhslink.com/xhslink.cn短链，会在当前session page内导航。两种方式恰好传一个，share_url不能与xsec_token同时使用。失败不保证页面位置回退，但不会提交打开/阅读逻辑状态。
 - 通知类工具：`get_unread_count`（只读未读数，不点入口不清未读）、`list_notifications`（进入通知页/切换 tab 读取列表，进入或切换会使对应未读被清除）、`like_notification`/`reply_notification`（仅对 `list_notifications` 中 `mentions` tab 的条目，且需使用其 `notification_ref`）。
 
 最小调用链：
 
 ```text
-start_page
-→ list_feeds / search_feeds
-→ open_note
-→ get_note_detail / like_feed / favorite_feed / comment_feed
-→ go_back
-→ close_page
+方式一：通过搜索结果打开
+start_page → search_feeds → open_note(result_ref) → ...
+
+方式二：通过分享链接打开
+start_page → open_note(share_url) → ...
+
+通用流程：
+start_page → list_feeds / search_feeds → open_note → get_note_detail / like_feed / favorite_feed / comment_feed → go_back → close_page
 
 通知链：
-start_page
-→ get_unread_count / list_notifications
-→ like_notification / reply_notification
-→ go_back
-→ close_page
+start_page → get_unread_count / list_notifications → like_notification / reply_notification → go_back → close_page
 ```
 
 ## 通用响应格式

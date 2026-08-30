@@ -887,7 +887,7 @@ npx mcporter list xiaohongshu-mcp
     - `publish_time`: 发布时间 - `不限`（默认）| `一天内` | `一周内` | `半年内`
     - `search_scope`: 搜索范围 - `不限`（默认）| `已看过` | `未看过` | `已关注`
     - `location`: 位置距离 - `不限`（默认）| `同城` | `附近`
-- `open_note` - 从搜索结果卡片点击打开笔记，返回首屏标题、正文、作者、互动数据、首屏评论及笔记图片 URL（`data.note.imageList[].urlDefault/urlPre`，图文笔记；可交给 agent vision 理解图片内容）（必需：session_id, result_ref；可选：xsec_token）
+- `open_note` - 打开笔记并返回首屏标题、正文、作者、互动数据、首屏评论及笔记图片 URL（`data.note.imageList[].urlDefault/urlPre`，图文笔记；可交给 agent vision 理解图片内容）。支持两种互斥方式：(1) result_ref传搜索结果index或feed_id（可配合xsec_token）；(2) share_url传官方完整笔记URL(www.xiaohongshu.com/explore/{24位hex}或/discovery/item/{24位hex})或xhslink.com/xhslink.cn短链，会在当前session page内导航。两种方式恰好传一个（必需：session_id；result_ref与share_url二选一；xsec_token仅与result_ref配合使用）。start_page不支持share_url。失败不保证页面位置回退，但不会提交打开/阅读逻辑状态
 - `get_note_detail` - 读取当前已打开笔记的评论，支持分批加载（必需：session_id；可选：max_items, cursor, click_more_replies, reply_limit, scroll_speed）
 - `go_back` - 在页面会话内后退到上一页（必需：session_id）
 - `like_feed` - 点赞/取消点赞当前 session 笔记（必需：session_id；可选：unlike, confirm_token）
