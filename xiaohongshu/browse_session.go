@@ -748,12 +748,8 @@ func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, shareURL, xsecT
 		}
 		feed = Feed{ID: finalNoteID, XsecToken: shareURLToken(finalToken, parsed.XsecToken)}
 		resultRefForTimeline = "share_url"
-		probe, probeErr := probeCurrentFeedDetail(opCtx, page, counter, feed.ID)
-		if probeErr != nil {
-			return fail(fmt.Errorf("探测笔记详情失败: %w", probeErr))
-		}
-		if !currentFeedDetailMatched(probe, feed.ID) {
-			return fail(fmt.Errorf("笔记页面未匹配目标笔记"))
+		if err := waitFeedDetailVisible(opCtx, page, counter, feed.ID); err != nil {
+			return fail(err)
 		}
 	} else {
 		feed, err = s.resolveResult(resultRef)
