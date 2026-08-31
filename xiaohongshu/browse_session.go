@@ -731,14 +731,17 @@ func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, shareURL, xsecT
 		if navErr := page.Context(opCtx).Navigate(parsed.NormalizedURL); navErr != nil {
 			return fail(fmt.Errorf("导航到share_url失败"))
 		}
-		finalURLCandidate, finalErr := s.currentPageURL(opCtx, counter)
-		if finalErr != nil {
-			return fail(fmt.Errorf("读取最终URL失败: %w", finalErr))
+		pollResult, pollErr := waitForNoteURLStable(opCtx, 60*time.Second, func(readCtx context.Context) (string, error) {
+			return s.currentPageURL(readCtx, counter)
+		})
+		if pollErr != nil {
+			return fail(pollErr)
 		}
-		finalURL = finalURLCandidate
-		finalNoteID, finalToken, validationErr := validateFinalNoteURL(finalURL)
-		if validationErr != nil {
-			return fail(validationErr)
+		finalURL = pollResult.URL
+		finalNoteID := pollResult.NoteID
+		finalToken := ""
+		if u, uErr := strictValidateHTTPSURL(finalURL); uErr == nil {
+			_, finalToken, _ = parseOfficialNoteURL(u)
 		}
 		if !parsed.IsShortLink && parsed.ExpectedID != finalNoteID {
 			return fail(fmt.Errorf("最终note ID与预期不一致"))
@@ -2985,4 +2988,80 @@ func validateFinalNoteURL(finalURL string) (noteID string, xsecToken string, err
 		return "", "", fmt.Errorf("最终URL不是有效的笔记页面")
 	}
 	return noteID, xsecToken, nil
+}
+
+type noteURLPollResult struct {
+	URL    string
+	NoteID string
+}
+
+func waitForNoteURLStable(ctx context.Context, wallClock time.Duration, readURL func(context.Context) (string, error)) (noteURLPollResult, error) {
+	if wallClock <= 0 {
+		wallClock = 60 * time.Second
+	}
+	deadline := time.Now().Add(wallClock)
+	const pollInterval = 500 * time.Millisecond
+	var lastErr error
+	for {
+		if ctx.Err() != nil {
+			return noteURLPollResult{}, ctx.Err()
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			break
+		}
+		readCtx, cancel := context.WithTimeout(ctx, remaining)
+		rawURL, err := readURL(readCtx)
+		cancel()
+		if ctx.Err() != nil {
+			return noteURLPollResult{}, ctx.Err()
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		if err != nil {
+			if isTransientCurrentDetailProbeError(err) {
+				lastErr = err
+				sleepDur := min(pollInterval, time.Until(deadline))
+				if sleepDur <= 0 {
+					break
+				}
+				if sleepErr := pageSleep(ctx, sleepDur); sleepErr != nil {
+					return noteURLPollResult{}, sleepErr
+				}
+				continue
+			}
+			if IsFatalRendererError(err) {
+				return noteURLPollResult{}, err
+			}
+			return noteURLPollResult{}, err
+		}
+		noteID, _, valErr := validateFinalNoteURL(rawURL)
+		if valErr == nil && noteID != "" {
+			return noteURLPollResult{URL: rawURL, NoteID: noteID}, nil
+		}
+		lastErr = fmt.Errorf("当前URL非官方笔记详情: %s", redactSensitiveURL(rawURL))
+		sleepDur := min(pollInterval, time.Until(deadline))
+		if sleepDur <= 0 {
+			break
+		}
+		if sleepErr := pageSleep(ctx, sleepDur); sleepErr != nil {
+			return noteURLPollResult{}, sleepErr
+		}
+	}
+	if lastErr != nil {
+		return noteURLPollResult{}, fmt.Errorf("等待笔记URL稳定超时: %w", lastErr)
+	}
+	return noteURLPollResult{}, fmt.Errorf("等待笔记URL稳定超时")
+}
+
+func pageSleep(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
