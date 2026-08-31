@@ -119,9 +119,6 @@ type OpenedNoteSnapshot struct {
 // ExtractOpenedNoteSnapshotFromDOM 单次 Eval 返回打开笔记的完整首屏快照。
 func ExtractOpenedNoteSnapshotFromDOM(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, feedID string) (*OpenedNoteSnapshot, error) {
 	result, err := evalJS(ctx, counter, page, `(feedID, likeSel, collectSel) => {` + domCleanJS + domNoteHelpersJS + domCommentExtractorJS + `
-		const interact = (() => {` + interactStateJS + `})();
-		if (!interact) return "";
-
 		const title = pickText(["#detail-title", ".note-content .title", ".title", "[class*='title']"]);
 		const desc = pickText(["#detail-desc", ".note-content .desc", ".note-text", ".desc", "[class*='desc']"]);
 		const author = pickText([".author .name", ".author-wrapper .name", ".user .name", ".nickname", "[class*='author'] [class*='name']"]);
@@ -132,6 +129,7 @@ func ExtractOpenedNoteSnapshotFromDOM(ctx context.Context, page *hrod.Page, coun
 		const comments = extractComments(feedID);
 
 		if (!title && !desc && comments.length === 0) return "";
+		const interact = (() => {` + interactStateJS + `})();
 		return JSON.stringify({
 			note: {
 				note_id: feedID,
@@ -140,8 +138,8 @@ func ExtractOpenedNoteSnapshotFromDOM(ctx context.Context, page *hrod.Page, coun
 				type: document.querySelector("video") ? "video" : "normal",
 				user: { nickname: author, nickName: author, avatar },
 				interactInfo: {
-					liked: interact.liked,
-					collected: interact.collected,
+					liked: interact ? interact.liked : false,
+					collected: interact ? interact.collected : false,
 					likedCount: countNear([".interact-container .like-lottie", ".interact-container .like-wrapper", ".interact-container [class*='like']"]),
 					commentCount: countNear([".comments-container .total", ".comment-wrapper", "[class*='comment']"]),
 					collectedCount: countNear([".interact-container .collect-icon", ".interact-container .collect-wrapper", ".interact-container [class*='collect']"])
