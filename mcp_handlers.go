@@ -652,6 +652,14 @@ func shareURLOpenErrorStage(err error) string {
 		return "等待最终详情URL失败"
 	case strings.HasPrefix(errText, "等待笔记详情可见"):
 		return "详情可见性校验失败"
+	case strings.Contains(errText, "DOM Eval超时"):
+		return "首屏内容读取失败（DOM Eval超时）"
+	case strings.Contains(errText, "DOM Eval异常"):
+		return "首屏内容读取失败（DOM Eval异常）"
+	case strings.Contains(errText, "JSON解析异常"):
+		return "首屏内容读取失败（快照JSON解析异常）"
+	case strings.Contains(errText, "DOM快照返回为空"):
+		return "首屏内容读取失败（DOM快照为空）"
 	case strings.HasPrefix(errText, "提取打开笔记快照"), strings.HasPrefix(errText, "首屏内容读取阶段"), strings.HasPrefix(errText, "笔记已打开但内容未就绪"):
 		return "首屏内容读取失败"
 	case strings.HasPrefix(errText, "图片状态读取阶段"):
