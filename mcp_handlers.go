@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -639,6 +640,36 @@ func (s *AppServer) handleSessionSearch(ctx context.Context, args SessionSearchA
 	return jsonMCPResultWithTools(result, afterSearchTools)
 }
 
+func shareURLOpenErrorStage(err error) string {
+	if err == nil {
+		return "未知错误"
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return "操作被取消或超时"
+	}
+	errText := err.Error()
+	switch {
+	case strings.HasPrefix(errText, "导航到share_url失败"), strings.HasPrefix(errText, "读取当前页面URL"):
+		return "导航阶段失败"
+	case strings.HasPrefix(errText, "等待笔记URL稳定"):
+		return "等待最终详情URL失败"
+	case strings.HasPrefix(errText, "等待笔记详情可见"):
+		return "详情可见性校验失败"
+	case strings.HasPrefix(errText, "提取打开笔记快照"), strings.HasPrefix(errText, "笔记已打开但内容未就绪"):
+		return "首屏内容读取失败"
+	case strings.HasPrefix(errText, "笔记标题为空"):
+		return "笔记标题读取失败"
+	case strings.HasPrefix(errText, "笔记作者为空"):
+		return "笔记作者读取失败"
+	case strings.HasPrefix(errText, "最终note ID与预期不一致"), strings.HasPrefix(errText, "最终URL"):
+		return "目标笔记校验失败"
+	case strings.HasPrefix(errText, "URL"), strings.HasPrefix(errText, "share_url"), strings.HasPrefix(errText, "短链"):
+		return "分享链接校验失败"
+	default:
+		return "执行阶段失败（未分类）"
+	}
+}
+
 func (s *AppServer) handleSessionOpenNote(ctx context.Context, args SessionOpenNoteArgs) *MCPToolResult {
 	args.SessionID = strings.TrimSpace(args.SessionID)
 	args.ResultRef = strings.TrimSpace(args.ResultRef)
@@ -661,7 +692,7 @@ func (s *AppServer) handleSessionOpenNote(ctx context.Context, args SessionOpenN
 	info, err := s.xiaohongshuService.SessionOpenNote(ctx, args.SessionID, args.ResultRef, args.ShareURL, args.XsecToken)
 	if err != nil {
 		if hasShareURL {
-			return sessionMCPErrorResult("打开笔记失败: 分享链接打开未完成", sessionNextStepState())
+			return sessionMCPErrorResult("打开笔记失败: "+shareURLOpenErrorStage(err), sessionNextStepState())
 		}
 		return sessionMCPErrorFromErr("打开笔记失败", err, sessionNextStepState())
 	}
