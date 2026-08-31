@@ -1236,3 +1236,137 @@ func TestShareURLTokenPrecedence(t *testing.T) {
 		t.Fatalf("最终 URL 无 token 时应回退输入 token: %q", got)
 	}
 }
+
+func TestWaitForNoteURLStableSuccessAfterRedirects(t *testing.T) {
+	callCount := 0
+	urls := []string{
+		"https://xhslink.cn/o/abc123",
+		"https://www.xiaohongshu.com/explore",
+		"https://www.xiaohongshu.com/explore/5f4d8e7b00000000010001a2",
+	}
+	result, err := waitForNoteURLStable(context.Background(), 5*time.Second, func(_ context.Context) (string, error) {
+		defer func() { callCount++ }()
+		if callCount < len(urls) {
+			return urls[callCount], nil
+		}
+		return urls[len(urls)-1], nil
+	})
+	if err != nil {
+		t.Fatalf("不期望错误: %v", err)
+	}
+	if result.NoteID != "5f4d8e7b00000000010001a2" {
+		t.Fatalf("noteID = %q, 期望 5f4d8e7b00000000010001a2", result.NoteID)
+	}
+	if callCount < 3 {
+		t.Fatalf("应轮询至少3次，实际 %d", callCount)
+	}
+}
+
+func TestWaitForNoteURLStableTransientContextErrorRetries(t *testing.T) {
+	callCount := 0
+	result, err := waitForNoteURLStable(context.Background(), 5*time.Second, func(_ context.Context) (string, error) {
+		callCount++
+		if callCount == 1 {
+			return "", errors.New("Execution context was destroyed")
+		}
+		if callCount == 2 {
+			return "", errors.New("Cannot find context with specified id")
+		}
+		return "https://www.xiaohongshu.com/explore/5f4d8e7b00000000010001a2", nil
+	})
+	if err != nil {
+		t.Fatalf("不期望错误: %v", err)
+	}
+	if result.NoteID != "5f4d8e7b00000000010001a2" {
+		t.Fatalf("noteID = %q, 期望 5f4d8e7b00000000010001a2", result.NoteID)
+	}
+	if callCount != 3 {
+		t.Fatalf("应轮询3次（2次瞬态+1次成功），实际 %d", callCount)
+	}
+}
+
+func TestWaitForNoteURLStableStaysOnHomepageTimeout(t *testing.T) {
+	_, err := waitForNoteURLStable(context.Background(), 100*time.Millisecond, func(_ context.Context) (string, error) {
+		return "https://www.xiaohongshu.com/explore", nil
+	})
+	if err == nil {
+		t.Fatal("始终首页应超时返回错误")
+	}
+	if !strings.Contains(err.Error(), "等待笔记URL稳定超时") {
+		t.Fatalf("错误信息应包含超时提示: %v", err)
+	}
+}
+
+func TestWaitForNoteURLStableTransientErrorPropagation(t *testing.T) {
+	wantErr := errors.New("读取 URL 失败")
+	_, err := waitForNoteURLStable(context.Background(), time.Second, func(_ context.Context) (string, error) {
+		return "", wantErr
+	})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("非 transient 错误应原样传播: %v", err)
+	}
+}
+
+func TestWaitForNoteURLStableSleepCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+	_, err := waitForNoteURLStable(ctx, time.Second, func(_ context.Context) (string, error) {
+		return "https://www.xiaohongshu.com/explore", nil
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("sleep 期间取消应返回 Canceled: %v", err)
+	}
+}
+
+func TestWaitForNoteURLStableCallbackBoundedByWallClock(t *testing.T) {
+	started := time.Now()
+	called := false
+	hasDeadline := false
+	_, err := waitForNoteURLStable(context.Background(), 50*time.Millisecond, func(ctx context.Context) (string, error) {
+		called = true
+		_, hasDeadline = ctx.Deadline()
+		<-ctx.Done()
+		return "https://www.xiaohongshu.com/explore/5f4d8e7b00000000010001a2", nil
+	})
+	if !called {
+		t.Fatal("应调用 URL callback")
+	}
+	if !hasDeadline {
+		t.Fatal("URL callback 应收到剩余预算 deadline")
+	}
+	if err == nil {
+		t.Fatal("callback 超过剩余预算后返回成功结果时应返回错误")
+	}
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("callback 不应突破 wall-clock 预算，耗时 %v", elapsed)
+	}
+}
+
+func TestWaitForNoteURLStableFatalErrorImmediateFail(t *testing.T) {
+	calls := 0
+	_, err := waitForNoteURLStable(context.Background(), 30*time.Second, func(_ context.Context) (string, error) {
+		calls++
+		return "", fmt.Errorf("browser health: %w", ErrFatalRendererError)
+	})
+	if !IsFatalRendererError(err) {
+		t.Fatalf("fatal 错误应立即返回: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("fatal 应只调用一次，实际 %d", calls)
+	}
+}
+
+func TestWaitForNoteURLStableContextCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := waitForNoteURLStable(ctx, 30*time.Second, func(_ context.Context) (string, error) {
+		return "https://xhslink.cn/o/abc", nil
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("context 取消应返回 Canceled: %v", err)
+	}
+}
