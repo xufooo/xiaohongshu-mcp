@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/proto"
 	xerrors "github.com/xpzouying/xiaohongshu-mcp/errors"
 	hrod "github.com/xpzouying/xiaohongshu-mcp/humanize/rod"
@@ -729,7 +730,13 @@ func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, shareURL, xsecT
 		}
 		sourceURL = sourceURLCandidate
 		if navErr := page.Context(opCtx).Navigate(parsed.NormalizedURL); navErr != nil {
-			return fail(fmt.Errorf("导航到share_url失败"))
+			var navigationErr *rod.NavigationError
+			if !parsed.IsShortLink || !errors.As(navErr, &navigationErr) {
+				return fail(fmt.Errorf("导航到share_url失败"))
+			}
+			if _, _, sourceErr := validateFinalNoteURL(sourceURL); sourceErr == nil {
+				return fail(fmt.Errorf("导航到share_url失败"))
+			}
 		}
 		pollResult, pollErr := waitForNoteURLStable(opCtx, 60*time.Second, func(readCtx context.Context) (string, error) {
 			return s.currentPageURL(readCtx, counter)
