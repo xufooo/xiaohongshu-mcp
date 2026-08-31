@@ -810,7 +810,7 @@ func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, shareURL, xsecT
 	})
 	if err != nil {
 		if errors.Is(err, xerrors.ErrNoFeedDetail) {
-			return fail(fmt.Errorf("笔记已打开但内容未就绪: %w", xerrors.ErrNoFeedDetail))
+			return fail(fmt.Errorf("笔记已打开但内容未就绪: %w", err))
 		}
 		return fail(fmt.Errorf("首屏内容读取阶段: %w", err))
 	}

@@ -150,15 +150,19 @@ func ExtractOpenedNoteSnapshotFromDOM(ctx context.Context, page *hrod.Page, coun
 		});
 	}`, feedID, SelectorLikeButton, SelectorCollectButton)
 	if err != nil {
-		return nil, fmt.Errorf("提取打开笔记快照失败: %w", err)
+		kind := "异常"
+		if isEvalTimeout(err) {
+			kind = "超时"
+		}
+		return nil, fmt.Errorf("提取打开笔记快照失败: DOM Eval%s: %w", kind, err)
 	}
 	if result == nil || strings.TrimSpace(result.Value.Str()) == "" {
-		return nil, errors.ErrNoFeedDetail
+		return nil, fmt.Errorf("DOM快照返回为空: %w", errors.ErrNoFeedDetail)
 	}
 
 	var snapshot OpenedNoteSnapshot
 	if err := json.Unmarshal([]byte(result.Value.Str()), &snapshot); err != nil {
-		return nil, fmt.Errorf("解析打开笔记快照失败: %w", err)
+		return nil, fmt.Errorf("提取打开笔记快照失败: JSON解析异常: %w", err)
 	}
 	return &snapshot, nil
 }
