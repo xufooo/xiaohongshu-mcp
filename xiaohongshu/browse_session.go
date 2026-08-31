@@ -812,7 +812,7 @@ func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, shareURL, xsecT
 		if errors.Is(err, xerrors.ErrNoFeedDetail) {
 			return fail(fmt.Errorf("笔记已打开但内容未就绪: %w", xerrors.ErrNoFeedDetail))
 		}
-		return fail(err)
+		return fail(fmt.Errorf("首屏内容读取阶段: %w", err))
 	}
 	content := snapshot.Note
 	if hasShareURL {
@@ -828,7 +828,7 @@ func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, shareURL, xsecT
 	comments := snapshot.Comments
 	content.ImageList, err = preferOpenedNoteImages(opCtx, page, counter, feed.ID, content.ImageList)
 	if err != nil {
-		return fail(err)
+		return fail(fmt.Errorf("图片状态读取阶段: %w", err))
 	}
 
 	initialCommentIDs := make([]string, 0)

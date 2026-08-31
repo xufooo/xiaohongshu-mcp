@@ -644,9 +644,6 @@ func shareURLOpenErrorStage(err error) string {
 	if err == nil {
 		return "未知错误"
 	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return "操作被取消或超时"
-	}
 	errText := err.Error()
 	switch {
 	case strings.HasPrefix(errText, "导航到share_url失败"), strings.HasPrefix(errText, "读取当前页面URL"):
@@ -655,8 +652,10 @@ func shareURLOpenErrorStage(err error) string {
 		return "等待最终详情URL失败"
 	case strings.HasPrefix(errText, "等待笔记详情可见"):
 		return "详情可见性校验失败"
-	case strings.HasPrefix(errText, "提取打开笔记快照"), strings.HasPrefix(errText, "笔记已打开但内容未就绪"):
+	case strings.HasPrefix(errText, "提取打开笔记快照"), strings.HasPrefix(errText, "首屏内容读取阶段"), strings.HasPrefix(errText, "笔记已打开但内容未就绪"):
 		return "首屏内容读取失败"
+	case strings.HasPrefix(errText, "图片状态读取阶段"):
+		return "图片状态读取失败"
 	case strings.HasPrefix(errText, "笔记标题为空"):
 		return "笔记标题读取失败"
 	case strings.HasPrefix(errText, "笔记作者为空"):
@@ -666,6 +665,9 @@ func shareURLOpenErrorStage(err error) string {
 	case strings.HasPrefix(errText, "URL"), strings.HasPrefix(errText, "share_url"), strings.HasPrefix(errText, "短链"):
 		return "分享链接校验失败"
 	default:
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return "操作被取消或超时"
+		}
 		return "执行阶段失败（未分类）"
 	}
 }
