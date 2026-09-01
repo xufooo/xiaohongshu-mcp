@@ -739,7 +739,14 @@ func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, shareURL, xsecT
 			}
 		}
 		pollResult, pollErr := waitForNoteURLStable(opCtx, 60*time.Second, func(readCtx context.Context) (string, error) {
-			return s.currentPageURL(readCtx, counter)
+			result, infoErr := proto.TargetGetTargetInfo{TargetID: page.Rod.TargetID}.Call(page.Rod.Browser().Context(readCtx))
+			if infoErr != nil {
+				return "", infoErr
+			}
+			if result == nil || result.TargetInfo == nil {
+				return "", fmt.Errorf("页面信息为空")
+			}
+			return result.TargetInfo.URL, nil
 		})
 		if pollErr != nil {
 			return fail(pollErr)
