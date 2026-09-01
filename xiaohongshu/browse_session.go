@@ -726,16 +726,16 @@ func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, shareURL, xsecT
 		counter := &evalTimeoutCounter{}
 		sourceURLCandidate, urlErr := s.currentPageURL(opCtx, counter)
 		if urlErr != nil {
-			return fail(fmt.Errorf("读取当前页面URL: %w", urlErr))
+			return fail(fmt.Errorf("读取当前页面URL: share_url_source_url_read_failed"))
 		}
 		sourceURL = sourceURLCandidate
 		if navErr := page.Context(opCtx).Navigate(parsed.NormalizedURL); navErr != nil {
 			var navigationErr *rod.NavigationError
 			if !parsed.IsShortLink || !errors.As(navErr, &navigationErr) {
-				return fail(fmt.Errorf("导航到share_url失败"))
+				return fail(fmt.Errorf("导航到share_url失败: share_url_navigate_error_not_navigation_error"))
 			}
 			if _, _, sourceErr := validateFinalNoteURL(sourceURL); sourceErr == nil {
-				return fail(fmt.Errorf("导航到share_url失败"))
+				return fail(fmt.Errorf("导航到share_url失败: share_url_navigation_rejected_detail_source"))
 			}
 		}
 		pollResult, pollErr := waitForNoteURLStable(opCtx, 60*time.Second, func(readCtx context.Context) (string, error) {

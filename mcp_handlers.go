@@ -664,6 +664,12 @@ func shareURLOpenErrorStage(err error) string {
 	}
 	errText := err.Error()
 	switch {
+	case strings.Contains(errText, "share_url_source_url_read_failed"):
+		return "导航阶段失败（source_url_read_failed）"
+	case strings.Contains(errText, "share_url_navigate_error_not_navigation_error"):
+		return "导航阶段失败（navigate_error_not_navigation_error）"
+	case strings.Contains(errText, "share_url_navigation_rejected_detail_source"):
+		return "导航阶段失败（navigation_rejected_detail_source）"
 	case strings.HasPrefix(errText, "导航到share_url失败"), strings.HasPrefix(errText, "读取当前页面URL"):
 		return "导航阶段失败"
 	case strings.HasPrefix(errText, "等待笔记URL稳定"):
