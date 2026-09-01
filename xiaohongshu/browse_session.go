@@ -2998,6 +2998,51 @@ type noteURLPollResult struct {
 	NoteID string
 }
 
+type NoteURLPollError struct {
+	sample            string
+	deadlineDiscarded string
+	contextState      string
+	cause             error
+}
+
+func (e *NoteURLPollError) Error() string {
+	return "等待笔记URL稳定失败"
+}
+
+func (e *NoteURLPollError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
+
+func (e *NoteURLPollError) Diagnostic() string {
+	if e == nil || e.sample == "" || e.deadlineDiscarded == "" || e.contextState == "" {
+		return ""
+	}
+	return fmt.Sprintf("sample=%s deadline_discarded=%s context=%s", e.sample, e.deadlineDiscarded, e.contextState)
+}
+
+func newNoteURLPollError(sample, deadlineDiscarded, contextState string, cause error) *NoteURLPollError {
+	return &NoteURLPollError{
+		sample:            sample,
+		deadlineDiscarded: deadlineDiscarded,
+		contextState:      contextState,
+		cause:             cause,
+	}
+}
+
+func noteURLContextState(err error) string {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "deadline"
+	default:
+		return "error"
+	}
+}
+
 func waitForNoteURLStable(ctx context.Context, wallClock time.Duration, readURL func(context.Context) (string, error)) (noteURLPollResult, error) {
 	if wallClock <= 0 {
 		wallClock = 60 * time.Second
@@ -3020,11 +3065,27 @@ func waitForNoteURLStable(ctx context.Context, wallClock time.Duration, readURL 
 			return noteURLPollResult{}, ctx.Err()
 		}
 		if time.Now().After(deadline) {
+			if err != nil {
+				if isTransientCurrentDetailProbeError(err) {
+					lastErr = newNoteURLPollError("transient_error", "false", noteURLContextState(err), err)
+				} else {
+					lastErr = newNoteURLPollError("read_error", "false", "unknown", err)
+				}
+			} else {
+				noteID, _, valErr := validateFinalNoteURL(rawURL)
+				if valErr == nil && noteID != "" {
+					lastErr = newNoteURLPollError("deadline_discarded", "true", "ok", nil)
+				} else if strings.TrimSpace(rawURL) == "" {
+					lastErr = newNoteURLPollError("empty_url", "false", "ok", nil)
+				} else {
+					lastErr = newNoteURLPollError("invalid_url", "false", "ok", nil)
+				}
+			}
 			break
 		}
 		if err != nil {
 			if isTransientCurrentDetailProbeError(err) {
-				lastErr = err
+				lastErr = newNoteURLPollError("transient_error", "false", noteURLContextState(err), err)
 				sleepDur := min(pollInterval, time.Until(deadline))
 				if sleepDur <= 0 {
 					break
@@ -3037,13 +3098,17 @@ func waitForNoteURLStable(ctx context.Context, wallClock time.Duration, readURL 
 			if IsFatalRendererError(err) {
 				return noteURLPollResult{}, err
 			}
-			return noteURLPollResult{}, err
+			return noteURLPollResult{}, newNoteURLPollError("read_error", "false", "unknown", err)
 		}
 		noteID, _, valErr := validateFinalNoteURL(rawURL)
 		if valErr == nil && noteID != "" {
 			return noteURLPollResult{URL: rawURL, NoteID: noteID}, nil
 		}
-		lastErr = fmt.Errorf("当前URL非官方笔记详情: %s", redactSensitiveURL(rawURL))
+		sample := "invalid_url"
+		if strings.TrimSpace(rawURL) == "" {
+			sample = "empty_url"
+		}
+		lastErr = newNoteURLPollError(sample, "false", "ok", nil)
 		sleepDur := min(pollInterval, time.Until(deadline))
 		if sleepDur <= 0 {
 			break
