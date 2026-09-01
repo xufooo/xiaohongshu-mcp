@@ -650,6 +650,12 @@ func shareURLOpenErrorStage(err error) string {
 			return "详情可见性校验失败（" + diagnostic + "）"
 		}
 	}
+	var urlPollErr *xiaohongshu.NoteURLPollError
+	if errors.As(err, &urlPollErr) && urlPollErr != nil {
+		if diagnostic := urlPollErr.Diagnostic(); diagnostic != "" {
+			return "最终详情URL读取失败（" + diagnostic + "）"
+		}
+	}
 	errText := err.Error()
 	switch {
 	case strings.HasPrefix(errText, "导航到share_url失败"), strings.HasPrefix(errText, "读取当前页面URL"):
