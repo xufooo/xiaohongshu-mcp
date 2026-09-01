@@ -3,8 +3,10 @@ package xiaohongshu
 import (
 	"context"
 	"encoding/json"
+	stderrors "errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/xpzouying/xiaohongshu-mcp/errors"
 	hrod "github.com/xpzouying/xiaohongshu-mcp/humanize/rod"
@@ -165,6 +167,107 @@ func ExtractOpenedNoteSnapshotFromDOM(ctx context.Context, page *hrod.Page, coun
 		return nil, fmt.Errorf("提取打开笔记快照失败: JSON解析异常: %w", err)
 	}
 	return &snapshot, nil
+}
+
+type SnapshotDiagnosticError struct {
+	diagnostic string
+	cause      error
+}
+
+func (e *SnapshotDiagnosticError) Error() string {
+	if e == nil {
+		return ""
+	}
+	if e.diagnostic == "" {
+		if e.cause == nil {
+			return ""
+		}
+		return e.cause.Error()
+	}
+	if e.cause == nil {
+		return "snapshot_diagnostic=" + e.diagnostic
+	}
+	return e.cause.Error() + "; snapshot_diagnostic=" + e.diagnostic
+}
+
+func (e *SnapshotDiagnosticError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
+
+func (e *SnapshotDiagnosticError) Diagnostic() string {
+	if e == nil {
+		return ""
+	}
+	return e.diagnostic
+}
+
+func probeOpenedNoteSnapshotStages(ctx context.Context, page *hrod.Page) string {
+	stages := []struct {
+		name string
+		js   string
+	}{
+		{"snapshot_shell", `() => JSON.stringify(document.querySelectorAll("#detail-title, #detail-desc, .note-content").length)`},
+		{"note_fields", `() => JSON.stringify(["#detail-title", "#detail-desc", ".author .name", ".author-wrapper .name"].reduce((n, s) => n + document.querySelectorAll(s).length, 0))`},
+		{"images", `() => JSON.stringify(document.querySelectorAll(".swiper img, .note-content img, .media-container img").length)`},
+		{"comments_top", `() => JSON.stringify(document.querySelectorAll(".parent-comment").length)`},
+		{"comments_nested", `() => JSON.stringify(document.querySelectorAll(".parent-comment .reply-container .comment-item").length)`},
+		{"interactions", `() => JSON.stringify(document.querySelectorAll(".interact-container, [class*='like'], [class*='collect']").length)`},
+	}
+	parts := make([]string, 0, len(stages))
+	for _, stage := range stages {
+		started := time.Now()
+		probeCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+		result, err := page.Context(probeCtx).Eval(stage.js)
+		cancel()
+		terminal := "ok"
+		countBucket := "0"
+		if err != nil {
+			switch {
+			case stderrors.Is(err, context.Canceled):
+				terminal = "context_canceled"
+			case stderrors.Is(err, context.DeadlineExceeded), isEvalTimeout(err):
+				terminal = "eval_timeout"
+			default:
+				terminal = "other"
+			}
+		} else if result == nil {
+			terminal = "other"
+		} else {
+			var count int
+			if json.Unmarshal([]byte(result.Value.Str()), &count) != nil {
+				terminal = "other"
+			} else {
+				switch {
+				case count == 0:
+					countBucket = "0"
+				case count == 1:
+					countBucket = "1"
+				case count <= 20:
+					countBucket = "2_20"
+				case count <= 100:
+					countBucket = "21_100"
+				default:
+					countBucket = "gt100"
+				}
+			}
+		}
+		elapsed := time.Since(started)
+		elapsedBucket := "lt100ms"
+		switch {
+		case elapsed >= 250*time.Millisecond:
+			elapsedBucket = "timeout"
+		case elapsed >= 100*time.Millisecond:
+			elapsedBucket = "100_249ms"
+		}
+		if terminal != "ok" {
+			countBucket = "0"
+		}
+		parts = append(parts, stage.name+":"+terminal+":"+elapsedBucket+":"+countBucket)
+	}
+	return strings.Join(parts, ",")
 }
 
 // ExtractSearchFeedsFromDOM 从渲染后的搜索/首页卡片提取笔记信息。
