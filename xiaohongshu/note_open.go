@@ -256,6 +256,8 @@ func detailProbeErrorCategory(terminal string, err error) string {
 		return "context_canceled"
 	case errors.Is(err, context.DeadlineExceeded):
 		return "context_deadline"
+	case errors.Is(err, errCurrentDetailEvalTimeout):
+		return "eval_timeout"
 	case errors.Is(err, cdp.ErrCtxNotFound), errors.Is(err, cdp.ErrCtxDestroyed):
 		return "execution_context_destroyed"
 	}

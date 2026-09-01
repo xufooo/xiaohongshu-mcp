@@ -1370,3 +1370,111 @@ func TestWaitForNoteURLStableContextCancel(t *testing.T) {
 		t.Fatalf("context 取消应返回 Canceled: %v", err)
 	}
 }
+
+func TestCurrentDetailProbeErrorCategories(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{name: "parent canceled", err: context.Canceled, want: "context_canceled"},
+		{name: "parent deadline", err: context.DeadlineExceeded, want: "context_deadline"},
+		{name: "local eval timeout", err: errCurrentDetailEvalTimeout, want: "eval_timeout"},
+		{name: "execution context destroyed", err: errors.New("Execution context was destroyed"), want: "execution_context_destroyed"},
+		{name: "other transient", err: errors.New("temporary probe failure"), want: "other_transient"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := detailProbeErrorCategory("transient_error", tt.err); got != tt.want {
+				t.Fatalf("detailProbeErrorCategory() = %q, 期望 %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNormalizeCurrentDetailProbeError(t *testing.T) {
+	expiredCtx, expiredCancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer expiredCancel()
+	canceledCtx, canceledCancel := context.WithCancel(context.Background())
+	canceledCancel()
+	rawEvalDeadline := errors.New("local eval deadline exceeded")
+	fatalErr := fmt.Errorf("renderer failed: %w", ErrFatalRendererError)
+
+	tests := []struct {
+		name      string
+		ctx       context.Context
+		err       error
+		want      error
+		wantExact error
+	}{
+		{name: "live parent with raw local deadline", ctx: context.Background(), err: rawEvalDeadline, want: errCurrentDetailEvalTimeout},
+		{name: "expired parent with raw deadline", ctx: expiredCtx, err: rawEvalDeadline, want: expiredCtx.Err(), wantExact: expiredCtx.Err()},
+		{name: "canceled parent", ctx: canceledCtx, err: rawEvalDeadline, want: context.Canceled},
+		{name: "fatal sentinel", ctx: expiredCtx, err: fatalErr, want: ErrFatalRendererError, wantExact: fatalErr},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := normalizeCurrentDetailProbeError(tt.ctx, tt.err)
+			if !errors.Is(got, tt.want) {
+				t.Fatalf("normalizeCurrentDetailProbeError() = %v, 期望 errors.Is(_, %v)", got, tt.want)
+			}
+			if tt.wantExact != nil && got != tt.wantExact {
+				t.Fatalf("normalizeCurrentDetailProbeError() 未原样传播错误: got=%v want=%v", got, tt.wantExact)
+			}
+		})
+	}
+
+	normalized := normalizeCurrentDetailProbeError(context.Background(), rawEvalDeadline)
+	if !errors.Is(normalized, errCurrentDetailEvalTimeout) {
+		t.Fatalf("局部 Eval 超时应归一化为专用 sentinel: %v", normalized)
+	}
+	if errors.Is(normalized, context.DeadlineExceeded) {
+		t.Fatal("局部 Eval 超时不得泄漏为 parent context deadline")
+	}
+	if !isTransientCurrentDetailProbeError(normalized) {
+		t.Fatal("本地 Eval 超时应为瞬态错误")
+	}
+}
+
+func TestDetailVisibilityErrorChain(t *testing.T) {
+	tests := []struct {
+		name  string
+		cause error
+	}{
+		{name: "local eval timeout", cause: errCurrentDetailEvalTimeout},
+		{name: "parent deadline", cause: context.DeadlineExceeded},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := newDetailVisibilityError("transient_error", tt.cause)
+			if !errors.Is(err, tt.cause) {
+				t.Fatalf("DetailVisibilityError 未通过 errors.Is 传播 cause: %v", err)
+			}
+			visibility, ok := err.(*DetailVisibilityError)
+			if !ok {
+				t.Fatalf("错误类型 = %T, 期望 *DetailVisibilityError", err)
+			}
+			if visibility.Unwrap() != tt.cause {
+				t.Fatalf("Unwrap() = %v, 期望 %v", visibility.Unwrap(), tt.cause)
+			}
+		})
+	}
+}
+
+func TestDetailVisibilityDiagnosticDoesNotExposeRawProbeError(t *testing.T) {
+	rawErr := errors.New("Runtime.evaluate timeout: https://www.xiaohongshu.com/explore/secret-note?xsec_token=secret-token")
+	err := newDetailVisibilityError("transient_error", rawErr)
+	visibility, ok := err.(*DetailVisibilityError)
+	if !ok {
+		t.Fatalf("错误类型 = %T, 期望 *DetailVisibilityError", err)
+	}
+	diagnostic := visibility.Diagnostic()
+	if !strings.Contains(diagnostic, "probe_error=eval_timeout") {
+		t.Fatalf("诊断缺少 Eval 超时分类: %q", diagnostic)
+	}
+	for _, secret := range []string{"https://www.xiaohongshu.com/explore/secret-note", "secret-note", "secret-token", "Runtime.evaluate"} {
+		if strings.Contains(diagnostic, secret) {
+			t.Fatalf("诊断泄露敏感内容 %q: %q", secret, diagnostic)
+		}
+	}
+}
