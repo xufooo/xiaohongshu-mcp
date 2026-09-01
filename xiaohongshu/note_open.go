@@ -162,6 +162,8 @@ func feedCardClickPoint(anchor *hrod.Element) (proto.Point, error) {
 
 func waitFeedDetailVisible(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, feedID string) error {
 	deadline := time.Now().Add(15 * time.Second)
+	waitCtx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
 	var last currentFeedDetailProbe
 	var lastErr error
 
@@ -169,7 +171,7 @@ func waitFeedDetailVisible(ctx context.Context, page *hrod.Page, counter *evalTi
 		if err := page.Err(); err != nil {
 			return err
 		}
-		probe, err := probeCurrentFeedDetail(ctx, page, counter, feedID)
+		probe, err := probeCurrentFeedDetail(waitCtx, page, feedID)
 		if err != nil {
 			if IsFatalRendererError(err) {
 				return err
