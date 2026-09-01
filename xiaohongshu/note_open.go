@@ -3,10 +3,12 @@ package xiaohongshu
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/go-rod/rod/lib/cdp"
 	"github.com/go-rod/rod/lib/proto"
 	hrod "github.com/xpzouying/xiaohongshu-mcp/humanize/rod"
 )
@@ -199,6 +201,7 @@ type DetailVisibilityError struct {
 	visibleDetailCount        string
 	visibleMatchedDetailCount string
 	stateMatched              string
+	probeError                string
 	cause                     error
 }
 
@@ -214,11 +217,11 @@ func (e *DetailVisibilityError) Unwrap() error {
 }
 
 func (e *DetailVisibilityError) Diagnostic() string {
-	if e == nil || e.probeTerminal == "" || e.urlMatched == "" || e.visibleDetailCount == "" || e.visibleMatchedDetailCount == "" || e.stateMatched == "" {
+	if e == nil || e.probeTerminal == "" || e.urlMatched == "" || e.visibleDetailCount == "" || e.visibleMatchedDetailCount == "" || e.stateMatched == "" || e.probeError == "" {
 		return ""
 	}
-	return fmt.Sprintf("probe_terminal=%s url_matched=%s visible_detail_count=%s visible_matched_detail_count=%s state_matched=%s",
-		e.probeTerminal, e.urlMatched, e.visibleDetailCount, e.visibleMatchedDetailCount, e.stateMatched)
+	return fmt.Sprintf("probe_terminal=%s probe_error=%s url_matched=%s visible_detail_count=%s visible_matched_detail_count=%s state_matched=%s",
+		e.probeTerminal, e.probeError, e.urlMatched, e.visibleDetailCount, e.visibleMatchedDetailCount, e.stateMatched)
 }
 
 func newDetailVisibilityError(terminal string, cause error, probes ...currentFeedDetailProbe) error {
@@ -228,6 +231,7 @@ func newDetailVisibilityError(terminal string, cause error, probes ...currentFee
 		visibleDetailCount:        "unknown",
 		visibleMatchedDetailCount: "unknown",
 		stateMatched:              "unknown",
+		probeError:                detailProbeErrorCategory(terminal, cause),
 		cause:                     cause,
 	}
 	if len(probes) == 1 {
@@ -238,6 +242,34 @@ func newDetailVisibilityError(terminal string, cause error, probes ...currentFee
 		visibility.stateMatched = boolCategory(probe.StateMatched)
 	}
 	return visibility
+}
+
+func detailProbeErrorCategory(terminal string, err error) string {
+	if terminal != "transient_error" {
+		return "unknown"
+	}
+	if err == nil {
+		return "unknown"
+	}
+	switch {
+	case errors.Is(err, context.Canceled):
+		return "context_canceled"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "context_deadline"
+	case errors.Is(err, cdp.ErrCtxNotFound), errors.Is(err, cdp.ErrCtxDestroyed):
+		return "execution_context_destroyed"
+	}
+	message := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(message, "execution context was destroyed"), strings.Contains(message, "cannot find context with specified id"):
+		return "execution_context_destroyed"
+	case strings.Contains(message, "context canceled"):
+		return "context_canceled"
+	case isEvalTimeout(err):
+		return "eval_timeout"
+	default:
+		return "other_transient"
+	}
 }
 
 func boolCategory(value bool) string {
