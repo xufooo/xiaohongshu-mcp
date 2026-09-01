@@ -111,6 +111,7 @@ const xhsSearchInputReadyJS = `
 			});
 		};
 `
+var errCurrentDetailEvalTimeout = errors.New("current detail eval timeout")
 var errPermanentCurrentDetailProbe = errors.New("permanent current detail probe error")
 
 type currentFeedDetailProbe struct {
@@ -136,7 +137,7 @@ func probeCurrentFeedDetail(ctx context.Context, page *hrod.Page, counter *evalT
 	}`
 	obj, err := evalJS(ctx, counter, page, probeJS, feedID, SelectorFeedDetailReady)
 	if err != nil {
-		return currentFeedDetailProbe{}, err
+		return currentFeedDetailProbe{}, normalizeCurrentDetailProbeError(ctx, err)
 	}
 	if obj == nil {
 		return currentFeedDetailProbe{}, fmt.Errorf("%w: 当前详情页探测无返回", errPermanentCurrentDetailProbe)
@@ -147,6 +148,19 @@ func probeCurrentFeedDetail(ctx context.Context, page *hrod.Page, counter *evalT
 		return currentFeedDetailProbe{}, fmt.Errorf("%w: %v", errPermanentCurrentDetailProbe, err)
 	}
 	return probe, nil
+}
+
+func normalizeCurrentDetailProbeError(ctx context.Context, err error) error {
+	if IsFatalRendererError(err) {
+		return err
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	if isEvalTimeout(err) {
+		return errCurrentDetailEvalTimeout
+	}
+	return err
 }
 
 func currentFeedDetailMatched(probe currentFeedDetailProbe, _ string) bool {
@@ -183,6 +197,7 @@ func isTransientCurrentDetailProbeError(err error) bool {
 	}
 	if errors.Is(err, context.Canceled) ||
 		errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, errCurrentDetailEvalTimeout) ||
 		errors.Is(err, cdp.ErrCtxNotFound) ||
 		errors.Is(err, cdp.ErrCtxDestroyed) {
 		return true
