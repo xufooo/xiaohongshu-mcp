@@ -118,9 +118,38 @@ type OpenedNoteSnapshot struct {
 	Comments []Comment         `json:"comments"`
 }
 
-// ExtractOpenedNoteSnapshotFromDOM 单次 Eval 返回打开笔记的完整首屏快照。
 func ExtractOpenedNoteSnapshotFromDOM(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, feedID string) (*OpenedNoteSnapshot, error) {
-	result, err := evalJS(ctx, counter, page, `(feedID, likeSel, collectSel) => {` + domCleanJS + domNoteHelpersJS + domCommentExtractorJS + `
+	attemptCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	content, err := extractOpenedNoteFieldsFromDOM(attemptCtx, page, feedID)
+	if err != nil {
+		return nil, finishOpenedNoteSnapshotAttempt(ctx, counter, page, err)
+	}
+	comments, err := extractOpenedNoteCommentsFromDOM(attemptCtx, page, feedID)
+	if err != nil {
+		return nil, finishOpenedNoteSnapshotAttempt(ctx, counter, page, err)
+	}
+	if strings.TrimSpace(content.Title) == "" && strings.TrimSpace(content.Desc) == "" && len(comments) == 0 {
+		err := fmt.Errorf("DOM快照返回为空: %w", errors.ErrNoFeedDetail)
+		return nil, finishOpenedNoteSnapshotAttempt(ctx, counter, page, err)
+	}
+	if err := finishOpenedNoteSnapshotAttempt(ctx, counter, page, nil); err != nil {
+		return nil, err
+	}
+	return &OpenedNoteSnapshot{Note: content, Comments: comments}, nil
+}
+
+func finishOpenedNoteSnapshotAttempt(ctx context.Context, counter *evalTimeoutCounter, page *hrod.Page, err error) error {
+	if counter == nil {
+		return err
+	}
+	return counter.add(ctx, err, func() error {
+		return confirmRendererAlive(ctx, page)
+	})
+}
+
+func extractOpenedNoteFieldsFromDOM(ctx context.Context, page *hrod.Page, feedID string) (OpenedNoteContent, error) {
+	result, err := evalJSNoCounter(ctx, page, `(feedID, likeSel, collectSel) => {` + domCleanJS + domNoteHelpersJS + `
 		const title = pickText(["#detail-title", ".note-content .title", ".title", "[class*='title']"]);
 		const desc = pickText(["#detail-desc", ".note-content .desc", ".note-text", ".desc", "[class*='desc']"]);
 		const author = pickText([".author .name", ".author-wrapper .name", ".user .name", ".nickname", "[class*='author'] [class*='name']"]);
@@ -128,29 +157,45 @@ func ExtractOpenedNoteSnapshotFromDOM(ctx context.Context, page *hrod.Page, coun
 		const images = Array.from(document.querySelectorAll(".swiper img, .note-content img, .media-container img"))
 			.map((img) => ({ width: img.naturalWidth || 0, height: img.naturalHeight || 0, urlDefault: img.src || "", urlPre: img.src || "" }))
 			.filter((img) => img.urlDefault);
-		const comments = extractComments(feedID);
-
-		if (!title && !desc && comments.length === 0) return "";
 		const interact = (() => {` + interactStateJS + `})();
 		return JSON.stringify({
-			note: {
-				note_id: feedID,
-				title,
-				desc,
-				type: document.querySelector("video") ? "video" : "normal",
-				user: { nickname: author, nickName: author, avatar },
-				interactInfo: {
-					liked: interact ? interact.liked : false,
-					collected: interact ? interact.collected : false,
-					likedCount: countNear([".interact-container .like-lottie", ".interact-container .like-wrapper", ".interact-container [class*='like']"]),
-					commentCount: countNear([".comments-container .total", ".comment-wrapper", "[class*='comment']"]),
-					collectedCount: countNear([".interact-container .collect-icon", ".interact-container .collect-wrapper", ".interact-container [class*='collect']"])
-				},
-				imageList: images
+			note_id: feedID,
+			title,
+			desc,
+			type: document.querySelector("video") ? "video" : "normal",
+			user: { nickname: author, nickName: author, avatar },
+			interactInfo: {
+				liked: interact ? interact.liked : false,
+				collected: interact ? interact.collected : false,
+				likedCount: countNear([".interact-container .like-lottie", ".interact-container .like-wrapper", ".interact-container [class*='like']"]),
+				commentCount: countNear([".comments-container .total", ".comment-wrapper", "[class*='comment']"]),
+				collectedCount: countNear([".interact-container .collect-icon", ".interact-container .collect-wrapper", ".interact-container [class*='collect']"])
 			},
-			comments
+			imageList: images
 		});
 	}`, feedID, SelectorLikeButton, SelectorCollectButton)
+	if err != nil {
+		kind := "异常"
+		if isEvalTimeout(err) {
+			kind = "超时"
+		}
+		return OpenedNoteContent{}, fmt.Errorf("提取打开笔记快照失败: DOM Eval%s: %w", kind, err)
+	}
+	if result == nil || strings.TrimSpace(result.Value.Str()) == "" {
+		return OpenedNoteContent{}, fmt.Errorf("DOM快照返回为空: %w", errors.ErrNoFeedDetail)
+	}
+
+	var content OpenedNoteContent
+	if err := json.Unmarshal([]byte(result.Value.Str()), &content); err != nil {
+		return OpenedNoteContent{}, fmt.Errorf("提取打开笔记快照失败: JSON解析异常: %w", err)
+	}
+	return content, nil
+}
+
+func extractOpenedNoteCommentsFromDOM(ctx context.Context, page *hrod.Page, feedID string) ([]Comment, error) {
+	result, err := evalJSNoCounter(ctx, page, `(feedID) => {` + domCleanJS + domCommentExtractorJS + `
+		return JSON.stringify(extractComments(feedID));
+	}`, feedID)
 	if err != nil {
 		kind := "异常"
 		if isEvalTimeout(err) {
@@ -162,11 +207,11 @@ func ExtractOpenedNoteSnapshotFromDOM(ctx context.Context, page *hrod.Page, coun
 		return nil, fmt.Errorf("DOM快照返回为空: %w", errors.ErrNoFeedDetail)
 	}
 
-	var snapshot OpenedNoteSnapshot
-	if err := json.Unmarshal([]byte(result.Value.Str()), &snapshot); err != nil {
+	var comments []Comment
+	if err := json.Unmarshal([]byte(result.Value.Str()), &comments); err != nil {
 		return nil, fmt.Errorf("提取打开笔记快照失败: JSON解析异常: %w", err)
 	}
-	return &snapshot, nil
+	return comments, nil
 }
 
 type SnapshotDiagnosticError struct {
