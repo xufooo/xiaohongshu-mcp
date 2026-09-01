@@ -93,7 +93,7 @@ func interactionValidationAction(actionType interactActionType) string {
 }
 
 func isCurrentFeedDetail(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, feedID string) (bool, error) {
-	probe, err := probeCurrentFeedDetail(ctx, page, counter, feedID)
+	probe, err := probeCurrentFeedDetail(ctx, page, feedID)
 	if err != nil {
 		return false, err
 	}
