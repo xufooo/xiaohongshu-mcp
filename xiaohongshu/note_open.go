@@ -173,7 +173,7 @@ func waitFeedDetailVisible(ctx context.Context, page *hrod.Page, counter *evalTi
 				return err
 			}
 			if !isTransientCurrentDetailProbeError(err) {
-				return fmt.Errorf("等待笔记详情可见失败: %w", err)
+				return newDetailVisibilityError("permanent_error", err)
 			}
 			lastErr = err
 		} else {
@@ -188,10 +188,74 @@ func waitFeedDetailVisible(ctx context.Context, page *hrod.Page, counter *evalTi
 		}
 	}
 	if lastErr != nil {
-		return fmt.Errorf("等待笔记详情可见失败: %w", lastErr)
+		return newDetailVisibilityError("transient_error", lastErr)
 	}
-	return fmt.Errorf("等待笔记详情可见超时: url=%s url_matched=%v visible=%d visible_matched=%d state_matched=%v",
-		last.URL, last.URLMatched, last.VisibleDetailCount, last.VisibleMatchedDetailCount, last.StateMatched)
+	return newDetailVisibilityError("unmatched", nil, last)
+}
+
+type DetailVisibilityError struct {
+	probeTerminal             string
+	urlMatched                string
+	visibleDetailCount        string
+	visibleMatchedDetailCount string
+	stateMatched              string
+	cause                     error
+}
+
+func (e *DetailVisibilityError) Error() string {
+	return "等待笔记详情可见失败"
+}
+
+func (e *DetailVisibilityError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
+
+func (e *DetailVisibilityError) Diagnostic() string {
+	if e == nil || e.probeTerminal == "" || e.urlMatched == "" || e.visibleDetailCount == "" || e.visibleMatchedDetailCount == "" || e.stateMatched == "" {
+		return ""
+	}
+	return fmt.Sprintf("probe_terminal=%s url_matched=%s visible_detail_count=%s visible_matched_detail_count=%s state_matched=%s",
+		e.probeTerminal, e.urlMatched, e.visibleDetailCount, e.visibleMatchedDetailCount, e.stateMatched)
+}
+
+func newDetailVisibilityError(terminal string, cause error, probes ...currentFeedDetailProbe) error {
+	visibility := &DetailVisibilityError{
+		probeTerminal:             terminal,
+		urlMatched:                "unknown",
+		visibleDetailCount:        "unknown",
+		visibleMatchedDetailCount: "unknown",
+		stateMatched:              "unknown",
+		cause:                     cause,
+	}
+	if len(probes) == 1 {
+		probe := probes[0]
+		visibility.urlMatched = boolCategory(probe.URLMatched)
+		visibility.visibleDetailCount = countCategory(probe.VisibleDetailCount)
+		visibility.visibleMatchedDetailCount = countCategory(probe.VisibleMatchedDetailCount)
+		visibility.stateMatched = boolCategory(probe.StateMatched)
+	}
+	return visibility
+}
+
+func boolCategory(value bool) string {
+	if value {
+		return "true"
+	}
+	return "false"
+}
+
+func countCategory(value int) string {
+	switch {
+	case value <= 0:
+		return "0"
+	case value == 1:
+		return "1"
+	default:
+		return "many"
+	}
 }
 
 func inferOpenSource(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter) (string, error) {
