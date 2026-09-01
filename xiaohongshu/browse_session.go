@@ -809,6 +809,12 @@ func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, shareURL, xsecT
 		return ExtractOpenedNoteSnapshotFromDOM(opCtx, page, counter, feed.ID)
 	})
 	if err != nil {
+		if opCtx.Err() == nil && isEvalTimeout(err) && !IsFatalRendererError(err) {
+			diagnostic := probeOpenedNoteSnapshotStages(opCtx, page)
+			if opCtx.Err() == nil {
+				err = &SnapshotDiagnosticError{diagnostic: diagnostic, cause: err}
+			}
+		}
 		if errors.Is(err, xerrors.ErrNoFeedDetail) {
 			return fail(fmt.Errorf("笔记已打开但内容未就绪: %w", err))
 		}

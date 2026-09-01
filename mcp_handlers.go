@@ -656,6 +656,12 @@ func shareURLOpenErrorStage(err error) string {
 			return "最终详情URL读取失败（" + diagnostic + "）"
 		}
 	}
+	var snapshotErr *xiaohongshu.SnapshotDiagnosticError
+	if errors.As(err, &snapshotErr) && snapshotErr != nil {
+		if diagnostic := snapshotErr.Diagnostic(); diagnostic != "" {
+			return "首屏内容读取失败（DOM Eval超时；snapshot_diagnostic=" + diagnostic + "）"
+		}
+	}
 	errText := err.Error()
 	switch {
 	case strings.HasPrefix(errText, "导航到share_url失败"), strings.HasPrefix(errText, "读取当前页面URL"):
