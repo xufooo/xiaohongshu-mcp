@@ -644,6 +644,12 @@ func shareURLOpenErrorStage(err error) string {
 	if err == nil {
 		return "未知错误"
 	}
+	var visibilityErr *xiaohongshu.DetailVisibilityError
+	if errors.As(err, &visibilityErr) && visibilityErr != nil {
+		if diagnostic := visibilityErr.Diagnostic(); diagnostic != "" {
+			return "详情可见性校验失败（" + diagnostic + "）"
+		}
+	}
 	errText := err.Error()
 	switch {
 	case strings.HasPrefix(errText, "导航到share_url失败"), strings.HasPrefix(errText, "读取当前页面URL"):
