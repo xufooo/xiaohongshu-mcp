@@ -1484,10 +1484,10 @@ func TestCurrentDetailProbeErrorCategories(t *testing.T) {
 		want string
 	}{
 		{name: "parent canceled", err: context.Canceled, want: "context_canceled"},
-		{name: "parent deadline", err: context.DeadlineExceeded, want: "context_deadline"},
+		{name: "attempt deadline", err: context.DeadlineExceeded, want: "attempt_context_deadline"},
 		{name: "local eval timeout", err: errCurrentDetailEvalTimeout, want: "eval_timeout"},
 		{name: "execution context destroyed", err: errors.New("Execution context was destroyed"), want: "execution_context_destroyed"},
-		{name: "other transient", err: errors.New("temporary probe failure"), want: "other_transient"},
+		{name: "other cdp error", err: errors.New("temporary probe failure"), want: "other_cdp_error"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1805,6 +1805,31 @@ func TestNormalizeCurrentDetailProbeError(t *testing.T) {
 	}
 	if !isTransientCurrentDetailProbeError(normalized) {
 		t.Fatal("本地 Eval 超时应为瞬态错误")
+	}
+}
+
+func TestNormalizeCurrentDetailProbeErrorClassifiesAttemptDeadlineAndOtherCDP(t *testing.T) {
+	expiredCtx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	cases := []struct {
+		name     string
+		ctx      context.Context
+		cause    error
+		category string
+	}{
+		{name: "attempt deadline", ctx: expiredCtx, cause: context.DeadlineExceeded, category: "attempt_context_deadline"},
+		{name: "other cdp error", ctx: context.Background(), cause: errors.New("protocol error"), category: "other_cdp_error"},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			normalized := normalizeCurrentDetailProbeError(tt.ctx, tt.cause)
+			if !errors.Is(normalized, tt.cause) {
+				t.Fatalf("分类包装不得改变 errors.Is: %v", normalized)
+			}
+			if got := detailProbeErrorCategory("transient_error", normalized); got != tt.category {
+				t.Fatalf("分类 = %q, 期望 %q", got, tt.category)
+			}
+		})
 	}
 }
 

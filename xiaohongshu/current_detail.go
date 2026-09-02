@@ -114,6 +114,14 @@ const xhsSearchInputReadyJS = `
 var errCurrentDetailEvalTimeout = errors.New("current detail eval timeout")
 var errPermanentCurrentDetailProbe = errors.New("permanent current detail probe error")
 
+const (
+	currentDetailProbeCategoryAttemptContextDeadline   = "attempt_context_deadline"
+	currentDetailProbeCategoryOtherCDPError            = "other_cdp_error"
+	currentDetailProbeCategoryContextCanceled          = "context_canceled"
+	currentDetailProbeCategoryEvalTimeout              = "eval_timeout"
+	currentDetailProbeCategoryExecutionContextDestroyed = "execution_context_destroyed"
+)
+
 type currentFeedDetailProbe struct {
 	URL                       string `json:"url"`
 	URLMatched                bool   `json:"url_matched"`
