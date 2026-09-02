@@ -17,6 +17,7 @@ import (
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/proto"
 	xerrors "github.com/xpzouying/xiaohongshu-mcp/errors"
+	"github.com/xpzouying/xiaohongshu-mcp/humanize"
 	hrod "github.com/xpzouying/xiaohongshu-mcp/humanize/rod"
 )
 
@@ -762,6 +763,7 @@ func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, shareURL, xsecT
 		}
 		feed = Feed{ID: finalNoteID, XsecToken: shareURLToken(finalToken, parsed.XsecToken)}
 		resultRefForTimeline = "share_url"
+		humanize.Delay(opCtx, humanize.AfterNavigate)
 		if err := waitFeedDetailVisible(opCtx, page, counter, feed.ID); err != nil {
 			return fail(err)
 		}
