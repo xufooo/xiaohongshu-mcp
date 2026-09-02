@@ -1246,10 +1246,25 @@ type currentPageURLCDPClient struct {
 	ctx      context.Context
 	method   string
 	params   interface{}
+	eventCh  chan *cdp.Event
+	eventOnce sync.Once
+	closeOnce sync.Once
 }
 
 func (c *currentPageURLCDPClient) Event() <-chan *cdp.Event {
-	return nil
+	c.eventOnce.Do(func() {
+		c.eventCh = make(chan *cdp.Event)
+	})
+	return c.eventCh
+}
+
+func (c *currentPageURLCDPClient) Close() {
+	c.eventOnce.Do(func() {
+		c.eventCh = make(chan *cdp.Event)
+	})
+	c.closeOnce.Do(func() {
+		close(c.eventCh)
+	})
 }
 
 func (c *currentPageURLCDPClient) Call(ctx context.Context, _ string, method string, params interface{}) ([]byte, error) {
@@ -1260,15 +1275,44 @@ func (c *currentPageURLCDPClient) Call(ctx context.Context, _ string, method str
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	switch method {
+	case "Target.setDiscoverTargets":
+		return []byte(`{}`), nil
+	case "Target.attachToTarget":
+		return []byte(`{"sessionId":"session-1"}`), nil
+	}
 	if c.err != nil {
 		return nil, c.err
 	}
 	return c.response, nil
 }
 
-func newCurrentPageURLSession(client *currentPageURLCDPClient) *BrowseSession {
-	page := rod.New().Client(client).PageFromSession("session-1")
-	page.TargetID = "target-1"
+func newCurrentPageURLSession(t *testing.T, client *currentPageURLCDPClient) *BrowseSession {
+	t.Helper()
+	browserCtx, cancelBrowser := context.WithCancel(context.Background())
+	browser := rod.New().Context(browserCtx).NoDefaultDevice().ControlURL("").Client(client)
+	connectErr := browser.Connect()
+	browserEvents := browser.Event()
+	t.Cleanup(func() {
+		client.Close()
+		select {
+		case <-browserEvents:
+		case <-time.After(time.Second):
+			t.Errorf("rod browser 事件 goroutine 未退出")
+		}
+		cancelBrowser()
+	})
+	if connectErr != nil {
+		t.Fatalf("初始化 rod browser: %v", connectErr)
+	}
+	page, err := browser.PageFromTarget("target-1")
+	if err != nil {
+		t.Fatalf("初始化 rod page: %v", err)
+	}
+	client.calls = 0
+	client.ctx = nil
+	client.method = ""
+	client.params = nil
 	return &BrowseSession{page: &hrod.Page{Rod: page}}
 }
 
@@ -1276,7 +1320,7 @@ func TestCurrentPageURLUsesTargetInfo(t *testing.T) {
 	client := &currentPageURLCDPClient{
 		response: []byte(`{"targetInfo":{"targetId":"target-1","url":"https://www.xiaohongshu.com/explore"}}`),
 	}
-	session := newCurrentPageURLSession(client)
+	session := newCurrentPageURLSession(t, client)
 
 	got, err := session.currentPageURL(context.Background(), nil)
 	if err != nil {
@@ -1308,7 +1352,7 @@ func TestCurrentPageURLEmptyTargetInfoOrCallError(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			client := &currentPageURLCDPClient{response: tt.response, err: tt.callErr}
-			session := newCurrentPageURLSession(client)
+			session := newCurrentPageURLSession(t, client)
 			_, err := session.currentPageURL(context.Background(), nil)
 			if err == nil {
 				t.Fatal("期望 currentPageURL 返回错误")
@@ -1329,7 +1373,7 @@ func TestCurrentPageURLPropagatesOuterCancellation(t *testing.T) {
 	client := &currentPageURLCDPClient{
 		response: []byte(`{"targetInfo":{"url":"https://www.xiaohongshu.com/explore"}}`),
 	}
-	session := newCurrentPageURLSession(client)
+	session := newCurrentPageURLSession(t, client)
 
 	got, err := session.currentPageURL(ctx, nil)
 	if !errors.Is(err, context.Canceled) {
@@ -1544,7 +1588,7 @@ func TestCurrentDetailProbeRuntimeEvaluateResponseHandling(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			client := &currentPageURLCDPClient{response: tt.response, err: tt.callErr}
-			session := newCurrentPageURLSession(client)
+			session := newCurrentPageURLSession(t, client)
 			got, err := probeCurrentFeedDetail(context.Background(), session.page, "feed-1")
 			if tt.wantErr != nil && !errors.Is(err, tt.wantErr) {
 				t.Fatalf("错误 = %v, 期望 errors.Is(_, %v)", err, tt.wantErr)
@@ -1573,7 +1617,7 @@ func TestCurrentDetailProbeRuntimeEvaluateRequest(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	client := &currentPageURLCDPClient{response: runtimeEvaluateStringResponse(t, validJSON)}
-	session := newCurrentPageURLSession(client)
+	session := newCurrentPageURLSession(t, client)
 
 	if _, err := probeCurrentFeedDetail(ctx, session.page, "feed-1"); err != nil {
 		t.Fatalf("不期望错误: %v", err)
@@ -1639,7 +1683,7 @@ func TestCurrentDetailProbeRuntimeEvaluateContextPropagation(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			client := &currentPageURLCDPClient{response: runtimeEvaluateStringResponse(t, validJSON)}
-			session := newCurrentPageURLSession(client)
+			session := newCurrentPageURLSession(t, client)
 			_, err := probeCurrentFeedDetail(tt.ctx, session.page, "feed-1")
 			if !errors.Is(err, tt.want) {
 				t.Fatalf("context 错误 = %v, 期望 errors.Is(_, %v)", err, tt.want)
