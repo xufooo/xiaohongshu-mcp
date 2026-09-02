@@ -8,7 +8,9 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/cdp"
+	"github.com/go-rod/rod/lib/proto"
 	hrod "github.com/xpzouying/xiaohongshu-mcp/humanize/rod"
 )
 
@@ -130,6 +132,18 @@ type currentFeedDetailProbe struct {
 	StateMatched              bool   `json:"state_matched"`
 }
 
+func currentDetailProbeExpression(probeJS, feedID, detailSelector string) (string, error) {
+	encodedFeedID, err := json.Marshal(feedID)
+	if err != nil {
+		return "", err
+	}
+	encodedSelector, err := json.Marshal(detailSelector)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("(%s)(%s, %s)", probeJS, encodedFeedID, encodedSelector), nil
+}
+
 func probeCurrentFeedDetail(ctx context.Context, page *hrod.Page, feedID string) (currentFeedDetailProbe, error) {
 	probeJS := `(feedID, detailSelector) => {` + xhsProbeVisibleJS + xhsProbeFeedMatchJS + `
 			const visibleDetails = Array.from(document.querySelectorAll(detailSelector)).filter(visible);
@@ -143,16 +157,30 @@ func probeCurrentFeedDetail(ctx context.Context, page *hrod.Page, feedID string)
 				state_matched: Boolean(feedID && stateMap && Object.prototype.hasOwnProperty.call(stateMap, feedID)),
 		});
 	}`
-	obj, err := page.Context(ctx).Eval(probeJS, feedID, SelectorFeedDetailReady)
+	expression, err := currentDetailProbeExpression(probeJS, feedID, SelectorFeedDetailReady)
+	if err != nil {
+		return currentFeedDetailProbe{}, fmt.Errorf("%w: %v", errPermanentCurrentDetailProbe, err)
+	}
+	result, err := (proto.RuntimeEvaluate{
+		Expression:     expression,
+		ReturnByValue:  true,
+		AwaitPromise:    true,
+	}).Call(page.Rod.Context(ctx))
 	if err != nil {
 		return currentFeedDetailProbe{}, normalizeCurrentDetailProbeError(ctx, err)
 	}
-	if obj == nil {
+	if result == nil {
+		return currentFeedDetailProbe{}, fmt.Errorf("%w: 当前详情页探测无返回", errPermanentCurrentDetailProbe)
+	}
+	if result.ExceptionDetails != nil {
+		return currentFeedDetailProbe{}, normalizeCurrentDetailProbeError(ctx, &rod.EvalError{result.ExceptionDetails})
+	}
+	if result.Result == nil {
 		return currentFeedDetailProbe{}, fmt.Errorf("%w: 当前详情页探测无返回", errPermanentCurrentDetailProbe)
 	}
 
 	var probe currentFeedDetailProbe
-	if err := json.Unmarshal([]byte(obj.Value.Str()), &probe); err != nil {
+	if err := json.Unmarshal([]byte(result.Result.Value.Str()), &probe); err != nil {
 		return currentFeedDetailProbe{}, fmt.Errorf("%w: %v", errPermanentCurrentDetailProbe, err)
 	}
 	return probe, nil
