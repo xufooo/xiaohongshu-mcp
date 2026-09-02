@@ -160,7 +160,10 @@ func feedCardClickPoint(anchor *hrod.Element) (proto.Point, error) {
 	return proto.Point{X: point.X, Y: point.Y}, nil
 }
 
-const feedDetailVisibleWaitBudget = 15 * time.Second
+const (
+	feedDetailVisibleWaitBudget    = 15 * time.Second
+	feedDetailProbeAttemptBudget   = 2 * time.Second
+)
 
 func waitFeedDetailVisible(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, feedID string) error {
 	return waitFeedDetailVisibleWith(ctx, feedID, page.Err,
@@ -186,10 +189,18 @@ func waitFeedDetailVisibleWith(
 	consecutiveMatches := 0
 
 	for time.Now().Before(deadline) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if err := pageErr(); err != nil {
 			return err
 		}
-		probeResult, err := probe(waitCtx)
+		attemptCtx, attemptCancel := context.WithTimeout(waitCtx, feedDetailProbeAttemptBudget)
+		probeResult, err := probe(attemptCtx)
+		attemptCancel()
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		if err != nil {
 			consecutiveMatches = 0
 			if IsFatalRendererError(err) {
@@ -205,7 +216,10 @@ func waitFeedDetailVisibleWith(
 			if currentFeedDetailMatched(probeResult, feedID) {
 				consecutiveMatches++
 				if consecutiveMatches >= 2 {
-					return nil
+					if time.Now().Before(deadline) {
+						return nil
+					}
+					break
 				}
 			} else {
 				consecutiveMatches = 0
