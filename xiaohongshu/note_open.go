@@ -298,25 +298,25 @@ func detailProbeErrorCategory(terminal string, err error) string {
 		return "unknown"
 	}
 	switch {
+	case errors.Is(err, cdp.ErrCtxDestroyed):
+		return currentDetailProbeCategoryExecutionContextDestroyed
 	case errors.Is(err, context.Canceled):
-		return "context_canceled"
+		return currentDetailProbeCategoryContextCanceled
 	case errors.Is(err, context.DeadlineExceeded):
-		return "context_deadline"
+		return currentDetailProbeCategoryAttemptContextDeadline
 	case errors.Is(err, errCurrentDetailEvalTimeout):
-		return "eval_timeout"
-	case errors.Is(err, cdp.ErrCtxNotFound), errors.Is(err, cdp.ErrCtxDestroyed):
-		return "execution_context_destroyed"
+		return currentDetailProbeCategoryEvalTimeout
 	}
 	message := strings.ToLower(err.Error())
 	switch {
 	case strings.Contains(message, "execution context was destroyed"), strings.Contains(message, "cannot find context with specified id"):
-		return "execution_context_destroyed"
+		return currentDetailProbeCategoryExecutionContextDestroyed
 	case strings.Contains(message, "context canceled"):
-		return "context_canceled"
+		return currentDetailProbeCategoryContextCanceled
 	case isEvalTimeout(err):
-		return "eval_timeout"
+		return currentDetailProbeCategoryEvalTimeout
 	default:
-		return "other_transient"
+		return currentDetailProbeCategoryOtherCDPError
 	}
 }
 
