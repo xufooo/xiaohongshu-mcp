@@ -1392,6 +1392,195 @@ func TestCurrentDetailProbeErrorCategories(t *testing.T) {
 	}
 }
 
+func TestWaitFeedDetailVisibleConsecutiveMatches(t *testing.T) {
+	matched := currentFeedDetailProbe{URLMatched: true, VisibleDetailCount: 1}
+	type step struct {
+		probe currentFeedDetailProbe
+		err   error
+	}
+	fatalErr := fmt.Errorf("renderer: %w", ErrFatalRendererError)
+	cases := []struct {
+		name       string
+		steps      []step
+		wantErr    error
+		wantCalls  int
+		wantSleeps int
+	}{
+		{
+			name: "第一次 matched 后不返回",
+			steps: []step{
+				{probe: matched},
+				{},
+				{probe: matched},
+				{err: errPermanentCurrentDetailProbe},
+			},
+			wantErr:    errPermanentCurrentDetailProbe,
+			wantCalls:  4,
+			wantSleeps: 3,
+		},
+		{
+			name: "matched timeout matched 不返回",
+			steps: []step{
+				{probe: matched},
+				{err: context.DeadlineExceeded},
+				{probe: matched},
+				{err: errPermanentCurrentDetailProbe},
+			},
+			wantErr:    errPermanentCurrentDetailProbe,
+			wantCalls:  4,
+			wantSleeps: 3,
+		},
+		{
+			name: "matched 其他瞬态错误 matched 不返回",
+			steps: []step{
+				{probe: matched},
+				{err: errors.New("Execution context was destroyed")},
+				{probe: matched},
+				{err: errPermanentCurrentDetailProbe},
+			},
+			wantErr:    errPermanentCurrentDetailProbe,
+			wantCalls:  4,
+			wantSleeps: 3,
+		},
+		{
+			name: "两次连续 matched 返回",
+			steps: []step{
+				{probe: matched},
+				{probe: matched},
+			},
+			wantCalls:  2,
+			wantSleeps: 1,
+		},
+		{
+			name: "fatal 立即返回",
+			steps: []step{
+				{err: fatalErr},
+			},
+			wantErr:   ErrFatalRendererError,
+			wantCalls: 1,
+		},
+		{
+			name: "permanent 立即返回",
+			steps: []step{
+				{err: errPermanentCurrentDetailProbe},
+			},
+			wantErr:   errPermanentCurrentDetailProbe,
+			wantCalls: 1,
+		},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			calls := 0
+			sleeps := 0
+			stepIndex := 0
+			err := waitFeedDetailVisibleWith(
+				context.Background(),
+				"feed-1",
+				func() error { return nil },
+				func(context.Context) (currentFeedDetailProbe, error) {
+					calls++
+					if stepIndex >= len(tt.steps) {
+						t.Fatalf("probe 调用超过预期: %d", stepIndex+1)
+					}
+					next := tt.steps[stepIndex]
+					stepIndex++
+					return next.probe, next.err
+				},
+				func(_ context.Context, min, max time.Duration) error {
+					sleeps++
+					if min != 300*time.Millisecond || max != 500*time.Millisecond {
+						t.Fatalf("SleepRandom 区间错误: min=%v max=%v", min, max)
+					}
+					return nil
+				},
+			)
+			if tt.wantErr == nil {
+				if err != nil {
+					t.Fatalf("不期望错误: %v", err)
+				}
+			} else if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("错误 = %v, 期望 errors.Is(_, %v)", err, tt.wantErr)
+			}
+			if calls != tt.wantCalls {
+				t.Fatalf("probe 调用次数 = %d, 期望 %d", calls, tt.wantCalls)
+			}
+			if sleeps != tt.wantSleeps {
+				t.Fatalf("sleep 调用次数 = %d, 期望 %d", sleeps, tt.wantSleeps)
+			}
+		})
+	}
+}
+
+func TestWaitFeedDetailVisibleKeeps15SecondBudget(t *testing.T) {
+	if feedDetailVisibleWaitBudget != 15*time.Second {
+		t.Fatalf("feedDetailVisibleWaitBudget = %v, 期望 15s", feedDetailVisibleWaitBudget)
+	}
+	started := time.Now()
+	var gotDeadline time.Time
+	deadlineOK := false
+	err := waitFeedDetailVisibleWith(
+		context.Background(),
+		"feed-1",
+		func() error { return nil },
+		func(ctx context.Context) (currentFeedDetailProbe, error) {
+			gotDeadline, deadlineOK = ctx.Deadline()
+			return currentFeedDetailProbe{}, errPermanentCurrentDetailProbe
+		},
+		func(context.Context, time.Duration, time.Duration) error {
+			t.Fatal("permanent probe 错误后不应 sleep")
+			return nil
+		},
+	)
+	if !errors.Is(err, errPermanentCurrentDetailProbe) {
+		t.Fatalf("应保留 permanent probe 错误: %v", err)
+	}
+	if !deadlineOK {
+		t.Fatal("probe context 应带 deadline")
+	}
+	if gotDeadline.Before(started.Add(14*time.Second)) || gotDeadline.After(started.Add(16*time.Second)) {
+		t.Fatalf("probe deadline 不符合 15s 总预算: started=%v deadline=%v", started, gotDeadline)
+	}
+}
+
+func TestWaitFeedDetailVisibleDoesNotOversleepDeadline(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	sleeps := 0
+	err := waitFeedDetailVisibleWith(
+		ctx,
+		"feed-1",
+		func() error { return nil },
+		func(context.Context) (currentFeedDetailProbe, error) {
+			return currentFeedDetailProbe{}, nil
+		},
+		func(sleepCtx context.Context, min, max time.Duration) error {
+			sleeps++
+			if min != 300*time.Millisecond || max != 500*time.Millisecond {
+				t.Fatalf("SleepRandom 区间错误: min=%v max=%v", min, max)
+			}
+			timer := time.NewTimer(max)
+			defer timer.Stop()
+			select {
+			case <-sleepCtx.Done():
+				return sleepCtx.Err()
+			case <-timer.C:
+				t.Fatal("deadline 后仍等待完整的 SleepRandom 区间")
+				return nil
+			}
+		},
+	)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("应返回 context deadline 错误: %v", err)
+	}
+	if sleeps == 0 {
+		t.Fatal("deadline 边界测试必须实际进入 sleep seam")
+	}
+	if sleeps != 1 {
+		t.Fatalf("deadline 后不应重复 sleep: %d", sleeps)
+	}
+}
+
 func TestNormalizeCurrentDetailProbeError(t *testing.T) {
 	expiredCtx, expiredCancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 	defer expiredCancel()

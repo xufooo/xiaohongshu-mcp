@@ -160,19 +160,38 @@ func feedCardClickPoint(anchor *hrod.Element) (proto.Point, error) {
 	return proto.Point{X: point.X, Y: point.Y}, nil
 }
 
+const feedDetailVisibleWaitBudget = 15 * time.Second
+
 func waitFeedDetailVisible(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, feedID string) error {
-	deadline := time.Now().Add(15 * time.Second)
+	return waitFeedDetailVisibleWith(ctx, feedID, page.Err,
+		func(probeCtx context.Context) (currentFeedDetailProbe, error) {
+			return probeCurrentFeedDetail(probeCtx, page, feedID)
+		}, func(sleepCtx context.Context, min, max time.Duration) error {
+			return page.Context(sleepCtx).SleepRandom(min, max)
+		})
+}
+
+func waitFeedDetailVisibleWith(
+	ctx context.Context,
+	feedID string,
+	pageErr func() error,
+	probe func(context.Context) (currentFeedDetailProbe, error),
+	sleep func(context.Context, time.Duration, time.Duration) error,
+) error {
+	deadline := time.Now().Add(feedDetailVisibleWaitBudget)
 	waitCtx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
 	var last currentFeedDetailProbe
 	var lastErr error
+	consecutiveMatches := 0
 
 	for time.Now().Before(deadline) {
-		if err := page.Err(); err != nil {
+		if err := pageErr(); err != nil {
 			return err
 		}
-		probe, err := probeCurrentFeedDetail(waitCtx, page, feedID)
+		probeResult, err := probe(waitCtx)
 		if err != nil {
+			consecutiveMatches = 0
 			if IsFatalRendererError(err) {
 				return err
 			}
@@ -181,13 +200,24 @@ func waitFeedDetailVisible(ctx context.Context, page *hrod.Page, counter *evalTi
 			}
 			lastErr = err
 		} else {
-			last = probe
+			last = probeResult
 			lastErr = nil
-			if currentFeedDetailMatched(probe, feedID) {
-				return nil
+			if currentFeedDetailMatched(probeResult, feedID) {
+				consecutiveMatches++
+				if consecutiveMatches >= 2 {
+					return nil
+				}
+			} else {
+				consecutiveMatches = 0
 			}
 		}
-		if err := page.SleepRandom(300*time.Millisecond, 500*time.Millisecond); err != nil {
+		if !time.Now().Before(deadline) {
+			break
+		}
+		if err := sleep(waitCtx, 300*time.Millisecond, 500*time.Millisecond); err != nil {
+			if errors.Is(err, context.DeadlineExceeded) && !time.Now().Before(deadline) {
+				break
+			}
 			return err
 		}
 	}
