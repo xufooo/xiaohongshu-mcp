@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-rod/rod"
+	"github.com/go-rod/rod/lib/cdp"
 	"github.com/go-rod/rod/lib/proto"
 	"github.com/ysmood/gson"
 	xerrors "github.com/xpzouying/xiaohongshu-mcp/errors"
@@ -1234,6 +1236,110 @@ func TestShareURLTokenPrecedence(t *testing.T) {
 	}
 	if got := shareURLToken("", "input-token"); got != "input-token" {
 		t.Fatalf("最终 URL 无 token 时应回退输入 token: %q", got)
+	}
+}
+
+type currentPageURLCDPClient struct {
+	response []byte
+	err      error
+	calls    int
+	ctx      context.Context
+	method   string
+	params   interface{}
+}
+
+func (c *currentPageURLCDPClient) Event() <-chan *cdp.Event {
+	return nil
+}
+
+func (c *currentPageURLCDPClient) Call(ctx context.Context, _ string, method string, params interface{}) ([]byte, error) {
+	c.calls++
+	c.ctx = ctx
+	c.method = method
+	c.params = params
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if c.err != nil {
+		return nil, c.err
+	}
+	return c.response, nil
+}
+
+func newCurrentPageURLSession(client *currentPageURLCDPClient) *BrowseSession {
+	page := rod.New().Client(client).PageFromSession("session-1")
+	page.TargetID = "target-1"
+	return &BrowseSession{page: &hrod.Page{Rod: page}}
+}
+
+func TestCurrentPageURLUsesTargetInfo(t *testing.T) {
+	client := &currentPageURLCDPClient{
+		response: []byte(`{"targetInfo":{"targetId":"target-1","url":"https://www.xiaohongshu.com/explore"}}`),
+	}
+	session := newCurrentPageURLSession(client)
+
+	got, err := session.currentPageURL(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("不期望错误: %v", err)
+	}
+	if got != "https://www.xiaohongshu.com/explore" {
+		t.Fatalf("URL = %q, 期望有效 TargetInfo URL", got)
+	}
+	if client.calls != 1 || client.method != "Target.getTargetInfo" {
+		t.Fatalf("应调用一次 Target.getTargetInfo: calls=%d method=%q", client.calls, client.method)
+	}
+	request, ok := client.params.(proto.TargetGetTargetInfo)
+	if !ok || request.TargetID != "target-1" {
+		t.Fatalf("Target.getTargetInfo 参数错误: %#v", client.params)
+	}
+}
+
+func TestCurrentPageURLEmptyTargetInfoOrCallError(t *testing.T) {
+	wantErr := errors.New("target info call failed")
+	tests := []struct {
+		name     string
+		response []byte
+		callErr  error
+		contains string
+	}{
+		{name: "TargetInfo为空", response: []byte(`{}`), contains: "页面信息为空"},
+		{name: "调用错误", callErr: wantErr},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &currentPageURLCDPClient{response: tt.response, err: tt.callErr}
+			session := newCurrentPageURLSession(client)
+			_, err := session.currentPageURL(context.Background(), nil)
+			if err == nil {
+				t.Fatal("期望 currentPageURL 返回错误")
+			}
+			if tt.callErr != nil && !errors.Is(err, tt.callErr) {
+				t.Fatalf("错误未原样传播: got=%v want=%v", err, tt.callErr)
+			}
+			if tt.contains != "" && !strings.Contains(err.Error(), tt.contains) {
+				t.Fatalf("错误应包含 %q: %v", tt.contains, err)
+			}
+		})
+	}
+}
+
+func TestCurrentPageURLPropagatesOuterCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	client := &currentPageURLCDPClient{
+		response: []byte(`{"targetInfo":{"url":"https://www.xiaohongshu.com/explore"}}`),
+	}
+	session := newCurrentPageURLSession(client)
+
+	got, err := session.currentPageURL(ctx, nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("外层取消应原样传播: got=%v", err)
+	}
+	if got != "" {
+		t.Fatalf("取消时不应返回 URL: %q", got)
+	}
+	if client.calls != 1 || client.ctx == nil || !errors.Is(client.ctx.Err(), context.Canceled) {
+		t.Fatalf("Target 调用应收到已取消的外层 context: calls=%d ctx=%v", client.calls, client.ctx)
 	}
 }
 

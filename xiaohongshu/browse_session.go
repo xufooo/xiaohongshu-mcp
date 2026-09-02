@@ -2430,11 +2430,14 @@ func (s *BrowseSession) currentPageURL(ctx context.Context, counter *evalTimeout
 	if page == nil {
 		return "", nil
 	}
-	result, err := evalJS(ctx, counter, page, `() => location.href`)
-	if err != nil || result == nil {
+	result, err := proto.TargetGetTargetInfo{TargetID: page.Rod.TargetID}.Call(page.Rod.Browser().Context(ctx))
+	if err != nil {
 		return "", err
 	}
-	return result.Value.Str(), nil
+	if result == nil || result.TargetInfo == nil {
+		return "", fmt.Errorf("页面信息为空")
+	}
+	return result.TargetInfo.URL, nil
 }
 
 func (s *BrowseSession) infoLocked() BrowseSessionInfo {
