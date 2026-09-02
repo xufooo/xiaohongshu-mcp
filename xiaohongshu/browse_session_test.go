@@ -1712,140 +1712,92 @@ func runtimeEvaluateStringResponse(t *testing.T, value string) []byte {
 	return response
 }
 
-func TestWaitFeedDetailVisibleConsecutiveMatches(t *testing.T) {
+func TestWaitFeedDetailVisibleMatched(t *testing.T) {
 	matched := currentFeedDetailProbe{URLMatched: true, VisibleDetailCount: 1}
-	type step struct {
-		probe             currentFeedDetailProbe
-		err               error
-		waitForDeadline   bool
+	calls := 0
+	sleeps := 0
+	activeProbes := 0
+	maxActiveProbes := 0
+	err := waitFeedDetailVisibleWith(
+		context.Background(),
+		"feed-1",
+		func() error { return nil },
+		func(probeCtx context.Context) (currentFeedDetailProbe, error) {
+			calls++
+			activeProbes++
+			if activeProbes > maxActiveProbes {
+				maxActiveProbes = activeProbes
+			}
+			defer func() { activeProbes-- }()
+			timer := time.NewTimer(2100 * time.Millisecond)
+			defer timer.Stop()
+			select {
+			case <-probeCtx.Done():
+				t.Fatalf("总预算内 probe 不应被取消: %v", probeCtx.Err())
+			case <-timer.C:
+			}
+			if err := probeCtx.Err(); err != nil {
+				t.Fatalf("总预算内 probe 返回前不应取消: %v", err)
+			}
+			return matched, nil
+		},
+		func(_ context.Context, min, max time.Duration) error {
+			sleeps++
+			if min != 300*time.Millisecond || max != 500*time.Millisecond {
+				t.Fatalf("SleepRandom 区间错误: min=%v max=%v", min, max)
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("不期望错误: %v", err)
 	}
-	fatalErr := fmt.Errorf("renderer: %w", ErrFatalRendererError)
-	cases := []struct {
-		name       string
-		steps      []step
-		wantErr    error
-		wantCalls  int
-		wantSleeps int
-	}{
-		{
-			name: "第一次 matched 后不返回",
-			steps: []step{
-				{probe: matched},
-				{},
-				{probe: matched},
-				{err: errPermanentCurrentDetailProbe},
-			},
-			wantErr:    errPermanentCurrentDetailProbe,
-			wantCalls:  4,
-			wantSleeps: 3,
-		},
-		{
-			name: "第一次 probe attempt timeout 后两次 matched 返回",
-			steps: []step{
-				{waitForDeadline: true},
-				{probe: matched},
-				{probe: matched},
-			},
-			wantCalls:  3,
-			wantSleeps: 2,
-		},
-		{
-			name: "matched attempt timeout matched 不返回",
-			steps: []step{
-				{probe: matched},
-				{waitForDeadline: true},
-				{probe: matched},
-				{err: errPermanentCurrentDetailProbe},
-			},
-			wantErr:    errPermanentCurrentDetailProbe,
-			wantCalls:  4,
-			wantSleeps: 3,
-		},
-		{
-			name: "matched 其他瞬态错误 matched 不返回",
-			steps: []step{
-				{probe: matched},
-				{err: errors.New("Execution context was destroyed")},
-				{probe: matched},
-				{err: errPermanentCurrentDetailProbe},
-			},
-			wantErr:    errPermanentCurrentDetailProbe,
-			wantCalls:  4,
-			wantSleeps: 3,
-		},
-		{
-			name: "两次连续 matched 返回",
-			steps: []step{
-				{probe: matched},
-				{probe: matched},
-			},
-			wantCalls:  2,
-			wantSleeps: 1,
-		},
-		{
-			name: "fatal 立即返回",
-			steps: []step{
-				{err: fatalErr},
-			},
-			wantErr:   ErrFatalRendererError,
-			wantCalls: 1,
-		},
-		{
-			name: "permanent 立即返回",
-			steps: []step{
-				{err: errPermanentCurrentDetailProbe},
-			},
-			wantErr:   errPermanentCurrentDetailProbe,
-			wantCalls: 1,
-		},
+	if calls != 1 {
+		t.Fatalf("probe 调用次数 = %d, 期望 1", calls)
 	}
+	if sleeps != 0 {
+		t.Fatalf("首次 matched 不应 sleep: %d", sleeps)
+	}
+	if maxActiveProbes != 1 {
+		t.Fatalf("同一时刻应至多一个 probe: max=%d", maxActiveProbes)
+	}
+}
 
-	for _, tt := range cases {
+func TestWaitFeedDetailVisibleTerminalErrors(t *testing.T) {
+	fatalErr := fmt.Errorf("renderer: %w", ErrFatalRendererError)
+	tests := []struct {
+		name     string
+		probeErr error
+		wantErr  error
+	}{
+		{name: "fatal", probeErr: fatalErr, wantErr: ErrFatalRendererError},
+		{name: "permanent", probeErr: errPermanentCurrentDetailProbe, wantErr: errPermanentCurrentDetailProbe},
+	}
+	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			calls := 0
 			sleeps := 0
-			stepIndex := 0
 			err := waitFeedDetailVisibleWith(
 				context.Background(),
 				"feed-1",
 				func() error { return nil },
-				func(probeCtx context.Context) (currentFeedDetailProbe, error) {
+				func(context.Context) (currentFeedDetailProbe, error) {
 					calls++
-					if stepIndex >= len(tt.steps) {
-						t.Fatalf("probe 调用超过预期: %d", stepIndex+1)
-					}
-					next := tt.steps[stepIndex]
-					stepIndex++
-					if next.waitForDeadline {
-						<-probeCtx.Done()
-						attemptErr := probeCtx.Err()
-						if !errors.Is(attemptErr, context.DeadlineExceeded) {
-							t.Fatalf("第一次 probe 应因 attempt deadline 结束: %v", attemptErr)
-						}
-						return next.probe, attemptErr
-					}
-					return next.probe, next.err
+					return currentFeedDetailProbe{}, tt.probeErr
 				},
-				func(_ context.Context, min, max time.Duration) error {
+				func(context.Context, time.Duration, time.Duration) error {
 					sleeps++
-					if min != 300*time.Millisecond || max != 500*time.Millisecond {
-						t.Fatalf("SleepRandom 区间错误: min=%v max=%v", min, max)
-					}
 					return nil
 				},
 			)
-			if tt.wantErr == nil {
-				if err != nil {
-					t.Fatalf("不期望错误: %v", err)
-				}
-			} else if !errors.Is(err, tt.wantErr) {
+			if !errors.Is(err, tt.wantErr) {
 				t.Fatalf("错误 = %v, 期望 errors.Is(_, %v)", err, tt.wantErr)
 			}
-			if calls != tt.wantCalls {
-				t.Fatalf("probe 调用次数 = %d, 期望 %d", calls, tt.wantCalls)
+			if calls != 1 {
+				t.Fatalf("probe 调用次数 = %d, 期望 1", calls)
 			}
-			if sleeps != tt.wantSleeps {
-				t.Fatalf("sleep 调用次数 = %d, 期望 %d", sleeps, tt.wantSleeps)
+			if sleeps != 0 {
+				t.Fatalf("terminal probe 错误不应 sleep: %d", sleeps)
 			}
 		})
 	}
@@ -1866,7 +1818,7 @@ func TestWaitFeedDetailVisibleKeeps15SecondBudget(t *testing.T) {
 		func() error { return nil },
 		func(ctx context.Context) (currentFeedDetailProbe, error) {
 			probeDeadline, probeDeadlineOK = ctx.Deadline()
-			return currentFeedDetailProbe{URLMatched: true, VisibleDetailCount: 1}, nil
+			return currentFeedDetailProbe{}, nil
 		},
 		func(ctx context.Context, _, _ time.Duration) error {
 			waitDeadline, waitDeadlineOK = ctx.Deadline()
@@ -1879,14 +1831,14 @@ func TestWaitFeedDetailVisibleKeeps15SecondBudget(t *testing.T) {
 	if !probeDeadlineOK || !waitDeadlineOK {
 		t.Fatal("probe 和 sleep context 都应带 deadline")
 	}
-	if probeDeadline.Before(started.Add(time.Second)) || probeDeadline.After(started.Add(3*time.Second)) {
-		t.Fatalf("probe attempt deadline 不符合约 2s 限制: started=%v deadline=%v", started, probeDeadline)
+	if probeDeadline.Before(started.Add(14*time.Second)) || probeDeadline.After(started.Add(16*time.Second)) {
+		t.Fatalf("probe deadline 不符合 15s 总预算: started=%v deadline=%v", started, probeDeadline)
 	}
 	if waitDeadline.Before(started.Add(14*time.Second)) || waitDeadline.After(started.Add(16*time.Second)) {
 		t.Fatalf("wait context deadline 不符合 15s 总预算: started=%v deadline=%v", started, waitDeadline)
 	}
-	if !probeDeadline.Before(waitDeadline) {
-		t.Fatalf("probe attempt deadline 应早于 wait context deadline: probe=%v wait=%v", probeDeadline, waitDeadline)
+	if !probeDeadline.Equal(waitDeadline) {
+		t.Fatalf("probe 应使用 wait context deadline: probe=%v wait=%v", probeDeadline, waitDeadline)
 	}
 }
 
@@ -1934,15 +1886,15 @@ func TestWaitFeedDetailVisibleDoesNotOversleepDeadline(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	parentDeadline, _ := ctx.Deadline()
-	attemptDeadline := time.Time{}
-	attemptDeadlineOK := false
+	probeDeadline := time.Time{}
+	probeDeadlineOK := false
 	sleeps := 0
 	err := waitFeedDetailVisibleWith(
 		ctx,
 		"feed-1",
 		func() error { return nil },
 		func(probeCtx context.Context) (currentFeedDetailProbe, error) {
-			attemptDeadline, attemptDeadlineOK = probeCtx.Deadline()
+			probeDeadline, probeDeadlineOK = probeCtx.Deadline()
 			return currentFeedDetailProbe{}, nil
 		},
 		func(sleepCtx context.Context, min, max time.Duration) error {
@@ -1964,11 +1916,11 @@ func TestWaitFeedDetailVisibleDoesNotOversleepDeadline(t *testing.T) {
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("应返回 context deadline 错误: %v", err)
 	}
-	if !attemptDeadlineOK {
-		t.Fatal("probe attempt context 应带 deadline")
+	if !probeDeadlineOK {
+		t.Fatal("probe context 应带总 deadline")
 	}
-	if attemptDeadline.After(parentDeadline) {
-		t.Fatalf("probe attempt deadline 不应越过外层 deadline: attempt=%v parent=%v", attemptDeadline, parentDeadline)
+	if probeDeadline.After(parentDeadline) {
+		t.Fatalf("probe deadline 不应越过外层 deadline: probe=%v parent=%v", probeDeadline, parentDeadline)
 	}
 	if sleeps == 0 {
 		t.Fatal("deadline 边界测试必须实际进入 sleep seam")
