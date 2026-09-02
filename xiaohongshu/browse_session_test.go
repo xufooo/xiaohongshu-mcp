@@ -1498,6 +1498,176 @@ func TestCurrentDetailProbeErrorCategories(t *testing.T) {
 	}
 }
 
+func TestCurrentDetailProbeRuntimeEvaluateResponseHandling(t *testing.T) {
+	wantTransportErr := errors.New("transport failure")
+	validJSON := `{"url":"https://www.xiaohongshu.com/explore/feed-1","url_matched":true,"visible_detail_count":1,"visible_matched_detail_count":1,"state_matched":true}`
+	tests := []struct {
+		name          string
+		response      []byte
+		callErr       error
+		wantErr       error
+		wantEvalError bool
+		wantProbe     *currentFeedDetailProbe
+	}{
+		{
+			name:     "transport error",
+			callErr:  wantTransportErr,
+			wantErr:  wantTransportErr,
+		},
+		{
+			name: "exception details",
+			response: []byte(`{"result":{"type":"undefined"},"exceptionDetails":{"text":"Uncaught","exception":{"type":"string","description":"probe failed","value":"probe failed"}}}`),
+			wantEvalError: true,
+		},
+		{
+			name:     "nil result",
+			response: []byte(`{"result":null}`),
+			wantErr:  errPermanentCurrentDetailProbe,
+		},
+		{
+			name:     "invalid JSON",
+			response: runtimeEvaluateStringResponse(t, "not-json"),
+			wantErr:  errPermanentCurrentDetailProbe,
+		},
+		{
+			name:     "success",
+			response: runtimeEvaluateStringResponse(t, validJSON),
+			wantProbe: &currentFeedDetailProbe{
+				URL:                       "https://www.xiaohongshu.com/explore/feed-1",
+				URLMatched:                true,
+				VisibleDetailCount:        1,
+				VisibleMatchedDetailCount: 1,
+				StateMatched:              true,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &currentPageURLCDPClient{response: tt.response, err: tt.callErr}
+			session := newCurrentPageURLSession(client)
+			got, err := probeCurrentFeedDetail(context.Background(), session.page, "feed-1")
+			if tt.wantErr != nil && !errors.Is(err, tt.wantErr) {
+				t.Fatalf("错误 = %v, 期望 errors.Is(_, %v)", err, tt.wantErr)
+			}
+			if tt.callErr != nil && err != tt.callErr {
+				t.Fatalf("transport error 未原样返回: got=%v want=%v", err, tt.callErr)
+			}
+			if tt.wantEvalError {
+				var evalErr *rod.EvalError
+				if !errors.As(err, &evalErr) {
+					t.Fatalf("错误类型 = %T, 期望 *rod.EvalError", err)
+				}
+			}
+			if tt.wantProbe != nil && got != *tt.wantProbe {
+				t.Fatalf("probe = %#v, 期望 %#v", got, *tt.wantProbe)
+			}
+			if client.calls != 1 || client.method != "Runtime.evaluate" {
+				t.Fatalf("Runtime.evaluate 应只调用一次: calls=%d method=%q", client.calls, client.method)
+			}
+		})
+	}
+}
+
+func TestCurrentDetailProbeRuntimeEvaluateRequest(t *testing.T) {
+	validJSON := `{"url":"https://www.xiaohongshu.com/explore/feed-1","url_matched":true,"visible_detail_count":1,"visible_matched_detail_count":1,"state_matched":true}`
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	client := &currentPageURLCDPClient{response: runtimeEvaluateStringResponse(t, validJSON)}
+	session := newCurrentPageURLSession(client)
+
+	if _, err := probeCurrentFeedDetail(ctx, session.page, "feed-1"); err != nil {
+		t.Fatalf("不期望错误: %v", err)
+	}
+	request, ok := client.params.(proto.RuntimeEvaluate)
+	if !ok {
+		t.Fatalf("Runtime.evaluate 参数类型 = %T", client.params)
+	}
+	if request.Expression == "" {
+		t.Fatal("Runtime.evaluate expression 不应为空")
+	}
+	if !request.ReturnByValue || !request.AwaitPromise {
+		t.Fatalf("Runtime.evaluate 应设置 ReturnByValue/AwaitPromise: %#v", request)
+	}
+	if request.ContextID != 0 || request.UniqueContextID != "" {
+		t.Fatalf("Runtime.evaluate 不应设置 context ID: %#v", request)
+	}
+	if client.ctx != ctx {
+		t.Fatalf("Runtime.evaluate 未收到原始 attempt context: got=%p want=%p", client.ctx, ctx)
+	}
+	if client.calls != 1 || client.method != "Runtime.evaluate" {
+		t.Fatalf("Runtime.evaluate 应只调用一次: calls=%d method=%q", client.calls, client.method)
+	}
+}
+
+func TestCurrentDetailProbeExpressionJSONEncodesArguments(t *testing.T) {
+	probeJS := `(feedID, detailSelector) => [feedID, detailSelector]`
+	feedID := `feed"); throw new Error("injected")`
+	detailSelector := `div[data-id="selector"]; throw new Error("injected")`
+	got, err := currentDetailProbeExpression(probeJS, feedID, detailSelector)
+	if err != nil {
+		t.Fatalf("不期望错误: %v", err)
+	}
+	encodedFeedID, err := json.Marshal(feedID)
+	if err != nil {
+		t.Fatalf("feedID JSON 编码失败: %v", err)
+	}
+	encodedSelector, err := json.Marshal(detailSelector)
+	if err != nil {
+		t.Fatalf("selector JSON 编码失败: %v", err)
+	}
+	want := fmt.Sprintf("(%s)(%s, %s)", probeJS, encodedFeedID, encodedSelector)
+	if got != want {
+		t.Fatalf("expression = %q, 期望 %q", got, want)
+	}
+}
+
+func TestCurrentDetailProbeRuntimeEvaluateContextPropagation(t *testing.T) {
+	canceledCtx, cancelCanceled := context.WithCancel(context.Background())
+	cancelCanceled()
+	expiredCtx, cancelExpired := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancelExpired()
+	validJSON := `{"url":"https://www.xiaohongshu.com/explore/feed-1","url_matched":true,"visible_detail_count":1,"visible_matched_detail_count":1,"state_matched":true}`
+
+	tests := []struct {
+		name string
+		ctx  context.Context
+		want error
+	}{
+		{name: "canceled", ctx: canceledCtx, want: context.Canceled},
+		{name: "deadline", ctx: expiredCtx, want: context.DeadlineExceeded},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &currentPageURLCDPClient{response: runtimeEvaluateStringResponse(t, validJSON)}
+			session := newCurrentPageURLSession(client)
+			_, err := probeCurrentFeedDetail(tt.ctx, session.page, "feed-1")
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("context 错误 = %v, 期望 errors.Is(_, %v)", err, tt.want)
+			}
+			if client.calls != 1 || client.method != "Runtime.evaluate" {
+				t.Fatalf("取消/截止不应触发 Rod retry: calls=%d method=%q", client.calls, client.method)
+			}
+			if client.ctx != tt.ctx {
+				t.Fatalf("未传播原始 context: got=%p want=%p", client.ctx, tt.ctx)
+			}
+		})
+	}
+}
+
+func runtimeEvaluateStringResponse(t *testing.T, value string) []byte {
+	t.Helper()
+	response, err := json.Marshal(map[string]interface{}{
+		"result": map[string]interface{}{
+			"type":  "string",
+			"value": value,
+		},
+	})
+	if err != nil {
+		t.Fatalf("构造 Runtime.evaluate 响应失败: %v", err)
+	}
+	return response
+}
+
 func TestWaitFeedDetailVisibleConsecutiveMatches(t *testing.T) {
 	matched := currentFeedDetailProbe{URLMatched: true, VisibleDetailCount: 1}
 	type step struct {
