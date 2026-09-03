@@ -1,8 +1,10 @@
 package xiaohongshu
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	hrod "github.com/xpzouying/xiaohongshu-mcp/humanize/rod"
 )
@@ -108,7 +110,9 @@ var (
 
 // ProbeSelectors 用单次 JS eval 批量探测选择器命中情况。
 func ProbeSelectors(page *hrod.Page, specs []SelectorSpec) ([]SelectorProbeResult, error) {
-	obj, err := page.Eval(`(specs) => {
+	ctx, cancel := context.WithTimeout(page.Rod.GetContext(), 5*time.Second)
+	defer cancel()
+	obj, err := evalJSDirect(ctx, page, `(specs) => {
 		const visible = (el) => {
 			if (!el || !el.isConnected) return false;
 			if (typeof el.checkVisibility === "function") {

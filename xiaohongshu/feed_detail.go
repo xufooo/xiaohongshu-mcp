@@ -823,7 +823,7 @@ func (c *evalTimeoutCounter) add(ctx context.Context, err error, probe func() er
 func confirmRendererAlive(ctx context.Context, page *hrod.Page) error {
 	probeCtx, probeCancel := context.WithTimeout(ctx, 2*time.Second)
 	defer probeCancel()
-	_, probeErr := page.Context(probeCtx).Eval(`() => 1`)
+	_, probeErr := evalJSDirect(probeCtx, page, `() => 1`)
 	if ctx.Err() != nil {
 		return nil
 	}
@@ -885,7 +885,7 @@ func isConfirmedRendererDead(err error) bool {
 func evalJS(ctx context.Context, counter *evalTimeoutCounter, page *hrod.Page, fn string, args ...interface{}) (*proto.RuntimeRemoteObject, error) {
 	evalCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	result, err := page.Context(evalCtx).Eval(fn, args...)
+	result, err := evalJSDirect(evalCtx, page, fn, args...)
 	if counter != nil {
 		err = counter.add(ctx, err, func() error {
 			return confirmRendererAlive(ctx, page)
@@ -899,7 +899,7 @@ func evalJS(ctx context.Context, counter *evalTimeoutCounter, page *hrod.Page, f
 func evalQuick(ctx context.Context, page *hrod.Page, fn string, args ...interface{}) (*proto.RuntimeRemoteObject, error) {
 	evalCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	return page.Context(evalCtx).Eval(fn, args...)
+	return evalJSDirect(evalCtx, page, fn, args...)
 }
 
 // evalJSNoCounter 执行重型单次 Eval（如评论全量提取），5s 边界但不累计
@@ -907,7 +907,7 @@ func evalQuick(ctx context.Context, page *hrod.Page, fn string, args ...interfac
 func evalJSNoCounter(ctx context.Context, page *hrod.Page, fn string, args ...interface{}) (*proto.RuntimeRemoteObject, error) {
 	evalCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	return page.Context(evalCtx).Eval(fn, args...)
+	return evalJSDirect(evalCtx, page, fn, args...)
 }
 
 func evalElementJS(ctx context.Context, counter *evalTimeoutCounter, element *hrod.Element, fn string, args ...interface{}) (*proto.RuntimeRemoteObject, error) {

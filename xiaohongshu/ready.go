@@ -247,8 +247,9 @@ func probeXHSReady(page *hrod.Page, kind XHSReadyKind, feedID string) (xhsReadyP
 		}
 		return JSON.stringify(out);
 	}`
-	obj, err := page.Eval(probeJS, append([]interface{}{string(kind), feedID}, xhsReadyProbeSelectorArgs()...)...)
-	return decodeXHSReadyProbe(obj, err)
+	probeArgs := append([]interface{}{string(kind), feedID}, xhsReadyProbeSelectorArgs()...)
+	result, err := evalJSDirect(page.Rod.GetContext(), page, probeJS, probeArgs...)
+	return decodeXHSReadyProbe(result, err)
 }
 
 // decodeXHSReadyProbe 统一 ready probe 的 nil 检查与 JSON 解码。
@@ -321,7 +322,8 @@ func probeXHSReadyFull(page *hrod.Page, feedID string) (xhsReadyProbe, error) {
 			risk_text: riskText.slice(0, 180),
 		});
 	}`
-	obj, err := page.Eval(probeJS, append([]interface{}{feedID}, xhsReadyProbeSelectorArgs()...)...)
+	probeArgs := append([]interface{}{feedID}, xhsReadyProbeSelectorArgs()...)
+	obj, err := evalJSDirect(page.Rod.GetContext(), page, probeJS, probeArgs...)
 	return decodeXHSReadyProbe(obj, err)
 }
 
