@@ -265,7 +265,7 @@ func probeOpenedNoteSnapshotStages(ctx context.Context, page *hrod.Page) string 
 	for _, stage := range stages {
 		started := time.Now()
 		probeCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
-		result, err := page.Context(probeCtx).Eval(stage.js)
+		result, err := evalJSDirect(probeCtx, page, stage.js)
 		cancel()
 		terminal := "ok"
 		countBucket := "0"
