@@ -161,11 +161,7 @@ func probeCurrentFeedDetail(ctx context.Context, page *hrod.Page, feedID string)
 	if err != nil {
 		return currentFeedDetailProbe{}, fmt.Errorf("%w: %v", errPermanentCurrentDetailProbe, err)
 	}
-	result, err := (proto.RuntimeEvaluate{
-		Expression:     expression,
-		ReturnByValue:  true,
-		AwaitPromise:    true,
-	}).Call(page.Rod.Context(ctx))
+	result, err := newRuntimeEvaluate(ctx, expression).Call(page.Rod.Context(ctx))
 	if err != nil {
 		return currentFeedDetailProbe{}, normalizeCurrentDetailProbeError(ctx, err)
 	}

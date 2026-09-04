@@ -1247,6 +1247,7 @@ type currentPageURLCDPClient struct {
 	method   string
 	params   interface{}
 	eventCh  chan *cdp.Event
+	forceErr bool
 	eventOnce sync.Once
 	closeOnce sync.Once
 }
@@ -1272,6 +1273,9 @@ func (c *currentPageURLCDPClient) Call(ctx context.Context, _ string, method str
 	c.ctx = ctx
 	c.method = method
 	c.params = params
+	if c.forceErr && c.err != nil {
+		return nil, c.err
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -1614,7 +1618,7 @@ func TestCurrentDetailProbeRuntimeEvaluateResponseHandling(t *testing.T) {
 
 func TestCurrentDetailProbeRuntimeEvaluateRequest(t *testing.T) {
 	validJSON := `{"url":"https://www.xiaohongshu.com/explore/feed-1","url_matched":true,"visible_detail_count":1,"visible_matched_detail_count":1,"state_matched":true}`
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	client := &currentPageURLCDPClient{response: runtimeEvaluateStringResponse(t, validJSON)}
 	session := newCurrentPageURLSession(t, client)
@@ -1631,6 +1635,9 @@ func TestCurrentDetailProbeRuntimeEvaluateRequest(t *testing.T) {
 	}
 	if !request.ReturnByValue || !request.AwaitPromise {
 		t.Fatalf("Runtime.evaluate 应设置 ReturnByValue/AwaitPromise: %#v", request)
+	}
+	if request.Timeout <= 0 || request.Timeout > proto.RuntimeTimeDelta(15000) {
+		t.Fatalf("Runtime.evaluate timeout = %v, 期望在 (0,15000] 内", request.Timeout)
 	}
 	if request.ContextID != 0 || request.UniqueContextID != "" {
 		t.Fatalf("Runtime.evaluate 不应设置 context ID: %#v", request)
