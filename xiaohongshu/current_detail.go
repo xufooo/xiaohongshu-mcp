@@ -10,7 +10,6 @@ import (
 
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/cdp"
-	"github.com/go-rod/rod/lib/proto"
 	hrod "github.com/xpzouying/xiaohongshu-mcp/humanize/rod"
 )
 
