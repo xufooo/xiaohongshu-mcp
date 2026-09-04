@@ -786,6 +786,9 @@ func IsFatalRendererError(err error) bool {
 
 type evalTimeoutCounter struct {
 	timeouts int
+	timeoutTotal, consecutiveTimeoutAtExit, confirmCount int
+	runtimeProbeResult, browserHealthResult string
+	stageDiagnostics bool
 }
 
 func (c *evalTimeoutCounter) reset() {
@@ -794,25 +797,33 @@ func (c *evalTimeoutCounter) reset() {
 
 func (c *evalTimeoutCounter) add(ctx context.Context, err error, probe func() error) error {
 	if ctx.Err() != nil {
+		c.consecutiveTimeoutAtExit = c.timeouts
 		c.reset()
 		return err
 	}
 	if err == nil || !isEvalTimeout(err) {
+		c.consecutiveTimeoutAtExit = c.timeouts
 		c.reset()
 		return err
 	}
 	c.timeouts++
+	c.timeoutTotal++
 	if c.timeouts < 3 {
+		c.consecutiveTimeoutAtExit = c.timeouts
 		return err
 	}
+	c.confirmCount++
 	probeErr := probe()
 	if probeErr == nil {
+		c.consecutiveTimeoutAtExit = 0
 		c.reset()
 		return err
 	}
 	if errors.Is(probeErr, ErrFatalRendererError) {
+		c.consecutiveTimeoutAtExit = c.timeouts
 		return probeErr
 	}
+	c.consecutiveTimeoutAtExit = c.timeouts
 	c.reset()
 	return err
 }
@@ -820,22 +831,44 @@ func (c *evalTimeoutCounter) add(ctx context.Context, err error, probe func() er
 // confirmRendererAlive 在业务 Eval 连续 timeout 后做 renderer/browser 二次确认：
 // probe 成功或 Health 超时（未确认）返回 nil（慢 renderer，清零容忍）；
 // 只有明确 CDP transport/browser closed 类错误才返回 ErrFatalRendererError。
-func confirmRendererAlive(ctx context.Context, page *hrod.Page) error {
+func confirmRendererAlive(ctx context.Context, page *hrod.Page, counters ...*evalTimeoutCounter) error {
+	counter := (*evalTimeoutCounter)(nil)
+	if len(counters) > 0 { counter = counters[0] }
 	probeCtx, probeCancel := context.WithTimeout(ctx, 2*time.Second)
 	defer probeCancel()
 	_, probeErr := evalJSDirect(probeCtx, page, `() => 1`)
 	if ctx.Err() != nil {
+		if counter != nil { counter.runtimeProbeResult = "canceled" }
 		return nil
 	}
 	if err := classifyProbeError(probeErr); err != nil {
+		if counter != nil { counter.runtimeProbeResult = "fatal_transport" }
 		return err
 	}
-	if probeErr == nil || !isEvalTimeout(probeErr) {
+	if probeErr == nil {
+		if counter != nil { counter.runtimeProbeResult = "ok" }
 		return nil
 	}
+	if counter != nil { counter.runtimeProbeResult = "other" }
+	if !isEvalTimeout(probeErr) {
+		return nil
+	}
+	if counter != nil { counter.runtimeProbeResult = "timeout" }
 	healthCtx, healthCancel := context.WithTimeout(ctx, 2*time.Second)
 	defer healthCancel()
 	if healthErr := page.Browser().Health(healthCtx); healthErr != nil {
+		if counter != nil {
+			switch {
+			case errors.Is(healthErr, context.Canceled) || errors.Is(healthCtx.Err(), context.Canceled):
+				counter.browserHealthResult = "canceled"
+			case isEvalTimeout(healthErr) || errors.Is(healthCtx.Err(), context.DeadlineExceeded):
+				counter.browserHealthResult = "timeout"
+			case isConfirmedRendererDead(healthErr):
+				counter.browserHealthResult = "fatal_transport"
+			default:
+				counter.browserHealthResult = "other"
+			}
+		}
 		if ctx.Err() != nil || healthCtx.Err() != nil || isEvalTimeout(healthErr) {
 			return nil
 		}
@@ -844,6 +877,7 @@ func confirmRendererAlive(ctx context.Context, page *hrod.Page) error {
 		}
 		return nil
 	}
+	if counter != nil { counter.browserHealthResult = "ok" }
 	return nil
 }
 

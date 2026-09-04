@@ -8,9 +8,40 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-rod/rod"
 	"github.com/xpzouying/xiaohongshu-mcp/errors"
 	hrod "github.com/xpzouying/xiaohongshu-mcp/humanize/rod"
 )
+
+type snapshotStageError struct {
+	stage string
+	kind  string
+	cause error
+}
+
+func (e *snapshotStageError) Error() string {
+	if e.kind == "context_deadline" { return fmt.Sprintf("snapshot stage=%s kind=%s: deadline exceeded", e.stage, e.kind) }
+	return fmt.Sprintf("snapshot stage=%s kind=%s", e.stage, e.kind)
+}
+func (e *snapshotStageError) Unwrap() error { return e.cause }
+func (e *snapshotStageError) Stage() string { return e.stage }
+func (e *snapshotStageError) Kind() string { return e.kind }
+
+func classifySnapshotError(err error) string {
+	if err == nil { return "other" }
+	if stderrors.Is(err, context.Canceled) { return "context_canceled" }
+	if stderrors.Is(err, context.DeadlineExceeded) { return "context_deadline" }
+	if IsFatalRendererError(err) { return "fatal_renderer" }
+	if stderrors.Is(err, errors.ErrNoFeedDetail) { return "no_detail" }
+	if isEvalTimeout(err) { return "eval_timeout" }
+	var syntaxErr *json.SyntaxError
+	if stderrors.As(err, &syntaxErr) { return "json_decode" }
+	var typeErr *json.UnmarshalTypeError
+	if stderrors.As(err, &typeErr) { return "json_decode" }
+	var evalErr *rod.EvalError
+	if stderrors.As(err, &evalErr) { return "eval_exception" }
+	return "other"
+}
 
 // interactStateJS 是唯一的互动状态来源：同时要求 like/collect wrapper 存在，
 // like use 读取 xlink:href（兼容 href），#liked→true / #like→false，
@@ -123,17 +154,29 @@ func ExtractOpenedNoteSnapshotFromDOM(ctx context.Context, page *hrod.Page, coun
 	defer cancel()
 	content, err := extractOpenedNoteFieldsFromDOM(attemptCtx, page, feedID)
 	if err != nil {
+		if counter != nil && counter.stageDiagnostics {
+			err = &snapshotStageError{"note_fields", classifySnapshotError(err), err}
+		}
 		return nil, finishOpenedNoteSnapshotAttempt(ctx, counter, page, err)
 	}
 	comments, err := extractOpenedNoteCommentsFromDOM(attemptCtx, page, feedID)
 	if err != nil {
+		if counter != nil && counter.stageDiagnostics {
+			err = &snapshotStageError{"comments", classifySnapshotError(err), err}
+		}
 		return nil, finishOpenedNoteSnapshotAttempt(ctx, counter, page, err)
 	}
 	if strings.TrimSpace(content.Title) == "" && strings.TrimSpace(content.Desc) == "" && len(comments) == 0 {
 		err := fmt.Errorf("DOM快照返回为空: %w", errors.ErrNoFeedDetail)
+		if counter != nil && counter.stageDiagnostics {
+			err = &snapshotStageError{"empty_snapshot", "no_detail", err}
+		}
 		return nil, finishOpenedNoteSnapshotAttempt(ctx, counter, page, err)
 	}
 	if err := finishOpenedNoteSnapshotAttempt(ctx, counter, page, nil); err != nil {
+		if counter != nil && counter.stageDiagnostics {
+			return nil, &snapshotStageError{"attempt_finalize", classifySnapshotError(err), err}
+		}
 		return nil, err
 	}
 	return &OpenedNoteSnapshot{Note: content, Comments: comments}, nil
@@ -144,7 +187,7 @@ func finishOpenedNoteSnapshotAttempt(ctx context.Context, counter *evalTimeoutCo
 		return err
 	}
 	return counter.add(ctx, err, func() error {
-		return confirmRendererAlive(ctx, page)
+		return confirmRendererAlive(ctx, page, counter)
 	})
 }
 
@@ -229,10 +272,7 @@ func (e *SnapshotDiagnosticError) Error() string {
 		}
 		return e.cause.Error()
 	}
-	if e.cause == nil {
-		return "snapshot_diagnostic=" + e.diagnostic
-	}
-	return e.cause.Error() + "; snapshot_diagnostic=" + e.diagnostic
+	return "snapshot_diagnostic=" + e.diagnostic
 }
 
 func (e *SnapshotDiagnosticError) Unwrap() error {
