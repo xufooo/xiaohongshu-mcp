@@ -185,6 +185,7 @@ func waitFeedDetailVisibleWith(
 	defer cancel()
 	var last currentFeedDetailProbe
 	var lastErr error
+	matchedSamples := 0
 
 	for time.Now().Before(deadline) {
 		if err := ctx.Err(); err != nil {
@@ -198,6 +199,7 @@ func waitFeedDetailVisibleWith(
 			return ctxErr
 		}
 		if err != nil {
+			matchedSamples = 0
 			if IsFatalRendererError(err) {
 				return err
 			}
@@ -209,7 +211,12 @@ func waitFeedDetailVisibleWith(
 			last = probeResult
 			lastErr = nil
 			if currentFeedDetailMatched(probeResult, feedID) {
-				return nil
+				matchedSamples++
+				if matchedSamples >= 2 {
+					return nil
+				}
+			} else {
+				matchedSamples = 0
 			}
 		}
 		if !time.Now().Before(deadline) {
