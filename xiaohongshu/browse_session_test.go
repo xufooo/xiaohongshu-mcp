@@ -1752,14 +1752,41 @@ func TestWaitFeedDetailVisibleMatched(t *testing.T) {
 	if err != nil {
 		t.Fatalf("不期望错误: %v", err)
 	}
-	if calls != 1 {
-		t.Fatalf("probe 调用次数 = %d, 期望 1", calls)
+	if calls != 2 {
+		t.Fatalf("probe 调用次数 = %d, 期望 2", calls)
 	}
-	if sleeps != 0 {
-		t.Fatalf("首次 matched 不应 sleep: %d", sleeps)
+	if sleeps != 1 {
+		t.Fatalf("首次 matched 后应等待第二次确认: %d", sleeps)
 	}
 	if maxActiveProbes != 1 {
 		t.Fatalf("同一时刻应至多一个 probe: max=%d", maxActiveProbes)
+	}
+}
+
+func TestWaitFeedDetailVisibleResetsMatchedSamples(t *testing.T) {
+	probes := []currentFeedDetailProbe{
+		{URLMatched: true, VisibleDetailCount: 1},
+		{},
+		{URLMatched: true, VisibleDetailCount: 1},
+		{URLMatched: true, VisibleDetailCount: 1},
+	}
+	calls := 0
+	err := waitFeedDetailVisibleWith(
+		context.Background(),
+		"feed-1",
+		func() error { return nil },
+		func(context.Context) (currentFeedDetailProbe, error) {
+			probe := probes[calls]
+			calls++
+			return probe, nil
+		},
+		func(context.Context, time.Duration, time.Duration) error { return nil },
+	)
+	if err != nil {
+		t.Fatalf("不期望错误: %v", err)
+	}
+	if calls != 4 {
+		t.Fatalf("中间 unmatched 后应重新累计，probe 调用次数 = %d, 期望 4", calls)
 	}
 }
 
