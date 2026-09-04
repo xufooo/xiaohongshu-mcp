@@ -6,12 +6,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/rand"
+	"os"
 	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 
 	"github.com/go-rod/rod"
+	"github.com/go-rod/rod/lib/cdp"
 	"github.com/go-rod/rod/lib/launcher"
 	"github.com/go-rod/rod/lib/launcher/flags"
 	"github.com/go-rod/rod/lib/proto"
@@ -33,6 +35,7 @@ type Browser struct {
 
 	closeOnce sync.Once
 	closeErr  error
+	traceFile *os.File
 }
 
 // Config holds browser options.
@@ -80,6 +83,7 @@ func WithChromeBinPath(path string) Option  { return func(c *Config) { c.ChromeB
 func WithUserDataDir(path string) Option    { return func(c *Config) { c.UserDataDir = path } }
 func WithProxy(proxy string) Option         { return func(c *Config) { c.Proxy = proxy } }
 func WithTrace() Option                     { return func(c *Config) { c.Trace = true } }
+
 
 // WithStealthJS 控制是否注入 go-rod/stealth 的 JS 补丁。用 CloakBrowser 时应传 false。
 func WithStealthJS(enabled bool) Option {
@@ -233,13 +237,41 @@ func New(ctx context.Context, options ...Option) (*Browser, error) {
 
 	browserCtx, browserCancel := context.WithCancel(context.Background())
 
-	controller := rod.New().ControlURL(url).Trace(cfg.Trace)
+	controller := rod.New().Trace(cfg.Trace)
+	var traceFile *os.File
+	if tracePath := os.Getenv("XHS_CDP_TRACE_FILE"); tracePath != "" {
+		traceFile, err = os.OpenFile(tracePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+		if err != nil {
+			browserCancel()
+			l.Kill()
+			go l.Cleanup()
+			return nil, fmt.Errorf("open CDP trace file: %w", err)
+		}
+		client, err := cdp.StartWithURL(browserCtx, url, nil)
+		if err != nil {
+			if traceFile != nil {
+				_ = traceFile.Close()
+			}
+			browserCancel()
+			l.Kill()
+			go l.Cleanup()
+			return nil, fmt.Errorf("connect traced CDP client: %w", err)
+		}
+		client.Logger(newRedactedCDPLogger(traceFile))
+		controller = controller.Client(client)
+		defer func() { _ = traceFile.Sync() }()
+	} else {
+		controller = controller.ControlURL(url)
+	}
 	if cfg.CloakProfile {
 		// CloakBrowser 已接管 UA 和视口指纹，避免 rod 默认设备再发覆盖指令。
 		controller = controller.NoDefaultDevice()
 	}
 	controller = controller.Context(browserCtx)
 	if err := controller.Connect(); err != nil {
+		if traceFile != nil {
+			_ = traceFile.Close()
+		}
 		browserCancel()
 		l.Kill()
 		go l.Cleanup()
@@ -259,12 +291,16 @@ func New(ctx context.Context, options ...Option) (*Browser, error) {
 	}
 
 	hb := &Browser{browser: browser, browserCancel: browserCancel, launcher: l, stealthJS: cfg.StealthJS}
+	hb.traceFile = traceFile
 
 	// 启用指纹时，构建一致 UA 覆盖，补回 go-rod 建页面丢失的 UA 版本保真度。
 	// 构建失败必须终止启动，不能无声降级。
 	if cfg.Fingerprint {
 		ov, err := buildUAOverride(browser, cfg.Language)
 		if err != nil {
+			if traceFile != nil {
+				_ = traceFile.Close()
+			}
 			browserCancel()
 			l.Kill()
 			go l.Cleanup()
@@ -359,6 +395,9 @@ func (b *Browser) Close() {
 func (b *Browser) CloseContext(ctx context.Context) error {
 	b.closeOnce.Do(func() {
 		b.closeErr = b.close(ctx)
+		if b.traceFile != nil {
+			_ = b.traceFile.Close()
+		}
 	})
 	return b.closeErr
 }
