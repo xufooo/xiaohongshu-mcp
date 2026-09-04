@@ -764,9 +764,6 @@ func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, shareURL, xsecT
 		feed = Feed{ID: finalNoteID, XsecToken: shareURLToken(finalToken, parsed.XsecToken)}
 		resultRefForTimeline = "share_url"
 		humanize.Delay(opCtx, humanize.AfterNavigate)
-		if err := waitFeedDetailVisible(opCtx, page, counter, feed.ID); err != nil {
-			return fail(err)
-		}
 	} else {
 		feed, err = s.resolveResult(resultRef)
 		if err != nil {
