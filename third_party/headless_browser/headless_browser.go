@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/cdp"
@@ -36,6 +37,8 @@ type Browser struct {
 	closeOnce sync.Once
 	closeErr  error
 	traceFile *os.File
+	browserCtx context.Context
+	diagnostic *diagnosticCDPClient
 }
 
 // Config holds browser options.
@@ -239,6 +242,7 @@ func New(ctx context.Context, options ...Option) (*Browser, error) {
 
 	controller := rod.New().Trace(cfg.Trace)
 	var traceFile *os.File
+	var diagnostic *diagnosticCDPClient
 	if tracePath := os.Getenv("XHS_CDP_TRACE_FILE"); tracePath != "" {
 		traceFile, err = os.OpenFile(tracePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 		if err != nil {
@@ -257,8 +261,17 @@ func New(ctx context.Context, options ...Option) (*Browser, error) {
 			go l.Cleanup()
 			return nil, fmt.Errorf("connect traced CDP client: %w", err)
 		}
-		client.Logger(newRedactedCDPLogger(traceFile))
-		controller = controller.Client(client)
+		logger, loggerErr := newRedactedCDPLogger(traceFile)
+		if loggerErr != nil {
+			_ = traceFile.Close()
+			browserCancel()
+			l.Kill()
+			go l.Cleanup()
+			return nil, fmt.Errorf("create CDP trace logger: %w", loggerErr)
+		}
+		client.Logger(logger)
+		diagnostic = newDiagnosticCDPClient(client, browserCtx, logger)
+		controller = controller.Client(diagnostic)
 		defer func() { _ = traceFile.Sync() }()
 	} else {
 		controller = controller.ControlURL(url)
@@ -290,7 +303,7 @@ func New(ctx context.Context, options ...Option) (*Browser, error) {
 		}
 	}
 
-	hb := &Browser{browser: browser, browserCancel: browserCancel, launcher: l, stealthJS: cfg.StealthJS}
+	hb := &Browser{browser: browser, browserCancel: browserCancel, browserCtx: browserCtx, launcher: l, stealthJS: cfg.StealthJS, diagnostic: diagnostic}
 	hb.traceFile = traceFile
 
 	// 启用指纹时，构建一致 UA 覆盖，补回 go-rod 建页面丢失的 UA 版本保真度。
@@ -457,6 +470,19 @@ func (b *Browser) Page() (page *rod.Page, err error) {
 		if err := b.uaOverride.Call(page); err != nil {
 			return nil, fmt.Errorf("apply UA override: %w", err)
 		}
+	}
+	if b.diagnostic != nil {
+		ctx, cancel := context.WithTimeout(b.browserCtx, 2*time.Second)
+		bound := page.Context(ctx)
+		var setup sync.WaitGroup
+		var runtimeErr, lifecycleErr error
+		setup.Add(2)
+		go func() { defer setup.Done(); runtimeErr = proto.RuntimeEnable{}.Call(bound) }()
+		go func() { defer setup.Done(); lifecycleErr = (proto.PageSetLifecycleEventsEnabled{Enabled: true}).Call(bound) }()
+		setup.Wait()
+		cancel()
+		b.diagnostic.logger.setup(runtimeErr, lifecycleErr)
+		b.diagnostic.Arm(page.SessionID)
 	}
 	return page, nil
 }
