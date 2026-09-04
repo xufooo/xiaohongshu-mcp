@@ -812,16 +812,30 @@ func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, shareURL, xsecT
 	if page == nil {
 		return fail(fmt.Errorf("browse session 页面不存在: %s", s.id))
 	}
-	counter := &evalTimeoutCounter{}
-
+	counter := &evalTimeoutCounter{runtimeProbeResult: "not_run", browserHealthResult: "not_run", stageDiagnostics: hasShareURL}
+	entryKind := "result_ref"
+	if hasShareURL { entryKind = "share_url" }
+	pollStarted := time.Now()
+	attemptCount := 0
+	firstStage, firstKind, lastStage, lastKind := "", "", "", ""
 	snapshot, err := pollOpenedNoteSnapshot(opCtx, 15*time.Second, 250*time.Millisecond, func() (*OpenedNoteSnapshot, error) {
-		return ExtractOpenedNoteSnapshotFromDOM(opCtx, page, counter, feed.ID)
+		attemptCount++
+		result, attemptErr := ExtractOpenedNoteSnapshotFromDOM(opCtx, page, counter, feed.ID)
+		var stageErr *snapshotStageError
+		if errors.As(attemptErr, &stageErr) {
+			lastStage, lastKind = stageErr.Stage(), stageErr.Kind()
+			if firstStage == "" { firstStage, firstKind = lastStage, lastKind }
+		}
+		return result, attemptErr
 	})
 	if err != nil {
-		if opCtx.Err() == nil && isEvalTimeout(err) && !IsFatalRendererError(err) {
+		if hasShareURL && opCtx.Err() == nil && isEvalTimeout(err) && !IsFatalRendererError(err) {
 			diagnostic := probeOpenedNoteSnapshotStages(opCtx, page)
 			if opCtx.Err() == nil {
-				err = &SnapshotDiagnosticError{diagnostic: diagnostic, cause: err}
+				state := "active"
+				if err := opCtx.Err(); err != nil { state = "deadline"; if errors.Is(err, context.Canceled) { state = "canceled" } }
+				obs := fmt.Sprintf("entry_kind=%s,attempt_count=%d,poll_elapsed_ms=%d,first_failure=%s:%s,last_failure=%s:%s,op_context_state=%s,timeout_total=%d,consecutive_timeout_at_exit=%d,confirm_count=%d,runtime_probe_result=%s,browser_health_result=%s", entryKind, attemptCount, time.Since(pollStarted).Milliseconds(), firstStage, firstKind, lastStage, lastKind, state, counter.timeoutTotal, counter.consecutiveTimeoutAtExit, counter.confirmCount, counter.runtimeProbeResult, counter.browserHealthResult)
+				err = &SnapshotDiagnosticError{diagnostic: diagnostic + "," + obs, cause: err}
 			}
 		}
 		if errors.Is(err, xerrors.ErrNoFeedDetail) {
