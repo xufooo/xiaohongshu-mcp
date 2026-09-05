@@ -826,6 +826,14 @@ func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, shareURL, xsecT
 		return result, attemptErr
 	})
 	if err != nil {
+		if isEvalTimeout(err) {
+			s.mu.Lock()
+			cancel := s.activeOp
+			s.mu.Unlock()
+			if cancel != nil {
+				cancel()
+			}
+		}
 		if hasShareURL && opCtx.Err() == nil && isEvalTimeout(err) && !IsFatalRendererError(err) {
 			diagnostic := probeOpenedNoteSnapshotStages(opCtx, page)
 			if opCtx.Err() == nil {
@@ -948,7 +956,7 @@ func pollOpenedNoteSnapshot(ctx context.Context, timeout, interval time.Duration
 		if IsFatalRendererError(err) {
 			return nil, err
 		}
-		if !errors.Is(err, xerrors.ErrNoFeedDetail) && !isEvalTimeout(err) {
+		if !errors.Is(err, xerrors.ErrNoFeedDetail) {
 			return nil, err
 		}
 		if !time.Now().Before(deadline) {
@@ -2242,7 +2250,7 @@ func (s *BrowseSession) endOperation(operationErr error) {
 		return
 	}
 
-	if !closed && !fatal && opCtx != nil {
+	if !closed && !fatal && opCtx != nil && opCtx.Err() == nil {
 		s.refreshPageState(opCtx)
 	}
 
