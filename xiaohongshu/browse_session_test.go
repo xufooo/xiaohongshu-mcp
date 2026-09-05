@@ -1744,7 +1744,7 @@ func runtimeEvaluateStringResponse(t *testing.T, value string) []byte {
 }
 
 func TestWaitFeedDetailVisibleMatched(t *testing.T) {
-	matched := currentFeedDetailProbe{URLMatched: true, VisibleDetailCount: 1}
+	matched := currentFeedDetailProbe{URLMatched: true, VisibleDetailCount: 1, StateMatched: true}
 	calls := 0
 	sleeps := 0
 	activeProbes := 0
@@ -1796,10 +1796,10 @@ func TestWaitFeedDetailVisibleMatched(t *testing.T) {
 
 func TestWaitFeedDetailVisibleResetsMatchedSamples(t *testing.T) {
 	probes := []currentFeedDetailProbe{
-		{URLMatched: true, VisibleDetailCount: 1},
+		{URLMatched: true, VisibleDetailCount: 1, StateMatched: true},
 		{},
-		{URLMatched: true, VisibleDetailCount: 1},
-		{URLMatched: true, VisibleDetailCount: 1},
+		{URLMatched: true, VisibleDetailCount: 1, StateMatched: true},
+		{URLMatched: true, VisibleDetailCount: 1, StateMatched: true},
 	}
 	calls := 0
 	err := waitFeedDetailVisibleWith(
