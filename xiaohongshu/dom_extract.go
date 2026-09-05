@@ -560,7 +560,7 @@ type commentsDOMSnapshot struct {
 }
 
 func extractCommentsWithProgressFromDOM(ctx context.Context, page *hrod.Page, feedID string) (commentsDOMSnapshot, error) {
-	result, err := evalJSNoCounterRetryOnce(ctx, page, `(feedID) => {` + domCleanJS + domCommentExtractorJS + `
+	result, err := evalJSNoCounter(ctx, page, `(feedID) => {` + domCleanJS + domCommentExtractorJS + `
 		const comments = extractComments(feedID);
 		const totalText = (document.querySelector(".comments-container .total") ||
 			document.querySelector(".comment-total") || document.querySelector(".total"))?.innerText || "";
