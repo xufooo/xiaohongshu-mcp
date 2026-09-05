@@ -815,7 +815,7 @@ func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, shareURL, xsecT
 	pollStarted := time.Now()
 	attemptCount := 0
 	firstStage, firstKind, lastStage, lastKind := "", "", "", ""
-	snapshot, err := pollOpenedNoteSnapshot(opCtx, 15*time.Second, 250*time.Millisecond, func(attemptCtx context.Context) (*OpenedNoteSnapshot, error) {
+	snapshot, err := pollOpenedNoteSnapshot(opCtx, 40*time.Second, 250*time.Millisecond, func(attemptCtx context.Context) (*OpenedNoteSnapshot, error) {
 		attemptCount++
 		result, attemptErr := ExtractOpenedNoteSnapshotFromDOM(attemptCtx, page, counter, feed.ID)
 		var stageErr *snapshotStageError
