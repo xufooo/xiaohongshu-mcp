@@ -219,7 +219,19 @@ func loadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 		}
 		moved, err := scrollNoteScrollerMoved(ctx, page, 160)
 		if err != nil {
-			return nil, nil, false, fmt.Errorf("初始滚动触发评论懒加载失败: %w", err)
+			if !isEvalTimeout(err) {
+				return nil, nil, false, fmt.Errorf("初始滚动触发评论懒加载失败: %w", err)
+			}
+			logrus.Warnf("初始滚动触发评论懒加载超时: %v", err)
+			moved = false
+			if remaining() >= 20*time.Second {
+				logrus.Warnf("初始滚动超时，剩余预算充足，重试一次")
+				moved, err = scrollNoteScrollerMoved(ctx, page, 160)
+				if err != nil {
+					logrus.Warnf("初始滚动重试仍失败(%v)，继续由主循环滚动补偿", err)
+					moved = false
+				}
+			}
 		}
 		if moved {
 			batchCursor.Round++
