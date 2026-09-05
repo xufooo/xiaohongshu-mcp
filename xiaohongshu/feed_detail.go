@@ -227,7 +227,8 @@ func loadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 			if !isEvalTimeout(scrollErr) {
 				return nil, nil, false, fmt.Errorf("初始滚动触发评论懒加载失败: %w", scrollErr)
 			}
-			if rem := remaining(); rem < time.Second {
+			rem := remaining()
+			if rem < time.Second {
 				return nil, nil, false, fmt.Errorf("初始滚动触发评论懒加载失败: %w", scrollErr)
 			}
 			if err := page.Sleep(min(time.Second, rem)); err != nil {
