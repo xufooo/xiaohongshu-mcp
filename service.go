@@ -483,24 +483,6 @@ type FeedsListResponse struct {
 	HasMore   bool                              `json:"has_more"`
 	SeenCount int                               `json:"seen_count"`
 	Network   []xiaohongshu.NetworkCaptureEntry `json:"network,omitempty"`
-
-	DebugSearchTotalMS            int64   `json:"debug_search_total_ms"`
-	DebugSearchPrecheckMS         int64   `json:"debug_search_precheck_ms"`
-	DebugSearchInputMS            int64   `json:"debug_search_input_ms"`
-	DebugSearchSubmitMS           int64   `json:"debug_search_submit_ms"`
-	DebugSearchWaitMS             int64   `json:"debug_search_wait_ms"`
-	DebugSearchExtractMS          int64   `json:"debug_search_extract_ms"`
-	DebugSearchInputProbeMs       []int64 `json:"debug_search_input_probe_ms"`
-	DebugSearchInputProbeCount    int     `json:"debug_search_input_probe_count"`
-	DebugSearchInputProbeFailed   int     `json:"debug_search_input_probe_failed"`
-	DebugSearchInputLastErrorKind string  `json:"debug_search_input_last_error_kind"`
-	DebugSearchResultProbeMs      []int64 `json:"debug_search_result_probe_ms"`
-	DebugSearchResultProbeCount   int     `json:"debug_search_result_probe_count"`
-	DebugSearchResultProbeFailed  int     `json:"debug_search_result_probe_failed"`
-	DebugSearchResultLastErrorKind string `json:"debug_search_result_last_error_kind"`
-	DebugSearchWaitExit           string  `json:"debug_search_wait_exit"`
-	DebugSearchFallback           bool    `json:"debug_search_fallback"`
-	DebugSearchWaitRounds         int     `json:"debug_search_wait_rounds"`
 }
 
 type commentCursorEntry struct {
@@ -1172,19 +1154,6 @@ func (s *XiaohongshuService) ReplyCommentToFeed(ctx context.Context, feedID, xse
 }
 
 func (s *XiaohongshuService) CreateBrowseSession(ctx context.Context, forceRecreate bool) (result *xiaohongshu.CreateBrowseSessionResult, err error) {
-	debugTotalStartedAt := time.Now()
-	var debugStartupElapsed time.Duration
-	var debugReadyElapsed time.Duration
-	defer func() {
-		if result == nil {
-			return
-		}
-		result.DebugTotalMS = time.Since(debugTotalStartedAt).Milliseconds()
-		result.DebugStartupMS = debugStartupElapsed.Milliseconds()
-		result.DebugReadyMS = debugReadyElapsed.Milliseconds()
-		result.DebugReused = result.Outcome == "reused"
-	}()
-
 	s.createSessionMu.Lock()
 	if err := ctx.Err(); err != nil {
 		s.createSessionMu.Unlock()
@@ -1193,9 +1162,7 @@ func (s *XiaohongshuService) CreateBrowseSession(ctx context.Context, forceRecre
 	defer s.createSessionMu.Unlock()
 
 	if !forceRecreate {
-		reuseStartedAt := time.Now()
 		if reuseResult := s.tryReuseSession(ctx); reuseResult != nil {
-			debugReadyElapsed = time.Since(reuseStartedAt)
 			return reuseResult, nil
 		}
 		if err := ctx.Err(); err != nil {
@@ -1205,14 +1172,11 @@ func (s *XiaohongshuService) CreateBrowseSession(ctx context.Context, forceRecre
 
 	s.browseSessions.CloseAll()
 
-	startupStartedAt := time.Now()
 	page, err := s.acquirePageFor(ctx, "session")
-	debugStartupElapsed = time.Since(startupStartedAt)
 	if err != nil {
 		return nil, err
 	}
 
-	readyStartedAt := time.Now()
 	if err := page.Navigate("https://www.xiaohongshu.com/explore"); err != nil {
 		s.browserManager.Release(page)
 		return nil, fmt.Errorf("导航探索页失败: %w", err)
@@ -1221,7 +1185,6 @@ func (s *XiaohongshuService) CreateBrowseSession(ctx context.Context, forceRecre
 		s.browserManager.Release(page)
 		return nil, fmt.Errorf("等待探索页就绪失败: %w", err)
 	}
-	debugReadyElapsed = time.Since(readyStartedAt)
 
 	session := s.browseSessions.Create(page, s.actionState, func(page *hrod.Page) {
 		s.browserManager.Release(page)
@@ -1422,24 +1385,6 @@ func (s *XiaohongshuService) SessionSearch(ctx context.Context, id, keyword, cur
 		Cursor:    nextCursorID,
 		HasMore:   hasMore,
 		SeenCount: seenCount,
-
-		DebugSearchTotalMS:             searchResult.DebugSearchTotalMS,
-		DebugSearchPrecheckMS:          searchResult.DebugSearchPrecheckMS,
-		DebugSearchInputMS:             searchResult.DebugSearchInputMS,
-		DebugSearchSubmitMS:            searchResult.DebugSearchSubmitMS,
-		DebugSearchWaitMS:              searchResult.DebugSearchWaitMS,
-		DebugSearchExtractMS:           searchResult.DebugSearchExtractMS,
-		DebugSearchInputProbeMs:        searchResult.DebugSearchInputProbeMs,
-		DebugSearchInputProbeCount:     searchResult.DebugSearchInputProbeCount,
-		DebugSearchInputProbeFailed:    searchResult.DebugSearchInputProbeFailed,
-		DebugSearchInputLastErrorKind:  searchResult.DebugSearchInputLastErrorKind,
-		DebugSearchResultProbeMs:       searchResult.DebugSearchResultProbeMs,
-		DebugSearchResultProbeCount:    searchResult.DebugSearchResultProbeCount,
-		DebugSearchResultProbeFailed:   searchResult.DebugSearchResultProbeFailed,
-		DebugSearchResultLastErrorKind: searchResult.DebugSearchResultLastErrorKind,
-		DebugSearchWaitExit:            searchResult.DebugSearchWaitExit,
-		DebugSearchFallback:            searchResult.DebugSearchFallback,
-		DebugSearchWaitRounds:          searchResult.DebugSearchWaitRounds,
 	}, nil
 }
 
