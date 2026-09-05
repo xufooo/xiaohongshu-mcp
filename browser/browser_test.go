@@ -80,22 +80,26 @@ func TestMaskProxyCredentials(t *testing.T) {
 
 func TestIdleCloseDelay(t *testing.T) {
 	cases := []struct {
-		name       string
-		owner      string
-		configured time.Duration
-		want       time.Duration
+		name         string
+		owner        string
+		configured   time.Duration
+		sessionGrace time.Duration
+		want         time.Duration
 	}{
-		{"普通 owner 保留配置", "browser_operation", 5 * time.Minute, 5 * time.Minute},
-		{"session owner 上限 1 分钟", "session:test-id", 5 * time.Minute, sessionIdleGrace},
-		{"session owner 尊重更短配置", "session:test-id", 30 * time.Second, 30 * time.Second},
-		{"session owner 保持零禁用", "session:test-id", 0, 0},
-		{"session owner 保持负值禁用", "session:test-id", -1 * time.Second, -1 * time.Second},
-		{"无冒号前缀不算 session owner", "session", 5 * time.Minute, 5 * time.Minute},
+		{"普通 owner 保留配置", "browser_operation", 5 * time.Minute, time.Minute, 5 * time.Minute},
+		{"session owner 上限 grace", "session:test-id", 5 * time.Minute, time.Minute, time.Minute},
+		{"session owner 尊重更短配置", "session:test-id", 30 * time.Second, time.Minute, 30 * time.Second},
+		{"session owner 保持零禁用", "session:test-id", 0, time.Minute, 0},
+		{"session owner 保持负值禁用", "session:test-id", -1 * time.Second, time.Minute, -1 * time.Second},
+		{"无冒号前缀不算 session owner", "session", 5 * time.Minute, time.Minute, 5 * time.Minute},
+		{"sessionGrace 零时跟随配置", "session:test-id", 5 * time.Minute, 0, 5 * time.Minute},
+		{"sessionGrace 为负时跟随配置", "session:test-id", 5 * time.Minute, -1 * time.Second, 5 * time.Minute},
+		{"sessionGrace 大于配置时用配置", "session:test-id", 30 * time.Second, 10 * time.Minute, 30 * time.Second},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := idleCloseDelay(tc.owner, tc.configured); got != tc.want {
-				t.Fatalf("idleCloseDelay(%q, %v) = %v, 期望 %v", tc.owner, tc.configured, got, tc.want)
+			if got := idleCloseDelay(tc.owner, tc.configured, tc.sessionGrace); got != tc.want {
+				t.Fatalf("idleCloseDelay(%q, %v, %v) = %v, 期望 %v", tc.owner, tc.configured, tc.sessionGrace, got, tc.want)
 			}
 		})
 	}

@@ -59,6 +59,7 @@ func NewXiaohongshuService() (*XiaohongshuService, error) {
 		browserManager: browser.NewManager(
 			newBrowser,
 			browser.WithIdleTimeout(configs.GetBrowserIdleTimeout()),
+			browser.WithSessionIdleGrace(configs.GetBrowserSessionIdleGrace()),
 		),
 		actionState: actionState,
 		browseSessions: xiaohongshu.NewBrowseSessionManager(xiaohongshu.DefaultBrowseSessionTimeout),
