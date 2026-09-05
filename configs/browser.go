@@ -17,6 +17,8 @@ var (
 
 	browserIdleTimeout = 5 * time.Minute
 
+	browserSessionIdleGrace = time.Minute
+
 	browserExtraArgs []string
 
 	browserUserAgent = ""
@@ -81,6 +83,16 @@ func SetBrowserIdleTimeout(timeout time.Duration) {
 // GetBrowserIdleTimeout 返回浏览器空闲回收时间。
 func GetBrowserIdleTimeout() time.Duration {
 	return browserIdleTimeout
+}
+
+// SetBrowserSessionIdleGrace 设置 session 释放后的浏览器保留宽限时间。
+func SetBrowserSessionIdleGrace(grace time.Duration) {
+	browserSessionIdleGrace = grace
+}
+
+// GetBrowserSessionIdleGrace 返回 session 释放后的浏览器保留宽限时间。
+func GetBrowserSessionIdleGrace() time.Duration {
+	return browserSessionIdleGrace
 }
 
 // GetBrowserStartupTimeout 返回用户配置的浏览器启动超时时间。

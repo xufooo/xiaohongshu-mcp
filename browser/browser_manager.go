@@ -18,7 +18,6 @@ const (
 	defaultStartupTimeout   = 120 * time.Second
 	operationAcquireTimeout = 5 * time.Second
 	lifecycleAcquireTimeout = 30 * time.Second
-	sessionIdleGrace        = time.Minute
 )
 
 // BusyError reports that the single browser is currently owned by another operation.
@@ -52,6 +51,14 @@ func WithIdleTimeout(timeout time.Duration) ManagerOption {
 	}
 }
 
+// WithSessionIdleGrace 设置 session 释放后浏览器的保留宽限。
+// 小于等于零时跟随 WithIdleTimeout 配置。
+func WithSessionIdleGrace(grace time.Duration) ManagerOption {
+	return func(m *Manager) {
+		m.sessionIdleGrace = grace
+	}
+}
+
 // Manager 串行复用一个浏览器实例，避免树莓派频繁启动 Chromium。
 type Manager struct {
 	factory BrowserFactory
@@ -71,6 +78,8 @@ type Manager struct {
 	idleTimeout time.Duration
 	idleTimer   *time.Timer
 	idleVersion uint64
+
+	sessionIdleGrace time.Duration
 }
 
 type browserStartup struct {
@@ -100,9 +109,10 @@ func (s *browserStartup) finish() {
 // NewManager 创建浏览器管理器。
 func NewManager(factory BrowserFactory, options ...ManagerOption) *Manager {
 	m := &Manager{
-		factory:     factory,
-		token:       make(chan struct{}, 1),
-		idleTimeout: 5 * time.Minute,
+		factory:          factory,
+		token:            make(chan struct{}, 1),
+		idleTimeout:      5 * time.Minute,
+		sessionIdleGrace: time.Minute,
 	}
 	for _, option := range options {
 		option(m)
@@ -183,20 +193,21 @@ func (m *Manager) Release(page *hrod.Page) {
 	m.mu.Lock()
 	owner := m.owner
 	configuredIdleTimeout := m.idleTimeout
+	sessionGrace := m.sessionIdleGrace
 	m.mu.Unlock()
-	m.scheduleIdleCloseAfter(idleCloseDelay(owner, configuredIdleTimeout))
+	m.scheduleIdleCloseAfter(idleCloseDelay(owner, configuredIdleTimeout, sessionGrace))
 	m.releaseToken()
 }
 
 // idleCloseDelay 选择页面释放后的浏览器空闲关闭延迟。
-// session owner 使用 sessionIdleGrace 上限，普通 owner 保留配置值；
-// 配置小于等于零表示不自动关闭，原样返回。
-func idleCloseDelay(owner string, configured time.Duration) time.Duration {
+// session owner 使用 sessionGrace 上限（sessionGrace<=0 时跟随 configured），
+// 普通 owner 保留配置值；配置小于等于零表示不自动关闭，原样返回。
+func idleCloseDelay(owner string, configured, sessionGrace time.Duration) time.Duration {
 	if configured <= 0 {
 		return configured
 	}
-	if len(owner) >= len("session:") && owner[:len("session:")] == "session:" && configured > sessionIdleGrace {
-		return sessionIdleGrace
+	if len(owner) >= len("session:") && owner[:len("session:")] == "session:" && sessionGrace > 0 && configured > sessionGrace {
+		return sessionGrace
 	}
 	return configured
 }

@@ -39,6 +39,15 @@ func main() {
 			idleTimeout = parsed
 		}
 	}
+	sessionIdleGrace := time.Minute
+	if rawGrace := os.Getenv("XHS_BROWSER_SESSION_IDLE_GRACE"); rawGrace != "" {
+		parsed, err := time.ParseDuration(rawGrace)
+		if err != nil {
+			logrus.Warnf("invalid XHS_BROWSER_SESSION_IDLE_GRACE %q, using %s", rawGrace, sessionIdleGrace)
+		} else {
+			sessionIdleGrace = parsed
+		}
+	}
 	if binPath != "" {
 		logrus.Infof("using browser binary: %s", binPath)
 	} else {
@@ -50,6 +59,7 @@ func main() {
 	configs.SetProfileDir(profileDir)
 	configs.SetBrowserMode(browserMode)
 	configs.SetBrowserIdleTimeout(idleTimeout)
+	configs.SetBrowserSessionIdleGrace(sessionIdleGrace)
 	configs.SetBrowserUserAgent(browserUserAgent)
 	configs.SetBrowserExtraArgs(configs.BrowserExtraArgsFromEnv())
 	if profileDir != "" {
