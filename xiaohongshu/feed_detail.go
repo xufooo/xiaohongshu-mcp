@@ -961,6 +961,14 @@ func evalJSNoCounter(ctx context.Context, page *hrod.Page, fn string, args ...in
 	return evalJSDirect(evalCtx, page, fn, args...)
 }
 
+func evalJSNoCounterRetryOnce(ctx context.Context, page *hrod.Page, fn string, args ...interface{}) (*proto.RuntimeRemoteObject, error) {
+	result, err := evalJSNoCounter(ctx, page, fn, args...)
+	if err != nil && isEvalTimeout(err) && !IsFatalRendererError(err) && ctx.Err() == nil {
+		result, err = evalJSNoCounter(ctx, page, fn, args...)
+	}
+	return result, err
+}
+
 func evalElementJS(ctx context.Context, counter *evalTimeoutCounter, element *hrod.Element, fn string, args ...interface{}) (*proto.RuntimeRemoteObject, error) {
 	evalCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
