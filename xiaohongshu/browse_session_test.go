@@ -570,18 +570,14 @@ func TestPollOpenedNoteSnapshotRetriesNoDetail(t *testing.T) {
 	}
 }
 
-func TestPollOpenedNoteSnapshotRetriesEvalTimeout(t *testing.T) {
+func TestPollOpenedNoteSnapshotStopsOnEvalTimeout(t *testing.T) {
 	calls := 0
-	want := &OpenedNoteSnapshot{}
-	got, err := pollOpenedNoteSnapshot(context.Background(), time.Second, time.Millisecond, func() (*OpenedNoteSnapshot, error) {
+	_, err := pollOpenedNoteSnapshot(context.Background(), time.Second, time.Millisecond, func() (*OpenedNoteSnapshot, error) {
 		calls++
-		if calls == 1 {
-			return nil, context.DeadlineExceeded
-		}
-		return want, nil
+		return nil, fmt.Errorf("snapshot: %w", context.DeadlineExceeded)
 	})
-	if err != nil || got != want || calls != 2 {
-		t.Fatalf("Eval timeout 后应在预算内重试成功: calls=%d err=%v", calls, err)
+	if !errors.Is(err, context.DeadlineExceeded) || calls != 1 {
+		t.Fatalf("Eval timeout 后应立即返回: calls=%d err=%v", calls, err)
 	}
 }
 
