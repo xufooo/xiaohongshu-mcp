@@ -3,45 +3,12 @@ package xiaohongshu
 import (
 	"context"
 	"encoding/json"
-	stderrors "errors"
 	"fmt"
 	"strings"
-	"time"
 
-	"github.com/go-rod/rod"
 	"github.com/xpzouying/xiaohongshu-mcp/errors"
 	hrod "github.com/xpzouying/xiaohongshu-mcp/humanize/rod"
 )
-
-type snapshotStageError struct {
-	stage string
-	kind  string
-	cause error
-}
-
-func (e *snapshotStageError) Error() string {
-	if e.kind == "context_deadline" { return fmt.Sprintf("snapshot stage=%s kind=%s: deadline exceeded", e.stage, e.kind) }
-	return fmt.Sprintf("snapshot stage=%s kind=%s", e.stage, e.kind)
-}
-func (e *snapshotStageError) Unwrap() error { return e.cause }
-func (e *snapshotStageError) Stage() string { return e.stage }
-func (e *snapshotStageError) Kind() string { return e.kind }
-
-func classifySnapshotError(err error) string {
-	if err == nil { return "other" }
-	if stderrors.Is(err, context.Canceled) { return "context_canceled" }
-	if stderrors.Is(err, context.DeadlineExceeded) { return "context_deadline" }
-	if IsFatalRendererError(err) { return "fatal_renderer" }
-	if stderrors.Is(err, errors.ErrNoFeedDetail) { return "no_detail" }
-	if isEvalTimeout(err) { return "eval_timeout" }
-	var syntaxErr *json.SyntaxError
-	if stderrors.As(err, &syntaxErr) { return "json_decode" }
-	var typeErr *json.UnmarshalTypeError
-	if stderrors.As(err, &typeErr) { return "json_decode" }
-	var evalErr *rod.EvalError
-	if stderrors.As(err, &evalErr) { return "eval_exception" }
-	return "other"
-}
 
 // interactStateJS 是唯一的互动状态来源：同时要求 like/collect wrapper 存在，
 // like use 读取 xlink:href（兼容 href），#liked→true / #like→false，
@@ -152,29 +119,16 @@ type OpenedNoteSnapshot struct {
 func ExtractOpenedNoteSnapshotFromDOM(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, feedID string) (*OpenedNoteSnapshot, error) {
 	content, err := extractOpenedNoteFieldsFromDOM(ctx, page, feedID)
 	if err != nil {
-		if counter != nil && counter.stageDiagnostics {
-			err = &snapshotStageError{"note_fields", classifySnapshotError(err), err}
-		}
 		return nil, finishOpenedNoteSnapshotAttempt(ctx, counter, page, err)
 	}
 	comments, err := extractOpenedNoteCommentsFromDOM(ctx, page, feedID)
 	if err != nil {
-		if counter != nil && counter.stageDiagnostics {
-			err = &snapshotStageError{"comments", classifySnapshotError(err), err}
-		}
 		return nil, finishOpenedNoteSnapshotAttempt(ctx, counter, page, err)
 	}
 	if strings.TrimSpace(content.Title) == "" && strings.TrimSpace(content.Desc) == "" && len(comments) == 0 {
-		err := fmt.Errorf("DOM快照返回为空: %w", errors.ErrNoFeedDetail)
-		if counter != nil && counter.stageDiagnostics {
-			err = &snapshotStageError{"empty_snapshot", "no_detail", err}
-		}
-		return nil, finishOpenedNoteSnapshotAttempt(ctx, counter, page, err)
+		return nil, finishOpenedNoteSnapshotAttempt(ctx, counter, page, fmt.Errorf("DOM快照返回为空: %w", errors.ErrNoFeedDetail))
 	}
 	if err := finishOpenedNoteSnapshotAttempt(ctx, counter, page, nil); err != nil {
-		if counter != nil && counter.stageDiagnostics {
-			return nil, &snapshotStageError{"attempt_finalize", classifySnapshotError(err), err}
-		}
 		return nil, err
 	}
 	return &OpenedNoteSnapshot{Note: content, Comments: comments}, nil
@@ -185,7 +139,7 @@ func finishOpenedNoteSnapshotAttempt(ctx context.Context, counter *evalTimeoutCo
 		return err
 	}
 	return counter.add(ctx, err, func() error {
-		return confirmRendererAlive(ctx, page, counter)
+		return confirmRendererAlive(ctx, page)
 	})
 }
 
@@ -253,104 +207,6 @@ func extractOpenedNoteCommentsFromDOM(ctx context.Context, page *hrod.Page, feed
 		return nil, fmt.Errorf("提取打开笔记快照失败: JSON解析异常: %w", err)
 	}
 	return comments, nil
-}
-
-type SnapshotDiagnosticError struct {
-	diagnostic string
-	cause      error
-}
-
-func (e *SnapshotDiagnosticError) Error() string {
-	if e == nil {
-		return ""
-	}
-	if e.diagnostic == "" {
-		if e.cause == nil {
-			return ""
-		}
-		return e.cause.Error()
-	}
-	return "snapshot_diagnostic=" + e.diagnostic
-}
-
-func (e *SnapshotDiagnosticError) Unwrap() error {
-	if e == nil {
-		return nil
-	}
-	return e.cause
-}
-
-func (e *SnapshotDiagnosticError) Diagnostic() string {
-	if e == nil {
-		return ""
-	}
-	return e.diagnostic
-}
-
-func probeOpenedNoteSnapshotStages(ctx context.Context, page *hrod.Page) string {
-	stages := []struct {
-		name string
-		js   string
-	}{
-		{"snapshot_shell", `() => JSON.stringify(document.querySelectorAll("#detail-title, #detail-desc, .note-content").length)`},
-		{"note_fields", `() => JSON.stringify(["#detail-title", "#detail-desc", ".author .name", ".author-wrapper .name"].reduce((n, s) => n + document.querySelectorAll(s).length, 0))`},
-		{"images", `() => JSON.stringify(document.querySelectorAll(".swiper img, .note-content img, .media-container img").length)`},
-		{"comments_top", `() => JSON.stringify(document.querySelectorAll(".parent-comment").length)`},
-		{"comments_nested", `() => JSON.stringify(document.querySelectorAll(".parent-comment .reply-container .comment-item").length)`},
-		{"interactions", `() => JSON.stringify(document.querySelectorAll(".interact-container, [class*='like'], [class*='collect']").length)`},
-	}
-	parts := make([]string, 0, len(stages))
-	for _, stage := range stages {
-		started := time.Now()
-		probeCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
-		result, err := evalJSDirect(probeCtx, page, stage.js)
-		cancel()
-		terminal := "ok"
-		countBucket := "0"
-		if err != nil {
-			switch {
-			case stderrors.Is(err, context.Canceled):
-				terminal = "context_canceled"
-			case stderrors.Is(err, context.DeadlineExceeded), isEvalTimeout(err):
-				terminal = "eval_timeout"
-			default:
-				terminal = "other"
-			}
-		} else if result == nil {
-			terminal = "other"
-		} else {
-			var count int
-			if json.Unmarshal([]byte(result.Value.Str()), &count) != nil {
-				terminal = "other"
-			} else {
-				switch {
-				case count == 0:
-					countBucket = "0"
-				case count == 1:
-					countBucket = "1"
-				case count <= 20:
-					countBucket = "2_20"
-				case count <= 100:
-					countBucket = "21_100"
-				default:
-					countBucket = "gt100"
-				}
-			}
-		}
-		elapsed := time.Since(started)
-		elapsedBucket := "lt100ms"
-		switch {
-		case elapsed >= 250*time.Millisecond:
-			elapsedBucket = "timeout"
-		case elapsed >= 100*time.Millisecond:
-			elapsedBucket = "100_249ms"
-		}
-		if terminal != "ok" {
-			countBucket = "0"
-		}
-		parts = append(parts, stage.name+":"+terminal+":"+elapsedBucket+":"+countBucket)
-	}
-	return strings.Join(parts, ",")
 }
 
 // ExtractSearchFeedsFromDOM 从渲染后的搜索/首页卡片提取笔记信息。
