@@ -144,22 +144,18 @@ func currentDetailProbeExpression(probeJS, feedID, detailSelector string) (strin
 }
 
 func probeCurrentFeedDetail(ctx context.Context, page *hrod.Page, feedID string) (currentFeedDetailProbe, error) {
-	probeJS := `(feedID, detailSelector) => {` + xhsProbeVisibleJS + xhsProbeFeedMatchJS + xhsProbeCollectionJS + `
+	probeJS := `(feedID, detailSelector) => {` + xhsProbeVisibleJS + xhsProbeFeedMatchJS + `
 			const visibleDetails = Array.from(document.querySelectorAll(detailSelector)).filter(visible);
 			const visibleMatchedDetails = visibleDetails.filter(elementMatchesFeedID);
-			const state = window.__INITIAL_STATE__ || {};
-			const stateDetailMap = unwrap(state.note?.noteDetailMap);
-			const stateDetail = feedID && stateDetailMap && Object.prototype.hasOwnProperty.call(stateDetailMap, feedID)
-				? unwrap(stateDetailMap[feedID])
-				: null;
+			const stateMap = window.__INITIAL_STATE__?.note?.noteDetailMap;
 			return JSON.stringify({
 				url: location.href.slice(0, 300),
 				url_matched: detailURLMatchesFeedID(location.href),
 				visible_detail_count: visibleDetails.length,
 				visible_matched_detail_count: visibleMatchedDetails.length,
-				state_matched: Boolean(stateDetail),
-			});
-		}`
+				state_matched: Boolean(feedID && stateMap && Object.prototype.hasOwnProperty.call(stateMap, feedID)),
+		});
+	}`
 	expression, err := currentDetailProbeExpression(probeJS, feedID, SelectorFeedDetailReady)
 	if err != nil {
 		return currentFeedDetailProbe{}, fmt.Errorf("%w: %v", errPermanentCurrentDetailProbe, err)
@@ -199,8 +195,8 @@ func normalizeCurrentDetailProbeError(ctx context.Context, err error) error {
 }
 
 func currentFeedDetailMatched(probe currentFeedDetailProbe, _ string) bool {
-	return probe.StateMatched &&
-		((probe.URLMatched && probe.VisibleDetailCount > 0) || probe.VisibleMatchedDetailCount > 0)
+	return (probe.URLMatched && probe.VisibleDetailCount > 0) ||
+		probe.VisibleMatchedDetailCount > 0
 }
 
 func detailURLMatchesFeedID(rawURL, feedID string) bool {
