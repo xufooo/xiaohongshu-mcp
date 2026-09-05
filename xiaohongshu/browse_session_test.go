@@ -540,7 +540,7 @@ func TestAppendSessionResultsReturnsOnlyResolvableFeedsNearCapacity(t *testing.T
 
 func TestPollOpenedNoteSnapshotDoesNotSwallowFatal(t *testing.T) {
 	calls := 0
-	_, err := pollOpenedNoteSnapshot(context.Background(), time.Second, time.Millisecond, func() (*OpenedNoteSnapshot, error) {
+	_, err := pollOpenedNoteSnapshot(context.Background(), time.Second, time.Millisecond, func(_ context.Context) (*OpenedNoteSnapshot, error) {
 		calls++
 		return nil, fmt.Errorf("probe: %w", ErrFatalRendererError)
 	})
@@ -552,7 +552,7 @@ func TestPollOpenedNoteSnapshotDoesNotSwallowFatal(t *testing.T) {
 func TestPollOpenedNoteSnapshotRetriesNoDetail(t *testing.T) {
 	calls := 0
 	want := &OpenedNoteSnapshot{}
-	got, err := pollOpenedNoteSnapshot(context.Background(), time.Second, time.Millisecond, func() (*OpenedNoteSnapshot, error) {
+	got, err := pollOpenedNoteSnapshot(context.Background(), time.Second, time.Millisecond, func(_ context.Context) (*OpenedNoteSnapshot, error) {
 		calls++
 		if calls == 1 {
 			return nil, xerrors.ErrNoFeedDetail
@@ -562,7 +562,7 @@ func TestPollOpenedNoteSnapshotRetriesNoDetail(t *testing.T) {
 	if err != nil || got != want || calls != 2 {
 		t.Fatalf("ErrNoFeedDetail 后应重试成功: calls=%d err=%v", calls, err)
 	}
-	_, err = pollOpenedNoteSnapshot(context.Background(), 0, time.Millisecond, func() (*OpenedNoteSnapshot, error) {
+	_, err = pollOpenedNoteSnapshot(context.Background(), 0, time.Millisecond, func(_ context.Context) (*OpenedNoteSnapshot, error) {
 		return nil, xerrors.ErrNoFeedDetail
 	})
 	if !errors.Is(err, xerrors.ErrNoFeedDetail) {
@@ -572,12 +572,40 @@ func TestPollOpenedNoteSnapshotRetriesNoDetail(t *testing.T) {
 
 func TestPollOpenedNoteSnapshotStopsOnEvalTimeout(t *testing.T) {
 	calls := 0
-	_, err := pollOpenedNoteSnapshot(context.Background(), time.Second, time.Millisecond, func() (*OpenedNoteSnapshot, error) {
+	_, err := pollOpenedNoteSnapshot(context.Background(), time.Second, time.Millisecond, func(_ context.Context) (*OpenedNoteSnapshot, error) {
 		calls++
 		return nil, fmt.Errorf("snapshot: %w", context.DeadlineExceeded)
 	})
 	if !errors.Is(err, context.DeadlineExceeded) || calls != 1 {
 		t.Fatalf("Eval timeout 后应立即返回: calls=%d err=%v", calls, err)
+	}
+}
+
+func TestPollOpenedNoteSnapshotAttemptReceivesBudget(t *testing.T) {
+	calls := 0
+	var firstRemaining, secondRemaining time.Duration
+	_, err := pollOpenedNoteSnapshot(context.Background(), 200*time.Millisecond, 10*time.Millisecond, func(attemptCtx context.Context) (*OpenedNoteSnapshot, error) {
+		calls++
+		deadline, ok := attemptCtx.Deadline()
+		if !ok {
+			t.Fatalf("attempt %d ctx 应带 deadline", calls)
+		}
+		remaining := time.Until(deadline)
+		if calls == 1 {
+			firstRemaining = remaining
+			return nil, xerrors.ErrNoFeedDetail
+		}
+		secondRemaining = remaining
+		return &OpenedNoteSnapshot{}, nil
+	})
+	if err != nil || calls != 2 {
+		t.Fatalf("ErrNoFeedDetail 后应重试成功: calls=%d err=%v", calls, err)
+	}
+	if firstRemaining <= 0 || firstRemaining > 250*time.Millisecond {
+		t.Fatalf("首个 attempt 预算应接近 timeout: %v", firstRemaining)
+	}
+	if secondRemaining > firstRemaining {
+		t.Fatalf("attempt 预算应随轮询递减: first=%v second=%v", firstRemaining, secondRemaining)
 	}
 }
 
