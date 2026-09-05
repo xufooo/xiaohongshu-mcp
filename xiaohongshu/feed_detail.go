@@ -217,9 +217,25 @@ func loadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 		if err := scrollToCommentsArea(ctx, page); err != nil {
 			return nil, nil, false, fmt.Errorf("定位评论区失败: %w", err)
 		}
-		moved, err := scrollNoteScrollerMoved(ctx, page, 160)
-		if err != nil {
-			return nil, nil, false, fmt.Errorf("初始滚动触发评论懒加载失败: %w", err)
+		moved := false
+		var scrollErr error
+		for attempt := 0; attempt < 10; attempt++ {
+			moved, scrollErr = scrollNoteScrollerMoved(ctx, page, 160)
+			if scrollErr == nil {
+				break
+			}
+			if !isEvalTimeout(scrollErr) {
+				return nil, nil, false, fmt.Errorf("初始滚动触发评论懒加载失败: %w", scrollErr)
+			}
+			if rem := remaining(); rem < time.Second {
+				return nil, nil, false, fmt.Errorf("初始滚动触发评论懒加载失败: %w", scrollErr)
+			}
+			if err := page.Sleep(min(time.Second, rem)); err != nil {
+				return nil, nil, false, err
+			}
+		}
+		if scrollErr != nil {
+			return nil, nil, false, fmt.Errorf("初始滚动触发评论懒加载失败: %w", scrollErr)
 		}
 		if moved {
 			batchCursor.Round++
