@@ -815,9 +815,9 @@ func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, shareURL, xsecT
 	pollStarted := time.Now()
 	attemptCount := 0
 	firstStage, firstKind, lastStage, lastKind := "", "", "", ""
-	snapshot, err := pollOpenedNoteSnapshot(opCtx, 15*time.Second, 250*time.Millisecond, func() (*OpenedNoteSnapshot, error) {
+	snapshot, err := pollOpenedNoteSnapshot(opCtx, 15*time.Second, 250*time.Millisecond, func(attemptCtx context.Context) (*OpenedNoteSnapshot, error) {
 		attemptCount++
-		result, attemptErr := ExtractOpenedNoteSnapshotFromDOM(opCtx, page, counter, feed.ID)
+		result, attemptErr := ExtractOpenedNoteSnapshotFromDOM(attemptCtx, page, counter, feed.ID)
 		var stageErr *snapshotStageError
 		if errors.As(attemptErr, &stageErr) {
 			lastStage, lastKind = stageErr.Stage(), stageErr.Kind()
@@ -946,10 +946,16 @@ func (s *BrowseSession) commitOpenedNote(feed Feed, sourceURL, resultRef string,
 	return info
 }
 
-func pollOpenedNoteSnapshot(ctx context.Context, timeout, interval time.Duration, attempt func() (*OpenedNoteSnapshot, error)) (*OpenedNoteSnapshot, error) {
+func pollOpenedNoteSnapshot(ctx context.Context, timeout, interval time.Duration, attempt func(context.Context) (*OpenedNoteSnapshot, error)) (*OpenedNoteSnapshot, error) {
 	deadline := time.Now().Add(timeout)
 	for {
-		snapshot, err := attempt()
+		attemptCtx := ctx
+		cancel := func() {}
+		if remaining := time.Until(deadline); remaining > 0 {
+			attemptCtx, cancel = context.WithTimeout(ctx, remaining)
+		}
+		snapshot, err := attempt(attemptCtx)
+		cancel()
 		if err == nil {
 			return snapshot, nil
 		}

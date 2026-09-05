@@ -150,16 +150,14 @@ type OpenedNoteSnapshot struct {
 }
 
 func ExtractOpenedNoteSnapshotFromDOM(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, feedID string) (*OpenedNoteSnapshot, error) {
-	attemptCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	content, err := extractOpenedNoteFieldsFromDOM(attemptCtx, page, feedID)
+	content, err := extractOpenedNoteFieldsFromDOM(ctx, page, feedID)
 	if err != nil {
 		if counter != nil && counter.stageDiagnostics {
 			err = &snapshotStageError{"note_fields", classifySnapshotError(err), err}
 		}
 		return nil, finishOpenedNoteSnapshotAttempt(ctx, counter, page, err)
 	}
-	comments, err := extractOpenedNoteCommentsFromDOM(attemptCtx, page, feedID)
+	comments, err := extractOpenedNoteCommentsFromDOM(ctx, page, feedID)
 	if err != nil {
 		if counter != nil && counter.stageDiagnostics {
 			err = &snapshotStageError{"comments", classifySnapshotError(err), err}
@@ -192,7 +190,7 @@ func finishOpenedNoteSnapshotAttempt(ctx context.Context, counter *evalTimeoutCo
 }
 
 func extractOpenedNoteFieldsFromDOM(ctx context.Context, page *hrod.Page, feedID string) (OpenedNoteContent, error) {
-	result, err := evalJSNoCounter(ctx, page, `(feedID, likeSel, collectSel) => {` + domCleanJS + domNoteHelpersJS + `
+	result, err := evalJSDirect(ctx, page, `(feedID, likeSel, collectSel) => {` + domCleanJS + domNoteHelpersJS + `
 		const title = pickText(["#detail-title", ".note-content .title", ".title", "[class*='title']"]);
 		const desc = pickText(["#detail-desc", ".note-content .desc", ".note-text", ".desc", "[class*='desc']"]);
 		const author = pickText([".author .name", ".author-wrapper .name", ".user .name", ".nickname", "[class*='author'] [class*='name']"]);
@@ -236,7 +234,7 @@ func extractOpenedNoteFieldsFromDOM(ctx context.Context, page *hrod.Page, feedID
 }
 
 func extractOpenedNoteCommentsFromDOM(ctx context.Context, page *hrod.Page, feedID string) ([]Comment, error) {
-	result, err := evalJSNoCounter(ctx, page, `(feedID) => {` + domCleanJS + domCommentExtractorJS + `
+	result, err := evalJSDirect(ctx, page, `(feedID) => {` + domCleanJS + domCommentExtractorJS + `
 		return JSON.stringify(extractComments(feedID));
 	}`, feedID)
 	if err != nil {
