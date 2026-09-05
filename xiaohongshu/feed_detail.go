@@ -217,26 +217,9 @@ func loadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 		if err := scrollToCommentsArea(ctx, page); err != nil {
 			return nil, nil, false, fmt.Errorf("定位评论区失败: %w", err)
 		}
-		moved := false
-		var scrollErr error
-		for attempt := 0; attempt < 10; attempt++ {
-			moved, scrollErr = scrollNoteScrollerMoved(ctx, page, 160)
-			if scrollErr == nil {
-				break
-			}
-			if !isEvalTimeout(scrollErr) {
-				return nil, nil, false, fmt.Errorf("初始滚动触发评论懒加载失败: %w", scrollErr)
-			}
-			rem := remaining()
-			if rem < time.Second {
-				return nil, nil, false, fmt.Errorf("初始滚动触发评论懒加载失败: %w", scrollErr)
-			}
-			if err := page.Sleep(min(time.Second, rem)); err != nil {
-				return nil, nil, false, err
-			}
-		}
-		if scrollErr != nil {
-			return nil, nil, false, fmt.Errorf("初始滚动触发评论懒加载失败: %w", scrollErr)
+		moved, err := scrollNoteScrollerMoved(ctx, page, 160)
+		if err != nil {
+			return nil, nil, false, fmt.Errorf("初始滚动触发评论懒加载失败: %w", err)
 		}
 		if moved {
 			batchCursor.Round++
@@ -959,14 +942,6 @@ func evalJSNoCounter(ctx context.Context, page *hrod.Page, fn string, args ...in
 	evalCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	return evalJSDirect(evalCtx, page, fn, args...)
-}
-
-func evalJSNoCounterRetryOnce(ctx context.Context, page *hrod.Page, fn string, args ...interface{}) (*proto.RuntimeRemoteObject, error) {
-	result, err := evalJSNoCounter(ctx, page, fn, args...)
-	if err != nil && isEvalTimeout(err) && !IsFatalRendererError(err) && ctx.Err() == nil {
-		result, err = evalJSNoCounter(ctx, page, fn, args...)
-	}
-	return result, err
 }
 
 func evalElementJS(ctx context.Context, counter *evalTimeoutCounter, element *hrod.Element, fn string, args ...interface{}) (*proto.RuntimeRemoteObject, error) {
