@@ -67,12 +67,6 @@ type CreateBrowseSessionResult struct {
 	Session           *BrowseSessionInfo      `json:"session,omitempty"`
 	Status            BrowseSessionStatusInfo `json:"status"`
 	RecommendedAction string                  `json:"recommended_action"`
-
-	// 临时探针字段：验收冷启动耗时后删除（2026-08-09）。
-	DebugStartupMS int64 `json:"debug_startup_ms"`
-	DebugReadyMS   int64 `json:"debug_ready_ms"`
-	DebugTotalMS   int64 `json:"debug_total_ms"`
-	DebugReused    bool  `json:"debug_reused"`
 }
 
 type BrowseSessionStatusInfo struct {
@@ -587,24 +581,13 @@ func (s *BrowseSession) searchBatch(ctx context.Context, keyword string, filters
 	searchCtx, cancel := context.WithTimeout(ctx, sessionSearchTimeout)
 	defer cancel()
 
-	rec := newDebugSearchRecorder()
-	rec.beginStage("precheck")
-	searchCtx = withDebugSearchRecorder(searchCtx, rec)
-
 	opCtx, err := s.beginLockedOperation(searchCtx, true)
 	if err != nil {
-		rec.finish()
-		return SearchPageResult{}, nil, false, fmt.Errorf("%w; debug_search=%s", err, rec.marshalSummary())
+		return SearchPageResult{}, nil, false, err
 	}
 	defer func() {
 		if err != nil && searchCtx.Err() == context.DeadlineExceeded && ctx.Err() == nil {
 			err = fmt.Errorf("搜索操作超过内部时限 %s: %w", sessionSearchTimeout, err)
-		}
-		rec.finish()
-		if err != nil {
-			err = fmt.Errorf("%w; debug_search=%s", err, rec.marshalSummary())
-		} else {
-			rec.fillResult(&result)
 		}
 		s.reconcileAfterFailedSearch(err)
 		s.finishOperation(err)

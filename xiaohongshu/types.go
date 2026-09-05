@@ -36,24 +36,6 @@ type AIChatReply struct {
 type SearchPageResult struct {
 	Feeds  []Feed       `json:"feeds"`
 	AIChat *AIChatReply `json:"ai_chat,omitempty"`
-
-	DebugSearchTotalMS           int64   `json:"debug_search_total_ms"`
-	DebugSearchPrecheckMS        int64   `json:"debug_search_precheck_ms"`
-	DebugSearchInputMS           int64   `json:"debug_search_input_ms"`
-	DebugSearchSubmitMS          int64   `json:"debug_search_submit_ms"`
-	DebugSearchWaitMS            int64   `json:"debug_search_wait_ms"`
-	DebugSearchExtractMS         int64   `json:"debug_search_extract_ms"`
-	DebugSearchInputProbeMs      []int64 `json:"debug_search_input_probe_ms"`
-	DebugSearchInputProbeCount   int     `json:"debug_search_input_probe_count"`
-	DebugSearchInputProbeFailed  int     `json:"debug_search_input_probe_failed"`
-	DebugSearchInputLastErrorKind string  `json:"debug_search_input_last_error_kind"`
-	DebugSearchResultProbeMs     []int64 `json:"debug_search_result_probe_ms"`
-	DebugSearchResultProbeCount  int     `json:"debug_search_result_probe_count"`
-	DebugSearchResultProbeFailed int     `json:"debug_search_result_probe_failed"`
-	DebugSearchResultLastErrorKind string `json:"debug_search_result_last_error_kind"`
-	DebugSearchWaitExit          string  `json:"debug_search_wait_exit"`
-	DebugSearchFallback          bool    `json:"debug_search_fallback"`
-	DebugSearchWaitRounds        int     `json:"debug_search_wait_rounds"`
 }
 
 // NoteCard 表示笔记卡片信息
