@@ -16,12 +16,15 @@ import (
 )
 
 type commentPagingCDPClient struct {
-	responses    [][]byte
-	errs         []error
-	runtimeCalls int
-	eventCh      chan *cdp.Event
-	eventOnce    sync.Once
-	closeOnce    sync.Once
+	responses       [][]byte
+	errs            []error
+	targetResponses [][]byte
+	targetErrs      []error
+	runtimeCalls    int
+	targetCalls     int
+	eventCh         chan *cdp.Event
+	eventOnce       sync.Once
+	closeOnce       sync.Once
 }
 
 func (c *commentPagingCDPClient) Event() <-chan *cdp.Event {
@@ -41,6 +44,20 @@ func (c *commentPagingCDPClient) Close() {
 }
 
 func (c *commentPagingCDPClient) Call(ctx context.Context, _ string, method string, params interface{}) ([]byte, error) {
+	if method == "Target.getTargetInfo" {
+		index := c.targetCalls
+		c.targetCalls++
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if index < len(c.targetErrs) && c.targetErrs[index] != nil {
+			return nil, c.targetErrs[index]
+		}
+		if index < len(c.targetResponses) {
+			return c.targetResponses[index], nil
+		}
+		return []byte(`{}`), nil
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -83,6 +100,8 @@ func newCommentPagingPage(t *testing.T, client *commentPagingCDPClient) *hrod.Pa
 	if err != nil {
 		t.Fatalf("初始化 rod page: %v", err)
 	}
+	client.runtimeCalls = 0
+	client.targetCalls = 0
 	return &hrod.Page{Rod: page}
 }
 
@@ -105,6 +124,106 @@ func commentPageRuntimeResponse(t *testing.T, snapshot commentPageDOMSnapshot) [
 		t.Fatalf("序列化 Runtime 响应: %v", err)
 	}
 	return response
+}
+
+func commentPageTargetInfoResponse(rawURL string) []byte {
+	response, _ := json.Marshal(map[string]interface{}{
+		"targetInfo": map[string]string{
+			"targetId": "target-1",
+			"url":      rawURL,
+		},
+	})
+	return response
+}
+
+func TestParseFeedIDFromPageURL(t *testing.T) {
+	tests := []struct {
+		name, input, want string
+		ok                 bool
+	}{
+		{"explore query fragment encoded ID", "https://www.xiaohongshu.com/explore/%36a7a944f0000000024026c8d?x=1#comments", "6a7a944f0000000024026c8d", true},
+		{"discovery item", "https://www.xiaohongshu.com/discovery/item/5f4d8e7b00000000010001a2#comments", "5f4d8e7b00000000010001a2", true},
+		{"not detail", "https://www.xiaohongshu.com/explore", "", false},
+		{"invalid escape", "https://www.xiaohongshu.com/explore/%zz", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := parseFeedIDFromPageURL(tt.input)
+			if ok != tt.ok || got != tt.want {
+				t.Fatalf("parseFeedIDFromPageURL() = %q, %v; 期望 %q, %v", got, ok, tt.want, tt.ok)
+			}
+		})
+	}
+}
+
+func runRecoverCommentBatchSession(t *testing.T, ctx context.Context, client *commentPagingCDPClient, expectedFeedID string) error {
+	t.Helper()
+	page := newCommentPagingPage(t, client)
+	return (&BrowseSession{page: page}).recoverCommentBatchSession(ctx, page, nil, expectedFeedID)
+}
+
+func assertCommentPagingCalls(t *testing.T, client *commentPagingCDPClient, targetCalls int) {
+	t.Helper()
+	if client.targetCalls != targetCalls || client.runtimeCalls != 0 {
+		t.Fatalf("CDP 调用次数错误: target=%d runtime=%d, 期望 target=%d runtime=0", client.targetCalls, client.runtimeCalls, targetCalls)
+	}
+}
+
+func TestRecoverCommentBatchSession(t *testing.T) {
+	tests := []struct {
+		name, wantErr, wantDetail string
+		targetResponses          [][]byte
+		targetErrs               []error
+		targetCalls              int
+	}{
+		{"success", "", "", [][]byte{commentPageTargetInfoResponse("https://www.xiaohongshu.com/explore/feed-1?x=1#comments")}, nil, 1},
+		{"first failure then success", "", "", [][]byte{commentPageTargetInfoResponse("https://www.xiaohongshu.com/explore"), commentPageTargetInfoResponse("https://www.xiaohongshu.com/discovery/item/feed-1?x=1#comments")}, nil, 2},
+		{"two failures", "无法确认 feed", "second target failure", nil, []error{errors.New("first target failure"), errors.New("second target failure")}, 2},
+		{"feed mismatch", "不匹配", "", [][]byte{commentPageTargetInfoResponse("https://www.xiaohongshu.com/explore/other-feed")}, nil, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &commentPagingCDPClient{targetResponses: tt.targetResponses, targetErrs: tt.targetErrs}
+			err := runRecoverCommentBatchSession(t, context.Background(), client, "feed-1")
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("恢复确认不应失败: %v", err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("恢复确认错误契约错误: %v", err)
+			}
+			if tt.wantDetail != "" && (err == nil || !strings.Contains(err.Error(), tt.wantDetail)) {
+				t.Fatalf("恢复确认错误详情错误: %v", err)
+			}
+			assertCommentPagingCalls(t, client, tt.targetCalls)
+		})
+	}
+}
+
+func TestRecoverCommentBatchSessionPropagatesCallerContext(t *testing.T) {
+	canceledCtx, cancelCanceled := context.WithCancel(context.Background())
+	cancelCanceled()
+	deadlineCtx, cancelDeadline := context.WithTimeout(context.Background(), 0)
+	defer cancelDeadline()
+
+	tests := []struct {
+		name string
+		ctx  context.Context
+		want error
+	}{
+		{name: "canceled", ctx: canceledCtx, want: context.Canceled},
+		{name: "deadline", ctx: deadlineCtx, want: context.DeadlineExceeded},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &commentPagingCDPClient{targetResponses: [][]byte{commentPageTargetInfoResponse("https://www.xiaohongshu.com/explore/feed-1")}}
+			err := runRecoverCommentBatchSession(t, tt.ctx, client, "feed-1")
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("caller context 错误未原样传播: got=%v want=%v", err, tt.want)
+			}
+			assertCommentPagingCalls(t, client, 1)
+		})
+	}
 }
 
 func TestExtractCommentsPagePreservesErrors(t *testing.T) {

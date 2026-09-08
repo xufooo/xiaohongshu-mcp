@@ -1212,19 +1212,39 @@ func (s *BrowseSession) completeDetailCommentsBatch(
 
 func (s *BrowseSession) recoverCommentBatchSession(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, expectedFeedID string) error {
 	p := page.Context(ctx)
-	feedID, err := currentFeedIDFromPage(ctx, p)
+	confirmFeedID := func() (string, error) {
+		rawURL, err := s.currentPageURL(ctx, counter)
+		if err != nil {
+			return "", err
+		}
+		feedID, ok := parseFeedIDFromPageURL(rawURL)
+		if !ok {
+			return "", nil
+		}
+		return feedID, nil
+	}
+	feedID, err := confirmFeedID()
 	if err != nil || feedID == "" {
 		if IsFatalRendererError(err) {
+			return err
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return err
 		}
 		if err := p.Sleep(time.Second); err != nil {
 			return err
 		}
-		feedID, err = currentFeedIDFromPage(ctx, p)
+		feedID, err = confirmFeedID()
 	}
 	if err != nil || feedID == "" {
 		if IsFatalRendererError(err) {
 			return err
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
 		}
 		return fmt.Errorf("session 当前页面无法确认 feed: expected=%s, err=%v", expectedFeedID, err)
 	}
@@ -2427,6 +2447,35 @@ func (s *BrowseSession) currentPageURL(ctx context.Context, counter *evalTimeout
 		return "", fmt.Errorf("页面信息为空")
 	}
 	return result.TargetInfo.URL, nil
+}
+
+func parseFeedIDFromPageURL(rawURL string) (string, bool) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", false
+	}
+	path := u.EscapedPath()
+	for _, prefix := range []string{"/explore/", "/discovery/item/"} {
+		if !strings.HasPrefix(path, prefix) {
+			continue
+		}
+		rest := strings.TrimPrefix(path, prefix)
+		if rest == "" {
+			return "", false
+		}
+		if slash := strings.IndexByte(rest, '/'); slash >= 0 {
+			rest = rest[:slash]
+		}
+		if rest == "" {
+			return "", false
+		}
+		feedID, err := url.PathUnescape(rest)
+		if err != nil {
+			return "", false
+		}
+		return feedID, true
+	}
+	return "", false
 }
 
 func (s *BrowseSession) infoLocked() BrowseSessionInfo {
