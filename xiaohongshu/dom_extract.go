@@ -415,6 +415,118 @@ type commentsDOMSnapshot struct {
 	Progress commentProgress `json:"progress"`
 }
 
+type commentPageDOMSnapshot struct {
+	Comments    []Comment       `json:"comments"`
+	MoreVisible bool            `json:"moreVisible"`
+	Progress    commentProgress `json:"progress"`
+}
+
+func extractCommentsPageWithProgressFromDOM(ctx context.Context, page *hrod.Page, feedID string, returnedIDs map[string]struct{}, limit int) (commentPageDOMSnapshot, error) {
+	result, err := evalJSNoCounter(ctx, page, `(feedID, returnedIDs, limit) => {` + domCleanJS + `
+		const seen = new Set(Object.keys(returnedIDs || {}));
+		const parents = document.querySelectorAll(".parent-comment");
+		const stableID = (node, parent) => {
+			if (parent) {
+				return node.getAttribute("id") || parent.dataset?.id || parent.getAttribute("data-comment-id") ||
+					node.dataset?.id || node.getAttribute("data-comment-id") || "";
+			}
+			return node.getAttribute("id") || node.dataset?.id || node.getAttribute("data-comment-id") || "";
+		};
+		const contentOf = (node) => {
+			const content = node.querySelector(".content, .note-text, [class*='content']");
+			return content ? clean(content.innerText) : clean(node.innerText);
+		};
+		const comments = [];
+		let moreVisible = false;
+		const process = (node, parent, subCount) => {
+			const id = stableID(node, parent);
+			if (!id || seen.has(id)) return false;
+			const content = contentOf(node);
+			if (!content) return false;
+			seen.add(id);
+			if (comments.length >= limit) {
+				moreVisible = true;
+				return true;
+			}
+			const user = clean(node.querySelector(".author-wrapper .name, .name, .nickname, [class*='name']")?.innerText);
+			const likeText = clean(node.querySelector(".interactions .like, .like, [class*='like']")?.innerText);
+			comments.push({
+				id,
+				noteId: feedID,
+				content,
+				likeCount: (likeText.match(/([\d.万wWkK]+)/) || ["", ""])[1],
+				userInfo: { nickname: user, nickName: user },
+				subCommentCount: subCount ? String(subCount) : "",
+				subComments: [],
+				showTags: []
+			});
+			return false;
+		};
+		outer: for (const parent of parents) {
+			const top = parent.querySelector(":scope > .comment-item") || parent;
+			if (limit === 0) {
+				const topID = stableID(top, parent);
+				if (topID && !seen.has(topID) && contentOf(top)) {
+					moreVisible = true;
+					break;
+				}
+				for (const sub of parent.querySelectorAll(":scope > .reply-container > .list-container > .comment-item")) {
+					const id = stableID(sub, null);
+					if (id && !seen.has(id) && contentOf(sub)) {
+						moreVisible = true;
+						break outer;
+					}
+				}
+				continue;
+			}
+			const subSeen = new Set(seen);
+			const topContent = contentOf(top);
+			if (topContent) {
+				const topID = stableID(top, parent);
+				if (topID) subSeen.add(topID);
+			}
+			const subComments = [];
+			for (const sub of parent.querySelectorAll(":scope > .reply-container > .list-container > .comment-item")) {
+				const id = stableID(sub, null);
+				if (!id || subSeen.has(id) || !contentOf(sub)) continue;
+				subSeen.add(id);
+				subComments.push(sub);
+			}
+			if (process(top, parent, subComments.length)) break;
+			for (const sub of subComments) {
+				if (process(sub, null, 0)) break outer;
+			}
+		}
+
+		const totalText = (document.querySelector(".comments-container .total") ||
+			document.querySelector(".comment-total") || document.querySelector(".total"))?.innerText || "";
+		const totalMatch = totalText.match(/共\s*(\d+)\s*条评论/);
+		const endText = document.querySelector(".end-container")?.textContent || "";
+		const noCommentsText = document.querySelector(".no-comments-text")?.textContent || "";
+		return JSON.stringify({
+			comments,
+			moreVisible,
+			progress: {
+				total: totalMatch ? Number(totalMatch[1]) : 0,
+				atEnd: /THE\s*END/i.test(endText),
+				noComments: noCommentsText.includes("这是一片荒地"),
+			},
+		});
+	}`, feedID, returnedIDs, limit)
+	if err != nil {
+		return commentPageDOMSnapshot{}, fmt.Errorf("提取分页 DOM 评论失败: %w", err)
+	}
+	if result == nil || strings.TrimSpace(result.Value.Str()) == "" {
+		return commentPageDOMSnapshot{}, errors.ErrNoFeedDetail
+	}
+
+	var snapshot commentPageDOMSnapshot
+	if err := json.Unmarshal([]byte(result.Value.Str()), &snapshot); err != nil {
+		return commentPageDOMSnapshot{}, fmt.Errorf("解析分页 DOM 评论失败: %w", err)
+	}
+	return snapshot, nil
+}
+
 func extractCommentsWithProgressFromDOM(ctx context.Context, page *hrod.Page, feedID string) (commentsDOMSnapshot, error) {
 	result, err := evalJSNoCounter(ctx, page, `(feedID) => {` + domCleanJS + domCommentExtractorJS + `
 		const comments = extractComments(feedID);
