@@ -246,32 +246,42 @@ func loadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 
 	collect := func(limit int) ([]Comment, bool, commentProgress, error) {
 		if limit <= 0 {
-			progress, err := getCommentProgress(ctx, page)
-			return nil, true, progress, err
+			snapshot, err := extractCommentsPageWithProgressFromDOM(ctx, page, feedID, returned, 0)
+			if err != nil {
+				return nil, false, commentProgress{}, err
+			}
+			return nil, snapshot.MoreVisible, snapshot.Progress, nil
 		}
-		snapshot, err := extractCommentsWithProgressFromDOM(ctx, page, feedID)
+		snapshot, err := extractCommentsPageWithProgressFromDOM(ctx, page, feedID, returned, limit)
 		if err != nil {
 			return nil, false, commentProgress{}, err
 		}
-		flat := flattenComments(snapshot.Comments)
-		snapshot.Comments = nil
-		var batch []Comment
-		for i, comment := range flat {
-			key := commentBatchKey(i, comment)
-			if key == "" {
+
+		batch := make([]Comment, 0, len(snapshot.Comments))
+		newIDs := make(map[string]struct{}, len(snapshot.Comments))
+		for _, comment := range snapshot.Comments {
+			key := commentBatchKey(len(batch), comment)
+			if key == "" || strings.TrimSpace(comment.Content) == "" {
 				continue
 			}
 			if _, ok := returned[key]; ok {
 				continue
 			}
-			if len(batch) >= limit {
-				return batch, true, snapshot.Progress, nil
+			if _, ok := newIDs[key]; ok {
+				continue
 			}
-			returned[key] = struct{}{}
-			batchCursor.ReturnedIDs = append(batchCursor.ReturnedIDs, key)
+			if len(batch) >= limit {
+				break
+			}
+			newIDs[key] = struct{}{}
 			batch = append(batch, comment)
 		}
-		return batch, false, snapshot.Progress, nil
+		for _, comment := range batch {
+			key := commentBatchKey(len(batchCursor.ReturnedIDs), comment)
+			returned[key] = struct{}{}
+			batchCursor.ReturnedIDs = append(batchCursor.ReturnedIDs, key)
+		}
+		return batch, snapshot.MoreVisible && len(batch) > 0, snapshot.Progress, nil
 	}
 
 	var batch []Comment
@@ -419,11 +429,12 @@ func loadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 		return nil, nil, false, ctx.Err()
 	}
 
-	m, _, progress, collectErr := collect(maxItems - len(batch))
+	m, moreVisible2, progress, collectErr := collect(maxItems - len(batch))
 	if collectErr != nil {
 		return partialOrError(collectErr)
 	}
 	batch = append(batch, m...)
+	moreVisible = moreVisible || moreVisible2
 
 	idsGrew := len(batchCursor.ReturnedIDs) > inputBase
 
@@ -437,11 +448,12 @@ func loadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 		if err := clickMoreReplies(ctx, page, config.MaxRepliesThreshold, remaining); err != nil {
 			return partialOrError(fmt.Errorf("全量展开子评论失败: %w", err))
 		}
-		m, _, progress2, collectErr2 := collect(maxItems - len(batch))
+		m, moreVisible2, progress2, collectErr2 := collect(maxItems - len(batch))
 		if collectErr2 != nil {
 			return partialOrError(collectErr2)
 		}
 		batch = append(batch, m...)
+		moreVisible = moreVisible || moreVisible2
 		idsGrew = len(batchCursor.ReturnedIDs) > inputBase
 		if progress2.AtEnd {
 			progress = progress2
@@ -457,6 +469,10 @@ func loadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 			}
 			return nil, nil, false, fmt.Errorf("评论滚动无进展，请重试")
 		}
+	}
+
+	if moreVisible && len(batch) > 0 {
+		return batch, batchCursor, true, nil
 	}
 
 	if !progress.AtEnd {
