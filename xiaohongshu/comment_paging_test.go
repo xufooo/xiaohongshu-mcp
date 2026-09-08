@@ -12,19 +12,22 @@ import (
 
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/cdp"
+	"github.com/go-rod/rod/lib/launcher"
+	"github.com/go-rod/rod/lib/proto"
 	hrod "github.com/xpzouying/xiaohongshu-mcp/humanize/rod"
 )
 
 type commentPagingCDPClient struct {
-	responses       [][]byte
-	errs            []error
-	targetResponses [][]byte
-	targetErrs      []error
-	runtimeCalls    int
-	targetCalls     int
-	eventCh         chan *cdp.Event
-	eventOnce       sync.Once
-	closeOnce       sync.Once
+	responses          [][]byte
+	errs               []error
+	targetResponses    [][]byte
+	targetErrs         []error
+	runtimeCalls       int
+	runtimeExpressions []string
+	targetCalls        int
+	eventCh            chan *cdp.Event
+	eventOnce          sync.Once
+	closeOnce          sync.Once
 }
 
 func (c *commentPagingCDPClient) Event() <-chan *cdp.Event {
@@ -69,6 +72,14 @@ func (c *commentPagingCDPClient) Call(ctx context.Context, _ string, method stri
 	case "Runtime.evaluate":
 		index := c.runtimeCalls
 		c.runtimeCalls++
+		if raw, marshalErr := json.Marshal(params); marshalErr == nil {
+			var request struct {
+				Expression string `json:"expression"`
+			}
+			if json.Unmarshal(raw, &request) == nil {
+				c.runtimeExpressions = append(c.runtimeExpressions, request.Expression)
+			}
+		}
 		if index < len(c.errs) && c.errs[index] != nil {
 			return nil, c.errs[index]
 		}
@@ -101,7 +112,83 @@ func newCommentPagingPage(t *testing.T, client *commentPagingCDPClient) *hrod.Pa
 		t.Fatalf("初始化 rod page: %v", err)
 	}
 	client.runtimeCalls = 0
+	client.runtimeExpressions = nil
 	client.targetCalls = 0
+	return &hrod.Page{Rod: page}
+}
+
+const realCommentPagingHTML = `<!doctype html>
+<div class="comments-container"><span class="total">共 7 条评论</span></div>
+<div class="parent-comment" data-id="parent-1">
+  <div class="comment-item" id="parent-1">
+    <div class="content">parent content</div>
+    <div class="author-wrapper"><span class="name">parent user</span></div>
+    <div class="interactions"><span class="like">1</span></div>
+  </div>
+  <div class="reply-container"><div class="list-container">
+    <div class="comment-item" id="reply-1">
+      <div class="content">reply 1</div>
+      <div class="author-wrapper"><span class="name">reply user 1</span></div>
+      <div class="interactions"><span class="like">1</span></div>
+    </div>
+    <div class="comment-item" id="reply-1"><div class="content">duplicate reply</div></div>
+    <div class="comment-item"><div class="content">missing stable id</div></div>
+    <div class="comment-item" id="reply-empty"><div class="content"></div></div>
+    <div class="comment-item" id="reply-seen"><div class="content">already returned</div></div>
+    <div class="comment-item" id="reply-2">
+      <div class="content">reply 2</div>
+      <div class="author-wrapper"><span class="name">reply user 2</span></div>
+      <div class="interactions"><span class="like">2</span></div>
+    </div>
+    <div class="comment-item" id="reply-3">
+      <div class="content">reply 3</div>
+      <div class="author-wrapper"><span class="name">reply user 3</span></div>
+      <div class="interactions"><span class="like">3</span></div>
+    </div>
+  </div></div>
+</div>
+<div class="end-container">THE END</div>
+<script>
+window.authorLikeReads = 0;
+for (const element of document.querySelectorAll(".author-wrapper .name, .interactions .like")) {
+  const value = element.textContent;
+  Object.defineProperty(element, "innerText", {
+    configurable: true,
+    get() {
+      window.authorLikeReads++;
+      return value;
+    },
+  });
+}
+</script>`
+
+func newRealCommentPagingPage(t *testing.T) *hrod.Page {
+	t.Helper()
+	bin, hasBrowser := launcher.LookPath()
+	if !hasBrowser {
+		t.Skip("未找到 Chrome/Chromium，跳过真实分页 JS fixture")
+	}
+	browserLauncher := launcher.New().Bin(bin).Headless(true).NoSandbox(true)
+	controlURL, err := browserLauncher.Launch()
+	if err != nil {
+		t.Fatalf("启动真实测试浏览器: %v", err)
+	}
+	browser := rod.New().ControlURL(controlURL)
+	if err := browser.Connect(); err != nil {
+		browserLauncher.Kill()
+		t.Fatalf("连接真实测试浏览器: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = browser.Close()
+		browserLauncher.Kill()
+	})
+	page, err := browser.Page(proto.TargetCreateTarget{})
+	if err != nil {
+		t.Fatalf("创建真实测试页面: %v", err)
+	}
+	if err := page.SetDocumentContent(realCommentPagingHTML); err != nil {
+		t.Fatalf("设置真实 DOM fixture: %v", err)
+	}
 	return &hrod.Page{Rod: page}
 }
 
@@ -313,5 +400,179 @@ func TestLoadCommentsBatchPropagatesCallerContextDeadline(t *testing.T) {
 	_, _, _, err := loadCommentsBatch(ctx, page, CommentLoadConfig{}, input, 20)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("caller context 错误被吞掉: %v", err)
+	}
+}
+
+func TestExtractCommentsPagePassesReturnedIDsAsArray(t *testing.T) {
+	client := &commentPagingCDPClient{
+		responses: [][]byte{commentPageRuntimeResponse(t, commentPageDOMSnapshot{})},
+	}
+	page := newCommentPagingPage(t, client)
+	_, err := extractCommentsPageWithProgressFromDOM(context.Background(), page, "feed-1", []string{"old-comment", "next-comment"}, 7)
+	if err != nil {
+		t.Fatalf("分页 DOM 提取不应失败: %v", err)
+	}
+	if len(client.runtimeExpressions) != 1 {
+		t.Fatalf("Runtime.evaluate 表达式数量错误: %d", len(client.runtimeExpressions))
+	}
+	expression := client.runtimeExpressions[0]
+	if !strings.Contains(expression, `["old-comment","next-comment"]`) {
+		t.Fatalf("returned IDs 未按数组传入: %s", expression)
+	}
+	if strings.Contains(expression, "Object.keys(returnedIDs") {
+		t.Fatalf("分页表达式仍复制 returned ID map: %s", expression)
+	}
+	if !strings.Contains(expression, ", 7)") {
+		t.Fatalf("limit 未按原值传入: %s", expression)
+	}
+}
+
+func TestLoadCommentsBatchDedupesStableIDsAndCapsAtMaxItems(t *testing.T) {
+	comments := []Comment{
+		{ID: "old-comment", Content: "old"},
+		{ID: "comment-1", Content: "one"},
+		{ID: "comment-1", Content: "duplicate"},
+		{ID: "", Content: "missing id"},
+		{ID: "empty-content", Content: ""},
+	}
+	for i := 2; i <= 51; i++ {
+		comments = append(comments, Comment{ID: fmt.Sprintf("comment-%d", i), Content: fmt.Sprintf("content-%d", i)})
+	}
+	client := &commentPagingCDPClient{
+		responses: [][]byte{commentPageRuntimeResponse(t, commentPageDOMSnapshot{
+			Comments:    comments,
+			MoreVisible: true,
+			Progress:    commentProgress{Total: 100, AtEnd: true},
+		})},
+	}
+	page := newCommentPagingPage(t, client)
+	input := &CommentCursor{FeedID: "feed-1", Round: 1, ReturnedIDs: []string{"old-comment", "old-comment", "idx_legacy", ""}}
+
+	got, next, hasMore, err := loadCommentsBatch(context.Background(), page, CommentLoadConfig{ScrollSpeed: "fast"}, input, 50)
+	if err != nil {
+		t.Fatalf("分页加载不应失败: %v", err)
+	}
+	if !hasMore {
+		t.Fatal("达到批次上限且仍有评论时应返回 hasMore=true")
+	}
+	if len(got) != 50 {
+		t.Fatalf("批次数量错误: got=%d want=50", len(got))
+	}
+	seen := make(map[string]struct{}, len(got))
+	for _, comment := range got {
+		if comment.ID == "" || comment.Content == "" {
+			t.Fatalf("批次包含无效评论: %+v", comment)
+		}
+		if _, ok := seen[comment.ID]; ok {
+			t.Fatalf("批次包含重复稳定 ID: %q", comment.ID)
+		}
+		seen[comment.ID] = struct{}{}
+	}
+	if next == nil || len(next.ReturnedIDs) != 51 || next.ReturnedIDs[0] != "old-comment" {
+		t.Fatalf("下一 cursor 错误: %+v", next)
+	}
+	for i := 0; i < 50; i++ {
+		want := fmt.Sprintf("comment-%d", i+1)
+		if next.ReturnedIDs[i+1] != want {
+			t.Fatalf("下一 cursor 顺序错误: index=%d got=%q want=%q", i+1, next.ReturnedIDs[i+1], want)
+		}
+	}
+	if len(input.ReturnedIDs) != 4 || input.ReturnedIDs[1] != "old-comment" || input.ReturnedIDs[2] != "idx_legacy" {
+		t.Fatalf("输入 cursor 不应被修改: %+v", input)
+	}
+}
+
+func TestExtractCommentsPageZeroLimitProbe(t *testing.T) {
+	client := &commentPagingCDPClient{
+		responses: [][]byte{commentPageRuntimeResponse(t, commentPageDOMSnapshot{
+			MoreVisible: true,
+			Progress:    commentProgress{Total: 12, AtEnd: false},
+		})},
+	}
+	page := newCommentPagingPage(t, client)
+	returnedIDs := []string{"seen-comment"}
+	snapshot, err := extractCommentsPageWithProgressFromDOM(context.Background(), page, "feed-1", returnedIDs, 0)
+	if err != nil {
+		t.Fatalf("limit=0 探测不应失败: %v", err)
+	}
+	if len(snapshot.Comments) != 0 || !snapshot.MoreVisible || snapshot.Progress.Total != 12 || snapshot.Progress.AtEnd {
+		t.Fatalf("limit=0 探测结果错误: %+v", snapshot)
+	}
+	if len(returnedIDs) != 1 || returnedIDs[0] != "seen-comment" {
+		t.Fatalf("limit=0 探测不应增长 returned IDs: %+v", returnedIDs)
+	}
+	if len(client.runtimeExpressions) != 1 || !strings.Contains(client.runtimeExpressions[0], ", 0)") {
+		t.Fatalf("limit=0 未透传到分页 Eval: %+v", client.runtimeExpressions)
+	}
+}
+
+func TestLoadCommentsBatchPreservesSubCommentCountAndExcludesOverflowID(t *testing.T) {
+	client := &commentPagingCDPClient{
+		responses: [][]byte{commentPageRuntimeResponse(t, commentPageDOMSnapshot{
+			Comments: []Comment{
+				{ID: "parent-1", Content: "parent", SubCommentCount: "3"},
+				{ID: "reply-1", Content: "reply 1"},
+				{ID: "reply-2", Content: "reply 2"},
+				{ID: "reply-3", Content: "reply 3"},
+			},
+			MoreVisible: true,
+			Progress:    commentProgress{Total: 4, AtEnd: true},
+		})},
+	}
+	page := newCommentPagingPage(t, client)
+	input := &CommentCursor{FeedID: "feed-1", Round: 1}
+
+	got, next, hasMore, err := loadCommentsBatch(context.Background(), page, CommentLoadConfig{ScrollSpeed: "fast"}, input, 2)
+	if err != nil {
+		t.Fatalf("分页加载不应失败: %v", err)
+	}
+	if len(got) != 2 || !hasMore || got[0].ID != "parent-1" || got[0].SubCommentCount != "3" || got[1].ID != "reply-1" {
+		t.Fatalf("subCommentCount 或 limit+1 返回契约错误: comments=%+v hasMore=%v", got, hasMore)
+	}
+	if next == nil || len(next.ReturnedIDs) != 2 || next.ReturnedIDs[0] != "parent-1" || next.ReturnedIDs[1] != "reply-1" {
+		t.Fatalf("溢出候选不应进入 cursor: %+v", next)
+	}
+}
+
+func TestExtractCommentsPageExecutesPaginationJS(t *testing.T) {
+	page := newRealCommentPagingPage(t)
+	readAuthorLikeReads := func() string {
+		result, err := page.Rod.Eval(`() => String(window.authorLikeReads)`)
+		if err != nil || result == nil {
+			t.Fatalf("读取 author/like 访问计数: %v", err)
+		}
+		return result.Value.Str()
+	}
+
+	returnedIDs := []string{"reply-seen"}
+	snapshot, err := extractCommentsPageWithProgressFromDOM(context.Background(), page, "feed-1", returnedIDs, 2)
+	if err != nil {
+		t.Fatalf("真实分页 JS 执行失败: %v", err)
+	}
+	if len(snapshot.Comments) != 2 || snapshot.Comments[0].ID != "parent-1" || snapshot.Comments[1].ID != "reply-1" {
+		t.Fatalf("父评论/回复顺序或 limit 错误: %+v", snapshot.Comments)
+	}
+	if snapshot.Comments[0].SubCommentCount != "3" || !snapshot.MoreVisible || snapshot.Progress.Total != 7 {
+		t.Fatalf("完整 subCommentCount 或 overflow 状态错误: %+v", snapshot)
+	}
+	if len(returnedIDs) != 1 || returnedIDs[0] != "reply-seen" {
+		t.Fatalf("输入 seen 不应被 JS 修改: %+v", returnedIDs)
+	}
+	if got := readAuthorLikeReads(); got != "4" {
+		t.Fatalf("overflow 候选不应物化作者/点赞: reads=%s", got)
+	}
+
+	if _, err := page.Rod.Eval(`() => { window.authorLikeReads = 0; }`); err != nil {
+		t.Fatalf("重置 author/like 访问计数: %v", err)
+	}
+	probe, err := extractCommentsPageWithProgressFromDOM(context.Background(), page, "feed-1", []string{"parent-1", "reply-seen", "reply-1", "reply-2"}, 0)
+	if err != nil {
+		t.Fatalf("真实 limit=0 分页 JS 执行失败: %v", err)
+	}
+	if len(probe.Comments) != 0 || !probe.MoreVisible {
+		t.Fatalf("limit=0 探测结果错误: %+v", probe)
+	}
+	if got := readAuthorLikeReads(); got != "0" {
+		t.Fatalf("limit=0 不应物化作者/点赞: reads=%s", got)
 	}
 }

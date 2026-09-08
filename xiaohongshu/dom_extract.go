@@ -421,9 +421,9 @@ type commentPageDOMSnapshot struct {
 	Progress    commentProgress `json:"progress"`
 }
 
-func extractCommentsPageWithProgressFromDOM(ctx context.Context, page *hrod.Page, feedID string, returnedIDs map[string]struct{}, limit int) (commentPageDOMSnapshot, error) {
+func extractCommentsPageWithProgressFromDOM(ctx context.Context, page *hrod.Page, feedID string, returnedIDs []string, limit int) (commentPageDOMSnapshot, error) {
 	result, err := evalJSNoCounter(ctx, page, `(feedID, returnedIDs, limit) => {` + domCleanJS + `
-		const seen = new Set(Object.keys(returnedIDs || {}));
+		const seen = new Set(returnedIDs || []);
 		const parents = document.querySelectorAll(".parent-comment");
 		const stableID = (node, parent) => {
 			if (parent) {
@@ -438,39 +438,16 @@ func extractCommentsPageWithProgressFromDOM(ctx context.Context, page *hrod.Page
 		};
 		const comments = [];
 		let moreVisible = false;
-		const process = (node, parent, subCount) => {
-			const id = stableID(node, parent);
-			if (!id || seen.has(id)) return false;
-			const content = contentOf(node);
-			if (!content) return false;
-			seen.add(id);
-			if (comments.length >= limit) {
-				moreVisible = true;
-				return true;
-			}
-			const user = clean(node.querySelector(".author-wrapper .name, .name, .nickname, [class*='name']")?.innerText);
-			const likeText = clean(node.querySelector(".interactions .like, .like, [class*='like']")?.innerText);
-			comments.push({
-				id,
-				noteId: feedID,
-				content,
-				likeCount: (likeText.match(/([\d.万wWkK]+)/) || ["", ""])[1],
-				userInfo: { nickname: user, nickName: user },
-				subCommentCount: subCount ? String(subCount) : "",
-				subComments: [],
-				showTags: []
-			});
-			return false;
-		};
 		outer: for (const parent of parents) {
 			const top = parent.querySelector(":scope > .comment-item") || parent;
+			const replies = parent.querySelectorAll(":scope > .reply-container > .list-container > .comment-item");
 			if (limit === 0) {
 				const topID = stableID(top, parent);
 				if (topID && !seen.has(topID) && contentOf(top)) {
 					moreVisible = true;
 					break;
 				}
-				for (const sub of parent.querySelectorAll(":scope > .reply-container > .list-container > .comment-item")) {
+				for (const sub of replies) {
 					const id = stableID(sub, null);
 					if (id && !seen.has(id) && contentOf(sub)) {
 						moreVisible = true;
@@ -479,23 +456,72 @@ func extractCommentsPageWithProgressFromDOM(ctx context.Context, page *hrod.Page
 				}
 				continue;
 			}
-			const subSeen = new Set(seen);
-			const topContent = contentOf(top);
-			if (topContent) {
-				const topID = stableID(top, parent);
-				if (topID) subSeen.add(topID);
+			const localSeen = new Set();
+			const candidates = [];
+			const candidateCapacity = limit + 1 - comments.length;
+			let parentReturns = false;
+			let parentOverflow = false;
+			let subCount = 0;
+			let stopped = false;
+			const topID = stableID(top, parent);
+			if (topID && !seen.has(topID)) {
+				const topContent = contentOf(top);
+				if (topContent) {
+					localSeen.add(topID);
+					parentReturns = comments.length < limit;
+					if (candidates.length < candidateCapacity) {
+						candidates.push({node: top, id: topID, content: topContent});
+					}
+					if (comments.length + candidates.length > limit) {
+						moreVisible = true;
+						parentOverflow = true;
+						stopped = true;
+					}
+				}
 			}
-			const subComments = [];
-			for (const sub of parent.querySelectorAll(":scope > .reply-container > .list-container > .comment-item")) {
-				const id = stableID(sub, null);
-				if (!id || subSeen.has(id) || !contentOf(sub)) continue;
-				subSeen.add(id);
-				subComments.push(sub);
+			if (!stopped) {
+				for (const sub of replies) {
+					const id = stableID(sub, null);
+					if (!id || seen.has(id) || localSeen.has(id)) continue;
+					const content = contentOf(sub);
+					if (!content) continue;
+					localSeen.add(id);
+					subCount++;
+					if (candidates.length < candidateCapacity) {
+						candidates.push({node: sub, id, content});
+						if (comments.length + candidates.length > limit) {
+							moreVisible = true;
+							parentOverflow = true;
+							if (!parentReturns) {
+								stopped = true;
+								break;
+							}
+						}
+					} else if (!parentReturns) {
+						moreVisible = true;
+						parentOverflow = true;
+						stopped = true;
+						break;
+					}
+				}
 			}
-			if (process(top, parent, subComments.length)) break;
-			for (const sub of subComments) {
-				if (process(sub, null, 0)) break outer;
+			for (const candidate of candidates) {
+				if (comments.length >= limit) break;
+				seen.add(candidate.id);
+				const user = clean(candidate.node.querySelector(".author-wrapper .name, .name, .nickname, [class*='name']")?.innerText);
+				const likeText = clean(candidate.node.querySelector(".interactions .like, .like, [class*='like']")?.innerText);
+				comments.push({
+					id: candidate.id,
+					noteId: feedID,
+					content: candidate.content,
+					likeCount: (likeText.match(/([\d.万wWkK]+)/) || ["", ""])[1],
+					userInfo: { nickname: user, nickName: user },
+					subCommentCount: candidate.node === top ? (subCount ? String(subCount) : "") : "",
+					subComments: [],
+					showTags: []
+				});
 			}
+			if (stopped || parentOverflow) break outer;
 		}
 
 		const totalText = (document.querySelector(".comments-container .total") ||
