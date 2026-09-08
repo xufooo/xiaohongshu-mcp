@@ -246,13 +246,13 @@ func loadCommentsBatch(ctx context.Context, page *hrod.Page, config CommentLoadC
 
 	collect := func(limit int) ([]Comment, bool, commentProgress, error) {
 		if limit <= 0 {
-			snapshot, err := extractCommentsPageWithProgressFromDOM(ctx, page, feedID, returned, 0)
+			snapshot, err := extractCommentsPageWithProgressFromDOM(ctx, page, feedID, batchCursor.ReturnedIDs, 0)
 			if err != nil {
 				return nil, false, commentProgress{}, err
 			}
 			return nil, snapshot.MoreVisible, snapshot.Progress, nil
 		}
-		snapshot, err := extractCommentsPageWithProgressFromDOM(ctx, page, feedID, returned, limit)
+		snapshot, err := extractCommentsPageWithProgressFromDOM(ctx, page, feedID, batchCursor.ReturnedIDs, limit)
 		if err != nil {
 			return nil, false, commentProgress{}, err
 		}
