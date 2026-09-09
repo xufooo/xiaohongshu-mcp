@@ -1049,8 +1049,8 @@ func (s *BrowseSession) DetailCommentsBatch(ctx context.Context, expectedFeedID 
 			}
 			return WaitForXHSReady(page.Context(opCtx), XHSReadyOptions{Kind: XHSReadyDetail, FeedID: feedID})
 		},
-		func(loadCtx context.Context, page *hrod.Page, counter *evalTimeoutCounter) ([]Comment, *CommentCursor, bool, error) {
-			return loadCommentsBatch(loadCtx, page.Context(loadCtx), config, cursor, maxItems)
+		func(loadCtx context.Context, page *hrod.Page, counter *evalTimeoutCounter) (commentBatchOutcome, error) {
+			return loadCommentsBatchOutcome(loadCtx, page.Context(loadCtx), config, cursor, maxItems)
 		},
 	)
 }
@@ -1062,7 +1062,7 @@ func (s *BrowseSession) detailCommentsBatchLifecycle(
 	cursor *CommentCursor,
 	config CommentLoadConfig,
 	pretask func(context.Context, *hrod.Page, *evalTimeoutCounter, string) error,
-	loader func(context.Context, *hrod.Page, *evalTimeoutCounter) ([]Comment, *CommentCursor, bool, error),
+	loader func(context.Context, *hrod.Page, *evalTimeoutCounter) (commentBatchOutcome, error),
 ) (detail *FeedDetailResponse, nextCursor *CommentCursor, hasMore bool, err error) {
 	opCtx, err := s.beginLockedOperation(ctx, true)
 	if err != nil {
@@ -1093,7 +1093,7 @@ func (s *BrowseSession) detailCommentsBatchLifecycle(
 	if s.state != nil {
 		dwellStart = time.Now()
 	}
-	comments, nextCursor, hasMore, err := runDetailCommentsBatch(opCtx, func(loadCtx context.Context) ([]Comment, *CommentCursor, bool, error) {
+	outcome, err := runDetailCommentsBatch(opCtx, func(loadCtx context.Context) (commentBatchOutcome, error) {
 		return loader(loadCtx, page, counter)
 	})
 	if err != nil {
@@ -1106,10 +1106,10 @@ func (s *BrowseSession) detailCommentsBatchLifecycle(
 		if cursor != nil {
 			inputRound = cursor.Round
 		}
-		scrolled := nextCursor != nil && nextCursor.Round > inputRound
+		scrolled := outcome.nextCursor != nil && outcome.nextCursor.Round > inputRound
 		_ = s.state.RecordCommentDwell(feedID, time.Since(dwellStart), scrolled)
 	}
-	return s.completeDetailCommentsBatch(opCtx, page, counter, feedID, cursor, maxItems, config, comments, nextCursor, hasMore)
+	return s.completeDetailCommentsBatch(opCtx, page, counter, feedID, cursor, maxItems, config, outcome)
 }
 
 func commentLoadDeadline(ctx context.Context) time.Time {
@@ -1124,17 +1124,17 @@ func commentLoadDeadline(ctx context.Context) time.Time {
 	return deadline
 }
 
-func runDetailCommentsBatch(opCtx context.Context, loader func(context.Context) ([]Comment, *CommentCursor, bool, error)) ([]Comment, *CommentCursor, bool, error) {
+func runDetailCommentsBatch(opCtx context.Context, loader func(context.Context) (commentBatchOutcome, error)) (commentBatchOutcome, error) {
 	loadCtx, cancel := context.WithTimeout(opCtx, commentLoadTimeout)
 	defer cancel()
-	comments, nextCursor, hasMore, err := loader(loadCtx)
+	outcome, err := loader(loadCtx)
 	if err != nil {
-		return nil, nil, false, err
+		return commentBatchOutcome{}, err
 	}
-	if len(comments) == 0 && !hasMore && loadCtx.Err() != nil {
-		return nil, nil, false, loadCtx.Err()
+	if len(outcome.comments) == 0 && !outcome.hasMore && loadCtx.Err() != nil {
+		return commentBatchOutcome{}, loadCtx.Err()
 	}
-	return comments, nextCursor, hasMore, nil
+	return outcome, nil
 }
 
 func detailBatchResponse(note FeedDetail, comments []Comment, hasMore bool) *FeedDetailResponse {
@@ -1155,13 +1155,15 @@ func (s *BrowseSession) completeDetailCommentsBatch(
 	inputCursor *CommentCursor,
 	maxItems int,
 	config CommentLoadConfig,
-	comments []Comment,
-	nextCursor *CommentCursor,
-	hasMore bool,
+	outcome commentBatchOutcome,
 ) (*FeedDetailResponse, *CommentCursor, bool, error) {
 	if opCtx.Err() != nil {
 		return nil, nil, false, opCtx.Err()
 	}
+	nextCursor := outcome.nextCursor
+	hasMore := outcome.hasMore
+	comments := outcome.comments
+	progress := outcome.progress
 	if nextCursor != nil && nextCursor.FeedID == "" {
 		nextCursor.FeedID = feedID
 	}
@@ -1171,16 +1173,6 @@ func (s *BrowseSession) completeDetailCommentsBatch(
 	seenCount := len(comments)
 	if nextCursor != nil {
 		seenCount = len(nextCursor.ReturnedIDs)
-	}
-	progress, progressErr := getCommentProgress(opCtx, page)
-	if progressErr != nil {
-		if !IsFatalRendererError(progressErr) && hasMore && len(comments) > 0 {
-			resp.Comments.SeenCount = seenCount
-			resp.Comments.Complete = false
-			resp.Comments.IncompleteReason = "progress_unavailable"
-			return resp, nextCursor, true, nil
-		}
-		return nil, nil, false, progressErr
 	}
 	if progress.Total > 0 {
 		resp.Comments.TotalItems = progress.Total

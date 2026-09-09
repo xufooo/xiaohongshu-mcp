@@ -28,6 +28,7 @@ type commentPagingCDPClient struct {
 	eventCh            chan *cdp.Event
 	eventOnce          sync.Once
 	closeOnce          sync.Once
+	afterRuntimeCall   func(int)
 }
 
 func (c *commentPagingCDPClient) Event() <-chan *cdp.Event {
@@ -84,7 +85,11 @@ func (c *commentPagingCDPClient) Call(ctx context.Context, _ string, method stri
 			return nil, c.errs[index]
 		}
 		if index < len(c.responses) {
-			return c.responses[index], nil
+			response := c.responses[index]
+			if c.afterRuntimeCall != nil {
+				c.afterRuntimeCall(index)
+			}
+			return response, nil
 		}
 	}
 	return []byte(`{}`), nil
@@ -656,4 +661,84 @@ func TestExtractCommentsPageExecutesPaginationJS(t *testing.T) {
 	if got := readAuthorLikeReads(); got != "0" {
 		t.Fatalf("limit=0 不应物化作者/点赞: reads=%s", got)
 	}
+}
+
+func TestCommentPagingOutcomeCarriesProgressToCompletion(t *testing.T) {
+	loaderConfig := CommentLoadConfig{ScrollSpeed: "fast"}
+	completionConfig := CommentLoadConfig{ClickMoreReplies: true, MaxRepliesThreshold: 0, ScrollSpeed: "fast"}
+
+	t.Run("terminal progress is reused without another DOM eval", func(t *testing.T) {
+		client := &commentPagingCDPClient{
+			responses: [][]byte{
+				commentPageRuntimeResponse(t, commentPageDOMSnapshot{
+					Comments: []Comment{{ID: "comment-1", NoteID: "feed-1", Content: "内容"}},
+					Progress: commentProgress{Total: 1, AtEnd: true},
+				}),
+				commentPageRuntimeResponse(t, commentPageDOMSnapshot{
+					Progress: commentProgress{Total: 1, AtEnd: true},
+				}),
+			},
+		}
+		page := newCommentPagingPage(t, client)
+		input := &CommentCursor{FeedID: "feed-1", Round: 1}
+
+		outcome, err := runDetailCommentsBatch(context.Background(), func(loadCtx context.Context) (commentBatchOutcome, error) {
+			return loadCommentsBatchOutcome(loadCtx, page, loaderConfig, input, 20)
+		})
+		if err != nil {
+			t.Fatalf("终批 loader 不应失败: %v", err)
+		}
+		if len(outcome.comments) != 1 || outcome.hasMore || outcome.progress.Total != 1 || !outcome.progress.AtEnd || outcome.progress.NoComments {
+			t.Fatalf("终批 outcome 错误: %+v", outcome)
+		}
+
+		session := &BrowseSession{
+			page:              page,
+			currentFeedID:     "feed-1",
+			opened:             true,
+			openedNoteContent: OpenedNoteContent{NoteID: "feed-1"},
+		}
+		runtimeCallsBeforeCompletion := client.runtimeCalls
+		response, next, hasMore, err := session.completeDetailCommentsBatch(
+			context.Background(), page, &evalTimeoutCounter{}, "feed-1", input, 20, completionConfig, outcome,
+		)
+		if err != nil {
+			t.Fatalf("终批 completion 不应失败: %v", err)
+		}
+		if response == nil || next == nil || hasMore || response.Comments.HasMore || !response.Comments.Complete ||
+			response.Comments.IncompleteReason != "" ||
+			response.Comments.TotalItems != 1 || response.Comments.SeenCount != 1 {
+			t.Fatalf("终批响应错误: response=%+v next=%+v hasMore=%v", response, next, hasMore)
+		}
+		if client.runtimeCalls != runtimeCallsBeforeCompletion {
+			t.Fatalf("completion 不应重复执行 progress DOM Eval: before=%d after=%d", runtimeCallsBeforeCompletion, client.runtimeCalls)
+		}
+	})
+
+	t.Run("context cancellation after successful collect keeps progress", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		client := &commentPagingCDPClient{
+			responses: [][]byte{commentPageRuntimeResponse(t, commentPageDOMSnapshot{
+				Comments: []Comment{{ID: "comment-1", NoteID: "feed-1", Content: "内容"}},
+				Progress: commentProgress{Total: 1, AtEnd: true},
+			})},
+			afterRuntimeCall: func(index int) {
+				if index == 0 {
+					cancel()
+				}
+			},
+		}
+		page := newCommentPagingPage(t, client)
+		outcome, err := loadCommentsBatchOutcome(ctx, page, loaderConfig, &CommentCursor{FeedID: "feed-1", Round: 1}, 20)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("成功 collect 后的 context 错误未保留: %v", err)
+		}
+		if outcome.progress.Total != 1 || !outcome.progress.AtEnd || outcome.progress.NoComments {
+			t.Fatalf("成功 collect 后 progress 丢失: %+v", outcome.progress)
+		}
+		if client.runtimeCalls != 1 {
+			t.Fatalf("取消后不应再次执行 progress DOM Eval: %d", client.runtimeCalls)
+		}
+	})
 }
