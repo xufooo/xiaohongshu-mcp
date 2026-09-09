@@ -424,7 +424,7 @@ type commentPageDOMSnapshot struct {
 }
 
 func extractCommentsPageWithProgressFromDOM(ctx context.Context, page *hrod.Page, feedID string, returnedIDs []string, limit int) (commentPageDOMSnapshot, error) {
-	result, err := evalJSNoCounter(ctx, page, `(feedID, returnedIDs, limit) => {
+	result, err := evalJSDirect(ctx, page, `(feedID, returnedIDs, limit) => {
 		const phaseMarker = "__xhsCommentPaginationPhase";
 		window[phaseMarker] = "";
 		window[phaseMarker] = "dom-query";` + domCleanJS + `
