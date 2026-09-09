@@ -179,6 +179,8 @@ func loadCommentsBatchOutcome(ctx context.Context, page *hrod.Page, config Comme
 	logrus.Infof("开始分批加载评论: maxItems=%d", maxItems)
 	await, scrollDelta := commentScrollSettings(config.ScrollSpeed)
 	deadline := commentLoadDeadline(ctx)
+	extractCtx, cancelExtract := context.WithDeadline(ctx, deadline)
+	defer cancelExtract()
 	remaining := func() time.Duration { return time.Until(deadline) }
 
 	feedID := ""
@@ -247,14 +249,20 @@ func loadCommentsBatchOutcome(ctx context.Context, page *hrod.Page, config Comme
 	}
 
 	collect := func(limit int) ([]Comment, bool, commentProgress, error) {
+		if err := ctx.Err(); err != nil {
+			return nil, false, commentProgress{}, err
+		}
+		if remaining() < 15*time.Second {
+			return nil, false, commentProgress{}, context.DeadlineExceeded
+		}
 		if limit <= 0 {
-			snapshot, err := extractCommentsPageWithProgressFromDOM(ctx, page, feedID, batchCursor.ReturnedIDs, 0)
+			snapshot, err := extractCommentsPageWithProgressFromDOM(extractCtx, page, feedID, batchCursor.ReturnedIDs, 0)
 			if err != nil {
 				return nil, false, commentProgress{}, err
 			}
 			return nil, snapshot.MoreVisible, snapshot.Progress, nil
 		}
-		snapshot, err := extractCommentsPageWithProgressFromDOM(ctx, page, feedID, batchCursor.ReturnedIDs, limit)
+		snapshot, err := extractCommentsPageWithProgressFromDOM(extractCtx, page, feedID, batchCursor.ReturnedIDs, limit)
 		if err != nil {
 			return nil, false, commentProgress{}, err
 		}
@@ -314,7 +322,7 @@ func loadCommentsBatchOutcome(ctx context.Context, page *hrod.Page, config Comme
 
 	more, moreVisible, collectedProgress, collectErr := collect(maxItems)
 	if collectErr != nil {
-		return commentBatchOutcome{}, collectErr
+		return partialOrError(collectErr)
 	}
 	progress = collectedProgress
 	batch = append(batch, more...)
