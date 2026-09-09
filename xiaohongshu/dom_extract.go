@@ -3,9 +3,11 @@ package xiaohongshu
 import (
 	"context"
 	"encoding/json"
+	stderrors "errors"
 	"fmt"
 	"strings"
 
+	"github.com/sirupsen/logrus"
 	"github.com/xpzouying/xiaohongshu-mcp/errors"
 	hrod "github.com/xpzouying/xiaohongshu-mcp/humanize/rod"
 )
@@ -422,9 +424,13 @@ type commentPageDOMSnapshot struct {
 }
 
 func extractCommentsPageWithProgressFromDOM(ctx context.Context, page *hrod.Page, feedID string, returnedIDs []string, limit int) (commentPageDOMSnapshot, error) {
-	result, err := evalJSNoCounter(ctx, page, `(feedID, returnedIDs, limit) => {` + domCleanJS + `
+	result, err := evalJSNoCounter(ctx, page, `(feedID, returnedIDs, limit) => {
+		const phaseMarker = "__xhsCommentPaginationPhase";
+		window[phaseMarker] = "";
+		window[phaseMarker] = "dom-query";` + domCleanJS + `
 		const seen = new Set(returnedIDs || []);
 		const parents = document.querySelectorAll(".parent-comment");
+		window[phaseMarker] = "scan";
 		const stableID = (node, parent) => {
 			if (parent) {
 				return node.getAttribute("id") || parent.dataset?.id || parent.getAttribute("data-comment-id") ||
@@ -439,6 +445,7 @@ func extractCommentsPageWithProgressFromDOM(ctx context.Context, page *hrod.Page
 		const comments = [];
 		let moreVisible = false;
 		outer: for (const parent of parents) {
+			window[phaseMarker] = "scan";
 			const top = parent.querySelector(":scope > .comment-item") || parent;
 			const replies = parent.querySelectorAll(":scope > .reply-container > .list-container > .comment-item");
 			if (limit === 0) {
@@ -505,6 +512,7 @@ func extractCommentsPageWithProgressFromDOM(ctx context.Context, page *hrod.Page
 					}
 				}
 			}
+			window[phaseMarker] = "object-construction";
 			for (const candidate of candidates) {
 				if (comments.length >= limit) break;
 				seen.add(candidate.id);
@@ -524,12 +532,14 @@ func extractCommentsPageWithProgressFromDOM(ctx context.Context, page *hrod.Page
 			if (stopped || parentOverflow) break outer;
 		}
 
+		window[phaseMarker] = "dom-query";
 		const totalText = (document.querySelector(".comments-container .total") ||
 			document.querySelector(".comment-total") || document.querySelector(".total"))?.innerText || "";
 		const totalMatch = totalText.match(/共\s*(\d+)\s*条评论/);
 		const endText = document.querySelector(".end-container")?.textContent || "";
 		const noCommentsText = document.querySelector(".no-comments-text")?.textContent || "";
-		return JSON.stringify({
+		window[phaseMarker] = "stringify";
+		const serialized = JSON.stringify({
 			comments,
 			moreVisible,
 			progress: {
@@ -538,8 +548,28 @@ func extractCommentsPageWithProgressFromDOM(ctx context.Context, page *hrod.Page
 				noComments: noCommentsText.includes("这是一片荒地"),
 			},
 		});
+		window[phaseMarker] = "completed";
+		window[phaseMarker] = "";
+		return serialized;
 	}`, feedID, returnedIDs, limit)
 	if err != nil {
+		if ctx.Err() == nil && !IsFatalRendererError(err) && stderrors.Is(err, context.DeadlineExceeded) {
+			phaseResult, phaseErr := evalQuick(ctx, page, `() => {
+				const phaseMarker = "__xhsCommentPaginationPhase";
+				const phase = window[phaseMarker] || "";
+				window[phaseMarker] = "";
+				return phase;
+			}`)
+			if phaseErr == nil && phaseResult != nil {
+				phase := phaseResult.Value.Str()
+				switch phase {
+				case "dom-query", "scan", "object-construction", "stringify", "completed":
+				default:
+					phase = ""
+				}
+				logrus.Warnf("event=comment_pagination_extract_eval_termination phase=%s", phase)
+			}
+		}
 		return commentPageDOMSnapshot{}, fmt.Errorf("提取分页 DOM 评论失败: %w", err)
 	}
 	if result == nil || strings.TrimSpace(result.Value.Str()) == "" {

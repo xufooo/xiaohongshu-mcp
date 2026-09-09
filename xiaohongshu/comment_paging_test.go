@@ -314,36 +314,90 @@ func TestRecoverCommentBatchSessionPropagatesCallerContext(t *testing.T) {
 }
 
 func TestExtractCommentsPagePreservesErrors(t *testing.T) {
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	terminationErr := context.DeadlineExceeded
+	probeErr := errors.New("probe failed")
 	tests := []struct {
-		name         string
-		err          error
-		wantContains string
-		wantFatal    bool
+		name             string
+		ctx              context.Context
+		errs             []error
+		responses        [][]byte
+		wantErr          error
+		wantContains     string
+		wantFatal        bool
+		wantRuntimeCalls int
+		wantProbe        bool
+		probeErrorHidden bool
 	}{
 		{
-			name:         "普通错误",
-			err:          errors.New("local eval timeout"),
-			wantContains: "local eval timeout",
+			name:             "deadline sentinel probes once (fake CDP)",
+			errs:             []error{terminationErr},
+			responses:        [][]byte{nil, []byte(`{"result":{"type":"string","value":"scan"}}`)},
+			wantErr:          terminationErr,
+			wantRuntimeCalls: 2,
+			wantProbe:        true,
 		},
 		{
-			name:      "fatal renderer",
-			err:       fmt.Errorf("%w: renderer closed", ErrFatalRendererError),
-			wantFatal: true,
+			name:             "ordinary error does not probe",
+			errs:             []error{errors.New("local eval timeout")},
+			wantContains:     "local eval timeout",
+			wantRuntimeCalls: 1,
+		},
+		{
+			name:             "fatal renderer does not probe",
+			errs:             []error{fmt.Errorf("%w: renderer closed", ErrFatalRendererError)},
+			wantFatal:        true,
+			wantRuntimeCalls: 1,
+		},
+		{
+			name:             "caller canceled does not probe",
+			ctx:              canceledCtx,
+			wantErr:          context.Canceled,
+			wantRuntimeCalls: 0,
+		},
+		{
+			name:             "probe failure preserves original error",
+			errs:             []error{terminationErr, probeErr},
+			wantErr:          terminationErr,
+			wantRuntimeCalls: 2,
+			wantProbe:        true,
+			probeErrorHidden: true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			client := &commentPagingCDPClient{errs: []error{tt.err}}
+			client := &commentPagingCDPClient{errs: tt.errs, responses: tt.responses}
 			page := newCommentPagingPage(t, client)
-			_, err := extractCommentsPageWithProgressFromDOM(context.Background(), page, "feed-1", nil, 2)
+			ctx := tt.ctx
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			_, err := extractCommentsPageWithProgressFromDOM(ctx, page, "feed-1", nil, 2)
 			if err == nil {
 				t.Fatal("期望分页 Eval 返回错误")
+			}
+			if tt.wantErr != nil && !errors.Is(err, tt.wantErr) {
+				t.Fatalf("原始错误未保留: got=%v want=%v", err, tt.wantErr)
 			}
 			if tt.wantContains != "" && !strings.Contains(err.Error(), tt.wantContains) {
 				t.Fatalf("错误应包含 %q: %v", tt.wantContains, err)
 			}
 			if tt.wantFatal && !IsFatalRendererError(err) {
 				t.Fatalf("fatal renderer 错误未原样保留: %v", err)
+			}
+			if tt.probeErrorHidden && strings.Contains(err.Error(), probeErr.Error()) {
+				t.Fatalf("probe 错误覆盖了原始错误: %v", err)
+			}
+			if client.runtimeCalls != tt.wantRuntimeCalls {
+				t.Fatalf("Runtime.evaluate 调用次数错误: got=%d want=%d", client.runtimeCalls, tt.wantRuntimeCalls)
+			}
+			if tt.wantProbe {
+				if len(client.runtimeExpressions) != 2 || !strings.Contains(client.runtimeExpressions[1], "__xhsCommentPaginationPhase") {
+					t.Fatalf("应恰好执行一次阶段 probe: %+v", client.runtimeExpressions)
+				}
+			} else if len(client.runtimeExpressions) > 1 {
+				t.Fatalf("非 termination 路径不应执行 probe: %+v", client.runtimeExpressions)
 			}
 		})
 	}
@@ -536,6 +590,26 @@ func TestLoadCommentsBatchPreservesSubCommentCountAndExcludesOverflowID(t *testi
 
 func TestExtractCommentsPageExecutesPaginationJS(t *testing.T) {
 	page := newRealCommentPagingPage(t)
+	if _, err := page.Rod.Eval(`() => {
+		const phaseMarker = "__xhsCommentPaginationPhase";
+		let current = "";
+		let completed = false;
+		let probed = false;
+		Object.defineProperty(window, phaseMarker, {
+			configurable: true,
+			get() {
+				probed = true;
+				return current;
+			},
+			set(value) {
+				current = value;
+				if (value === "completed") completed = true;
+			},
+		});
+		window.__xhsCommentPaginationPhaseState = () => [completed, current, probed].join("|");
+	}`); err != nil {
+		t.Fatalf("安装分页阶段测试 accessor: %v", err)
+	}
 	readAuthorLikeReads := func() string {
 		result, err := page.Rod.Eval(`() => String(window.authorLikeReads)`)
 		if err != nil || result == nil {
@@ -548,6 +622,13 @@ func TestExtractCommentsPageExecutesPaginationJS(t *testing.T) {
 	snapshot, err := extractCommentsPageWithProgressFromDOM(context.Background(), page, "feed-1", returnedIDs, 2)
 	if err != nil {
 		t.Fatalf("真实分页 JS 执行失败: %v", err)
+	}
+	phaseStateResult, err := page.Rod.Eval(`() => window.__xhsCommentPaginationPhaseState()`)
+	if err != nil || phaseStateResult == nil {
+		t.Fatalf("读取分页阶段测试状态: %v", err)
+	}
+	if got := phaseStateResult.Value.Str(); got != "true||false" {
+		t.Fatalf("成功路径阶段 marker 状态错误: %s", got)
 	}
 	if len(snapshot.Comments) != 2 || snapshot.Comments[0].ID != "parent-1" || snapshot.Comments[1].ID != "reply-1" {
 		t.Fatalf("父评论/回复顺序或 limit 错误: %+v", snapshot.Comments)
