@@ -338,7 +338,7 @@ func TestExtractCommentsPagePreservesErrors(t *testing.T) {
 		{
 			name:             "deadline sentinel probes once (fake CDP)",
 			errs:             []error{terminationErr},
-			responses:        [][]byte{nil, []byte(`{"result":{"type":"string","value":"scan"}}`)},
+			responses:        [][]byte{nil, []byte(`{"result":{"type":"string","value":"full-scan"}}`)},
 			wantErr:          terminationErr,
 			wantRuntimeCalls: 2,
 			wantProbe:        true,
@@ -378,7 +378,7 @@ func TestExtractCommentsPagePreservesErrors(t *testing.T) {
 			if ctx == nil {
 				ctx = context.Background()
 			}
-			_, err := extractCommentsPageWithProgressFromDOM(ctx, page, "feed-1", nil, 2)
+			_, err := extractCommentsPageWithProgressFromDOM(ctx, page, "feed-1")
 			if err == nil {
 				t.Fatal("期望分页 Eval 返回错误")
 			}
@@ -462,30 +462,6 @@ func TestLoadCommentsBatchPropagatesCallerContextDeadline(t *testing.T) {
 	}
 }
 
-func TestExtractCommentsPagePassesReturnedIDsAsArray(t *testing.T) {
-	client := &commentPagingCDPClient{
-		responses: [][]byte{commentPageRuntimeResponse(t, commentPageDOMSnapshot{})},
-	}
-	page := newCommentPagingPage(t, client)
-	_, err := extractCommentsPageWithProgressFromDOM(context.Background(), page, "feed-1", []string{"old-comment", "next-comment"}, 7)
-	if err != nil {
-		t.Fatalf("分页 DOM 提取不应失败: %v", err)
-	}
-	if len(client.runtimeExpressions) != 1 {
-		t.Fatalf("Runtime.evaluate 表达式数量错误: %d", len(client.runtimeExpressions))
-	}
-	expression := client.runtimeExpressions[0]
-	if !strings.Contains(expression, `["old-comment","next-comment"]`) {
-		t.Fatalf("returned IDs 未按数组传入: %s", expression)
-	}
-	if strings.Contains(expression, "Object.keys(returnedIDs") {
-		t.Fatalf("分页表达式仍复制 returned ID map: %s", expression)
-	}
-	if !strings.Contains(expression, ", 7)") {
-		t.Fatalf("limit 未按原值传入: %s", expression)
-	}
-}
-
 func TestLoadCommentsBatchDedupesStableIDsAndCapsAtMaxItems(t *testing.T) {
 	comments := []Comment{
 		{ID: "old-comment", Content: "old"},
@@ -500,7 +476,6 @@ func TestLoadCommentsBatchDedupesStableIDsAndCapsAtMaxItems(t *testing.T) {
 	client := &commentPagingCDPClient{
 		responses: [][]byte{commentPageRuntimeResponse(t, commentPageDOMSnapshot{
 			Comments:    comments,
-			MoreVisible: true,
 			Progress:    commentProgress{Total: 100, AtEnd: true},
 		})},
 	}
@@ -541,43 +516,24 @@ func TestLoadCommentsBatchDedupesStableIDsAndCapsAtMaxItems(t *testing.T) {
 	}
 }
 
-func TestExtractCommentsPageZeroLimitProbe(t *testing.T) {
-	client := &commentPagingCDPClient{
-		responses: [][]byte{commentPageRuntimeResponse(t, commentPageDOMSnapshot{
-			MoreVisible: true,
-			Progress:    commentProgress{Total: 12, AtEnd: false},
-		})},
-	}
-	page := newCommentPagingPage(t, client)
-	returnedIDs := []string{"seen-comment"}
-	snapshot, err := extractCommentsPageWithProgressFromDOM(context.Background(), page, "feed-1", returnedIDs, 0)
-	if err != nil {
-		t.Fatalf("limit=0 探测不应失败: %v", err)
-	}
-	if len(snapshot.Comments) != 0 || !snapshot.MoreVisible || snapshot.Progress.Total != 12 || snapshot.Progress.AtEnd {
-		t.Fatalf("limit=0 探测结果错误: %+v", snapshot)
-	}
-	if len(returnedIDs) != 1 || returnedIDs[0] != "seen-comment" {
-		t.Fatalf("limit=0 探测不应增长 returned IDs: %+v", returnedIDs)
-	}
-	if len(client.runtimeExpressions) != 1 || !strings.Contains(client.runtimeExpressions[0], ", 0)") {
-		t.Fatalf("limit=0 未透传到分页 Eval: %+v", client.runtimeExpressions)
-	}
-}
-
-func TestLoadCommentsBatchPreservesSubCommentCountAndExcludesOverflowID(t *testing.T) {
-	client := &commentPagingCDPClient{
-		responses: [][]byte{commentPageRuntimeResponse(t, commentPageDOMSnapshot{
-			Comments: []Comment{
-				{ID: "parent-1", Content: "parent", SubCommentCount: "3"},
-				{ID: "reply-1", Content: "reply 1"},
-				{ID: "reply-2", Content: "reply 2"},
-				{ID: "reply-3", Content: "reply 3"},
+func TestLoadCommentsBatchCapsInGoAndContinuesOverflow(t *testing.T) {
+	snapshot := commentPageDOMSnapshot{
+		Comments: []Comment{
+			{
+				ID:              "parent-1",
+				Content:         "parent",
+				SubCommentCount: "3",
+				SubComments: []Comment{
+					{ID: "reply-1", Content: "reply 1"},
+					{ID: "reply-2", Content: "reply 2"},
+					{ID: "reply-3", Content: "reply 3"},
+				},
 			},
-			MoreVisible: true,
-			Progress:    commentProgress{Total: 4, AtEnd: true},
-		})},
+		},
+		Progress: commentProgress{Total: 4, AtEnd: true},
 	}
+	response := commentPageRuntimeResponse(t, snapshot)
+	client := &commentPagingCDPClient{responses: [][]byte{response, response, response}}
 	page := newCommentPagingPage(t, client)
 	input := &CommentCursor{FeedID: "feed-1", Round: 1}
 
@@ -586,10 +542,64 @@ func TestLoadCommentsBatchPreservesSubCommentCountAndExcludesOverflowID(t *testi
 		t.Fatalf("分页加载不应失败: %v", err)
 	}
 	if len(got) != 2 || !hasMore || got[0].ID != "parent-1" || got[0].SubCommentCount != "3" || got[1].ID != "reply-1" {
-		t.Fatalf("subCommentCount 或 limit+1 返回契约错误: comments=%+v hasMore=%v", got, hasMore)
+		t.Fatalf("Go 侧 limit 或父子顺序错误: comments=%+v hasMore=%v", got, hasMore)
 	}
 	if next == nil || len(next.ReturnedIDs) != 2 || next.ReturnedIDs[0] != "parent-1" || next.ReturnedIDs[1] != "reply-1" {
-		t.Fatalf("溢出候选不应进入 cursor: %+v", next)
+		t.Fatalf("溢出评论不应写入本轮 cursor: %+v", next)
+	}
+	if len(input.ReturnedIDs) != 0 {
+		t.Fatalf("输入 cursor 不应被修改: %+v", input)
+	}
+
+	got, next, hasMore, err = loadCommentsBatch(context.Background(), page, CommentLoadConfig{ScrollSpeed: "fast"}, next, 2)
+	if err != nil {
+		t.Fatalf("续页加载不应失败: %v", err)
+	}
+	if len(got) != 2 || hasMore || got[0].ID != "reply-2" || got[1].ID != "reply-3" {
+		t.Fatalf("下一 cursor 未取得 overflow: comments=%+v hasMore=%v", got, hasMore)
+	}
+	if next == nil || len(next.ReturnedIDs) != 4 || next.ReturnedIDs[2] != "reply-2" || next.ReturnedIDs[3] != "reply-3" {
+		t.Fatalf("续页 cursor 错误: %+v", next)
+	}
+}
+
+func TestLoadCommentsBatchLimitZeroUsesSameSnapshotForProgress(t *testing.T) {
+	first := commentPageDOMSnapshot{
+		Comments: []Comment{
+			{ID: "comment-1", Content: "one"},
+			{ID: "comment-2", Content: "two"},
+		},
+		Progress: commentProgress{Total: 3, AtEnd: true},
+	}
+	second := commentPageDOMSnapshot{
+		Comments: []Comment{
+			{ID: "comment-1", Content: "one"},
+			{ID: "comment-2", Content: "two"},
+			{ID: "comment-3", Content: "three"},
+		},
+		Progress: commentProgress{Total: 3, AtEnd: true},
+	}
+	client := &commentPagingCDPClient{
+		responses: [][]byte{
+			commentPageRuntimeResponse(t, first),
+			commentPageRuntimeResponse(t, second),
+		},
+	}
+	page := newCommentPagingPage(t, client)
+	input := &CommentCursor{FeedID: "feed-1", Round: 1}
+
+	got, next, hasMore, err := loadCommentsBatch(context.Background(), page, CommentLoadConfig{ScrollSpeed: "fast"}, input, 2)
+	if err != nil {
+		t.Fatalf("limit=0 收尾探测不应失败: %v", err)
+	}
+	if len(got) != 2 || got[0].ID != "comment-1" || got[1].ID != "comment-2" || !hasMore {
+		t.Fatalf("limit=0 完整快照进度判定错误: comments=%+v hasMore=%v", got, hasMore)
+	}
+	if next == nil || len(next.ReturnedIDs) != 2 || next.ReturnedIDs[0] != "comment-1" || next.ReturnedIDs[1] != "comment-2" {
+		t.Fatalf("limit=0 不应把 overflow 写入 cursor: %+v", next)
+	}
+	if client.runtimeCalls != 2 {
+		t.Fatalf("limit=0 不应增加独立 progress Eval: runtimeCalls=%d", client.runtimeCalls)
 	}
 }
 
@@ -623,8 +633,7 @@ func TestExtractCommentsPageExecutesPaginationJS(t *testing.T) {
 		return result.Value.Str()
 	}
 
-	returnedIDs := []string{"reply-seen"}
-	snapshot, err := extractCommentsPageWithProgressFromDOM(context.Background(), page, "feed-1", returnedIDs, 2)
+	snapshot, err := extractCommentsPageWithProgressFromDOM(context.Background(), page, "feed-1")
 	if err != nil {
 		t.Fatalf("真实分页 JS 执行失败: %v", err)
 	}
@@ -635,31 +644,21 @@ func TestExtractCommentsPageExecutesPaginationJS(t *testing.T) {
 	if got := phaseStateResult.Value.Str(); got != "true||false" {
 		t.Fatalf("成功路径阶段 marker 状态错误: %s", got)
 	}
-	if len(snapshot.Comments) != 2 || snapshot.Comments[0].ID != "parent-1" || snapshot.Comments[1].ID != "reply-1" {
-		t.Fatalf("父评论/回复顺序或 limit 错误: %+v", snapshot.Comments)
+	if len(snapshot.Comments) != 1 || snapshot.Comments[0].ID != "parent-1" {
+		t.Fatalf("完整父评论快照错误: %+v", snapshot.Comments)
 	}
-	if snapshot.Comments[0].SubCommentCount != "3" || !snapshot.MoreVisible || snapshot.Progress.Total != 7 {
-		t.Fatalf("完整 subCommentCount 或 overflow 状态错误: %+v", snapshot)
+	parent := snapshot.Comments[0]
+	if parent.SubCommentCount != "6" || len(parent.SubComments) != 6 || snapshot.Progress.Total != 7 {
+		t.Fatalf("完整子评论快照或 progress 错误: %+v", snapshot)
 	}
-	if len(returnedIDs) != 1 || returnedIDs[0] != "reply-seen" {
-		t.Fatalf("输入 seen 不应被 JS 修改: %+v", returnedIDs)
+	wantIDs := []string{"reply-1", "reply-1", "", "reply-seen", "reply-2", "reply-3"}
+	for i, want := range wantIDs {
+		if parent.SubComments[i].ID != want {
+			t.Fatalf("子评论快照顺序错误: index=%d got=%q want=%q", i, parent.SubComments[i].ID, want)
+		}
 	}
-	if got := readAuthorLikeReads(); got != "4" {
-		t.Fatalf("overflow 候选不应物化作者/点赞: reads=%s", got)
-	}
-
-	if _, err := page.Rod.Eval(`() => { window.authorLikeReads = 0; }`); err != nil {
-		t.Fatalf("重置 author/like 访问计数: %v", err)
-	}
-	probe, err := extractCommentsPageWithProgressFromDOM(context.Background(), page, "feed-1", []string{"parent-1", "reply-seen", "reply-1", "reply-2"}, 0)
-	if err != nil {
-		t.Fatalf("真实 limit=0 分页 JS 执行失败: %v", err)
-	}
-	if len(probe.Comments) != 0 || !probe.MoreVisible {
-		t.Fatalf("limit=0 探测结果错误: %+v", probe)
-	}
-	if got := readAuthorLikeReads(); got != "0" {
-		t.Fatalf("limit=0 不应物化作者/点赞: reads=%s", got)
+	if got := readAuthorLikeReads(); got != "8" {
+		t.Fatalf("完整快照未物化全部作者/点赞: reads=%s", got)
 	}
 }
 
