@@ -549,7 +549,7 @@ func findFilterOption(page *hrod.Page, pf pendingFilter) (*hrod.Element, error) 
 		if strings.TrimSpace(text) != pf.GroupLabel {
 			continue
 		}
-		tags, err := group.Elements(":scope > div.tags")
+		tags, err := group.Elements("div.tags")
 		if err != nil || len(tags) == 0 {
 			return nil, fmt.Errorf("「%s」没有选项", pf.GroupLabel)
 		}
