@@ -418,120 +418,17 @@ type commentsDOMSnapshot struct {
 }
 
 type commentPageDOMSnapshot struct {
-	Comments    []Comment       `json:"comments"`
-	MoreVisible bool            `json:"moreVisible"`
-	Progress    commentProgress `json:"progress"`
+	Comments []Comment       `json:"comments"`
+	Progress commentProgress `json:"progress"`
 }
 
-func extractCommentsPageWithProgressFromDOM(ctx context.Context, page *hrod.Page, feedID string, returnedIDs []string, limit int) (commentPageDOMSnapshot, error) {
-	result, err := evalJSDirect(ctx, page, `(feedID, returnedIDs, limit) => {
+func extractCommentsPageWithProgressFromDOM(ctx context.Context, page *hrod.Page, feedID string) (commentPageDOMSnapshot, error) {
+	result, err := evalJSDirect(ctx, page, `(feedID) => {
 		const phaseMarker = "__xhsCommentPaginationPhase";
 		window[phaseMarker] = "";
-		window[phaseMarker] = "dom-query";` + domCleanJS + `
-		const seen = new Set(returnedIDs || []);
-		const parents = document.querySelectorAll(".parent-comment");
-		window[phaseMarker] = "scan";
-		const stableID = (node, parent) => {
-			if (parent) {
-				return node.getAttribute("id") || parent.dataset?.id || parent.getAttribute("data-comment-id") ||
-					node.dataset?.id || node.getAttribute("data-comment-id") || "";
-			}
-			return node.getAttribute("id") || node.dataset?.id || node.getAttribute("data-comment-id") || "";
-		};
-		const contentOf = (node) => {
-			const content = node.querySelector(".content, .note-text, [class*='content']");
-			return content ? clean(content.innerText) : clean(node.innerText);
-		};
-		const comments = [];
-		let moreVisible = false;
-		outer: for (const parent of parents) {
-			window[phaseMarker] = "scan";
-			const top = parent.querySelector(":scope > .comment-item") || parent;
-			const replies = parent.querySelectorAll(":scope > .reply-container > .list-container > .comment-item");
-			if (limit === 0) {
-				const topID = stableID(top, parent);
-				if (topID && !seen.has(topID) && contentOf(top)) {
-					moreVisible = true;
-					break;
-				}
-				for (const sub of replies) {
-					const id = stableID(sub, null);
-					if (id && !seen.has(id) && contentOf(sub)) {
-						moreVisible = true;
-						break outer;
-					}
-				}
-				continue;
-			}
-			const localSeen = new Set();
-			const candidates = [];
-			const candidateCapacity = limit + 1 - comments.length;
-			let parentReturns = false;
-			let parentOverflow = false;
-			let subCount = 0;
-			let stopped = false;
-			const topID = stableID(top, parent);
-			if (topID && !seen.has(topID)) {
-				const topContent = contentOf(top);
-				if (topContent) {
-					localSeen.add(topID);
-					parentReturns = comments.length < limit;
-					if (candidates.length < candidateCapacity) {
-						candidates.push({node: top, id: topID, content: topContent});
-					}
-					if (comments.length + candidates.length > limit) {
-						moreVisible = true;
-						parentOverflow = true;
-						stopped = true;
-					}
-				}
-			}
-			if (!stopped) {
-				for (const sub of replies) {
-					const id = stableID(sub, null);
-					if (!id || seen.has(id) || localSeen.has(id)) continue;
-					const content = contentOf(sub);
-					if (!content) continue;
-					localSeen.add(id);
-					subCount++;
-					if (candidates.length < candidateCapacity) {
-						candidates.push({node: sub, id, content});
-						if (comments.length + candidates.length > limit) {
-							moreVisible = true;
-							parentOverflow = true;
-							if (!parentReturns) {
-								stopped = true;
-								break;
-							}
-						}
-					} else if (!parentReturns) {
-						moreVisible = true;
-						parentOverflow = true;
-						stopped = true;
-						break;
-					}
-				}
-			}
-			window[phaseMarker] = "object-construction";
-			for (const candidate of candidates) {
-				if (comments.length >= limit) break;
-				seen.add(candidate.id);
-				const user = clean(candidate.node.querySelector(".author-wrapper .name, .name, .nickname, [class*='name']")?.innerText);
-				const likeText = clean(candidate.node.querySelector(".interactions .like, .like, [class*='like']")?.innerText);
-				comments.push({
-					id: candidate.id,
-					noteId: feedID,
-					content: candidate.content,
-					likeCount: (likeText.match(/([\d.万wWkK]+)/) || ["", ""])[1],
-					userInfo: { nickname: user, nickName: user },
-					subCommentCount: candidate.node === top ? (subCount ? String(subCount) : "") : "",
-					subComments: [],
-					showTags: []
-				});
-			}
-			if (stopped || parentOverflow) break outer;
-		}
-
+		window[phaseMarker] = "dom-query";` + domCleanJS + domCommentExtractorJS + `
+		window[phaseMarker] = "full-scan";
+		const comments = extractComments(feedID);
 		window[phaseMarker] = "dom-query";
 		const totalText = (document.querySelector(".comments-container .total") ||
 			document.querySelector(".comment-total") || document.querySelector(".total"))?.innerText || "";
@@ -541,7 +438,6 @@ func extractCommentsPageWithProgressFromDOM(ctx context.Context, page *hrod.Page
 		window[phaseMarker] = "stringify";
 		const serialized = JSON.stringify({
 			comments,
-			moreVisible,
 			progress: {
 				total: totalMatch ? Number(totalMatch[1]) : 0,
 				atEnd: /THE\s*END/i.test(endText),
@@ -551,7 +447,7 @@ func extractCommentsPageWithProgressFromDOM(ctx context.Context, page *hrod.Page
 		window[phaseMarker] = "completed";
 		window[phaseMarker] = "";
 		return serialized;
-	}`, feedID, returnedIDs, limit)
+	}`, feedID)
 	if err != nil {
 		if ctx.Err() == nil && !IsFatalRendererError(err) && stderrors.Is(err, context.DeadlineExceeded) {
 			phaseResult, phaseErr := evalQuick(ctx, page, `() => {
@@ -563,7 +459,7 @@ func extractCommentsPageWithProgressFromDOM(ctx context.Context, page *hrod.Page
 			if phaseErr == nil && phaseResult != nil {
 				phase := phaseResult.Value.Str()
 				switch phase {
-				case "dom-query", "scan", "object-construction", "stringify", "completed":
+				case "dom-query", "full-scan", "stringify", "completed":
 				default:
 					phase = ""
 				}

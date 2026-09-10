@@ -255,21 +255,17 @@ func loadCommentsBatchOutcome(ctx context.Context, page *hrod.Page, config Comme
 		if remaining() < 15*time.Second {
 			return nil, false, commentProgress{}, context.DeadlineExceeded
 		}
-		if limit <= 0 {
-			snapshot, err := extractCommentsPageWithProgressFromDOM(extractCtx, page, feedID, batchCursor.ReturnedIDs, 0)
-			if err != nil {
-				return nil, false, commentProgress{}, err
-			}
-			return nil, snapshot.MoreVisible, snapshot.Progress, nil
-		}
-		snapshot, err := extractCommentsPageWithProgressFromDOM(extractCtx, page, feedID, batchCursor.ReturnedIDs, limit)
+		snapshot, err := extractCommentsPageWithProgressFromDOM(extractCtx, page, feedID)
 		if err != nil {
 			return nil, false, commentProgress{}, err
 		}
 
-		batch := make([]Comment, 0, len(snapshot.Comments))
-		newIDs := make(map[string]struct{}, len(snapshot.Comments))
-		for _, comment := range snapshot.Comments {
+		comments := flattenComments(snapshot.Comments)
+		snapshot.Comments = nil
+		batch := make([]Comment, 0, len(comments))
+		newIDs := make(map[string]struct{}, len(comments))
+		moreVisible := false
+		for _, comment := range comments {
 			key := commentBatchKey(len(batch), comment)
 			if key == "" || strings.TrimSpace(comment.Content) == "" {
 				continue
@@ -280,7 +276,8 @@ func loadCommentsBatchOutcome(ctx context.Context, page *hrod.Page, config Comme
 			if _, ok := newIDs[key]; ok {
 				continue
 			}
-			if len(batch) >= limit {
+			if limit <= 0 || len(batch) >= limit {
+				moreVisible = true
 				break
 			}
 			newIDs[key] = struct{}{}
@@ -291,7 +288,7 @@ func loadCommentsBatchOutcome(ctx context.Context, page *hrod.Page, config Comme
 			returned[key] = struct{}{}
 			batchCursor.ReturnedIDs = append(batchCursor.ReturnedIDs, key)
 		}
-		return batch, snapshot.MoreVisible && len(batch) > 0, snapshot.Progress, nil
+		return batch, moreVisible, snapshot.Progress, nil
 	}
 
 	var batch []Comment
