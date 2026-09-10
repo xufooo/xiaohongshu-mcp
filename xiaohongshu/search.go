@@ -921,7 +921,7 @@ func (s *SearchAction) collectResults(ctx context.Context, page *hrod.Page, coun
 		before, _ := readFeedIDs(ctx, page, counter)
 
 		for _, pf := range pfs {
-			option, err := findFilterOption(page, pf)
+			option, err := findFilterOption(filterPage, pf)
 			if err != nil {
 				return nil, stageErr("filter_option_lookup", time.Now(), err, pf.OptionText)
 			}
@@ -932,8 +932,16 @@ func (s *SearchAction) collectResults(ctx context.Context, page *hrod.Page, coun
 				return nil, stageErr("filter_option_delay", time.Now(), err, pf.OptionText)
 			}
 
+			target, err := option.Rod.Interactable()
+			if err != nil {
+				return nil, stageErr("filter_option_interactable", time.Now(), err, pf.OptionText)
+			}
+			if err := option.Actor().Mouse.MovePointDirect(*target); err != nil {
+				return nil, stageErr("filter_option_move", time.Now(), err, pf.OptionText)
+			}
+
 			t0 = time.Now()
-			if err := option.Actor().Mouse.ClickNoScroll(option.Rod); err != nil {
+			if err := option.ClickNoScroll(); err != nil {
 				return nil, stageErr("filter_option_click", t0, err, pf.OptionText)
 			}
 			t0 = time.Now()
