@@ -48,6 +48,17 @@ type pendingFilter struct {
 	OptionText string
 }
 
+var (
+	errFilterMisdirectedNavigation = errors.New("filter_misdirected_navigation")
+	errFilterApplyFailed           = errors.New("filter_apply_failed")
+)
+
+type filterAppliedProbe struct {
+	Route      string `json:"route"`
+	GroupFound bool   `json:"group_found"`
+	ActiveText string `json:"active_text"`
+}
+
 // filterGroups 筛选选项分组定义，按标签组织
 var filterGroups = []filterGroup{
 	{Label: "排序依据", Options: []string{"综合", "最新", "最多点赞", "最多评论", "最多收藏"}},
@@ -538,22 +549,140 @@ func findFilterOption(page *hrod.Page, pf pendingFilter) (*hrod.Element, error) 
 		if strings.TrimSpace(text) != pf.GroupLabel {
 			continue
 		}
-		tags, err := group.Elements("div.tags")
+		tags, err := group.Elements(":scope > div.tags")
 		if err != nil || len(tags) == 0 {
 			return nil, fmt.Errorf("「%s」没有选项", pf.GroupLabel)
 		}
+		matched := false
+		ctx := page.Rod.GetContext()
 		for _, tag := range tags {
 			t, err := tag.Text()
 			if err != nil {
 				continue
 			}
-			if strings.TrimSpace(t) == pf.OptionText {
+			if strings.TrimSpace(t) != pf.OptionText {
+				continue
+			}
+			matched = true
+			hit, err := evalElementJS(ctx, nil, tag, `() => {
+				if (!this.isConnected) {
+					return false;
+				}
+				const style = getComputedStyle(this);
+				if (style.display === "none" || style.visibility === "hidden" || !(parseFloat(style.opacity) > 0)) {
+					return false;
+				}
+				const rect = this.getBoundingClientRect();
+				if (rect.width <= 0 || rect.height <= 0) {
+					return false;
+				}
+				const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+				return this.closest("div.filter-panel") !== null && (hit === this || this.contains(hit));
+			}`)
+			if err == nil && hit != nil && hit.Value.Bool() {
 				return tag, nil
 			}
+		}
+		if matched {
+			return nil, fmt.Errorf("筛选选项「%s」当前不可命中", pf.OptionText)
 		}
 		return nil, fmt.Errorf("「%s」里没有「%s」", pf.GroupLabel, pf.OptionText)
 	}
 	return nil, fmt.Errorf("筛选面板里没有「%s」组", pf.GroupLabel)
+}
+
+func readFilterAppliedProbe(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, groupLabel string) (filterAppliedProbe, error) {
+	obj, err := evalJS(ctx, counter, page, `(groupLabel) => {
+		const text = (el) => String(el?.textContent || "").replace(/\s+/g, " ").trim();
+		const route = location.origin + location.pathname;
+		const group = Array.from(document.querySelectorAll(".filter-panel .filters")).find((candidate) =>
+			Array.from(candidate.querySelectorAll(":scope > span")).some((label) => text(label) === groupLabel)
+		);
+		const active = group ? group.querySelector(".tags.active") : null;
+		return JSON.stringify({
+			route,
+			group_found: !!group,
+			active_text: active ? text(active) : "",
+		});
+	}`, groupLabel)
+	if err != nil {
+		return filterAppliedProbe{}, err
+	}
+	if obj == nil {
+		return filterAppliedProbe{}, fmt.Errorf("读取筛选状态无返回")
+	}
+	var probe filterAppliedProbe
+	if err := json.Unmarshal([]byte(obj.Value.Str()), &probe); err != nil {
+		return filterAppliedProbe{}, err
+	}
+	return probe, nil
+}
+
+func filterApplied(probe filterAppliedProbe, pf pendingFilter) bool {
+	return isSearchResultPage(probe.Route) && probe.GroupFound && strings.TrimSpace(probe.ActiveText) == pf.OptionText
+}
+
+func waitFilterApplied(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, pf pendingFilter, timeout time.Duration) error {
+	if dl, ok := ctx.Deadline(); ok {
+		if rem := time.Until(dl); rem < timeout {
+			timeout = rem
+		}
+	}
+	deadline := time.Now().Add(timeout)
+	var last filterAppliedProbe
+	var lastErr error
+
+	for time.Now().Before(deadline) {
+		if err := page.Err(); err != nil {
+			return fmt.Errorf("%w: %v", errFilterApplyFailed, err)
+		}
+		probe, err := readFilterAppliedProbe(ctx, page, counter, pf.GroupLabel)
+		if err != nil {
+			if IsFatalRendererError(err) {
+				return fmt.Errorf("%w: %w", errFilterApplyFailed, err)
+			}
+			lastErr = err
+		} else {
+			last = probe
+			lastErr = nil
+			if !isSearchResultPage(probe.Route) {
+				return fmt.Errorf("%w: route=%s", errFilterMisdirectedNavigation, probe.Route)
+			}
+			if filterApplied(probe, pf) {
+				return nil
+			}
+		}
+		sleepFor := min(300*time.Millisecond, time.Until(deadline))
+		if sleepFor <= 0 {
+			break
+		}
+		if err := page.Sleep(sleepFor); err != nil {
+			return fmt.Errorf("%w: %v", errFilterApplyFailed, err)
+		}
+	}
+
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("%w: %v", errFilterApplyFailed, err)
+	}
+	if lastErr != nil {
+		return fmt.Errorf("%w: %v", errFilterApplyFailed, lastErr)
+	}
+	return fmt.Errorf("%w: group=%q option=%q active=%q route=%s", errFilterApplyFailed, pf.GroupLabel, pf.OptionText, last.ActiveText, last.Route)
+}
+
+func ensureFilterSearchRoute(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter) error {
+	obj, err := evalJS(ctx, counter, page, `() => location.origin + location.pathname`)
+	if err != nil {
+		return fmt.Errorf("读取筛选路由失败: %w", err)
+	}
+	if obj == nil {
+		return fmt.Errorf("读取筛选路由无返回")
+	}
+	route := obj.Value.Str()
+	if !isSearchResultPage(route) {
+		return fmt.Errorf("%w: route=%s", errFilterMisdirectedNavigation, route)
+	}
+	return nil
 }
 
 // readFeedIDs 从 __INITIAL_STATE__ 读取当前搜索结果 feed ID 列表
@@ -756,7 +885,7 @@ func (s *SearchAction) collectResults(ctx context.Context, page *hrod.Page, coun
 				fields["tag"] = tag
 			}
 			logrus.WithFields(fields).Error("筛选阶段失败")
-			return fmt.Errorf("筛选阶段 %s 失败", stage)
+			return fmt.Errorf("筛选阶段 %s 失败: %w", stage, err)
 		}
 
 		filterCtx, cancel := context.WithTimeout(page.Actor().Ctx(), searchFilterRefreshWaitTimeout)
@@ -807,9 +936,17 @@ func (s *SearchAction) collectResults(ctx context.Context, page *hrod.Page, coun
 			if err := option.Actor().Mouse.ClickNoScroll(option.Rod); err != nil {
 				return nil, stageErr("filter_option_click", t0, err, pf.OptionText)
 			}
+			t0 = time.Now()
+			if err := waitFilterApplied(filterCtx, filterPage, counter, pf, searchFilterRefreshWaitTimeout); err != nil {
+				return nil, stageErr("filter_option_apply", t0, err, pf.OptionText)
+			}
 		}
 
 		stateRefreshed = waitFeedsChanged(ctx, page, counter, before, searchFilterRefreshWaitTimeout)
+		t0 = time.Now()
+		if err := ensureFilterSearchRoute(ctx, page, counter); err != nil {
+			return nil, stageErr("filter_route_guard", t0, err, "")
+		}
 		appliedFilters = true
 	}
 

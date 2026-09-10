@@ -1,9 +1,12 @@
 package xiaohongshu
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSearchFallbackDoesNotSwallowFatal(t *testing.T) {
@@ -90,6 +93,7 @@ func TestIsSearchResultPage(t *testing.T) {
 		{name: "search_result_ai", url: "https://www.xiaohongshu.com/search_result_ai?keyword=abc", want: true},
 		{name: "无 fragment", url: "https://www.xiaohongshu.com/search_result#anchor", want: false},
 		{name: "explore", url: "https://www.xiaohongshu.com/explore", want: false},
+		{name: "explore detail", url: "https://www.xiaohongshu.com/explore/abc123", want: false},
 		{name: "伪域名", url: "https://evil.com/search_result?keyword=abc", want: false},
 		{name: "相似路径", url: "https://www.xiaohongshu.com/search_results_extra", want: false},
 		{name: "非 https", url: "http://www.xiaohongshu.com/search_result?keyword=abc", want: false},
@@ -99,5 +103,71 @@ func TestIsSearchResultPage(t *testing.T) {
 		if got := isSearchResultPage(tc.url); got != tc.want {
 			t.Errorf("%s: isSearchResultPage(%q) = %v, want %v", tc.name, tc.url, got, tc.want)
 		}
+	}
+}
+
+func TestFilterAppliedRequiresActiveOptionOnSearchRoute(t *testing.T) {
+	pf := pendingFilter{GroupLabel: "排序依据", OptionText: "最多评论"}
+	tests := []struct {
+		name  string
+		probe filterAppliedProbe
+		want  bool
+	}{
+		{
+			name:  "目标未 active",
+			probe: filterAppliedProbe{Route: "https://www.xiaohongshu.com/search_result", GroupFound: true, ActiveText: "综合"},
+			want:  false,
+		},
+		{
+			name:  "目标 active 且处于搜索路由",
+			probe: filterAppliedProbe{Route: "https://www.xiaohongshu.com/search_result_ai", GroupFound: true, ActiveText: "最多评论"},
+			want:  true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := filterApplied(tc.probe, pf); got != tc.want {
+				t.Fatalf("filterApplied(%+v, %+v) = %v, want %v", tc.probe, pf, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestWaitFilterAppliedTimeoutWrapsApplyFailure(t *testing.T) {
+	client := &currentPageURLCDPClient{response: runtimeEvaluateStringResponse(t, `{"route":"https://www.xiaohongshu.com/search_result","group_found":true,"active_text":"综合"}`)}
+	session := newCurrentPageURLSession(t, client)
+	page := session.page.Context(context.Background())
+
+	err := waitFilterApplied(context.Background(), page, nil, pendingFilter{GroupLabel: "排序依据", OptionText: "最多评论"}, 50*time.Millisecond)
+	if !errors.Is(err, errFilterApplyFailed) {
+		t.Fatalf("未 active 超时应包装为 errFilterApplyFailed: %v", err)
+	}
+	if client.method != "Runtime.evaluate" {
+		t.Fatalf("应先读取未 active probe: method=%q", client.method)
+	}
+}
+
+func TestWaitFilterAppliedPreservesFatalRendererError(t *testing.T) {
+	fatalProbeErr := fmt.Errorf("probe: %w", ErrFatalRendererError)
+	if !IsFatalRendererError(fatalProbeErr) {
+		t.Fatal("测试前提错误：fatal probe 错误应包含 ErrFatalRendererError")
+	}
+	client := &currentPageURLCDPClient{
+		response: runtimeEvaluateStringResponse(t, `{"route":"https://www.xiaohongshu.com/search_result","group_found":true,"active_text":"综合"}`),
+	}
+	session := newCurrentPageURLSession(t, client)
+	client.err = fatalProbeErr
+	client.forceErr = true
+	page := session.page.Context(context.Background())
+
+	err := waitFilterApplied(context.Background(), page, nil, pendingFilter{GroupLabel: "排序依据", OptionText: "最多评论"}, 50*time.Millisecond)
+	if !errors.Is(err, errFilterApplyFailed) {
+		t.Fatalf("fatal probe 错误应包装为 errFilterApplyFailed: %v", err)
+	}
+	if !IsFatalRendererError(err) {
+		t.Fatalf("fatal probe 错误链不应被吞掉: %v", err)
+	}
+	if client.method != "Runtime.evaluate" {
+		t.Fatalf("应由 fatal probe 读取路径触发: method=%q", client.method)
 	}
 }

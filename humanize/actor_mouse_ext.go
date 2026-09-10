@@ -3,6 +3,7 @@ package humanize
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"math/rand"
 	"os"
@@ -386,6 +387,25 @@ func (m *Mouse) ClickNoScroll(el *rod.Element) error {
 	// Human pause before clicking.
 	if err := sleepWithContext(m.ctx, randDuration(80*time.Millisecond, 350*time.Millisecond)); err != nil {
 		return err
+	}
+
+	final := m.posSnapshot()
+	result, err := el.Context(m.ctx).Eval(`(x, y) => {
+		const style = window.getComputedStyle(this);
+		const rect = this.getBoundingClientRect();
+		const visible = this.isConnected &&
+			style.display !== "none" &&
+			style.visibility !== "hidden" &&
+			Number(style.opacity || "1") > 0 &&
+			rect.width > 0 && rect.height > 0;
+		const hit = visible ? document.elementFromPoint(x, y) : null;
+		return visible && !!hit && (hit === this || this.contains(hit));
+	}`, final.X, final.Y)
+	if err != nil {
+		return fmt.Errorf("最终点击命中校验失败: %w", err)
+	}
+	if result == nil || !result.Value.Bool() {
+		return errors.New("最终点击落点不再命中目标")
 	}
 
 	if err := m.dispatchMouseButton(proto.InputDispatchMouseEventTypeMousePressed, proto.InputMouseButtonLeft, 1); err != nil {
