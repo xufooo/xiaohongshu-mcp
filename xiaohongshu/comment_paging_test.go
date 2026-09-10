@@ -17,18 +17,27 @@ import (
 	hrod "github.com/xpzouying/xiaohongshu-mcp/humanize/rod"
 )
 
+const commentPagingWindowObjectID = "comment-paging-window"
+
 type commentPagingCDPClient struct {
-	responses          [][]byte
-	errs               []error
-	targetResponses    [][]byte
-	targetErrs         []error
-	runtimeCalls       int
-	runtimeExpressions []string
-	targetCalls        int
-	eventCh            chan *cdp.Event
-	eventOnce          sync.Once
-	closeOnce          sync.Once
-	afterRuntimeCall   func(int)
+	responses             [][]byte
+	errs                  []error
+	runtimeResponses      [][]byte
+	runtimeErrs           []error
+	targetResponses       [][]byte
+	targetErrs            []error
+	runtimeCalls          int
+	runtimeProbeCalls     int
+	runtimeExpressions    []string
+	callFunctionCalls           int
+	callFunctionDeclarations    []string
+	callFunctionObjectIDs       []proto.RuntimeRemoteObjectID
+	callFunctionArguments       [][]*proto.RuntimeCallArgument
+	targetCalls           int
+	eventCh               chan *cdp.Event
+	eventOnce             sync.Once
+	closeOnce             sync.Once
+	afterFunctionCall     func(int)
 }
 
 func (c *commentPagingCDPClient) Event() <-chan *cdp.Event {
@@ -71,23 +80,40 @@ func (c *commentPagingCDPClient) Call(ctx context.Context, _ string, method stri
 	case "Target.attachToTarget":
 		return []byte(`{"sessionId":"session-1"}`), nil
 	case "Runtime.evaluate":
-		index := c.runtimeCalls
 		c.runtimeCalls++
+		var request struct {
+			Expression string `json:"expression"`
+		}
 		if raw, marshalErr := json.Marshal(params); marshalErr == nil {
-			var request struct {
-				Expression string `json:"expression"`
-			}
-			if json.Unmarshal(raw, &request) == nil {
-				c.runtimeExpressions = append(c.runtimeExpressions, request.Expression)
-			}
+			_ = json.Unmarshal(raw, &request)
+		}
+		c.runtimeExpressions = append(c.runtimeExpressions, request.Expression)
+		if request.Expression == "window" {
+			return []byte(`{"result":{"type":"object","objectId":"comment-paging-window"}}`), nil
+		}
+		index := c.runtimeProbeCalls
+		c.runtimeProbeCalls++
+		if index < len(c.runtimeErrs) && c.runtimeErrs[index] != nil {
+			return nil, c.runtimeErrs[index]
+		}
+		if index < len(c.runtimeResponses) {
+			return c.runtimeResponses[index], nil
+		}
+	case "Runtime.callFunctionOn":
+		index := c.callFunctionCalls
+		c.callFunctionCalls++
+		if request, ok := params.(proto.RuntimeCallFunctionOn); ok {
+			c.callFunctionDeclarations = append(c.callFunctionDeclarations, request.FunctionDeclaration)
+			c.callFunctionObjectIDs = append(c.callFunctionObjectIDs, request.ObjectID)
+			c.callFunctionArguments = append(c.callFunctionArguments, request.Arguments)
 		}
 		if index < len(c.errs) && c.errs[index] != nil {
 			return nil, c.errs[index]
 		}
 		if index < len(c.responses) {
 			response := c.responses[index]
-			if c.afterRuntimeCall != nil {
-				c.afterRuntimeCall(index)
+			if c.afterFunctionCall != nil {
+				c.afterFunctionCall(index)
 			}
 			return response, nil
 		}
@@ -117,7 +143,12 @@ func newCommentPagingPage(t *testing.T, client *commentPagingCDPClient) *hrod.Pa
 		t.Fatalf("初始化 rod page: %v", err)
 	}
 	client.runtimeCalls = 0
+	client.runtimeProbeCalls = 0
 	client.runtimeExpressions = nil
+	client.callFunctionCalls = 0
+	client.callFunctionDeclarations = nil
+	client.callFunctionObjectIDs = nil
+	client.callFunctionArguments = nil
 	client.targetCalls = 0
 	return &hrod.Page{Rod: page}
 }
@@ -261,6 +292,39 @@ func assertCommentPagingCalls(t *testing.T, client *commentPagingCDPClient, targ
 	}
 }
 
+func assertCommentPagingMainCalls(t *testing.T, client *commentPagingCDPClient, wantCalls int, feedID string) {
+	t.Helper()
+	if client.callFunctionCalls != wantCalls || len(client.callFunctionDeclarations) != wantCalls ||
+		len(client.callFunctionObjectIDs) != wantCalls || len(client.callFunctionArguments) != wantCalls {
+		t.Fatalf("Runtime.callFunctionOn 调用契约错误: calls=%d declarations=%d objectIDs=%d arguments=%d want=%d",
+			client.callFunctionCalls, len(client.callFunctionDeclarations), len(client.callFunctionObjectIDs), len(client.callFunctionArguments), wantCalls)
+	}
+	for i := 0; i < wantCalls; i++ {
+		declaration := client.callFunctionDeclarations[i]
+		if !strings.HasPrefix(declaration, "function() { return (") ||
+			!strings.Contains(declaration, "(feedID) => {") ||
+			!strings.Contains(declaration, "extractComments(feedID)") ||
+			!strings.Contains(declaration, ").apply(this, arguments) }") {
+			t.Fatalf("分页主调用 FunctionDeclaration 错误: %q", declaration)
+		}
+		if client.callFunctionObjectIDs[i] != commentPagingWindowObjectID {
+			t.Fatalf("分页主调用 objectId 错误: got=%q want=%q", client.callFunctionObjectIDs[i], commentPagingWindowObjectID)
+		}
+		args := client.callFunctionArguments[i]
+		if len(args) != 1 || args[0] == nil || args[0].ObjectID != "" {
+			t.Fatalf("分页主调用应使用一个结构化值参数: %+v", args)
+		}
+		value, err := json.Marshal(args[0].Value)
+		if err != nil {
+			t.Fatalf("读取分页主调用实参失败: %v", err)
+		}
+		var gotFeedID string
+		if err := json.Unmarshal(value, &gotFeedID); err != nil || gotFeedID != feedID {
+			t.Fatalf("分页主调用实参错误: raw=%s got=%q want=%q", value, gotFeedID, feedID)
+		}
+	}
+}
+
 func TestRecoverCommentBatchSession(t *testing.T) {
 	tests := []struct {
 		name, wantErr, wantDetail string
@@ -324,23 +388,26 @@ func TestExtractCommentsPagePreservesErrors(t *testing.T) {
 	terminationErr := context.DeadlineExceeded
 	probeErr := errors.New("probe failed")
 	tests := []struct {
-		name             string
-		ctx              context.Context
-		errs             []error
-		responses        [][]byte
-		wantErr          error
-		wantContains     string
-		wantFatal        bool
-		wantRuntimeCalls int
-		wantProbe        bool
-		probeErrorHidden bool
+		name               string
+		ctx                context.Context
+		errs               []error
+		runtimeErrs        []error
+		runtimeResponses   [][]byte
+		wantErr            error
+		wantContains       string
+		wantFatal          bool
+		wantRuntimeCalls   int
+		wantFunctionCalls  int
+		wantProbe          bool
+		probeErrorHidden   bool
 	}{
 		{
 			name:             "deadline sentinel probes once (fake CDP)",
 			errs:             []error{terminationErr},
-			responses:        [][]byte{nil, []byte(`{"result":{"type":"string","value":"full-scan"}}`)},
+			runtimeResponses: [][]byte{[]byte(`{"result":{"type":"string","value":"full-scan"}}`)},
 			wantErr:          terminationErr,
 			wantRuntimeCalls: 2,
+			wantFunctionCalls: 1,
 			wantProbe:        true,
 		},
 		{
@@ -348,31 +415,40 @@ func TestExtractCommentsPagePreservesErrors(t *testing.T) {
 			errs:             []error{errors.New("local eval timeout")},
 			wantContains:     "local eval timeout",
 			wantRuntimeCalls: 1,
+			wantFunctionCalls: 1,
 		},
 		{
 			name:             "fatal renderer does not probe",
 			errs:             []error{fmt.Errorf("%w: renderer closed", ErrFatalRendererError)},
 			wantFatal:        true,
 			wantRuntimeCalls: 1,
+			wantFunctionCalls: 1,
 		},
 		{
 			name:             "caller canceled does not probe",
 			ctx:              canceledCtx,
 			wantErr:          context.Canceled,
 			wantRuntimeCalls: 0,
+			wantFunctionCalls: 0,
 		},
 		{
 			name:             "probe failure preserves original error",
-			errs:             []error{terminationErr, probeErr},
+			errs:             []error{terminationErr},
+			runtimeErrs:      []error{probeErr},
 			wantErr:          terminationErr,
 			wantRuntimeCalls: 2,
+			wantFunctionCalls: 1,
 			wantProbe:        true,
 			probeErrorHidden: true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			client := &commentPagingCDPClient{errs: tt.errs, responses: tt.responses}
+			client := &commentPagingCDPClient{
+				errs:             tt.errs,
+				runtimeErrs:      tt.runtimeErrs,
+				runtimeResponses: tt.runtimeResponses,
+			}
 			page := newCommentPagingPage(t, client)
 			ctx := tt.ctx
 			if ctx == nil {
@@ -396,6 +472,13 @@ func TestExtractCommentsPagePreservesErrors(t *testing.T) {
 			}
 			if client.runtimeCalls != tt.wantRuntimeCalls {
 				t.Fatalf("Runtime.evaluate 调用次数错误: got=%d want=%d", client.runtimeCalls, tt.wantRuntimeCalls)
+			}
+			assertCommentPagingMainCalls(t, client, tt.wantFunctionCalls, "feed-1")
+			if len(client.runtimeExpressions) != tt.wantRuntimeCalls {
+				t.Fatalf("Runtime.evaluate expression 记录数量错误: got=%d want=%d expressions=%+v", len(client.runtimeExpressions), tt.wantRuntimeCalls, client.runtimeExpressions)
+			}
+			if tt.wantRuntimeCalls > 0 && client.runtimeExpressions[0] != "window" {
+				t.Fatalf("Runtime.evaluate 首次调用应获取 window context: %+v", client.runtimeExpressions)
 			}
 			if tt.wantProbe {
 				if len(client.runtimeExpressions) != 2 || !strings.Contains(client.runtimeExpressions[1], "__xhsCommentPaginationPhase") {
@@ -598,9 +681,10 @@ func TestLoadCommentsBatchLimitZeroUsesSameSnapshotForProgress(t *testing.T) {
 	if next == nil || len(next.ReturnedIDs) != 2 || next.ReturnedIDs[0] != "comment-1" || next.ReturnedIDs[1] != "comment-2" {
 		t.Fatalf("limit=0 不应把 overflow 写入 cursor: %+v", next)
 	}
-	if client.runtimeCalls != 2 {
+	if client.runtimeCalls != 1 {
 		t.Fatalf("limit=0 不应增加独立 progress Eval: runtimeCalls=%d", client.runtimeCalls)
 	}
+	assertCommentPagingMainCalls(t, client, 2, "feed-1")
 }
 
 func TestExtractCommentsPageExecutesPaginationJS(t *testing.T) {
@@ -722,7 +806,7 @@ func TestCommentPagingOutcomeCarriesProgressToCompletion(t *testing.T) {
 				Comments: []Comment{{ID: "comment-1", NoteID: "feed-1", Content: "内容"}},
 				Progress: commentProgress{Total: 1, AtEnd: true},
 			})},
-			afterRuntimeCall: func(index int) {
+			afterFunctionCall: func(index int) {
 				if index == 0 {
 					cancel()
 				}
