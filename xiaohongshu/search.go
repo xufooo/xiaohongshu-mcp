@@ -50,14 +50,7 @@ type pendingFilter struct {
 
 var (
 	errFilterMisdirectedNavigation = errors.New("filter_misdirected_navigation")
-	errFilterApplyFailed           = errors.New("filter_apply_failed")
 )
-
-type filterAppliedProbe struct {
-	Route      string `json:"route"`
-	GroupFound bool   `json:"group_found"`
-	ActiveText string `json:"active_text"`
-}
 
 // filterGroups 筛选选项分组定义，按标签组织
 var filterGroups = []filterGroup{
@@ -591,98 +584,21 @@ func findFilterOption(page *hrod.Page, pf pendingFilter) (*hrod.Element, error) 
 	return nil, fmt.Errorf("筛选面板里没有「%s」组", pf.GroupLabel)
 }
 
-func readFilterAppliedProbe(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, groupLabel string) (filterAppliedProbe, error) {
-	obj, err := evalJS(ctx, counter, page, `(groupLabel) => {
-		const text = (el) => String(el?.textContent || "").replace(/\s+/g, " ").trim();
-		const route = location.origin + location.pathname;
-		const group = Array.from(document.querySelectorAll(".filter-panel .filters")).find((candidate) =>
-			Array.from(candidate.querySelectorAll(":scope > span")).some((label) => text(label) === groupLabel)
-		);
-		const active = group ? group.querySelector(".tags.active") : null;
-		return JSON.stringify({
-			route,
-			group_found: !!group,
-			active_text: active ? text(active) : "",
-		});
-	}`, groupLabel)
+func ensureFilterPanelOpen(ctx context.Context, counter *evalTimeoutCounter, page *hrod.Page, filterButton *hrod.Element) (string, error) {
+	panel, err := evalJS(ctx, counter, page, `() => document.querySelector(".filter-panel") !== null`)
 	if err != nil {
-		return filterAppliedProbe{}, err
+		return "filter_panel_probe", err
 	}
-	if obj == nil {
-		return filterAppliedProbe{}, fmt.Errorf("读取筛选状态无返回")
+	if panel == nil || panel.Type != proto.RuntimeRemoteObjectTypeBoolean {
+		return "filter_panel_probe", errors.New("筛选面板状态探针无有效返回")
 	}
-	var probe filterAppliedProbe
-	if err := json.Unmarshal([]byte(obj.Value.Str()), &probe); err != nil {
-		return filterAppliedProbe{}, err
+	if panel.Value.Bool() {
+		return "", nil
 	}
-	return probe, nil
-}
-
-func filterApplied(probe filterAppliedProbe, pf pendingFilter) bool {
-	return isSearchResultPage(probe.Route) && probe.GroupFound && strings.TrimSpace(probe.ActiveText) == pf.OptionText
-}
-
-func waitFilterApplied(ctx context.Context, filterPage *hrod.Page, counter *evalTimeoutCounter, pf pendingFilter, timeout time.Duration) error {
-	if dl, ok := ctx.Deadline(); ok {
-		if rem := time.Until(dl); rem < timeout {
-			timeout = rem
-		}
+	if err := humanize.ClickDirect(filterButton.Rod); err != nil {
+		return "filter_button_click", err
 	}
-	deadline := time.Now().Add(timeout)
-	var last filterAppliedProbe
-	var lastErr error
-	reopened := false
-
-	for time.Now().Before(deadline) {
-		if err := filterPage.Err(); err != nil {
-			return fmt.Errorf("%w: %v", errFilterApplyFailed, err)
-		}
-		probe, err := readFilterAppliedProbe(ctx, filterPage, counter, pf.GroupLabel)
-		if err != nil {
-			if IsFatalRendererError(err) {
-				return fmt.Errorf("%w: %w", errFilterApplyFailed, err)
-			}
-			lastErr = err
-		} else {
-			last = probe
-			lastErr = nil
-			if !isSearchResultPage(probe.Route) {
-				return fmt.Errorf("%w: route=%s", errFilterMisdirectedNavigation, probe.Route)
-			}
-			if filterApplied(probe, pf) {
-				return nil
-			}
-			if !probe.GroupFound && !reopened {
-				filterButton, err := filterPage.Element("div.filter")
-				if err != nil {
-					return fmt.Errorf("%w: %w", errFilterApplyFailed, err)
-				}
-				target, err := filterButton.Rod.Interactable()
-				if err != nil {
-					return fmt.Errorf("%w: %w", errFilterApplyFailed, err)
-				}
-				if err := filterButton.Actor().Mouse.MovePointDirect(*target); err != nil {
-					return fmt.Errorf("%w: %w", errFilterApplyFailed, err)
-				}
-				reopened = true
-			}
-		}
-		sleepFor := min(300*time.Millisecond, time.Until(deadline))
-		if sleepFor <= 0 {
-			break
-		}
-		if err := filterPage.Sleep(sleepFor); err != nil {
-			return fmt.Errorf("%w: %v", errFilterApplyFailed, err)
-		}
-	}
-
-	if err := ctx.Err(); err != nil {
-		return fmt.Errorf("%w: %v", errFilterApplyFailed, err)
-	}
-	if lastErr != nil {
-		return fmt.Errorf("%w: %v", errFilterApplyFailed, lastErr)
-	}
-	return fmt.Errorf("%w: group=%q option=%q active=%q route=%s", errFilterApplyFailed, pf.GroupLabel, pf.OptionText, last.ActiveText, last.Route)
+	return "", nil
 }
 
 func ensureFilterSearchRoute(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter) error {
@@ -913,56 +829,62 @@ func (s *SearchAction) collectResults(ctx context.Context, page *hrod.Page, coun
 			return nil, stageErr("filter_button_lookup", t0, err, "")
 		}
 
-		t0 = time.Now()
-		if err := filterButton.Hover(); err != nil {
-			return nil, stageErr("filter_button_hover", t0, err, "")
-		}
-		humanize.Delay(filterCtx, humanize.BeforeClick)
-
-		t0 = time.Now()
-		for {
-			panel, panelErr := evalJS(filterCtx, counter, filterPage, `(groupLabel, optionText) => {
-				const text = (el) => String(el?.textContent || "").replace(/\s+/g, " ").trim();
-				const panel = document.querySelector(".filter-panel");
-				if (!panel) {
-					return false;
-				}
-				const group = Array.from(panel.querySelectorAll(".filters")).find((candidate) =>
-					Array.from(candidate.querySelectorAll(":scope > span")).some((label) => text(label) === groupLabel)
-				);
-				if (!group) {
-					return false;
-				}
-				return Array.from(group.querySelectorAll("div.tags")).some((tag) => {
-					if (text(tag) !== optionText || !tag.isConnected) {
-						return false;
-					}
-					const style = getComputedStyle(tag);
-					if (style.display === "none" || style.visibility === "hidden" || !(parseFloat(style.opacity) > 0)) {
-						return false;
-					}
-					const rect = tag.getBoundingClientRect();
-					if (rect.width <= 0 || rect.height <= 0) {
-						return false;
-					}
-					const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
-					return tag.closest("div.filter-panel") !== null && (hit === tag || tag.contains(hit));
-				});
-			}`, pfs[0].GroupLabel, pfs[0].OptionText)
-			if panelErr != nil {
-				return nil, stageErr("filter_option_ready_wait", t0, panelErr, "")
-			}
-			if panel != nil && panel.Value.Bool() {
-				break
-			}
-			if sleepErr := filterPage.Sleep(300 * time.Millisecond); sleepErr != nil {
-				return nil, stageErr("filter_option_ready_wait", t0, sleepErr, "")
-			}
-		}
-
 		before, _ := readFeedIDs(ctx, page, counter)
 
 		for _, pf := range pfs {
+			t0 := time.Now()
+			if err := filterButton.Hover(); err != nil {
+				return nil, stageErr("filter_button_hover", t0, err, pf.OptionText)
+			}
+			humanize.Delay(filterCtx, humanize.BeforeClick)
+
+			t0 = time.Now()
+			stage, panelErr := ensureFilterPanelOpen(filterCtx, counter, filterPage, filterButton)
+			if panelErr != nil {
+				return nil, stageErr(stage, t0, panelErr, pf.OptionText)
+			}
+
+			t0 = time.Now()
+			for {
+				panel, panelErr := evalJS(filterCtx, counter, filterPage, `(groupLabel, optionText) => {
+					const text = (el) => String(el?.textContent || "").replace(/\s+/g, " ").trim();
+					const panel = document.querySelector(".filter-panel");
+					if (!panel) {
+						return false;
+					}
+					const group = Array.from(panel.querySelectorAll(".filters")).find((candidate) =>
+						Array.from(candidate.querySelectorAll(":scope > span")).some((label) => text(label) === groupLabel)
+					);
+					if (!group) {
+						return false;
+					}
+					return Array.from(group.querySelectorAll("div.tags")).some((tag) => {
+						if (text(tag) !== optionText || !tag.isConnected) {
+							return false;
+						}
+						const style = getComputedStyle(tag);
+						if (style.display === "none" || style.visibility === "hidden" || !(parseFloat(style.opacity) > 0)) {
+							return false;
+						}
+						const rect = tag.getBoundingClientRect();
+						if (rect.width <= 0 || rect.height <= 0) {
+							return false;
+						}
+						const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+						return tag.closest("div.filter-panel") !== null && (hit === tag || tag.contains(hit));
+					});
+				}`, pf.GroupLabel, pf.OptionText)
+				if panelErr != nil {
+					return nil, stageErr("filter_option_ready_wait", t0, panelErr, pf.OptionText)
+				}
+				if panel != nil && panel.Value.Bool() {
+					break
+				}
+				if sleepErr := filterPage.Sleep(300 * time.Millisecond); sleepErr != nil {
+					return nil, stageErr("filter_option_ready_wait", t0, sleepErr, pf.OptionText)
+				}
+			}
+
 			option, err := findFilterOption(filterPage, pf)
 			if err != nil {
 				return nil, stageErr("filter_option_lookup", time.Now(), err, pf.OptionText)
@@ -974,21 +896,9 @@ func (s *SearchAction) collectResults(ctx context.Context, page *hrod.Page, coun
 				return nil, stageErr("filter_option_delay", time.Now(), err, pf.OptionText)
 			}
 
-			target, err := option.Rod.Interactable()
-			if err != nil {
-				return nil, stageErr("filter_option_interactable", time.Now(), err, pf.OptionText)
-			}
-			if err := option.Actor().Mouse.MovePointDirect(*target); err != nil {
-				return nil, stageErr("filter_option_move", time.Now(), err, pf.OptionText)
-			}
-
 			t0 = time.Now()
-			if err := option.ClickNoScroll(); err != nil {
+			if err := humanize.ClickDirect(option.Rod); err != nil {
 				return nil, stageErr("filter_option_click", t0, err, pf.OptionText)
-			}
-			t0 = time.Now()
-			if err := waitFilterApplied(filterCtx, filterPage, counter, pf, searchFilterRefreshWaitTimeout); err != nil {
-				return nil, stageErr("filter_option_apply", t0, err, pf.OptionText)
 			}
 		}
 
