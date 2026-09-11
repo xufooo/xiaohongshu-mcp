@@ -640,15 +640,22 @@ func (s *AppServer) handleSessionSearch(ctx context.Context, args SessionSearchA
 	return jsonMCPResultWithTools(result, afterSearchTools)
 }
 
+func detailVisibilityDiagnosticSuffix(err error) string {
+	var visibilityErr *xiaohongshu.DetailVisibilityError
+	if errors.As(err, &visibilityErr) && visibilityErr != nil {
+		if diagnostic := visibilityErr.Diagnostic(); diagnostic != "" {
+			return "（" + diagnostic + "）"
+		}
+	}
+	return ""
+}
+
 func shareURLOpenErrorStage(err error) string {
 	if err == nil {
 		return "未知错误"
 	}
-	var visibilityErr *xiaohongshu.DetailVisibilityError
-	if errors.As(err, &visibilityErr) && visibilityErr != nil {
-		if diagnostic := visibilityErr.Diagnostic(); diagnostic != "" {
-			return "详情可见性校验失败（" + diagnostic + "）"
-		}
+	if suffix := detailVisibilityDiagnosticSuffix(err); suffix != "" {
+		return "详情可见性校验失败" + suffix
 	}
 	var urlPollErr *xiaohongshu.NoteURLPollError
 	if errors.As(err, &urlPollErr) && urlPollErr != nil {
@@ -722,7 +729,7 @@ func (s *AppServer) handleSessionOpenNote(ctx context.Context, args SessionOpenN
 		if hasShareURL {
 			return sessionMCPErrorResult("打开笔记失败: "+shareURLOpenErrorStage(err), sessionNextStepState())
 		}
-		return sessionMCPErrorFromErr("打开笔记失败", err, sessionNextStepState())
+		return sessionMCPErrorFromErr("打开笔记失败", fmt.Errorf("%w%s", err, detailVisibilityDiagnosticSuffix(err)), sessionNextStepState())
 	}
 	return jsonMCPResultWithTools(info, afterOpenTools)
 }

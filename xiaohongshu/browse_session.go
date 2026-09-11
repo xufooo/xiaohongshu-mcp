@@ -774,6 +774,9 @@ func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, shareURL, xsecT
 			return fail(fmt.Errorf("探测当前笔记详情失败: %w", probeErr))
 		}
 		alreadyOpen := probeErr == nil && currentFeedDetailMatched(probe, feed.ID)
+		if probeErr == nil && probe.VisibleDetailCount > 0 && !alreadyOpen {
+			return fail(fmt.Errorf("当前处于其他笔记详情，请先 go_back"))
+		}
 		if !alreadyOpen {
 			sourceURL, err = s.currentPageURL(opCtx, counter)
 			if err != nil {

@@ -167,10 +167,22 @@ const (
 func waitFeedDetailVisible(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, feedID string) error {
 	return waitFeedDetailVisibleWith(ctx, feedID, page.Err,
 		func(probeCtx context.Context) (currentFeedDetailProbe, error) {
-			return probeCurrentFeedDetail(probeCtx, page, feedID)
+			return probeCurrentFeedDetailWithCounter(probeCtx, counter, page, feedID)
 		}, func(sleepCtx context.Context, min, max time.Duration) error {
 			return page.Context(sleepCtx).SleepRandom(min, max)
 		})
+}
+
+func probeCurrentFeedDetailWithCounter(ctx context.Context, counter *evalTimeoutCounter, page *hrod.Page, feedID string) (currentFeedDetailProbe, error) {
+	evalCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	probe, err := probeCurrentFeedDetail(evalCtx, page, feedID)
+	if counter != nil {
+		err = counter.add(ctx, err, func() error {
+			return confirmRendererAlive(ctx, page)
+		})
+	}
+	return probe, normalizeCurrentDetailProbeError(ctx, err)
 }
 
 func waitFeedDetailVisibleWith(

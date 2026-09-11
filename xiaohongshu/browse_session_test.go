@@ -1264,16 +1264,20 @@ func TestShareURLTokenPrecedence(t *testing.T) {
 }
 
 type currentPageURLCDPClient struct {
-	response []byte
-	err      error
-	calls    int
-	ctx      context.Context
-	method   string
-	params   interface{}
-	eventCh  chan *cdp.Event
-	forceErr bool
-	eventOnce sync.Once
-	closeOnce sync.Once
+	response              []byte
+	runtimeResponses      [][]byte
+	runtimeBlockUntilDone []bool
+	runtimeCall           int
+	runtimeTimeouts       []proto.RuntimeTimeDelta
+	err                   error
+	calls                 int
+	ctx                   context.Context
+	method                string
+	params                interface{}
+	eventCh               chan *cdp.Event
+	forceErr              bool
+	eventOnce             sync.Once
+	closeOnce             sync.Once
 }
 
 func (c *currentPageURLCDPClient) Event() <-chan *cdp.Event {
@@ -1297,6 +1301,9 @@ func (c *currentPageURLCDPClient) Call(ctx context.Context, _ string, method str
 	c.ctx = ctx
 	c.method = method
 	c.params = params
+	if request, ok := params.(proto.RuntimeEvaluate); ok {
+		c.runtimeTimeouts = append(c.runtimeTimeouts, request.Timeout)
+	}
 	if c.forceErr && c.err != nil {
 		return nil, c.err
 	}
@@ -1308,6 +1315,16 @@ func (c *currentPageURLCDPClient) Call(ctx context.Context, _ string, method str
 		return []byte(`{}`), nil
 	case "Target.attachToTarget":
 		return []byte(`{"sessionId":"session-1"}`), nil
+	case "Runtime.evaluate":
+		index := c.runtimeCall
+		c.runtimeCall++
+		if index < len(c.runtimeBlockUntilDone) && c.runtimeBlockUntilDone[index] {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}
+		if index < len(c.runtimeResponses) {
+			return c.runtimeResponses[index], nil
+		}
 	}
 	if c.err != nil {
 		return nil, c.err
@@ -1341,6 +1358,8 @@ func newCurrentPageURLSession(t *testing.T, client *currentPageURLCDPClient) *Br
 	client.ctx = nil
 	client.method = ""
 	client.params = nil
+	client.runtimeCall = 0
+	client.runtimeTimeouts = nil
 	return &BrowseSession{page: &hrod.Page{Rod: page}}
 }
 
@@ -1741,6 +1760,80 @@ func runtimeEvaluateStringResponse(t *testing.T, value string) []byte {
 		t.Fatalf("构造 Runtime.evaluate 响应失败: %v", err)
 	}
 	return response
+}
+
+func TestProbeCurrentFeedDetailWithCounterUsesBoundedEval(t *testing.T) {
+	validJSON := `{"url":"https://www.xiaohongshu.com/explore/feed-1","url_matched":true,"visible_detail_count":1,"visible_matched_detail_count":1,"state_matched":true}`
+	client := &currentPageURLCDPClient{response: runtimeEvaluateStringResponse(t, validJSON)}
+	session := newCurrentPageURLSession(t, client)
+	page := session.page.Context(context.Background())
+
+	if _, err := probeCurrentFeedDetailWithCounter(context.Background(), &evalTimeoutCounter{}, page, "feed-1"); err != nil {
+		t.Fatalf("不期望错误: %v", err)
+	}
+	if len(client.runtimeTimeouts) != 1 {
+		t.Fatalf("Runtime.evaluate 应只调用一次: %d", len(client.runtimeTimeouts))
+	}
+	if timeout := client.runtimeTimeouts[0]; timeout <= 0 || timeout > proto.RuntimeTimeDelta(5000) {
+		t.Fatalf("Runtime.evaluate timeout = %v, 期望在 (0,5000] 内", timeout)
+	}
+}
+
+func TestWaitFeedDetailVisibleRetriesAfterProbeTimeoutWithinBudget(t *testing.T) {
+	validJSON := `{"url":"https://www.xiaohongshu.com/explore/feed-1","url_matched":true,"visible_detail_count":1,"visible_matched_detail_count":1,"state_matched":true}`
+	response := runtimeEvaluateStringResponse(t, validJSON)
+	client := &currentPageURLCDPClient{}
+	session := newCurrentPageURLSession(t, client)
+	client.runtimeResponses = [][]byte{nil, response, response}
+	client.runtimeBlockUntilDone = []bool{true}
+	page := session.page.Context(context.Background())
+	started := time.Now()
+
+	if err := waitFeedDetailVisible(context.Background(), page, &evalTimeoutCounter{}, "feed-1"); err != nil {
+		t.Fatalf("首次 probe 超时后应在总预算内连续命中成功: %v", err)
+	}
+	if client.runtimeCall != 3 {
+		t.Fatalf("应为首次超时后两次命中，共调用3次 probe，实际 %d", client.runtimeCall)
+	}
+	if elapsed := time.Since(started); elapsed >= feedDetailVisibleWaitBudget {
+		t.Fatalf("连续命中不应突破15s总预算，耗时 %v", elapsed)
+	}
+	for i, timeout := range client.runtimeTimeouts {
+		if timeout <= 0 || timeout > proto.RuntimeTimeDelta(5000) {
+			t.Fatalf("第%d次 Runtime.evaluate timeout = %v，超出5s级边界", i+1, timeout)
+		}
+	}
+}
+
+func TestOpenNoteRejectsOtherVisibleDetailBeforeCardActions(t *testing.T) {
+	probeJSON := `{"url":"https://www.xiaohongshu.com/search_result?keyword=test","url_matched":false,"visible_detail_count":1,"visible_matched_detail_count":0,"state_matched":false}`
+	client := &currentPageURLCDPClient{response: runtimeEvaluateStringResponse(t, probeJSON)}
+	pageSession := newCurrentPageURLSession(t, client)
+	page := pageSession.page.Context(context.Background())
+	opToken := make(chan struct{}, 1)
+	opToken <- struct{}{}
+	session := &BrowseSession{
+		id:              "session-1",
+		opToken:         opToken,
+		closedCh:        make(chan struct{}),
+		page:            page,
+		timeout:         time.Minute,
+		expiresAt:       time.Now().Add(time.Minute),
+		results:         map[string]Feed{"0": {ID: "feed-target", XsecToken: "token"}},
+		nextResultIndex: 1,
+	}
+	t.Cleanup(session.Close)
+
+	_, err := session.OpenNote(context.Background(), "0", "", "")
+	if err == nil {
+		t.Fatal("其他笔记详情可见时应拒绝打开目标卡片")
+	}
+	if !strings.Contains(err.Error(), "当前处于其他笔记详情") || !strings.Contains(err.Error(), "go_back") {
+		t.Fatalf("错误应提示当前处于其他笔记详情并先 go_back: %v", err)
+	}
+	if client.calls != 1 || client.method != "Runtime.evaluate" {
+		t.Fatalf("拒绝后不应调用 ScrollIntoView/ClickPoint: calls=%d method=%q", client.calls, client.method)
+	}
 }
 
 func TestWaitFeedDetailVisibleMatched(t *testing.T) {
