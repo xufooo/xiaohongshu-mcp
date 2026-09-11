@@ -1157,6 +1157,15 @@ func readFeedDetailStateOnce(ctx context.Context, page *hrod.Page, counter *eval
 		const detail = unwrapRef(noteDetailMap?.[feedID]);
 		if (!detail) return "";
 
+		// 互动状态必须能被确认为严格 boolean，否则整体 unknown（fail-closed）。
+		// 缺失的 interactInfo 若直接落到 Go 端的 bool 零值，会被伪装成"未点赞/未收藏"。
+		const interactInfo = unwrapRef(detail.note?.interactInfo);
+		if (!interactInfo ||
+			typeof interactInfo.liked !== "boolean" ||
+			typeof interactInfo.collected !== "boolean") {
+			return "";
+		}
+
 		return JSON.stringify(snapshot({
 			note: detail.note,
 			comments: detail.comments,
