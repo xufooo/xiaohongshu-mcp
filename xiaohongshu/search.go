@@ -622,7 +622,7 @@ func filterApplied(probe filterAppliedProbe, pf pendingFilter) bool {
 	return isSearchResultPage(probe.Route) && probe.GroupFound && strings.TrimSpace(probe.ActiveText) == pf.OptionText
 }
 
-func waitFilterApplied(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, pf pendingFilter, timeout time.Duration) error {
+func waitFilterApplied(ctx context.Context, filterPage *hrod.Page, counter *evalTimeoutCounter, pf pendingFilter, timeout time.Duration) error {
 	if dl, ok := ctx.Deadline(); ok {
 		if rem := time.Until(dl); rem < timeout {
 			timeout = rem
@@ -631,12 +631,13 @@ func waitFilterApplied(ctx context.Context, page *hrod.Page, counter *evalTimeou
 	deadline := time.Now().Add(timeout)
 	var last filterAppliedProbe
 	var lastErr error
+	reopened := false
 
 	for time.Now().Before(deadline) {
-		if err := page.Err(); err != nil {
+		if err := filterPage.Err(); err != nil {
 			return fmt.Errorf("%w: %v", errFilterApplyFailed, err)
 		}
-		probe, err := readFilterAppliedProbe(ctx, page, counter, pf.GroupLabel)
+		probe, err := readFilterAppliedProbe(ctx, filterPage, counter, pf.GroupLabel)
 		if err != nil {
 			if IsFatalRendererError(err) {
 				return fmt.Errorf("%w: %w", errFilterApplyFailed, err)
@@ -651,12 +652,26 @@ func waitFilterApplied(ctx context.Context, page *hrod.Page, counter *evalTimeou
 			if filterApplied(probe, pf) {
 				return nil
 			}
+			if !probe.GroupFound && !reopened {
+				filterButton, err := filterPage.Element("div.filter")
+				if err != nil {
+					return fmt.Errorf("%w: %w", errFilterApplyFailed, err)
+				}
+				target, err := filterButton.Rod.Interactable()
+				if err != nil {
+					return fmt.Errorf("%w: %w", errFilterApplyFailed, err)
+				}
+				if err := filterButton.Actor().Mouse.MovePointDirect(*target); err != nil {
+					return fmt.Errorf("%w: %w", errFilterApplyFailed, err)
+				}
+				reopened = true
+			}
 		}
 		sleepFor := min(300*time.Millisecond, time.Until(deadline))
 		if sleepFor <= 0 {
 			break
 		}
-		if err := page.Sleep(sleepFor); err != nil {
+		if err := filterPage.Sleep(sleepFor); err != nil {
 			return fmt.Errorf("%w: %v", errFilterApplyFailed, err)
 		}
 	}
@@ -906,15 +921,42 @@ func (s *SearchAction) collectResults(ctx context.Context, page *hrod.Page, coun
 
 		t0 = time.Now()
 		for {
-			panel, panelErr := evalJS(filterCtx, counter, filterPage, `() => document.querySelector('.filter-panel') !== null`)
+			panel, panelErr := evalJS(filterCtx, counter, filterPage, `(groupLabel, optionText) => {
+				const text = (el) => String(el?.textContent || "").replace(/\s+/g, " ").trim();
+				const panel = document.querySelector(".filter-panel");
+				if (!panel) {
+					return false;
+				}
+				const group = Array.from(panel.querySelectorAll(".filters")).find((candidate) =>
+					Array.from(candidate.querySelectorAll(":scope > span")).some((label) => text(label) === groupLabel)
+				);
+				if (!group) {
+					return false;
+				}
+				return Array.from(group.querySelectorAll("div.tags")).some((tag) => {
+					if (text(tag) !== optionText || !tag.isConnected) {
+						return false;
+					}
+					const style = getComputedStyle(tag);
+					if (style.display === "none" || style.visibility === "hidden" || !(parseFloat(style.opacity) > 0)) {
+						return false;
+					}
+					const rect = tag.getBoundingClientRect();
+					if (rect.width <= 0 || rect.height <= 0) {
+						return false;
+					}
+					const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+					return tag.closest("div.filter-panel") !== null && (hit === tag || tag.contains(hit));
+				});
+			}`, pfs[0].GroupLabel, pfs[0].OptionText)
 			if panelErr != nil {
-				return nil, stageErr("filter_panel_wait", t0, panelErr, "")
+				return nil, stageErr("filter_option_ready_wait", t0, panelErr, "")
 			}
 			if panel != nil && panel.Value.Bool() {
 				break
 			}
 			if sleepErr := filterPage.Sleep(300 * time.Millisecond); sleepErr != nil {
-				return nil, stageErr("filter_panel_wait", t0, sleepErr, "")
+				return nil, stageErr("filter_option_ready_wait", t0, sleepErr, "")
 			}
 		}
 
