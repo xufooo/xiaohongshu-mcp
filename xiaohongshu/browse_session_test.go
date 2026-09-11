@@ -1779,6 +1779,28 @@ func TestProbeCurrentFeedDetailWithCounterUsesBoundedEval(t *testing.T) {
 	}
 }
 
+// 点赞/收藏前置校验必须同样走有界 wrapper：改回裸 probeCurrentFeedDetail 时此测试会失败。
+func TestIsCurrentFeedDetailUsesBoundedEval(t *testing.T) {
+	validJSON := `{"url":"https://www.xiaohongshu.com/explore/feed-1","url_matched":true,"visible_detail_count":1,"visible_matched_detail_count":1,"state_matched":true}`
+	client := &currentPageURLCDPClient{response: runtimeEvaluateStringResponse(t, validJSON)}
+	session := newCurrentPageURLSession(t, client)
+	page := session.page.Context(context.Background())
+
+	ok, err := isCurrentFeedDetail(context.Background(), page, &evalTimeoutCounter{}, "feed-1")
+	if err != nil {
+		t.Fatalf("不期望错误: %v", err)
+	}
+	if !ok {
+		t.Fatal("应判定为当前笔记详情")
+	}
+	if len(client.runtimeTimeouts) != 1 {
+		t.Fatalf("Runtime.evaluate 应只调用一次: %d", len(client.runtimeTimeouts))
+	}
+	if timeout := client.runtimeTimeouts[0]; timeout <= 0 || timeout > proto.RuntimeTimeDelta(5000) {
+		t.Fatalf("Runtime.evaluate timeout = %v, 期望在 (0,5000] 内", timeout)
+	}
+}
+
 func TestWaitFeedDetailVisibleRetriesAfterProbeTimeoutWithinBudget(t *testing.T) {
 	validJSON := `{"url":"https://www.xiaohongshu.com/explore/feed-1","url_matched":true,"visible_detail_count":1,"visible_matched_detail_count":1,"state_matched":true}`
 	response := runtimeEvaluateStringResponse(t, validJSON)
@@ -1833,6 +1855,13 @@ func TestOpenNoteRejectsOtherVisibleDetailBeforeCardActions(t *testing.T) {
 	}
 	if client.calls != 1 || client.method != "Runtime.evaluate" {
 		t.Fatalf("拒绝后不应调用 ScrollIntoView/ClickPoint: calls=%d method=%q", client.calls, client.method)
+	}
+	// 预探针必须走 5 秒有界 wrapper：改回裸 probeCurrentFeedDetail 时此断言会失败
+	if len(client.runtimeTimeouts) != 1 {
+		t.Fatalf("预探针应只记录一次 Runtime.evaluate timeout: %d", len(client.runtimeTimeouts))
+	}
+	if timeout := client.runtimeTimeouts[0]; timeout <= 0 || timeout > proto.RuntimeTimeDelta(5000) {
+		t.Fatalf("预探针 Runtime.evaluate timeout = %v, 期望在 (0,5000] 内", timeout)
 	}
 }
 

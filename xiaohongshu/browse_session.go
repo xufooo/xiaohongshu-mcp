@@ -766,7 +766,7 @@ func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, shareURL, xsecT
 		}
 		counter := &evalTimeoutCounter{}
 		resultRefForTimeline = resultRef
-		probe, probeErr := probeCurrentFeedDetail(opCtx, page, feed.ID)
+		probe, probeErr := probeCurrentFeedDetailWithCounter(opCtx, counter, page, feed.ID)
 		if probeErr != nil && IsFatalRendererError(probeErr) {
 			return fail(probeErr)
 		}
