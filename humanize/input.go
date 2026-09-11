@@ -76,6 +76,29 @@ func ensureClickable(elem *rod.Element, pt proto.Point) error {
 	return nil
 }
 
+func ensureHitBeforePress(elem *rod.Element, target proto.Point) error {
+	result, err := elem.Eval(`(x, y) => {
+		if (!this.isConnected) {
+			return false;
+		}
+		const style = getComputedStyle(this);
+		const rect = this.getBoundingClientRect();
+		const visible = style.display !== "none" &&
+			style.visibility !== "hidden" &&
+			Number(style.opacity || "1") > 0 &&
+			rect.width > 0 && rect.height > 0;
+		const hit = visible ? document.elementFromPoint(x, y) : null;
+		return visible && !!hit && (hit === this || this.contains(hit));
+	}`, target.X, target.Y)
+	if err != nil {
+		return fmt.Errorf("最终点击命中校验失败: %w", err)
+	}
+	if result == nil || !result.Value.Bool() {
+		return errors.New("最终落点不再命中目标")
+	}
+	return nil
+}
+
 func Click(elem *rod.Element) error {
 	pt, err := elem.WaitInteractable()
 	if err != nil {
@@ -101,6 +124,32 @@ func Click(elem *rod.Element) error {
 	return pressAndRelease(mouse)
 }
 
+// ClickDirect 直接进入目标并在按下前复核，适用于 hover 浮层选项。
+func ClickDirect(elem *rod.Element) error {
+	shape, err := elem.Shape()
+	if err != nil {
+		return err
+	}
+	if len(shape.Quads) == 0 {
+		return errors.New("元素无可点击区域")
+	}
+
+	q := shape.Quads[0]
+	center := proto.Point{X: (q[0] + q[4]) / 2, Y: (q[1] + q[5]) / 2}
+	if err := ensureClickable(elem, center); err != nil {
+		return err
+	}
+
+	mouse := elem.Page().Mouse
+	if err := mouse.MoveTo(center); err != nil {
+		return err
+	}
+	if err := ensureHitBeforePress(elem, center); err != nil {
+		return err
+	}
+	return pressAndRelease(mouse)
+}
+
 // ClickNoWait 跳过 WaitInteractable 的遮挡重试，用于它会误判而死等的场景。
 func ClickNoWait(elem *rod.Element) error {
 	shape, err := elem.Shape()
@@ -121,6 +170,9 @@ func ClickNoWait(elem *rod.Element) error {
 
 	mouse := elem.Page().Mouse
 	if err := moveMouseCurved(mouse, target); err != nil {
+		return err
+	}
+	if err := ensureHitBeforePress(elem, target); err != nil {
 		return err
 	}
 	return pressAndRelease(mouse)

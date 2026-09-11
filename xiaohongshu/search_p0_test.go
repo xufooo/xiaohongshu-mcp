@@ -3,20 +3,138 @@ package xiaohongshu
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"reflect"
 	"strings"
 	"sync"
 	"testing"
 	"time"
-	"unsafe"
 
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/cdp"
+	"github.com/go-rod/rod/lib/proto"
 	"github.com/xpzouying/xiaohongshu-mcp/humanize"
 	hrod "github.com/xpzouying/xiaohongshu-mcp/humanize/rod"
 )
+
+type searchP0CDPClient struct {
+	eventCh      chan *cdp.Event
+	eventOnce    sync.Once
+	closeOnce    sync.Once
+	panelOpen    bool
+	panelProbes  int
+	buttonClicks int
+	hit          bool
+	mouseEvents  []proto.InputDispatchMouseEventType
+}
+
+func (c *searchP0CDPClient) Event() <-chan *cdp.Event {
+	c.eventOnce.Do(func() {
+		c.eventCh = make(chan *cdp.Event)
+	})
+	return c.eventCh
+}
+
+func (c *searchP0CDPClient) Close() {
+	c.eventOnce.Do(func() {
+		c.eventCh = make(chan *cdp.Event)
+	})
+	c.closeOnce.Do(func() {
+		close(c.eventCh)
+	})
+}
+
+func (c *searchP0CDPClient) Call(ctx context.Context, _ string, method string, params interface{}) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	switch method {
+	case "Target.attachToTarget":
+		return []byte(`{"sessionId":"session-1"}`), nil
+	case "Runtime.evaluate":
+		request, ok := params.(proto.RuntimeEvaluate)
+		if !ok {
+			raw, _ := json.Marshal(params)
+			_ = json.Unmarshal(raw, &request)
+		}
+		switch {
+		case strings.Contains(request.Expression, ".filter-panel"):
+			c.panelProbes++
+			if c.panelOpen {
+				return []byte(`{"result":{"type":"boolean","value":true}}`), nil
+			}
+			return []byte(`{"result":{"type":"boolean","value":false}}`), nil
+		case strings.TrimSpace(request.Expression) == "window":
+			return []byte(`{"result":{"type":"object","objectId":"window"}}`), nil
+		default:
+			return []byte(`{"result":{"type":"object","objectId":"window"}}`), nil
+		}
+	case "Runtime.callFunctionOn":
+		request, ok := params.(proto.RuntimeCallFunctionOn)
+		if !ok {
+			raw, _ := json.Marshal(params)
+			_ = json.Unmarshal(raw, &request)
+		}
+		switch {
+		case strings.TrimSpace(request.FunctionDeclaration) == "() => window":
+			return []byte(`{"result":{"type":"object","objectId":"window"}}`), nil
+		case strings.Contains(request.FunctionDeclaration, "JSON.stringify([window.innerWidth, window.innerHeight])"):
+			return []byte(`{"result":{"type":"string","value":"[800,600]"}}`), nil
+		case strings.Contains(request.FunctionDeclaration, "getComputedStyle(this).visibility"):
+			return []byte(`{"result":{"type":"string","value":"visible"}}`), nil
+		case strings.Contains(request.FunctionDeclaration, "elementFromPoint"):
+			if c.hit {
+				return []byte(`{"result":{"type":"boolean","value":true}}`), nil
+			}
+			return []byte(`{"result":{"type":"boolean","value":false}}`), nil
+		default:
+			return []byte(`{"result":{"type":"object","subtype":"node","objectId":"filter-button"}}`), nil
+		}
+	case "DOM.getContentQuads":
+		return []byte(`{"quads":[[10,20,110,20,110,60,10,60]]}`), nil
+	case "Input.dispatchMouseEvent":
+		request, ok := params.(proto.InputDispatchMouseEvent)
+		if !ok {
+			raw, _ := json.Marshal(params)
+			_ = json.Unmarshal(raw, &request)
+		}
+		c.mouseEvents = append(c.mouseEvents, request.Type)
+		if request.Type == proto.InputDispatchMouseEventTypeMouseReleased {
+			c.buttonClicks++
+			c.panelOpen = true
+		}
+		return []byte(`{}`), nil
+	}
+	return []byte(`{}`), nil
+}
+
+func newSearchP0Element(t *testing.T, client *searchP0CDPClient) (*rod.Page, *rod.Element) {
+	t.Helper()
+	browserCtx, cancelBrowser := context.WithCancel(context.Background())
+	browser := rod.New().Context(browserCtx).NoDefaultDevice().ControlURL("").Client(client)
+	if err := browser.Connect(); err != nil {
+		t.Fatalf("初始化 search fake rod browser: %v", err)
+	}
+	browserEvents := browser.Event()
+	t.Cleanup(func() {
+		client.Close()
+		select {
+		case <-browserEvents:
+		case <-time.After(time.Second):
+			t.Errorf("search fake rod browser 事件 goroutine 未退出")
+		}
+		cancelBrowser()
+	})
+	page, err := browser.PageFromTarget("target-1")
+	if err != nil {
+		t.Fatalf("初始化 search fake rod page: %v", err)
+	}
+	element, err := page.Element("div.filter")
+	if err != nil {
+		t.Fatalf("初始化 search fake filter element: %v", err)
+	}
+	return page, element
+}
 
 func TestSearchFallbackDoesNotSwallowFatal(t *testing.T) {
 	navigations := 0
@@ -115,288 +233,76 @@ func TestIsSearchResultPage(t *testing.T) {
 	}
 }
 
-func TestFilterAppliedRequiresActiveOptionOnSearchRoute(t *testing.T) {
-	pf := pendingFilter{GroupLabel: "排序依据", OptionText: "最多评论"}
-	tests := []struct {
-		name  string
-		probe filterAppliedProbe
-		want  bool
-	}{
-		{
-			name:  "面板关闭时目标组不存在",
-			probe: filterAppliedProbe{Route: "https://www.xiaohongshu.com/search_result", GroupFound: false, ActiveText: "最多评论"},
-			want:  false,
-		},
-		{
-			name:  "目标未 active",
-			probe: filterAppliedProbe{Route: "https://www.xiaohongshu.com/search_result", GroupFound: true, ActiveText: "综合"},
-			want:  false,
-		},
-		{
-			name:  "目标 active 且处于搜索路由",
-			probe: filterAppliedProbe{Route: "https://www.xiaohongshu.com/search_result_ai", GroupFound: true, ActiveText: "最多评论"},
-			want:  true,
-		},
-		{
-			name:  "目标 active 但处于 explore 路由",
-			probe: filterAppliedProbe{Route: "https://www.xiaohongshu.com/explore/abc123", GroupFound: true, ActiveText: "最多评论"},
-			want:  false,
-		},
+func TestClickDirectDispatchesOneMouseClick(t *testing.T) {
+	client := &searchP0CDPClient{hit: true}
+	_, element := newSearchP0Element(t, client)
+
+	if err := humanize.ClickDirect(element); err != nil {
+		t.Fatalf("ClickDirect 不应失败: %v", err)
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := filterApplied(tc.probe, pf); got != tc.want {
-				t.Fatalf("filterApplied(%+v, %+v) = %v, want %v", tc.probe, pf, got, tc.want)
-			}
-		})
+	want := []proto.InputDispatchMouseEventType{
+		proto.InputDispatchMouseEventTypeMouseMoved,
+		proto.InputDispatchMouseEventTypeMousePressed,
+		proto.InputDispatchMouseEventTypeMouseReleased,
+	}
+	if len(client.mouseEvents) != len(want) {
+		t.Fatalf("鼠标事件数量错误: got=%v want=%v", client.mouseEvents, want)
+	}
+	for i := range want {
+		if client.mouseEvents[i] != want[i] {
+			t.Fatalf("鼠标事件[%d]错误: got=%v want=%v", i, client.mouseEvents[i], want[i])
+		}
 	}
 }
 
-func TestWaitFilterAppliedTimeoutWrapsApplyFailure(t *testing.T) {
-	client := &currentPageURLCDPClient{response: runtimeEvaluateStringResponse(t, `{"route":"https://www.xiaohongshu.com/search_result","group_found":true,"active_text":"综合"}`)}
-	session := newCurrentPageURLSession(t, client)
-	page := session.page.Context(context.Background())
+func TestClickDirectStopsBeforePressWhenHitCheckFails(t *testing.T) {
+	client := &searchP0CDPClient{hit: false}
+	_, element := newSearchP0Element(t, client)
 
-	err := waitFilterApplied(context.Background(), page, nil, pendingFilter{GroupLabel: "排序依据", OptionText: "最多评论"}, 50*time.Millisecond)
-	if !errors.Is(err, errFilterApplyFailed) {
-		t.Fatalf("未 active 超时应包装为 errFilterApplyFailed: %v", err)
+	if err := humanize.ClickDirect(element); err == nil {
+		t.Fatal("按下前命中复核失败时应返回错误")
 	}
-	if client.method != "Runtime.evaluate" {
-		t.Fatalf("应先读取未 active probe: method=%q", client.method)
+	if len(client.mouseEvents) != 1 || client.mouseEvents[0] != proto.InputDispatchMouseEventTypeMouseMoved {
+		t.Fatalf("命中复核失败后只应有一次 mouseMoved: %v", client.mouseEvents)
+	}
+	for _, event := range client.mouseEvents {
+		if event == proto.InputDispatchMouseEventTypeMousePressed {
+			t.Fatal("按下前命中复核失败时不得产生 mousePressed")
+		}
+		if event == proto.InputDispatchMouseEventTypeMouseReleased {
+			t.Fatal("按下前命中复核失败时不得产生 mouseReleased")
+		}
 	}
 }
 
-func TestWaitFilterAppliedPreservesFatalRendererError(t *testing.T) {
-	fatalProbeErr := fmt.Errorf("probe: %w", ErrFatalRendererError)
-	if !IsFatalRendererError(fatalProbeErr) {
-		t.Fatal("测试前提错误：fatal probe 错误应包含 ErrFatalRendererError")
-	}
-	client := &currentPageURLCDPClient{
-		response: runtimeEvaluateStringResponse(t, `{"route":"https://www.xiaohongshu.com/search_result","group_found":true,"active_text":"综合"}`),
-	}
-	session := newCurrentPageURLSession(t, client)
-	client.err = fatalProbeErr
-	client.forceErr = true
-	page := session.page.Context(context.Background())
+func TestEnsureFilterPanelOpenRecoversClosedPanel(t *testing.T) {
+	client := &searchP0CDPClient{hit: true}
+	rawPage, rawButton := newSearchP0Element(t, client)
+	button := hrod.NewElement(rawButton, humanize.New(rawPage, humanize.Config{}))
+	page := &hrod.Page{Rod: rawPage}
 
-	err := waitFilterApplied(context.Background(), page, nil, pendingFilter{GroupLabel: "排序依据", OptionText: "最多评论"}, 50*time.Millisecond)
-	if !errors.Is(err, errFilterApplyFailed) {
-		t.Fatalf("fatal probe 错误应包装为 errFilterApplyFailed: %v", err)
-	}
-	if !IsFatalRendererError(err) {
-		t.Fatalf("fatal probe 错误链不应被吞掉: %v", err)
-	}
-	if client.method != "Runtime.evaluate" {
-		t.Fatalf("应由 fatal probe 读取路径触发: method=%q", client.method)
-	}
-}
-
-func TestWaitFilterAppliedPrioritizesMisdirectedNavigation(t *testing.T) {
-	client := &currentPageURLCDPClient{response: runtimeEvaluateStringResponse(t, `{"route":"https://www.xiaohongshu.com/explore/abc123","group_found":true,"active_text":"最多评论"}`)}
-	session := newCurrentPageURLSession(t, client)
-	page := session.page.Context(context.Background())
-
-	err := waitFilterApplied(context.Background(), page, nil, pendingFilter{GroupLabel: "排序依据", OptionText: "最多评论"}, 50*time.Millisecond)
-	if !errors.Is(err, errFilterMisdirectedNavigation) {
-		t.Fatalf("非搜索路由应优先返回 errFilterMisdirectedNavigation: %v", err)
-	}
-	if errors.Is(err, errFilterApplyFailed) {
-		t.Fatalf("非搜索路由不应降级为 errFilterApplyFailed: %v", err)
-	}
-}
-
-type filterApplyCDPClient struct {
-	probeResponses     [][]byte
-	probeIndex         int
-	callFunctionCalls  int
-	mouseMoves         int
-	failCallFunction   bool
-	failErr            error
-	eventCh            chan *cdp.Event
-	eventOnce          sync.Once
-	closeOnce          sync.Once
-}
-
-func (c *filterApplyCDPClient) Event() <-chan *cdp.Event {
-	c.eventOnce.Do(func() {
-		c.eventCh = make(chan *cdp.Event)
-	})
-	return c.eventCh
-}
-
-func (c *filterApplyCDPClient) Close() {
-	c.eventOnce.Do(func() {
-		c.eventCh = make(chan *cdp.Event)
-	})
-	c.closeOnce.Do(func() {
-		close(c.eventCh)
-	})
-}
-
-func (c *filterApplyCDPClient) Call(ctx context.Context, _ string, method string, params interface{}) ([]byte, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	switch method {
-	case "Target.setDiscoverTargets", "Target.setAutoAttach":
-		return []byte(`{}`), nil
-	case "Target.attachToTarget":
-		return []byte(`{"sessionId":"session-1"}`), nil
-	case "Target.getTargetInfo":
-		return []byte(`{"targetInfo":{"targetId":"target-1","url":"https://www.xiaohongshu.com/search_result"}}`), nil
-	case "Runtime.evaluate":
-		var request struct {
-			Expression string `json:"expression"`
-		}
-		if raw, marshalErr := json.Marshal(params); marshalErr == nil {
-			_ = json.Unmarshal(raw, &request)
-		}
-		if request.Expression == "window" {
-			return []byte(`{"result":{"type":"object","objectId":"filter-window"}}`), nil
-		}
-		index := c.probeIndex
-		c.probeIndex++
-		if index < len(c.probeResponses) {
-			return c.probeResponses[index], nil
-		}
-		if len(c.probeResponses) > 0 {
-			return c.probeResponses[len(c.probeResponses)-1], nil
-		}
-		return []byte(`{"result":{"type":"string","value":"{\"route\":\"https://www.xiaohongshu.com/search_result\",\"group_found\":false,\"active_text\":\"\"}"}}`), nil
-	case "Runtime.callFunctionOn":
-		c.callFunctionCalls++
-		if c.failCallFunction {
-			return nil, c.failErr
-		}
-		var request struct {
-			FunctionDeclaration string `json:"functionDeclaration"`
-		}
-		if raw, marshalErr := json.Marshal(params); marshalErr == nil {
-			_ = json.Unmarshal(raw, &request)
-		}
-		switch {
-		case request.FunctionDeclaration == "() => window":
-			return []byte(`{"result":{"type":"object","objectId":"filter-window"}}`), nil
-		case strings.Contains(request.FunctionDeclaration, "containsElement") && !strings.Contains(request.FunctionDeclaration, "functions =>"):
-			return []byte(`{"result":{"type":"boolean","value":true}}`), nil
-		case strings.Contains(request.FunctionDeclaration, "getComputedStyle(this).pointerEvents"):
-			return []byte(`{"result":{"type":"boolean","value":false}}`), nil
-		case strings.Contains(request.FunctionDeclaration, "window.scrollX"):
-			return []byte(`{"result":{"type":"object","value":{"x":0,"y":0}}}`), nil
-		case strings.Contains(request.FunctionDeclaration, "function (f") && strings.Contains(request.FunctionDeclaration, "element"):
-			return []byte(`{"result":{"type":"object","subtype":"node","objectId":"filter-button"}}`), nil
-		default:
-			return []byte(`{"result":{"type":"object","objectId":"filter-helper"}}`), nil
-		}
-	case "DOM.getContentQuads":
-		return []byte(`{"quads":[[0,0,10,0,10,10,0,10]]}`), nil
-	case "DOM.getNodeForLocation":
-		return []byte(`{"backendNodeId":1}`), nil
-	case "DOM.resolveNode":
-		return []byte(`{"object":{"type":"object","subtype":"node","objectId":"filter-hit"}}`), nil
-	case "DOM.describeNode":
-		return []byte(`{"node":{"nodeName":"DIV"}}`), nil
-	case "Input.dispatchMouseEvent":
-		c.mouseMoves++
-		return []byte(`{}`), nil
-	case "Runtime.releaseObject":
-		return []byte(`{}`), nil
-	}
-	return []byte(`{}`), nil
-}
-
-func newFilterApplyPage(t *testing.T, client *filterApplyCDPClient) *hrod.Page {
-	t.Helper()
-	browserCtx, cancelBrowser := context.WithCancel(context.Background())
-	browser := rod.New().Context(browserCtx).NoDefaultDevice().ControlURL("").Client(client)
-	if err := browser.Connect(); err != nil {
-		t.Fatalf("初始化筛选 fake browser: %v", err)
-	}
-	browserEvents := browser.Event()
-	t.Cleanup(func() {
-		client.Close()
-		select {
-		case <-browserEvents:
-		case <-time.After(time.Second):
-			t.Errorf("筛选 fake browser 事件 goroutine 未退出")
-		}
-		cancelBrowser()
-	})
-	page, err := browser.PageFromTarget("target-1")
+	stage, err := ensureFilterPanelOpen(context.Background(), &evalTimeoutCounter{}, page, button)
 	if err != nil {
-		t.Fatalf("初始化筛选 fake page: %v", err)
+		t.Fatalf("已筛选状态恢复面板不应失败: stage=%s err=%v", stage, err)
 	}
-	wrapped := &hrod.Page{Rod: page}
-	actor := humanize.New(page, humanize.Config{})
-	actorField := reflect.ValueOf(wrapped).Elem().FieldByName("actor")
-	reflect.NewAt(actorField.Type(), unsafe.Pointer(actorField.UnsafeAddr())).Elem().Set(reflect.ValueOf(actor))
-	return wrapped
-}
+	if stage != "" {
+		t.Fatalf("成功路径不应返回失败 stage: %q", stage)
+	}
+	if client.panelProbes != 1 {
+		t.Fatalf("首次恢复应只探针一次: %d", client.panelProbes)
+	}
+	if client.buttonClicks != 1 {
+		t.Fatalf("面板不存在时应点击按钮一次: %d", client.buttonClicks)
+	}
 
-func filterProbeResponse(t *testing.T, groupFound bool, activeText string) []byte {
-	t.Helper()
-	return runtimeEvaluateStringResponse(t, fmt.Sprintf(`{"route":"https://www.xiaohongshu.com/search_result","group_found":%t,"active_text":%q}`, groupFound, activeText))
-}
-
-func TestWaitFilterAppliedReopensPanelOnce(t *testing.T) {
-	client := &filterApplyCDPClient{probeResponses: [][]byte{
-		filterProbeResponse(t, false, ""),
-		filterProbeResponse(t, false, ""),
-		filterProbeResponse(t, true, "最多评论"),
-	}}
-	page := newFilterApplyPage(t, client).Context(context.Background())
-
-	err := waitFilterApplied(context.Background(), page, nil, pendingFilter{GroupLabel: "排序依据", OptionText: "最多评论"}, 1200*time.Millisecond)
+	stage, err = ensureFilterPanelOpen(context.Background(), &evalTimeoutCounter{}, page, button)
 	if err != nil {
-		t.Fatalf("一次 hover 重开后目标 active 应成功: %v", err)
+		t.Fatalf("面板已存在时不应失败: stage=%s err=%v", stage, err)
 	}
-	if client.mouseMoves != 1 {
-		t.Fatalf("筛选面板只应恢复 hover 一次: moves=%d", client.mouseMoves)
+	if client.panelProbes != 2 {
+		t.Fatalf("每次调用应各做一次面板探针: %d", client.panelProbes)
 	}
-}
-
-func TestWaitFilterAppliedAfterReopenStillWrongOptionFails(t *testing.T) {
-	client := &filterApplyCDPClient{probeResponses: [][]byte{
-		filterProbeResponse(t, false, ""),
-		filterProbeResponse(t, true, "综合"),
-	}}
-	page := newFilterApplyPage(t, client).Context(context.Background())
-
-	err := waitFilterApplied(context.Background(), page, nil, pendingFilter{GroupLabel: "排序依据", OptionText: "最多评论"}, 700*time.Millisecond)
-	if !errors.Is(err, errFilterApplyFailed) {
-		t.Fatalf("重开后仍为综合应返回 errFilterApplyFailed: %v", err)
-	}
-	if client.mouseMoves != 1 {
-		t.Fatalf("重开动作只能执行一次: moves=%d", client.mouseMoves)
-	}
-}
-
-func TestWaitFilterAppliedReopenFailureWrapsApplyError(t *testing.T) {
-	reopenErr := errors.New("reopen filter failed")
-	client := &filterApplyCDPClient{
-		probeResponses:   [][]byte{filterProbeResponse(t, false, "")},
-		failCallFunction: true,
-		failErr:          reopenErr,
-	}
-	page := newFilterApplyPage(t, client).Context(context.Background())
-
-	err := waitFilterApplied(context.Background(), page, nil, pendingFilter{GroupLabel: "排序依据", OptionText: "最多评论"}, time.Second)
-	if !errors.Is(err, errFilterApplyFailed) || !errors.Is(err, reopenErr) {
-		t.Fatalf("重开失败应同时保留 apply 和底层错误: %v", err)
-	}
-}
-
-func TestWaitFilterAppliedReopenFailurePreservesFatalRendererError(t *testing.T) {
-	fatalReopenErr := fmt.Errorf("reopen renderer: %w", ErrFatalRendererError)
-	client := &filterApplyCDPClient{
-		probeResponses:   [][]byte{filterProbeResponse(t, false, "")},
-		failCallFunction: true,
-		failErr:          fatalReopenErr,
-	}
-	page := newFilterApplyPage(t, client).Context(context.Background())
-
-	err := waitFilterApplied(context.Background(), page, nil, pendingFilter{GroupLabel: "排序依据", OptionText: "最多评论"}, time.Second)
-	if !errors.Is(err, errFilterApplyFailed) || !errors.Is(err, ErrFatalRendererError) || !IsFatalRendererError(err) {
-		t.Fatalf("重开 fatal 失败应同时保留两个错误链: %v", err)
+	if client.buttonClicks != 1 {
+		t.Fatalf("面板已存在时不应再次点击按钮: %d", client.buttonClicks)
 	}
 }

@@ -199,11 +199,6 @@ func (m *Mouse) MovePoint(target Point) error {
 	return m.moveTo(target, true)
 }
 
-// MovePointDirect 直接移动到视口坐标，不生成中间轨迹。
-func (m *Mouse) MovePointDirect(target Point) error {
-	return m.dispatchMouseMove(m.boundPage(), target)
-}
-
 // moveTo performs the actual cursor movement without any extra scrolling.
 func (m *Mouse) moveTo(target Point, scrollingAllowed bool) error {
 	if debugMouse {
