@@ -1269,6 +1269,9 @@ type currentPageURLCDPClient struct {
 	runtimeBlockUntilDone []bool
 	runtimeCall           int
 	runtimeTimeouts       []proto.RuntimeTimeDelta
+	runtimeExpressions    []string
+	methodHistory         []string
+	keyEvents             []proto.InputDispatchKeyEvent
 	err                   error
 	calls                 int
 	ctx                   context.Context
@@ -1301,8 +1304,10 @@ func (c *currentPageURLCDPClient) Call(ctx context.Context, _ string, method str
 	c.ctx = ctx
 	c.method = method
 	c.params = params
+	c.methodHistory = append(c.methodHistory, method)
 	if request, ok := params.(proto.RuntimeEvaluate); ok {
 		c.runtimeTimeouts = append(c.runtimeTimeouts, request.Timeout)
+		c.runtimeExpressions = append(c.runtimeExpressions, request.Expression)
 	}
 	if c.forceErr && c.err != nil {
 		return nil, c.err
@@ -1325,6 +1330,11 @@ func (c *currentPageURLCDPClient) Call(ctx context.Context, _ string, method str
 		if index < len(c.runtimeResponses) {
 			return c.runtimeResponses[index], nil
 		}
+	case "Input.dispatchKeyEvent":
+		if request, ok := params.(proto.InputDispatchKeyEvent); ok {
+			c.keyEvents = append(c.keyEvents, request)
+		}
+		return []byte(`{}`), nil
 	}
 	if c.err != nil {
 		return nil, c.err
@@ -1360,7 +1370,104 @@ func newCurrentPageURLSession(t *testing.T, client *currentPageURLCDPClient) *Br
 	client.params = nil
 	client.runtimeCall = 0
 	client.runtimeTimeouts = nil
-	return &BrowseSession{page: &hrod.Page{Rod: page}}
+	client.runtimeExpressions = nil
+	client.methodHistory = nil
+	client.keyEvents = nil
+	return &BrowseSession{page: &hrod.Page{Rod: page, Keyboard: page.Keyboard}}
+}
+
+func TestAdvanceCarouselRightUsesArrowRightWithoutMouseClick(t *testing.T) {
+	client := &currentPageURLCDPClient{
+		runtimeResponses: [][]byte{
+			[]byte(`{"result":{"type":"boolean","value":true}}`),
+			[]byte(`{"result":{"type":"number","value":1}}`),
+		},
+	}
+	session := newCurrentPageURLSession(t, client)
+
+	got, err := advanceCarouselRight(context.Background(), session.page.Context(context.Background()), &evalTimeoutCounter{}, 0)
+	if err != nil {
+		t.Fatalf("不期望错误: %v", err)
+	}
+	if got != 1 {
+		t.Fatalf("切换后的索引 = %d，期望 1", got)
+	}
+	if len(client.keyEvents) != 2 {
+		t.Fatalf("应发送成对键盘事件，实际 %d 个", len(client.keyEvents))
+	}
+	if client.keyEvents[0].Type != proto.InputDispatchKeyEventTypeRawKeyDown ||
+		client.keyEvents[1].Type != proto.InputDispatchKeyEventTypeKeyUp {
+		t.Fatalf("ArrowRight 键盘事件未成对发送: %#v", client.keyEvents)
+	}
+	for i, event := range client.keyEvents {
+		if event.Key != "ArrowRight" || event.Code != "ArrowRight" {
+			t.Fatalf("第 %d 个键盘事件不是 ArrowRight: %#v", i, event)
+		}
+	}
+	for _, method := range client.methodHistory {
+		if method == "Input.dispatchMouseEvent" {
+			t.Fatalf("不应发送鼠标事件: %v", client.methodHistory)
+		}
+	}
+	if len(client.runtimeExpressions) != 2 {
+		t.Fatalf("应发送安全条件和索引等待两个 Runtime.evaluate，实际 %d 个", len(client.runtimeExpressions))
+	}
+	safetyExpression := client.runtimeExpressions[0]
+	for _, check := range []struct {
+		name     string
+		fragment string
+	}{
+		{name: "页面可见性检查", fragment: "document.visibilityState"},
+		{name: "焦点检查", fragment: "document.hasFocus()"},
+		{name: "编辑元素焦点排除", fragment: "focused.isContentEditable"},
+		{name: "输入元素焦点排除", fragment: `focused.matches("input, textarea, select")`},
+		{name: "Swiper realIndex 状态", fragment: "swiper.realIndex"},
+		{name: "Swiper isEnd 状态", fragment: "swiper.isEnd"},
+		{name: "剩余索引读取", fragment: `getAttribute("data-swiper-slide-index")`},
+	} {
+		if !strings.Contains(safetyExpression, check.fragment) {
+			t.Fatalf("安全条件 Runtime.evaluate 缺少%s %q，实际表达式: %s", check.name, check.fragment, safetyExpression)
+		}
+	}
+	for _, expression := range client.runtimeExpressions {
+		for _, forbidden := range []string{"getBoundingClientRect", "elementFromPoint"} {
+			if strings.Contains(expression, forbidden) {
+				t.Fatalf("Runtime.evaluate 不应包含旧鼠标坐标逻辑 %q: %s", forbidden, expression)
+			}
+		}
+	}
+	request, ok := client.params.(proto.RuntimeEvaluate)
+	if !ok {
+		t.Fatalf("索引等待 Eval 参数类型 = %T", client.params)
+	}
+	if !request.AwaitPromise || !strings.Contains(request.Expression, "MutationObserver") {
+		t.Fatalf("索引变化等待 Eval 应带 AwaitPromise 和 MutationObserver: %#v", request)
+	}
+}
+
+func TestAdvanceCarouselRightStopsWhenKeyboardAdvanceIsUnsafe(t *testing.T) {
+	client := &currentPageURLCDPClient{
+		runtimeResponses: [][]byte{
+			[]byte(`{"result":{"type":"boolean","value":false}}`),
+		},
+	}
+	session := newCurrentPageURLSession(t, client)
+
+	got, err := advanceCarouselRight(context.Background(), session.page.Context(context.Background()), &evalTimeoutCounter{}, 0)
+	if got != 0 || err == nil {
+		t.Fatalf("不安全条件应返回原索引和错误: got=%d err=%v", got, err)
+	}
+	if len(client.keyEvents) != 0 {
+		t.Fatalf("不安全条件下不应发送键盘事件: %#v", client.keyEvents)
+	}
+	for _, method := range client.methodHistory {
+		if method == "Input.dispatchKeyEvent" || method == "Input.dispatchMouseEvent" {
+			t.Fatalf("不安全条件下不应发送输入事件: %v", client.methodHistory)
+		}
+	}
+	if len(client.runtimeExpressions) != 1 {
+		t.Fatalf("不安全条件下不应进入索引等待 Eval，实际 Runtime.evaluate %d 次", len(client.runtimeExpressions))
+	}
 }
 
 func TestExtractInteractStateFromDOMUsesDataLayerState(t *testing.T) {

@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/go-rod/rod/lib/proto"
+	"github.com/go-rod/rod/lib/input"
 	hrod "github.com/xpzouying/xiaohongshu-mcp/humanize/rod"
 )
 
@@ -54,7 +54,7 @@ func dynamicReadDuration(m contentMetrics) time.Duration {
 }
 
 // Read reads title/body and, for a multi-image note, physically advances at
-// most two pages using the report-verified .swiper-slide interaction. It never
+// most two pages by sending keyboard ArrowRight. It never
 // scrolls comments. A positive minDuration is an explicit caller lower bound;
 // an unset duration uses the content-aware default above.
 func (a *ReadStageAction) Read(ctx context.Context, feedID string, minDuration time.Duration) error {
@@ -150,16 +150,50 @@ func carouselReadProbeScript() string {
 }
 
 func advanceCarouselRight(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, previousIndex int) (int, error) {
-	_, err := page.Element(".swiper-slide-active")
+	ready, err := evalJS(ctx, counter, page, `(previousIndex) => {
+		if (document.visibilityState !== "visible" || !document.hasFocus()) {
+			return false;
+		}
+
+		const focused = document.activeElement;
+		if (focused &&
+			(focused.matches("input, textarea, select") || focused.isContentEditable)) {
+			return false;
+		}
+
+		const swiper = document.querySelector(".swiper")?.swiper;
+		const active = document.querySelector(".swiper-slide-active");
+		const activeIndex = Number.parseInt(
+			active?.getAttribute("data-swiper-slide-index") || "-1",
+			10
+		);
+		const realIndices = Array.from(document.querySelectorAll(".swiper-slide"))
+			.map((slide) => Number.parseInt(
+				slide.getAttribute("data-swiper-slide-index") || "-1",
+				10
+			))
+			.filter(Number.isInteger);
+
+		if (!swiper ||
+			typeof swiper.realIndex !== "number" ||
+			typeof swiper.isEnd !== "boolean" ||
+			typeof swiper.slideNext !== "function" ||
+			activeIndex !== previousIndex ||
+			swiper.realIndex !== previousIndex) {
+			return false;
+		}
+
+		return !swiper.isEnd &&
+			realIndices.some((index) => index > previousIndex);
+	}`, previousIndex)
 	if err != nil {
-		return previousIndex, fmt.Errorf("当前笔记图片轮播页不可用: %w", err)
+		return previousIndex, fmt.Errorf("检查图片轮播键盘翻页条件失败: %w", err)
 	}
-	point, err := carouselRightClickPoint(ctx, page, counter)
-	if err != nil {
-		return previousIndex, err
+	if ready == nil || !ready.Value.Bool() {
+		return previousIndex, fmt.Errorf("当前图片轮播页不可安全键盘翻页")
 	}
-	if err := page.ClickPoint(point); err != nil {
-		return previousIndex, fmt.Errorf("点击图片轮播右侧失败: %w", err)
+	if err := page.Keyboard.Type(input.ArrowRight); err != nil {
+		return previousIndex, fmt.Errorf("发送图片轮播右方向键失败: %w", err)
 	}
 
 	// 用一次可等待 Promise/MutationObserver Eval 等待 active index 变化，最长 2 秒，
@@ -196,30 +230,6 @@ func advanceCarouselRight(ctx context.Context, page *hrod.Page, counter *evalTim
 		return previousIndex, fmt.Errorf("图片轮播页未从 index=%d 切换", previousIndex)
 	}
 	return index, nil
-}
-
-func carouselRightClickPoint(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter) (proto.Point, error) {
-	result, err := evalJS(ctx, counter, page, `() => {
-			const slide = document.querySelector(".swiper-slide-active");
-			if (!slide) return "";
-			const r = slide.getBoundingClientRect();
-			const x = Math.min(Math.max(r.left + r.width * 0.8, 1), window.innerWidth - 1);
-			const y = Math.min(Math.max(r.top + r.height / 2, 1), window.innerHeight - 1);
-			const hit = document.elementFromPoint(x, y);
-			if (!slide.isConnected || r.width <= 1 || r.height <= 1 || !hit || !slide.contains(hit)) return "";
-		return JSON.stringify({x, y});
-	}`)
-	if err != nil || result == nil || result.Value.Str() == "" {
-		return proto.Point{}, fmt.Errorf("当前图片轮播页不可原生点击")
-	}
-	var point struct {
-		X float64 `json:"x"`
-		Y float64 `json:"y"`
-	}
-	if err := json.Unmarshal([]byte(result.Value.Str()), &point); err != nil {
-		return proto.Point{}, fmt.Errorf("解析图片轮播点击坐标失败: %w", err)
-	}
-	return proto.Point{X: point.X, Y: point.Y}, nil
 }
 
 func minInt(a, b int) int {
