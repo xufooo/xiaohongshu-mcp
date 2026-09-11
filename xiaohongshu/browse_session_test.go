@@ -1363,6 +1363,141 @@ func newCurrentPageURLSession(t *testing.T, client *currentPageURLCDPClient) *Br
 	return &BrowseSession{page: &hrod.Page{Rod: page}}
 }
 
+func TestExtractInteractStateFromDOMUsesDataLayerState(t *testing.T) {
+	tests := []struct {
+		name          string
+		response      string
+		wantLiked     bool
+		wantCollected bool
+	}{
+		{
+			name:          "未点赞已收藏",
+			response:      `{"liked":false,"collected":true}`,
+			wantLiked:     false,
+			wantCollected: true,
+		},
+		{
+			name:          "已点赞未收藏",
+			response:      `{"liked":true,"collected":false}`,
+			wantLiked:     true,
+			wantCollected: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &currentPageURLCDPClient{response: runtimeEvaluateStringResponse(t, tt.response)}
+			session := newCurrentPageURLSession(t, client)
+			liked, collected, err := ExtractInteractStateFromDOM(context.Background(), session.page, &evalTimeoutCounter{}, "feed-state-test")
+			if err != nil {
+				t.Fatalf("不期望错误: %v", err)
+			}
+			if liked != tt.wantLiked || collected != tt.wantCollected {
+				t.Fatalf("互动状态 = liked:%t collected:%t，期望 liked:%t collected:%t", liked, collected, tt.wantLiked, tt.wantCollected)
+			}
+		})
+	}
+}
+
+func TestExtractInteractStateFromDOMExpressionUsesFeedIDDataLayer(t *testing.T) {
+	feedID := "feed-state-exact"
+	client := &currentPageURLCDPClient{response: runtimeEvaluateStringResponse(t, `{"liked":false,"collected":true}`)}
+	session := newCurrentPageURLSession(t, client)
+	if _, _, err := ExtractInteractStateFromDOM(context.Background(), session.page, &evalTimeoutCounter{}, feedID); err != nil {
+		t.Fatalf("不期望错误: %v", err)
+	}
+	request, ok := client.params.(proto.RuntimeEvaluate)
+	if !ok {
+		t.Fatalf("Runtime.evaluate 参数类型 = %T", client.params)
+	}
+	expression := request.Expression
+	if !strings.HasSuffix(expression, fmt.Sprintf(`("%s")`, feedID)) {
+		t.Fatalf("Runtime.evaluate 未传入精确 feedID 实参: %q", expression)
+	}
+	for _, required := range []string{
+		"noteDetailMap[feedID]",
+		`typeof interactInfo.liked !== "boolean"`,
+		`typeof interactInfo.collected !== "boolean"`,
+	} {
+		if !strings.Contains(expression, required) {
+			t.Fatalf("Runtime.evaluate expression 缺少 %q: %s", required, expression)
+		}
+	}
+	for _, forbidden := range []string{"likeHref", "collectHref", "#like_b", "#liked", "#like"} {
+		if strings.Contains(expression, forbidden) {
+			t.Fatalf("Runtime.evaluate expression 不应包含旧 href 痕迹 %q: %s", forbidden, expression)
+		}
+	}
+}
+
+func TestExtractInteractStateFromDOMUnknownReturnsNoFeedDetail(t *testing.T) {
+	client := &currentPageURLCDPClient{response: runtimeEvaluateStringResponse(t, "")}
+	session := newCurrentPageURLSession(t, client)
+	liked, collected, err := ExtractInteractStateFromDOM(context.Background(), session.page, &evalTimeoutCounter{}, "feed-state-empty")
+	if liked || collected {
+		t.Fatalf("unknown 状态不应伪装成已互动: liked=%t collected=%t", liked, collected)
+	}
+	if !errors.Is(err, xerrors.ErrNoFeedDetail) {
+		t.Fatalf("空结果应返回 ErrNoFeedDetail: %v", err)
+	}
+}
+
+func TestExtractOpenedNoteFieldsFromDOMUnknownInteractReturnsNoFeedDetail(t *testing.T) {
+	client := &currentPageURLCDPClient{response: runtimeEvaluateStringResponse(t, "")}
+	session := newCurrentPageURLSession(t, client)
+	_, err := extractOpenedNoteFieldsFromDOM(context.Background(), session.page, "feed-snapshot-empty")
+	if !errors.Is(err, xerrors.ErrNoFeedDetail) {
+		t.Fatalf("首屏互动状态 unknown 应进入 ErrNoFeedDetail 路径: %v", err)
+	}
+	request, ok := client.params.(proto.RuntimeEvaluate)
+	if !ok {
+		t.Fatalf("Runtime.evaluate 参数类型 = %T", client.params)
+	}
+	expression := request.Expression
+	if !strings.Contains(expression, `if (!interact) return "";`) {
+		t.Fatal("首屏快照 Eval 缺少 unknown 时返回空结果的分支")
+	}
+	if !strings.Contains(expression, "liked: interact.liked") || !strings.Contains(expression, "collected: interact.collected") {
+		t.Fatal("首屏快照互动字段应直接读取 interact 状态")
+	}
+	for _, fallback := range []string{
+		"liked: interact ? interact.liked : false",
+		"collected: interact ? interact.collected : false",
+		"liked: false",
+		"collected: false",
+	} {
+		if strings.Contains(expression, fallback) {
+			t.Fatalf("首屏快照不应保留 false 回退 %q", fallback)
+		}
+	}
+}
+
+func TestReadFeedDetailStateUnknownInteractReturnsNoFeedDetail(t *testing.T) {
+	client := &currentPageURLCDPClient{response: runtimeEvaluateStringResponse(t, "")}
+	session := newCurrentPageURLSession(t, client)
+	response, err := readFeedDetailState(context.Background(), session.page, &evalTimeoutCounter{}, "feed-detail-state-empty")
+	if !errors.Is(err, xerrors.ErrNoFeedDetail) {
+		t.Fatalf("缺失 interactInfo 应返回 ErrNoFeedDetail: %v", err)
+	}
+	if response != nil {
+		t.Fatalf("unknown 状态不应返回成功响应: liked=%t collected=%t", response.Note.InteractInfo.Liked, response.Note.InteractInfo.Collected)
+	}
+
+	request, ok := client.params.(proto.RuntimeEvaluate)
+	if !ok {
+		t.Fatalf("Runtime.evaluate 参数类型 = %T", client.params)
+	}
+	expression := request.Expression
+	for _, required := range []string{
+		"if (!interactInfo ||",
+		`typeof interactInfo.liked !== "boolean"`,
+		`typeof interactInfo.collected !== "boolean"`,
+	} {
+		if !strings.Contains(expression, required) {
+			t.Fatalf("Runtime.evaluate expression 缺少 %q: %s", required, expression)
+		}
+	}
+}
+
 func TestCurrentPageURLUsesTargetInfo(t *testing.T) {
 	client := &currentPageURLCDPClient{
 		response: []byte(`{"targetInfo":{"targetId":"target-1","url":"https://www.xiaohongshu.com/explore"}}`),

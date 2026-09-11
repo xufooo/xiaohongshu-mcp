@@ -12,35 +12,25 @@ import (
 	hrod "github.com/xpzouying/xiaohongshu-mcp/humanize/rod"
 )
 
-// interactStateJS 是唯一的互动状态来源：同时要求 like/collect wrapper 存在，
-// like use 读取 xlink:href（兼容 href），#liked→true / #like→false，
-// #collected→true / #collect→false。use 缺失、未知 href 或任一 wrapper 缺失
-// 均返回 null（unknown，fail-closed）。
+// interactStateJS 是唯一的互动状态来源：按 feedID 精确读取
+// __INITIAL_STATE__.note.noteDetailMap[feedID].note.interactInfo。
+// map、目标 key、interactInfo 或任一布尔字段缺失时返回 null（unknown，fail-closed）。
 const interactStateJS = `
-	const hrefHash = (href) => {
-		const idx = href.indexOf("#");
-		return idx >= 0 ? href.slice(idx) : "";
+	const noteDetailMap = window.__INITIAL_STATE__?.note?.noteDetailMap;
+	if (!feedID || !noteDetailMap ||
+		!Object.prototype.hasOwnProperty.call(noteDetailMap, feedID)) {
+		return null;
+	}
+	const interactInfo = noteDetailMap[feedID]?.note?.interactInfo;
+	if (!interactInfo ||
+		typeof interactInfo.liked !== "boolean" ||
+		typeof interactInfo.collected !== "boolean") {
+		return null;
+	}
+	return {
+		liked: interactInfo.liked,
+		collected: interactInfo.collected,
 	};
-	const likeWrapper = document.querySelector(likeSel);
-	const collectWrapper = document.querySelector(collectSel);
-	if (!likeWrapper || !collectWrapper) return null;
-	const likeUse = likeWrapper.querySelector("use");
-	if (!likeUse) return null;
-	const likeRaw = likeUse.getAttribute("xlink:href") || likeUse.getAttribute("href") || "";
-	const likeHref = hrefHash(likeRaw);
-	let liked;
-	if (likeHref === "#liked") liked = true;
-	else if (likeHref === "#like") liked = false;
-	else return null;
-	const collectUse = collectWrapper.querySelector("use");
-	if (!collectUse) return null;
-	const collectRaw = collectUse.getAttribute("xlink:href") || collectUse.getAttribute("href") || "";
-	const collectHref = hrefHash(collectRaw);
-	let collected;
-	if (collectHref === "#collected") collected = true;
-	else if (collectHref === "#collect") collected = false;
-	else return null;
-	return { liked, collected };
 `
 
 // domCleanJS 只定义 clean（供三个 DOM 提取器共用）。
@@ -112,7 +102,7 @@ const domCommentExtractorJS = `
 	}).filter((comment) => comment.content);
 `
 
-// OpenedNoteSnapshot 是打开笔记后的一次 DOM 快照：正文、图片、href 互动状态和当前首屏评论。
+// OpenedNoteSnapshot 是打开笔记后的一次 DOM 快照：正文、图片、数据层互动状态和当前首屏评论。
 type OpenedNoteSnapshot struct {
 	Note     OpenedNoteContent `json:"note"`
 	Comments []Comment         `json:"comments"`
@@ -146,7 +136,7 @@ func finishOpenedNoteSnapshotAttempt(ctx context.Context, counter *evalTimeoutCo
 }
 
 func extractOpenedNoteFieldsFromDOM(ctx context.Context, page *hrod.Page, feedID string) (OpenedNoteContent, error) {
-	result, err := evalJSDirect(ctx, page, `(feedID, likeSel, collectSel) => {` + domCleanJS + domNoteHelpersJS + `
+	result, err := evalJSDirect(ctx, page, `(feedID) => {` + domCleanJS + domNoteHelpersJS + `
 		const title = pickText(["#detail-title", ".note-content .title", ".title", "[class*='title']"]);
 		const desc = pickText(["#detail-desc", ".note-content .desc", ".note-text", ".desc", "[class*='desc']"]);
 		const author = pickText([".author .name", ".author-wrapper .name", ".user .name", ".nickname", "[class*='author'] [class*='name']"]);
@@ -155,6 +145,7 @@ func extractOpenedNoteFieldsFromDOM(ctx context.Context, page *hrod.Page, feedID
 			.map((img) => ({ width: img.naturalWidth || 0, height: img.naturalHeight || 0, urlDefault: img.src || "", urlPre: img.src || "" }))
 			.filter((img) => img.urlDefault);
 		const interact = (() => {` + interactStateJS + `})();
+		if (!interact) return "";
 		return JSON.stringify({
 			note_id: feedID,
 			title,
@@ -162,15 +153,15 @@ func extractOpenedNoteFieldsFromDOM(ctx context.Context, page *hrod.Page, feedID
 			type: document.querySelector("video") ? "video" : "normal",
 			user: { nickname: author, nickName: author, avatar },
 			interactInfo: {
-				liked: interact ? interact.liked : false,
-				collected: interact ? interact.collected : false,
+				liked: interact.liked,
+				collected: interact.collected,
 				likedCount: countNear([".interact-container .like-lottie", ".interact-container .like-wrapper", ".interact-container [class*='like']"]),
 				commentCount: countNear([".comments-container .total", ".comment-wrapper", "[class*='comment']"]),
 				collectedCount: countNear([".interact-container .collect-icon", ".interact-container .collect-wrapper", ".interact-container [class*='collect']"])
 			},
 			imageList: images
 		});
-	}`, feedID, SelectorLikeButton, SelectorCollectButton)
+	}`, feedID)
 	if err != nil {
 		kind := "异常"
 		if isEvalTimeout(err) {
@@ -355,7 +346,7 @@ func extractSearchFeedSources(ctx context.Context, page *hrod.Page, counter *eva
 
 // ExtractFeedDetailFromDOM 从当前详情页可见 DOM 提取笔记、作者、评论和互动状态。
 func ExtractFeedDetailFromDOM(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, feedID string) (*FeedDetailResponse, error) {
-	result, err := evalJS(ctx, counter, page, `(feedID, likeSel, collectSel) => {` + domCleanJS + domNoteHelpersJS + domCommentExtractorJS + `
+	result, err := evalJS(ctx, counter, page, `(feedID) => {` + domCleanJS + domNoteHelpersJS + domCommentExtractorJS + `
 		const interact = (() => {` + interactStateJS + `})();
 		if (!interact) return "";
 
@@ -389,7 +380,7 @@ func ExtractFeedDetailFromDOM(ctx context.Context, page *hrod.Page, counter *eva
 		};
 		if (!title && !desc && comments.length === 0) return "";
 		return JSON.stringify(detail);
-	}`, feedID, SelectorLikeButton, SelectorCollectButton)
+	}`, feedID)
 	if err != nil {
 		return nil, fmt.Errorf("提取 DOM Feed 详情失败: %w", err)
 	}
@@ -510,13 +501,13 @@ func extractCommentsWithProgressFromDOM(ctx context.Context, page *hrod.Page, fe
 	return snapshot, nil
 }
 
-// ExtractInteractStateFromDOM 复用唯一 href 状态片段读取点赞/收藏状态。
+// ExtractInteractStateFromDOM 复用唯一的数据层互动状态片段读取点赞/收藏状态。
 func ExtractInteractStateFromDOM(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, feedID string) (bool, bool, error) {
-	result, err := evalJS(ctx, counter, page, `(likeSel, collectSel) => {
+	result, err := evalJS(ctx, counter, page, `(feedID) => {
 		const interact = (() => {` + interactStateJS + `})();
 		if (!interact) return "";
 		return JSON.stringify(interact);
-	}`, SelectorLikeButton, SelectorCollectButton)
+	}`, feedID)
 	if err != nil {
 		return false, false, err
 	}

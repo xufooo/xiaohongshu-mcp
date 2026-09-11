@@ -252,7 +252,8 @@ func (a *FavoriteAction) perform(ctx context.Context, feedID, xsecToken string, 
 	return a.performInteraction(ctx, spec, feedID, xsecToken)
 }
 
-// getInteractState 仅从渲染后的互动按钮读取状态；无法确认时返回错误。
+// getInteractState 从页面数据层 __INITIAL_STATE__.note.noteDetailMap[feedID].note.interactInfo
+// 读取点赞/收藏状态；无法确认时返回错误。
 func (a *interactAction) getInteractState(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, feedID string) (bool, bool, error) {
 	return ExtractInteractStateFromDOM(ctx, page, counter, feedID)
 }
