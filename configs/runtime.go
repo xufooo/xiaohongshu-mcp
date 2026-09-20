@@ -19,9 +19,14 @@ const defaultLowResourceMemoryLimit = 128 << 20
 //   - XHS_GOGC：GC 触发比例（0 表示关闭自动 GC，需谨慎）。
 func ApplyRuntimeLimits() {
 	if raw := strings.TrimSpace(os.Getenv("XHS_GO_MEMLIMIT")); raw != "" {
-		if bytes, err := parseByteSize(raw); err == nil && bytes > 0 {
-			debug.SetMemoryLimit(bytes)
-			logrus.Infof("GOMEMLIMIT set to %d bytes", bytes)
+		if bytes, err := parseByteSize(raw); err == nil {
+			if bytes <= 0 {
+				// 显式 0 表示"不设软上限"，不是非法值。
+				logrus.Info("GOMEMLIMIT disabled by XHS_GO_MEMLIMIT=0")
+			} else {
+				debug.SetMemoryLimit(bytes)
+				logrus.Infof("GOMEMLIMIT set to %d bytes", bytes)
+			}
 		} else {
 			logrus.Warnf("invalid XHS_GO_MEMLIMIT %q, ignored", raw)
 		}

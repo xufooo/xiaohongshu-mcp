@@ -1,0 +1,491 @@
+# xiaohongshu-mcp 树莓派 3B 优化测试文档
+
+- 分支：`perf/pi3-optimize`（基线 `fixup-test` @ `0646295`，改动见 [`pi3b-optimization.md`](./pi3b-optimization.md)）
+- 目标设备：Raspberry Pi 3B，4×Cortex-A53 @1.2GHz，1GB RAM，arm64（Raspberry Pi OS 64-bit），无 swap
+- 编写日期：2026-09-20
+- 证据等级标注：**[源码]** 直接读到代码 / **[本机实测]** 开发机 x86_64 上真实运行取数 / **[推断]** 由代码推导 / **[待真机]** 需要树莓派实测才能定论
+
+---
+
+## 1. 目的与范围
+
+### 1.1 要验证什么
+
+1. 本次资源优化**不破坏任何既有功能**（回归面）；
+2. 低资源档的配置解析、flag 组装、资源拦截、运行时内存上限**按设计生效**；
+3. 图片下载、限流落盘、身份采集节流、network capture 的改动**语义等价**；
+4. 在真实 Chromium 上，服务能起来、健康检查通过、登录二维码链路可用；
+5. 给树莓派真机一套**可直接照做**的验收步骤与判据。
+
+### 1.2 明确不在范围内
+
+- 需要**已登录小红书账号**的端到端功能（搜索/详情/点赞/评论/发布）。原因见 §2.3。
+- 防封禁策略（拟人等待、阅读时长、限流阈值）的行为变更 —— 本次**没有改**这些默认值，因此不需要重新标定。
+- 树莓派上的绝对内存/延迟数字 —— 本机没有 Pi，只能给出「怎么测 + 判据」。
+
+---
+
+## 2. 环境与前置条件
+
+### 2.1 开发机（本次实际执行环境）
+
+| 项 | 值 |
+|:--|:--|
+| OS | Manjaro Linux（rolling），x86_64 |
+| 浏览器 | `google-chrome-stable 153.0.8010.52`（`/usr/bin/google-chrome-stable`） |
+| Go 工具链 | **本机未安装**（按要求不装），编译与测试全部走 GitHub Actions |
+| CI | `gh` CLI 已登录 `xufooo`，具备 `repo` + `workflow` scope |
+| 用于取数的 Node | `/opt/dsh-desktop/resources/app/node_modules/node/bin/node`（v24.9.0） |
+
+CI workflow：`.github/workflows/build.yml`（name: **Build Check**）
+
+- `verify` job：`go test ./...` + `go build ./...` + `third_party/headless_browser` 单独 `go mod tidy && go test ./...`
+- `build` matrix：`linux/windows/darwin × amd64/arm64`，上传 6 个 artifact
+- 手动触发：`gh workflow run "Build Check" --ref perf/pi3-optimize`（`workflow_dispatch` 对任意分支生效）
+
+### 2.2 编译与测试的入口（不装 Go）
+
+```bash
+cd /home/ooo/Works/xiaohongshu-mcp
+
+# 1) 推送分支（未经同意不要推 fixup-test / main）
+git push origin perf/pi3-optimize
+
+# 2) 触发 CI
+gh workflow run "Build Check" --ref perf/pi3-optimize
+
+# 3) 看结果
+gh run list --workflow build.yml --limit 3
+gh run view <run-id> --log-failed          # 失败时看日志
+
+# 4) 下产物（linux/arm64 给树莓派，linux/amd64 给本机验证）
+gh run download <run-id> -n xiaohongshu-mcp-linux-arm64 -D /tmp/xhs-arm64
+gh run download <run-id> -n xiaohongshu-mcp-linux-amd64 -D /tmp/xhs-amd64
+```
+
+### 2.3 已知环境约束（会影响能测到什么）
+
+| 约束 | 事实 | 影响 |
+|:--|:--|:--|
+| 出口 IP 被小红书风控拦截 | **[本机实测]** 访问 `https://www.xiaohongshu.com/explore` 会 302 到 `/website-login/error?...error_code=300012&error_msg=IP存在风险…`，`document.title` = 「安全限制」 | 本机无法用真实信息流页面做功能/内存取数 |
+| 无已登录 cookies | 用户确认没有可提供的登录态 | 搜索/详情/互动/发布链路**本机不可端到端验证** |
+| 无树莓派可用 | 用户确认只能本机 x86 + Chrome 验证 | 所有 Pi 专属数字标 **[待真机]**，不给结论性数值 |
+| 本机未装 Go | 按要求 | 单测/编译只能靠 CI，本地只用 `gofmt` 校验格式 |
+
+> CI 上的 `go test ./...` 是本次唯一的自动化回归闸门：**143 个既有测试 + 本次新增 ~14 个测试**。
+
+---
+
+## 3. 变更 → 测试项映射（不漏项）
+
+| # | 变更 | 代码位置 | 验证层级 | 具体测试项 |
+|:--|:--|:--|:--|:--|
+| C1 | 低资源档判定（`XHS_LOW_RESOURCE`，arm 默认开） | `configs/browser.go` | L1 单测 | T1-1 |
+| C2 | V8 堆上限 / renderer 上限解析 | `configs/browser.go` | L1 单测 | T1-2 |
+| C3 | flag 组装（含"不得出现 WebGL 杀手 flag"） | `third_party/headless_browser` | L1 单测 | T1-3 |
+| C4 | URL 拦截模式解析（显式 / `-` / 默认 / 非低资源） | `configs/browser.go` | L1 单测 | T1-4 |
+| C5 | `Network.setBlockedURLs` 实际可用性 | `third_party/headless_browser` | L2 探针 | T2-2 |
+| C6 | 低资源档真实生效（进程数 / RSS / WebGL 未被破坏） | 全部 | L2 探针 | T2-3 |
+| C7 | Go 运行时内存上限解析 | `configs/runtime.go` | L1 单测 | T1-5 |
+| C8 | 图片下载流式化（分块、超限、正常） | `pkg/downloader/images.go` | L1 单测 | T1-6 |
+| C9 | 限流裁剪无变化不写盘 | `pkg/ratelimit/*` | L1 单测 + 代码审查 | T1-7 |
+| C10 | 身份采集节流 | `service.go` / `configs` | L1 单测 + L2 日志 | T1-8 / T2-4 |
+| C11 | network capture panic 路径停止 | `service.go` | L1 回归（既有测试）+ 代码审查 | T1-9 |
+| C12 | 构建裁剪（`-trimpath -s -w`） | `build.yml` | L2 CI | T2-1 |
+| C13 | docker `shm_size` / 文档纠错 | `docker/`、`docs/` | L2 人工 | T3-6 |
+| C14 | 全部既有功能不回归 | 全仓 | L1 CI | T1-10 |
+
+---
+
+## 4. L1：单元测试与 CI（自动闸门）
+
+### 4.1 执行方式
+
+CI 的 `verify` job 覆盖；本机不装 Go，因此**以 CI 输出为准**。失败定位：
+
+```bash
+gh run view <run-id> --log-failed
+```
+
+### 4.2 本次新增测试清单
+
+| 编号 | 测试函数 | 文件 | 断言要点 |
+|:--|:--|:--|:--|
+| T1-1 | `TestLowResourceProfileExplicit` | `configs/browser_test.go` | `XHS_LOW_RESOURCE=1` 开；`0/false/off/no` 全关（压过架构默认） |
+| T1-2 | `TestBrowserJSHeapMB` | `configs/browser_test.go` | 显式值优先；`0`/非法值回落；低资源档 192；非低资源档 256 |
+| T1-2 | `TestBrowserRendererLimit` | `configs/browser_test.go` | 默认 2；显式覆盖；负数回落 2 |
+| T1-4 | `TestBrowserBlockedURLPatterns` | `configs/browser_test.go` | 显式逗号列表（含空格）；`-` = 不拦截；空值按未设置；非低资源档返回 nil |
+| T1-8 | `TestIdentityCheckInterval` | `configs/browser_test.go` | 默认 10m；`0` = 每次；`90s` 解析；非法/负值回落 |
+| T1-5 | `TestParseByteSize` | `configs/runtime_test.go` | `128MiB`/`128MB`/`1GiB`/`512KiB`/纯字节/`64B` 正确；空串与 `abc` 报错 |
+| T1-3 | `TestApplyLowMemoryLauncherProfile` | `third_party/headless_browser/headless_browser_test.go` | 5 个固定 flag 在位；`js-flags=--max-old-space-size=192`；`renderer-process-limit=2`；**断言 `disable-gpu`/`disable-software-rasterizer` 不在默认档** |
+| T1-3 | `TestApplyLowMemoryLauncherProfileDefaults` | 同上 | 参数为 0 时回落 256 / 2 |
+| T1-3 | `TestWithLowMemoryProfileConfig` / `TestWithBlockedURLsDefensiveCopy` | 同上 | 选项写入 Config；切片防御性复制；nil 等同不拦截 |
+| T1-6 | `TestDownloadImageChunkedStreams` | `pkg/downloader/images_test.go` | 无 `Content-Length` 的分块响应也能落盘，字节与源完全一致 |
+| T1-6 | `TestWriteImageStreamWithinLimit` | 同上 | 头部 + 剩余流拼接后内容一致 |
+| T1-6 | `TestWriteImageStreamRejectsOversize` | 同上 | 超限报错含 `exceeds size limit`；**不留目标文件也不留 `.tmp`** |
+| T1-6 | `TestReadImageBodyWithinLimit/ExceedsLimit`（既有） | 同上 | 保留的辅助函数语义未变 |
+| T1-6 | `TestDownloadImageSuccessAndLimits`（既有） | 同上 | Content-Length 超限提前拒绝；错误信息不泄漏 token |
+
+### 4.3 既有回归测试（必须全绿，共 143 个 + 子测试）
+
+重点回归面（与本次改动最近的）：
+
+| 既有测试 | 为什么相关 |
+|:--|:--|
+| `xiaohongshu/session_optimization_test.go`（6 个） | 真实文件持久化的 ActionState 阈值/累计语义；改动只动了序列化格式 |
+| `xiaohongshu/ready_test.go`（7 个） | 就绪轮询与稳定窗未被改动 |
+| `humanize/humanize_test.go`、`humanize/rod/hrod_test.go` | 拟人层未被改动 |
+| `browser/browser_test.go` | 浏览器选项装配 |
+| `service_p0_test.go` | 服务层 P0 行为 |
+
+### 4.4 通过判据
+
+```
+verify job: success
+build job (6 个平台): success
+第三方模块 verify（third_party/headless_browser）: success
+```
+
+### 4.5 实测记录（本次）
+
+| 运行 | commit | 结果 |
+|:--|:--|:--|
+| 基线 | `0646295`（分支刚建，无改动） | `Build Check` success，artifact 6 个均已生成 |
+| 优化后 | `7dab19b` | 见 §6 执行记录（CI 结果回填） |
+
+---
+
+## 5. L2：本机浏览器验证（真实 Chromium）
+
+### 5.1 T2-1 产物存在与体积
+
+```bash
+gh run download <run-id> -n xiaohongshu-mcp-linux-amd64 -D /tmp/xhs-amd64
+ls -l /tmp/xhs-amd64/xiaohongshu-mcp-linux-amd64
+```
+
+判据：文件存在、可执行、体积为"裁剪后"的量级（对比基线运行同平台 artifact 的 `ls -l`；
+`-s -w` 去符号表 + `-trimpath`，**[本机实测]** 预期显著小于基线）。
+CI 日志里现在会打印该文件大小（`Build` 步骤末尾 `ls -l`），可直接比对。
+
+### 5.2 T2-2 资源拦截命令可用性（独立探针）
+
+用自建 CDP 探针（不属于仓库文件，测试脚本用完即删）：
+
+```bash
+cd /tmp && cat > cdp-probe.mjs <<'EOF'   # 完整脚本见本文件附录 A
+EOF
+node cdp-probe.mjs "" "https://www.xiaohongshu.com/explore" "baseline"
+```
+
+判据：
+
+- `setBlockedURLsWithoutEnable == "ok"` → **不需要先 `Network.enable`**，实现路径成立；
+- `probe.webgl.renderer` 含 `SwiftShader` → 基线 WebGL 正常。
+
+**[本机实测]** 结果：`ok` / `ok`，WebGL = `ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero)…))`。
+
+### 5.3 T2-3 低资源档真实生效 + 不破坏 WebGL
+
+```bash
+node cdp-probe.mjs "" "https://www.xiaohongshu.com/explore" "baseline"
+node cdp-probe.mjs "--js-flags=--max-old-space-size=192|--renderer-process-limit=2" "https://www.xiaohongshu.com/explore" "lowmem"
+```
+
+判据（**[本机实测]** 已通过，数据见 `pi3b-optimization.md` §2）：
+
+| 检查 | 基线 | 低资源档 | 判据 |
+|:--|--:|--:|:--|
+| 空页进程数 | 12 | 10 | 下降 |
+| 加载后进程数 | 13 | 11 | 下降 |
+| 加载后 RSS | 1,912,176 KB | 1,661,696 KB | 下降（约 −13%） |
+| WebGL renderer | SwiftShader | SwiftShader | **必须仍然可用** |
+
+反例（必须**不**出现在默认档）：
+
+```bash
+node cdp-probe.mjs "--disable-software-rasterizer" "about:blank" "swrast"
+# 期望观察到 probe.webgl.error == "no webgl context" → 这就是它不进默认档的原因
+```
+
+### 5.4 T2-4 服务起来 + 登录二维码链路 + 低资源档日志
+
+```bash
+rm -rf /tmp/xhs-data && mkdir -p /tmp/xhs-data
+ROD_BROWSER_BIN=/usr/bin/google-chrome-stable \
+COOKIES_PATH=/tmp/xhs-data/cookies.json \
+XHS_BROWSER_PROFILE_DIR=/tmp/xhs-data/browser-profile \
+XHS_BROWSER_IDLE_TIMEOUT=2m \
+XHS_LOW_RESOURCE=1 \
+/tmp/xhs-amd64/xiaohongshu-mcp-linux-amd64 -port :18060 > /tmp/xhs-data/server.log 2>&1 &
+sleep 3
+curl -s http://127.0.0.1:18060/health
+```
+
+判据：
+
+1. 日志出现 `low resource profile enabled: js_heap_mb=192 renderer_limit=2`（**[源码]** `browser/browser.go`）；
+2. 日志出现 `blocking 5 URL patterns per page`（低资源档默认媒体列表）；
+3. `/health` 返回 200；
+4. 首次调用后 `ps -eo args | grep chrome` 能看到 `--js-flags=--max-old-space-size=192`
+   与 `--renderer-process-limit=2` 真的传给了 Chromium；
+5. 触发一次需要页面的调用，确认日志里**没有** `set blocked URLs failed` 告警
+   （有告警说明拦截命令被拒，需要回退到"先 `Network.enable` 再 set"的实现）。
+
+```bash
+# 触发浏览器（扫码登录链路，不需要已有账号）
+curl -s http://127.0.0.1:18060/api/v1/login/status
+curl -s http://127.0.0.1:18060/api/v1/login/qrcode | head -c 200
+grep -c "set blocked URLs failed" /tmp/xhs-data/server.log   # 期望 0
+```
+
+> 说明：`/api/v1/login/qrcode` 会返回 base64 二维码图片（`img` 字段）。
+> 本机验证只需要"能取到二维码"，**不需要真的扫码**（没有账号，且出口 IP 被风控）。
+> 若此调用返回风控错误，属于 §2.3 的环境约束，不判为回归。
+
+### 5.5 T2-5 身份采集节流可观测
+
+```bash
+XHS_IDENTITY_CHECK_INTERVAL=0 ...   # 每次取页都采集
+XHS_IDENTITY_CHECK_INTERVAL=10m ... # 默认：10 分钟内只采一次
+```
+
+判据：`XHS_IDENTITY_CHECK_INTERVAL=0` 时，连续两次需要页面的调用后，
+`grep -c "browser identity" server.log` 的行为与默认档不同（默认档不重复打印）。
+若两次调用间隔大于 10 分钟，默认档也应再次采集。
+
+---
+
+## 6. L3：树莓派 3B 真机验收（[待真机]）
+
+> 本机没有 Pi，以下步骤是**可执行清单**；表里的数字留空，等真机填入后再判定。
+> 所有命令都在 Pi 上以部署用户执行。
+
+### 6.1 部署
+
+```bash
+# 在开发机
+gh run download <run-id> -n xiaohongshu-mcp-linux-arm64 -D /tmp/xhs-arm64
+scp /tmp/xhs-arm64/xiaohongshu-mcp-linux-arm64 pi@<PI_IP>:/tmp/xiaohongshu-mcp
+scp -r /home/ooo/Works/xiaohongshu-mcp/deploy/... # 按需
+```
+
+```bash
+# 在 Pi 上
+sudo install -m 0755 /tmp/xiaohongshu-mcp /usr/local/bin/xiaohongshu-mcp
+sudo mkdir -p /var/lib/xiaohongshu-mcp
+```
+
+### 6.2 记录基线（必须做，否则后面无法比较）
+
+```bash
+# 关掉低资源档跑一轮，作为 Pi 上的 A/B 基线
+sudo systemctl stop xiaohongshu-mcp 2>/dev/null
+ROD_BROWSER_BIN=/usr/bin/chromium-browser \
+XHS_LOW_RESOURCE=0 \
+XHS_BROWSER_PROFILE_DIR=/var/lib/xiaohongshu-mcp/browser-profile \
+COOKIES_PATH=/var/lib/xiaohongshu-mcp/cookies.json \
+XHS_BROWSER_IDLE_TIMEOUT=30m \
+/usr/local/bin/xiaohongshu-mcp -port :18060 > /tmp/xhs-baseline.log 2>&1 &
+```
+
+采数（触发一次搜索/详情后再采）：
+
+```bash
+free -m                                   # Mem available
+ps -eo pid,rss,comm | grep -i chrom       # 各 Chrome 进程 RSS（KB）
+ps -eo args | grep -c '[c]hrome'          # 进程数
+uptime                                    # load average
+vcgencmd measure_temp                     # 温度（Pi 3B 降频相关）
+cat /proc/<chrome-pid>/status | grep VmRSS
+```
+
+### 6.3 开低资源档复测
+
+```bash
+XHS_LOW_RESOURCE=1 XHS_BROWSER_JS_HEAP_MB=192 XHS_BROWSER_RENDERER_LIMIT=2 \
+XHS_GO_MEMLIMIT=128MiB XHS_BROWSER_BLOCK_URLS=- \   # 先不拦媒体，单独量化 flag 收益
+... 同上启动 ...
+```
+
+然后**单独**再跑一次带媒体拦截（去掉 `XHS_BROWSER_BLOCK_URLS=-`），对比：
+
+| 指标 | 基线 | 低资源档 | 低资源档+媒体拦截 | 判据 |
+|:--|--:|--:|--:|:--|
+| Chrome 进程数 | | | | 基线 −2 左右 |
+| Chrome RSS 合计 | | | | 明显下降 |
+| Mem available | | | | 上升；不得出现 OOM |
+| 首页/搜索页可见耗时 | | | | 不得劣化超过 20% |
+| dmesg OOM 记录 | | | | 无 `Out of memory: Killed process` |
+| 视频笔记是否仍可正常浏览文本/图片 | | | | 拦截媒体后功能不受影响 |
+
+### 6.4 真机验收判据（硬性）
+
+1. `free -m` 的 available 在持续操作 10 分钟后 **不低于 120MB**；
+2. `dmesg | grep -i "killed process"` **无** Chromium 被杀记录；
+3. 搜索、打开笔记、读取评论、点赞、收藏、发布（图）**各至少 1 次成功**；
+4. 媒体拦截开启后，视频笔记的**文本与图片提取仍然正常**；
+5. 登录态在重启后仍有效（cookies 持久化未被破坏）；
+6. 连续 20 次操作无 "browser busy" 之外的异常，无 goroutine 累积
+   （`curl /health` 前后对比进程 RSS 无单调暴涨）。
+
+### 6.5 T3-6 Docker 路径（若用 Docker 部署）
+
+```bash
+docker compose up -d
+docker inspect xiaohongshu-mcp --format '{{.HostConfig.ShmSize}}'   # 期望 268435456（256MiB）
+```
+
+判据：`shm_size` 生效；容器内 `df -h /dev/shm` 显示 256M。
+
+---
+
+## 7. 未覆盖项与后续动作
+
+| 项 | 现状 | 建议动作 |
+|:--|:--|:--|
+| 需要登录态的功能链路（搜索/详情/互动/发布） | **[待真机]** 本机无账号且 IP 被风控 | 在 Pi（家庭宽带 IP）上按 §6.4 逐项过一遍 |
+| `XHS_BROWSER_IDLE_TIMEOUT` 默认值（5m） | 未改默认；Pi 上冷启动 Chromium 代价高 | 真机上测「5m vs 30m vs 0」的内存曲线与首字延迟，再决定默认 |
+| page 复用池（省掉每次新建 renderer） | 未做 | 若真机实测「每次调用新建 page」是主瓶颈，再评估；需要重做大半生命周期测试 |
+| `WaitForXHSReady` 轮询密度 | 未改 | 需要真机 CPU profile；改前先补测试 |
+| `--disable-gpu` 在 Pi 上是否有收益 | 本机无可测差异 | 真机 A/B，用 `XHS_BROWSER_EXTRA_ARGS=--disable-gpu` 对比，注意指纹一致性 |
+| 单进程模式 `--single-process` | 未做 | 真机实验项，renderer 崩溃会拖垮整个浏览器，谨慎 |
+| CI 的 `gofmt` 门禁 | 未加 | 仓库现存大量未格式化文件，先单独一次「全仓 gofmt」提交，再加门禁 |
+
+---
+
+## 8. 回滚方案
+
+优化全部集中在 `perf/pi3-optimize` 分支，且每一档都能用环境变量关掉，**不需要回滚代码**即可恢复上游行为：
+
+```bash
+XHS_LOW_RESOURCE=0          # 关掉低资源档（flag、资源拦截、Go 内存上限都不生效）
+XHS_BROWSER_BLOCK_URLS=-    # 只关资源拦截
+XHS_IDENTITY_CHECK_INTERVAL=0   # 恢复每次采集指纹
+XHS_GO_MEMLIMIT=0           # 注意：0 表示"不限制"，等价于不设软上限
+```
+
+需要彻底回退时：
+
+```bash
+git checkout fixup-test     # 本地
+# 远程分支保留，未推 fixup-test / main
+```
+
+需要注意的行为差异（不是回滚点，但要知情）：
+
+- 限流状态文件与 ActionState 文件由"缩进 JSON"变成"紧凑 JSON"。**向下兼容**（仍是合法 JSON，
+  旧文件照样能被 `json.Unmarshal` 读入），只是人工打开可读性下降。
+- 低资源档在 `arm/arm64` 上**默认开启**。如果 Pi 上出现无法解释的页面异常，
+  第一件事就是 `XHS_LOW_RESOURCE=0` 复现一次。
+
+---
+
+## 附录 A：CDP 探针脚本（测试用，不入库）
+
+```javascript
+// cdp-probe.mjs —— 用法: node cdp-probe.mjs "<flag1|flag2>" "<url>" "<label>"
+// 依赖 Node >= 22（内置 WebSocket）。输出 JSON：RSS、进程数、WebGL、setBlockedURLs 可用性。
+import { spawn } from 'node:child_process'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { execFileSync } from 'node:child_process'
+
+const CHROME = '/usr/bin/google-chrome-stable'
+const extraFlags = (process.argv[2] || '').split('|').filter(Boolean)
+const targetURL = process.argv[3] || 'about:blank'
+const label = process.argv[4] || 'run'
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+const userDataDir = mkdtempSync(join(tmpdir(), 'xhs-perf-'))
+const port = 9300 + Math.floor(Math.random() * 400)
+
+const child = spawn(CHROME, [
+  '--headless', '--no-sandbox', '--remote-debugging-port=' + port,
+  '--user-data-dir=' + userDataDir, '--disable-dev-shm-usage',
+  '--disable-features=site-per-process,TranslateUI', ...extraFlags, 'about:blank',
+], { stdio: 'ignore' })
+
+const sleep2 = sleep
+async function devtoolsReady() {
+  for (let i = 0; i < 150; i++) {
+    try { const r = await fetch(`http://127.0.0.1:${port}/json/version`); if (r.ok) return await r.json() } catch {}
+    await sleep2(200)
+  }
+  throw new Error('devtools 未就绪')
+}
+function totalRSS() {
+  const ps = execFileSync('ps', ['-eo', 'rss=,args='], { encoding: 'utf8' })
+  let kb = 0, procs = 0
+  for (const line of ps.split('\n')) {
+    if (!line.includes(userDataDir)) continue
+    const m = line.trim().match(/^(\d+)/); if (!m) continue
+    kb += Number(m[1]); procs++
+  }
+  return { kb, procs }
+}
+class CDP {
+  constructor(ws) {
+    this.ws = ws; this.id = 0; this.pending = new Map(); this.events = []
+    ws.addEventListener('message', (ev) => {
+      const msg = JSON.parse(ev.data)
+      if (msg.id && this.pending.has(msg.id)) {
+        const { resolve, reject } = this.pending.get(msg.id); this.pending.delete(msg.id)
+        msg.error ? reject(new Error(JSON.stringify(msg.error))) : resolve(msg.result)
+      } else if (msg.method) this.events.push(msg.method)
+    })
+  }
+  send(method, params = {}) {
+    const id = ++this.id
+    return new Promise((resolve, reject) => {
+      this.pending.set(id, { resolve, reject })
+      this.ws.send(JSON.stringify({ id, method, params }))
+      setTimeout(() => { if (this.pending.has(id)) { this.pending.delete(id); reject(new Error('timeout: ' + method)) } }, 30000)
+    })
+  }
+}
+const connect = (url) => new Promise((resolve, reject) => {
+  const ws = new WebSocket(url)
+  ws.addEventListener('open', () => resolve(new CDP(ws)))
+  ws.addEventListener('error', () => reject(new Error('ws error')))
+})
+
+const result = { label, extraFlags, targetURL }
+try {
+  await devtoolsReady()
+  const created = await fetch(`http://127.0.0.1:${port}/json/new?about:blank`, { method: 'PUT' })
+  const pageInfo = await created.json()
+  const cdp = await connect(pageInfo.webSocketDebuggerUrl)
+  try { await cdp.send('Network.setBlockedURLs', { urls: ['*.mp4*'] }); result.setBlockedURLsWithoutEnable = 'ok' }
+  catch (e) { result.setBlockedURLsWithoutEnable = 'error: ' + e.message }
+  await cdp.send('Page.enable')
+  const idle = totalRSS()
+  result.idleRSSKB = idle.kb; result.idleProcesses = idle.procs
+  const started = Date.now()
+  await cdp.send('Page.navigate', { url: targetURL })
+  for (let i = 0; i < 100; i++) { if (cdp.events.includes('Page.loadEventFired')) { result.loadEventFired = true; break } await sleep(150) }
+  result.loadMs = Date.now() - started
+  await sleep(4000)
+  const after = totalRSS()
+  result.afterLoadRSSKB = after.kb; result.afterLoadProcesses = after.procs
+  const probe = await cdp.send('Runtime.evaluate', {
+    expression: `(() => { let webgl = {}; try { const c = document.createElement('canvas');
+      const gl = c.getContext('webgl') || c.getContext('experimental-webgl');
+      if (gl) { const d = gl.getExtension('WEBGL_debug_renderer_info');
+        webgl.vendor = d ? gl.getParameter(d.UNMASKED_VENDOR_WEBGL) : gl.getParameter(gl.VENDOR);
+        webgl.renderer = d ? gl.getParameter(d.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER); }
+      else { webgl.error = 'no webgl context' } } catch (e) { webgl.error = String(e) }
+      return JSON.stringify({ userAgent: navigator.userAgent, hardwareConcurrency: navigator.hardwareConcurrency,
+        webdriver: navigator.webdriver, webgl, url: location.href, title: document.title }); })()`,
+    returnByValue: true,
+  })
+  result.probe = JSON.parse(probe.result.value)
+  cdp.ws.close()
+} catch (err) { result.fatal = String(err) } finally {
+  try { child.kill('SIGKILL') } catch {}
+  await sleep(500)
+  try { rmSync(userDataDir, { recursive: true, force: true }) } catch {}
+  console.log(JSON.stringify(result, null, 2))
+  process.exit(0)
+}
+```
