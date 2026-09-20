@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/go-rod/rod/lib/launcher"
+	"github.com/go-rod/rod/lib/launcher/flags"
 )
 
 func TestParseLaunchArg(t *testing.T) {
@@ -131,14 +132,14 @@ func TestApplyLowMemoryLauncherProfile(t *testing.T) {
 		"aggressive-cache-discard",
 		"mute-audio",
 	} {
-		if !l.Has(name) {
+		if !l.Has(flags.Flag(name)) {
 			t.Fatalf("低开销档缺少 flag %s", name)
 		}
 	}
 
 	// WebGL 指纹相关 flag 不得出现在默认档：--disable-software-rasterizer 会让 WebGL 直接消失。
 	for _, forbidden := range []string{"disable-gpu", "disable-software-rasterizer"} {
-		if l.Has(forbidden) {
+		if l.Has(flags.Flag(forbidden)) {
 			t.Fatalf("低开销档不应默认添加 %s（见 docs/pi3b-optimization.md 实测）", forbidden)
 		}
 	}
