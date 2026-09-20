@@ -581,6 +581,12 @@ try {
 扫描方式：内置浏览器打开真实站点 → 每页**只打一次极小探针**（不做 `scrollIntoView`、不做长等待、不做循环基准）
 → 把命中数与代码里的选择器/数据路径逐一对照。证据等级：**[实测]** = 浏览器实测；**[源码]** = 读代码确认。
 
+> **扫描环境更正（2026-09-20 晚）**：内置浏览器**本来就是已登录的真实会话** ——
+> `__INITIAL_STATE__.user.loggedIn = true`、`userInfo.guest = false`、昵称「一画一话」、`userId 6523ebde…`。
+> 因此本附录里凡此前标注「未登录」的观测，一律应按**已登录态**理解（这反而更贴近 MCP 的真实使用场景）。
+> 之前 `/api/v1/login/status` 返回 `is_logged_in: false` 的是 **MCP 自己的 headless Chrome**（无 cookies 且出口 IP 被风控），
+> 与内置浏览器不是同一个浏览器会话。
+
 ### D.1 已扫
 
 | # | 功能 | 页面 | 代码依赖（[源码]） | 实测（[实测]） | 结论 |
@@ -630,3 +636,22 @@ DIV.filter-panel                     ← hover「筛选」后异步挂载
 **这一条解释了 `findFilterOption` 为什么必须做命中校验**：`div.tags` 存在重复节点，按文本取到的第一个
 可能不是可点击的那个，所以代码逐个 tag 用 `elementFromPoint` 复核命中——这个设计是**对的**，
 不要为了「少一次 eval」把它简化掉（那会退化成点到重复节点上）。
+
+### D.4 第二轮扫描结果（C/D 详情互动、E 登录、F 用户主页、G 通知、H 发布）
+
+| # | 功能 | 代码依赖（[源码]） | 实测（[实测]，已登录态） | 结论 |
+|:--|:--|:--|:--|:--|
+| C/D | 详情 + 互动选择器 | `.interact-container .left .like-wrapper` / `.collect-wrapper`（`like_favorite.go`）；`.comments-container`；`.parent-comment`；`:scope > .reply-container > .list-container > .comment-item`；`.show-more`；`.note-scroller` | like=**1**、collect=**1**、`collect-wrapper` 全页=1、`comments-container`=1、`parent-comment`=10、`comment-item-sub`=10、`show-more`=10、`note-scroller`=1 | ✅ 命中且不歧义。「点开『展开 N 条回复』」的交互未测：10 个 `.show-more` 全不在视口内，需要滚动内部 `.note-scroller`，成本高 → 待测 |
+| E | `check_login_status` | 导航 `/explore` → 睡 3s → `pp.Has(".main-container .user .link-wrapper .channel")` | 已登录态：该选择器命中 **2**（1 个可见 [64,523,16,18] + 1 个 0×0 克隆），`.login-container`=0 → 返回 true（正确） | ⚠️ **登出态无法在此验证**（不能登出用户的真实会话）。待验证问题：登出时 XHS 是否仍渲染侧栏「我」入口？若渲染则该判定会把「未登录」误报为「已登录」。验证法：Pi 上用干净 profile 跑一次 `check_login_status` 并同时抓该页 DOM |
+| F | `user_profile` 入口 | `page.Element("div.main-container li.user.side-bar-component a.link-wrapper span.channel")` —— **取第一个匹配** | 命中 **2**：第一个 [64,523,16,18] **可见**，第二个 [0,0,0,0] **隐藏**；`a[href^="/user/profile/"]` 存在 | ⚠️ **潜在脆弱点（非当前故障）**：现在顺序恰好取到可见的，但顺序无契约保证。通知入口那边代码专门循环挑可见（`findVisibleNotificationEntry`），这里没有 → 建议对齐（低风险小改） |
+| G | 通知页 | `.notification-page`；3 个 `.reds-tab-item.tab-item`；`.tabs-content-container .container`；`.action-like` / `.action-reply`；`textarea.comment-input`；入口 `a[href="/notification"]` | `notification-page`=1、tabs=**3**、items=**5**、`action-like`=5、`action-reply`=5、入口=**2**、`textarea.comment-input`=0 | ✅ 选择器全部有效；入口 2 个（代码已循环挑可见）；回复输入框按需挂载，与 `waitNotificationReplyInput` 设计一致 |
+| H | `publish_content`（creator 域） | `div.creator-tab`（点击 tab）；首张图 `.upload-input`、后续 `input[type="file"]`；深层 `div.d-input input`、`xhs-publish-btn`、`.ql-editor`、`#creator-editor-topic-container` | `div.creator-tab`=**9**（3 个 tab × 3 个重复节点）；文件输入 `INPUT.upload-input > DIV.drag-over > DIV.upload-wrapper`=1；`xhs-publish-btn` / `div.d-input` / `.ql-editor` / topic-container 均=0（未上传内容时本就不存在） | ✅ 早期选择器有效。`getTabElement` 已按「可见 + 精确文本 + `elementFromPoint` 未被遮挡」筛选，能对付 9 个重复节点；深层流程需带图上传才能出现 → 待测 |
+
+### D.5 第一轮整体观（结论）
+
+1. **没有确认的 bug。** 所有被检查的选择器与数据路径在真实站点上均命中；`div.tags` / `div.creator-tab` 这类
+   **重复节点**，代码都已有「逐个复核命中」的防御（这是作者踩过坑的设计，别为省一次 eval 简化掉）。
+2. 两处曾被我判成 bug 的都已澄清：筛选面板 = 我的探针方法错（已更正）；登录判定 = 在已登录会话上无法验证登出态（列为待验证项）。
+3. 值得动的不是选择器，而是**资源与流程**：图片占内容页 93~100% 流量（已拦）、冷启动代价、每调用新建 page、
+   以及 F 那类「取第一个匹配」的一致性强化。
+4. 仍未实测：C 的「展开回复」交互、H 的带图深层流程、以及需要真机才能量的所有资源数字。
