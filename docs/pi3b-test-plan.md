@@ -587,9 +587,14 @@ try {
 |:--|:--|:--|:--|:--|:--|
 | A | `list_feeds` | `/explore` | `SelectorFeedCard` 并集；`__INITIAL_STATE__.feed.feeds.value ?? ._value` | 卡片 **30**；`feed.feeds` = `_value array:33`；`like-wrapper` 30；`a[href="/notification"]` **2** | ✅ 正常 |
 | B1 | `search_feeds`（结果） | `/search_result?keyword=咖啡&source=web_explore_feed&type=51` | `makeSearchURL` → `search_result_ai`；`search.feeds`；卡片并集 | 卡片 **22**；`search.feeds` = `array:22`；搜索框并集命中 1 | ✅ 正常 |
-| B2 | `search_feeds`（**筛选**） | 同上 | `div.filter` 按钮 → hover+click → `.filter-panel` → `div.filter-panel div.filters` → `:scope > span` 分组标题（期望「排序依据/笔记类型/发布时间/搜索范围/位置距离」）→ `div.tags` 选项 | 按钮 `div.filter`（文本「筛选」，父链 `DIV.search-layout__top > DIV.search-layout > DIV.feeds-page`）存在；**真实 CDP 点击后 `.filter-panel` 仍不存在**；整份 HTML（209,095 字符）里 `filter-panel`/`排序依据`/`笔记类型`/`发布时间`/`最多点赞` **全部不存在**；页面只有 `DIV.channel`（图文/视频）与位置 tab 条 | ❌ **BUG #1：筛选选择器已漂移**，筛选链路必然失败（未登录态确认；登录态待复核） |
+| B2 | `search_feeds`（**筛选**） | 同上 | `div.filter` 按钮 → `Hover()` → `.filter-panel` → `div.filter-panel div.filters` → `:scope > span` 分组标题 → `div.tags` 选项 | **选择器全部命中**：`.filter-panel` 在 hover 后挂载（`DIV.filter-panel > DIV.filter > DIV.search-layout__top`）；`div.filter-panel div.filters` = **5 组**，标签依次为 排序依据/笔记类型/发布时间/搜索范围/位置距离；选项文本与代码 `filterGroups` 一致 | ✅ 正常（**含一处需注意的真实结构**，见 D.3） |
 
-**扫描中修正的一处我自己的误报**：早前记的「搜索页顶层没有 `search` 键」是错的 —— 那是 `Object.keys(...).slice(0,8)` 截断造成的假象；完整键列表里 `search`/`note`/`notification` 都在，`search.feeds` 实测可用。
+**扫描中修正的两处我自己的误报**（都是一手复测推翻的）：
+
+1. 早前记的「搜索页顶层没有 `search` 键」是错的 —— 那是 `Object.keys(...).slice(0,8)` 截断造成的假象；完整键列表里 `search`/`note`/`notification` 都在，`search.feeds` 实测可用。
+2. 更严重的一处：B2 一开始被我判成「❌ BUG #1 筛选选择器漂移，链路必然失败」，**是误报**，已在 2026-09-20 当晚复测推翻。错因是探针方法：我在派发合成 hover 事件的**同一个同步块里立刻探测**，Vue 的浮层异步渲染还没挂载，于是拿到了「不存在」的假结论；随后用真实坐标点击（`elementFromPoint` 确认点确实落在 `SPAN > DIV.filter` 上）也没打开，是因为该浮层由 **hover（mouseenter）** 触发，而点击不触发它。
+   正确复测方式：派发 `mouseover/mouseenter/pointerover/pointerenter` → **等 600ms** → 再探测，此时 `.filter-panel` 存在、5 组齐全。
+   **教训（写进流程）**：对异步渲染的 UI，派发事件与探测不能放在同一个同步块；且「整份 HTML 里没有该 class」只在**当前状态**下成立，不能用来证明「该元素永不存在」。
 
 ### D.2 待扫
 
@@ -601,3 +606,27 @@ try {
 | F | `user_profile` | `/user/profile/<id>` | 侧栏导航入口、`userPageData` 数据层 |
 | G | `list_notifications` / `get_unread_count` / `like_notification` / `reply_notification` | `/notification` | `.notification-page`、tab、`.action-like`、`textarea.comment-input` |
 | H | `publish_content` / `publish_with_video` | `creator.xiaohongshu.com` | 上传页 tab、标题/正文输入、发布按钮 |
+
+### D.3 已核验的筛选面板真实结构（[实测]，未登录态，hover 后）
+
+```
+DIV.filter-panel                     ← hover「筛选」后异步挂载
+  └── （挂在 DIV.filter > DIV.search-layout__top 下）
+      div.filters × 5                ← 代码用 div.filter-panel div.filters 取，命中 5
+        ├── span                     ← 分组标题：排序依据 / 笔记类型 / 发布时间 / 搜索范围 / 位置距离
+        └── div.tags …               ← 选项，注意**每个选项渲染成 2 个 div.tags**
+```
+
+实测各组 `div.tags` 文本（重复即同一选项出现两次）：
+
+| 分组 | div.tags 数 | 文本 |
+|:--|--:|:--|
+| 排序依据 | 10 | 综合×2、最新×2、最多点赞×2、最多评论×2、最多收藏×2 |
+| 笔记类型 | 5 | 不限、视频×2、图文×2 |
+| 发布时间 | 7 | 不限、一天内×2、一周内×2、半年内×2 |
+| 搜索范围 | 7 | 不限、已看过×2、未看过×2、已关注×2 |
+| 位置距离 | 6 | 不限×2、同城×2、附近×2 |
+
+**这一条解释了 `findFilterOption` 为什么必须做命中校验**：`div.tags` 存在重复节点，按文本取到的第一个
+可能不是可点击的那个，所以代码逐个 tag 用 `elementFromPoint` 复核命中——这个设计是**对的**，
+不要为了「少一次 eval」把它简化掉（那会退化成点到重复节点上）。
