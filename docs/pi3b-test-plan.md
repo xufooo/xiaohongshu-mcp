@@ -735,3 +735,18 @@ DIV.filter-panel                     ← hover「筛选」后异步挂载
 我不会在未获授权时执行。要验证写链路，需要三选一：
 ① 明确授权我在这个账号上操作（并指定靶子笔记）；② 提供一个测试账号/干净 profile；
 ③ 留到树莓派上按本文件 §6.4 的真机验收清单做。
+
+**通知页读取（`get_unread_count` / `list_notifications`）—— 读路径实测通过**
+
+在 `/notification`（已登录）实测：
+
+| 观测 | 实测值 | 含义 |
+|:--|:--|:--|
+| 状态键 | `redBadge` / `notification` / `messageData` | 通知数据在 `notification` ✅ |
+| `notification` 子键 | `isFetching` / `isUnreadCountInitialized` / `activeTabKey` / **`notificationCount`** / `notificationMap` | 未读数读取路径存在 ✅ |
+| tab 真实文案 | **`评论和@` / `赞和收藏` / `新增关注`** | 与代码 `notificationTabLabel` 返回值**逐字一致** ✅ |
+| items / `.action-like` / `.action-reply` | 5 / 5 / 5 | 列表与互动按钮就位 ✅ |
+| 首条内容 | `青史拾页 你的好友 评论了你的笔记 06-09 … 回复` | 「评论和@」tab 的条目形态符合代码解析假设 ✅ |
+
+> 本轮第四次「差一点误报」：tab 文案看起来像漂移点，逐字对照后发现代码写的就是线上文案，**无漂移**。
+> 四次澄清分别是：筛选面板（异步渲染）、登录判定（无法在已登录会话验证登出态）、`notes` 条数（嵌套结构）、通知 tab 文案（其实一致）。
