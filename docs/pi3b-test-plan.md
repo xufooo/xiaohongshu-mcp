@@ -381,6 +381,90 @@ git checkout fixup-test     # 本地
 
 ---
 
+## 附录 C：为什么「树莓派的浏览器很慢」要当成一等约束（2026-09-20 实测）
+
+### C.1 桌面上的实测事实（一手，内置浏览器 + 真实小红书）
+
+| 观测 | 数值 | 一手性 |
+|:--|:--|:--|
+| 笔记详情页 DOM 规模 | 1,982 节点 | 实测 |
+| 详情页单页传输 | 1.77 MB，其中图片 1.54 MB（**93%**） | 实测 |
+| 搜索结果页传输 | 1.65 MB，**100% 是图片**（104 个资源全是 img） | 实测 |
+| 该页字体 / 媒体请求 | **0 / 0** | 实测 |
+| 详情就绪探针（模仿 `ready.go`） | **0.57 ms/次**（20 次均值，桌面） | 实测 |
+| 真实详情页上一次 `Runtime.evaluate` | **两次连续 20s 超时**（renderer 卡死） | 实测 |
+| 信息流页 `document.querySelectorAll` 全页扫描 | 28 张卡片 / 1,338 节点，探针 0.81 ms | 实测 |
+
+### C.2 到 Pi 3B 上的放大倍数
+
+**没有实测数据，不写数字。** 只能给方向：Cortex-A53 @1.2GHz 的单核性能远低于桌面核，
+且 Pi 3B 内存只有 1GB、无 swap，页面渲染/JS 解析/图片解码都按数量级放大。
+因此上面每一条「毫秒级」结论在 Pi 上都必须重新标定 —— 但**相对关系**成立：
+探针便宜、渲染昂贵、图片占绝大部分。
+
+### C.3 对流程优化的直接含义
+
+在「浏览器很慢」这个前提下，**最贵的不是计算，而是重试**：一次失败重试 = 一次完整 SPA
+重渲染 + 再次图片解码。所以省资源的顺序是：
+
+1. **别加载不需要的东西** —— 图片占内容页 93~100% 的流量与解码开销；
+   低资源档已默认拦图片 CDN（`392f600`），`XHS_BROWSER_BLOCK_URLS=-` 可放行。
+2. **别做注定失败的探测** —— 单次 eval 最长 20s 才被判死；代码里已有的
+   5s/2s eval 预算、`confirmRendererAlive` 双探针、`isConfirmedRendererDead` 熔断
+   正是为这种卡死准备的，不要放宽。
+3. **别反复冷启动 Chromium** —— 代码里 `defaultStartupTimeout = 120s`
+   本身就说明 Pi 上启动是分钟级；空闲回收策略（默认 5m）要按「重启一次多贵」来权衡。
+4. **别每次调用都新建 page/target** —— 现有 16 处 `acquirePageFor` 每次新建一个
+   renderer；在慢机器上这是延迟与内存的双重放大器。
+
+---
+
+## 附录 B：生产 DOM 契约核验（2026-09-20，内置浏览器实测）
+
+未登录状态下打开真实站点，逐个核对代码里写死的选择器（`xiaohongshu/ui_selectors.go`
+与 `comment_feed.go` / `dom_extract.go` 里的内联选择器）。**全部命中**：
+
+| 代码里的选择器 | 真实页面命中 | 备注 |
+|:--|--:|:--|
+| `#search-input-in-feeds, #search-input, #search-input-ai, input[placeholder*="搜索"]` | 1 | 信息流页 |
+| `section.note-item, .note-item, .feeds-container section, .note-list section` | 28 | 信息流卡片数 |
+| `.feeds-container, .note-list, .search-layout, div[data-v-]` | 1 | 结果容器 |
+| `.note-detail-mask` / `.note-container` / `.interact-container` / `.comments-container` | 1 / 1 / 1 / 1 | 详情页四种就绪信号都可见 |
+| `.note-scroller` | 1 | 评论滚动容器（`scrollNoteScroller` 依赖） |
+| `div.input-box div.content-edit p.content-input` | 1 | 评论输入框 |
+| `.btn.submit` | 1 | 评论提交按钮 |
+| `.like-wrapper` / `.collect-wrapper` | 50 / 1 | 互动按钮 |
+| `.show-more` | 7 | 「展开 N 条回复」，文本形如 `展开 36 条回复` |
+| `.comments-container .parent-comment` | 10 | 父评论包装 |
+| `:scope > .reply-container > .list-container > .comment-item` | **9** | 子评论（`feed_detail.go:630`、`dom_extract.go:78` 用的就是这个式子）✅ |
+| `.children-comments > .comment-item-sub` | 0（兜底分支未用上） | 主式子已命中，兜底保留无害 |
+
+真实评论树（一手）：
+
+```
+.comments-container
+└── .list-container
+    └── .parent-comment                  ×10
+        ├── .comment-item                （父评论本体）
+        └── .reply-container
+            └── .list-container
+                └── .comment-item.comment-item-sub   ×9
+```
+
+两条重要结论：
+
+1. **子评论不在父 `.comment-item` 内部**，而在同级的 `.parent-comment > .reply-container > .list-container` 下。
+   任何用 `parentComment.querySelector(':scope > .children-comments > …')` 的写法都取不到；代码用的是
+   `.reply-container > .list-container > .comment-item`，实测命中 9 条 —— **代码是对的**（本次先怀疑后核验，
+   避免了一个假 bug 报告）。
+2. **DOM class 不能用来判断点赞状态**：详情页 DOM 上 `.like-wrapper` 带 `like-active`，
+   而页面数据层 `__INITIAL_STATE__.note.noteDetailMap[].note.interactInfo` 是
+   `{"liked":false,"collected":false,"likedCount":"3002","commentCount":"219",...}`。
+   也就是说 `like-active` ≠ 已点赞。这与 `22d8c97`（交互状态改从页面数据层读取）的决策一致，
+   后续不要再退回 DOM class 判定。
+
+---
+
 ## 附录 A：CDP 探针脚本（测试用，不入库）
 
 ```javascript
