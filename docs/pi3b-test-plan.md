@@ -679,3 +679,23 @@ DIV.filter-panel                     ← hover「筛选」后异步挂载
 
 > 方法论提醒（本轮唯一一次有效的行为级测量）：滚动/点击之类的操作，**探测必须放到下一次调用**，
 > 不能和触发动作放在同一个同步块（见 D.1 的误报）。
+
+**用户主页提取（`user_profile`）—— 状态路径实测通过，但一度差点误报**
+
+在 `/user/profile/6523ebde000000002b00267b`（已登录，作者「一画一话」）实测 `__INITIAL_STATE__.user`：
+
+| 字段 | 实测值 | 对代码的含义 |
+|:--|:--|:--|
+| `userPageData` 顶层键 | `tags/tabPublic/posted/liked/collected/result/basicInfo/interactions` | 与 `parseUserProfileState` 期望一致 ✅ |
+| `basicInfo` 键 | `imageb/nickname/images/redId/gender/ipLocation/desc` | 与 `UserBasicInfo` 一致；`nickname=一画一话` ✅ |
+| `activeTab.query` | `"note"` | 代码按 `query != note` fail-closed 选分区，正好命中 ✅ |
+| `userPageData.posted` | **17** | 该账号公开笔记 17 篇 |
+| `userPageData.liked` / `.collected` | 49 / 21 | 其它 tab 的计数 |
+| `user.notes` 的 `length` | **5** | ⚠️ **不能按 length 判断条数**：`notes[0]` 自身是带 `0..7` 数字键的嵌套结构（分栏/分页），不是 5 篇笔记 |
+| DOM `section.note-item` 计数 | 滚动前 17 → 滚动后 **9** | 网格有回收/复用，**不能按 DOM 数判断条数** |
+
+**结论**：该工具的状态路径与分区选择实测有效；`notes` 为嵌套结构（配合 `posted=17` 可解释），
+**不是 bug**。同时得到两条禁止用法：不要用 `notes.length` 当笔记条数，也不要用 DOM 卡片数当条数。
+
+> 附：本轮扫描里第三次「差一点误报」——前两次是筛选面板与登录判定。三次都靠**再下钻一层**澄清
+> （异步渲染 / 隐藏克隆 / 嵌套结构）。**方法论**：把差异当 bug 之前，至少再下钻一层数据结构或交互状态。
