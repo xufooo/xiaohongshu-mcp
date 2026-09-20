@@ -47,10 +47,14 @@ jobs:
         export GOOS=${{ matrix.goos }}
         export GOARCH=${{ matrix.goarch }}
         export GOFLAGS=-buildvcs=false
+        export CGO_ENABLED=0
         EXT=""
         if [ "$GOOS" = "windows" ]; then EXT=".exe"; fi
         mkdir -p dist
-        go build -v -o "dist/xiaohongshu-mcp-${GOOS}-${GOARCH}${EXT}" .
+        # -trimpath 去掉构建机绝对路径；-s -w 去掉符号表与调试信息。
+        # 产物直接拷进树莓派 SD 卡，体积与页缓存占用都要省。
+        go build -v -trimpath -ldflags="-s -w" -o "dist/xiaohongshu-mcp-${GOOS}-${GOARCH}${EXT}" .
+        ls -l "dist/xiaohongshu-mcp-${GOOS}-${GOARCH}${EXT}"
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:

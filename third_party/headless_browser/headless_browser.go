@@ -34,11 +34,12 @@ type Browser struct {
 	// nil = 不覆盖。
 	uaOverride *proto.NetworkSetUserAgentOverride
 
-	closeOnce sync.Once
-	closeErr  error
-	traceFile *os.File
-	browserCtx context.Context
-	diagnostic *diagnosticCDPClient
+	closeOnce   sync.Once
+	closeErr    error
+	traceFile   *os.File
+	browserCtx  context.Context
+	diagnostic  *diagnosticCDPClient
+	blockedURLs []string // 逐页拦截的 URL 模式，空表示不拦截
 }
 
 // Config holds browser options.
@@ -67,6 +68,16 @@ type Config struct {
 	// ExtraFlags 透传任意浏览器启动 flag（如 fingerprint-chromium 的
 	// "fingerprint-brand":"Chrome"）。键不带前导 "--"。
 	ExtraFlags map[string]string
+
+	// LowMemory 启用低开销启动档（树莓派 3B 等 1GB 内存设备）：
+	// 关闭 GPU/扩展/组件更新，并压低 V8 堆上限与 renderer 进程数。
+	LowMemory     bool
+	JSHeapMB      int // V8 old space 上限（MB），<=0 用默认值
+	RendererLimit int // renderer 进程数上限，<=0 用默认值
+
+	// BlockedURLs 逐页下发 CDP Network.setBlockedURLs 的 URL 模式
+	// （如 "*.mp4*"）。空表示不拦截；拦截失败只告警，不影响页面创建。
+	BlockedURLs []string
 }
 
 // Option configures a Browser.
@@ -86,7 +97,6 @@ func WithChromeBinPath(path string) Option  { return func(c *Config) { c.ChromeB
 func WithUserDataDir(path string) Option    { return func(c *Config) { c.UserDataDir = path } }
 func WithProxy(proxy string) Option         { return func(c *Config) { c.Proxy = proxy } }
 func WithTrace() Option                     { return func(c *Config) { c.Trace = true } }
-
 
 // WithStealthJS 控制是否注入 go-rod/stealth 的 JS 补丁。用 CloakBrowser 时应传 false。
 func WithStealthJS(enabled bool) Option {
@@ -149,6 +159,69 @@ func WithExtraFlags(flagsMap map[string]string) Option {
 	}
 }
 
+// WithLowMemoryProfile 启用低开销启动档。jsHeapMB/rendererLimit <=0 时用默认值。
+func WithLowMemoryProfile(jsHeapMB, rendererLimit int) Option {
+	return func(c *Config) {
+		c.LowMemory = true
+		c.JSHeapMB = jsHeapMB
+		c.RendererLimit = rendererLimit
+	}
+}
+
+// WithBlockedURLs 设置逐页拦截的 URL 模式。防御性复制，空切片等同不拦截。
+func WithBlockedURLs(patterns []string) Option {
+	return func(c *Config) {
+		if len(patterns) == 0 {
+			c.BlockedURLs = nil
+			return
+		}
+		c.BlockedURLs = append([]string(nil), patterns...)
+	}
+}
+
+// lowMemoryProfile 的默认值：V8 old space 256MB、renderer 进程 2 个。
+// 树莓派 3B 上按 192MB 配置更稳（见 docs/pi3b-optimization.md）。
+const (
+	defaultJSHeapMB      = 256
+	defaultRendererLimit = 2
+)
+
+// lowMemoryFlags 是低开销档附加的固定 flag。
+// 注意：这里只做"增量添加"，不整体替换 disable-features，
+// 避免静默覆盖 rod 未来的默认值（见 applyCloakLauncherProfile 的注释）。
+//
+// 实测（Chrome 153 headless，x86_64，见 docs/pi3b-optimization.md）：
+//   - --disable-software-rasterizer 会让 WebGL 直接不可用（"no webgl context"），
+//     是明确的自动化特征，**不得**放进默认档。
+//   - --disable-gpu 在本机对进程数与 RSS 无可测差异，故同样不默认添加，
+//     需要时用 XHS_BROWSER_EXTRA_ARGS 显式打开并在真机 A/B。
+var lowMemoryFlags = []flags.Flag{
+	"disable-extensions",
+	"disable-component-update",
+	"no-default-browser-check",
+	"aggressive-cache-discard",
+	"mute-audio",
+}
+
+// applyLowMemoryLauncherProfile 追加减内存相关启动参数，返回同一个 launcher。
+func applyLowMemoryLauncherProfile(l *launcher.Launcher, jsHeapMB, rendererLimit int) *launcher.Launcher {
+	if l == nil {
+		return l
+	}
+	if jsHeapMB <= 0 {
+		jsHeapMB = defaultJSHeapMB
+	}
+	if rendererLimit <= 0 {
+		rendererLimit = defaultRendererLimit
+	}
+	for _, f := range lowMemoryFlags {
+		l = l.Set(f)
+	}
+	return l.
+		Set("js-flags", fmt.Sprintf("--max-old-space-size=%d", jsHeapMB)).
+		Set("renderer-process-limit", strconv.Itoa(rendererLimit))
+}
+
 // autoFingerprintPlatform 按运行 OS 返回 CloakBrowser 的指纹平台。
 // Linux 服务器上呈现 Windows 画像（最常见的真实用户画像，且避免 Linux 桌面的稀有特征）。
 func autoFingerprintPlatform() string {
@@ -176,6 +249,9 @@ func New(ctx context.Context, options ...Option) (*Browser, error) {
 	l := launcher.New().
 		Headless(cfg.Headless).
 		Set("--no-sandbox")
+	if cfg.LowMemory {
+		l = applyLowMemoryLauncherProfile(l, cfg.JSHeapMB, cfg.RendererLimit)
+	}
 	if cfg.CloakProfile {
 		applyCloakLauncherProfile(l)
 	}
@@ -305,6 +381,7 @@ func New(ctx context.Context, options ...Option) (*Browser, error) {
 
 	hb := &Browser{browser: browser, browserCancel: browserCancel, browserCtx: browserCtx, launcher: l, stealthJS: cfg.StealthJS, diagnostic: diagnostic}
 	hb.traceFile = traceFile
+	hb.blockedURLs = append([]string(nil), cfg.BlockedURLs...)
 
 	// 启用指纹时，构建一致 UA 覆盖，补回 go-rod 建页面丢失的 UA 版本保真度。
 	// 构建失败必须终止启动，不能无声降级。
@@ -471,6 +548,12 @@ func (b *Browser) Page() (page *rod.Page, err error) {
 			return nil, fmt.Errorf("apply UA override: %w", err)
 		}
 	}
+	// 资源拦截：只做一次 target 级设置，零逐请求开销。失败只告警，不影响建页。
+	if len(b.blockedURLs) > 0 {
+		if err := (proto.NetworkSetBlockedURLs{Urls: b.blockedURLs}).Call(page); err != nil {
+			logrus.WithError(err).Warn("set blocked URLs failed; loading all resources")
+		}
+	}
 	if b.diagnostic != nil {
 		ctx, cancel := context.WithTimeout(b.browserCtx, 2*time.Second)
 		bound := page.Context(ctx)
@@ -478,7 +561,10 @@ func (b *Browser) Page() (page *rod.Page, err error) {
 		var runtimeErr, lifecycleErr error
 		setup.Add(2)
 		go func() { defer setup.Done(); runtimeErr = proto.RuntimeEnable{}.Call(bound) }()
-		go func() { defer setup.Done(); lifecycleErr = (proto.PageSetLifecycleEventsEnabled{Enabled: true}).Call(bound) }()
+		go func() {
+			defer setup.Done()
+			lifecycleErr = (proto.PageSetLifecycleEventsEnabled{Enabled: true}).Call(bound)
+		}()
 		setup.Wait()
 		cancel()
 		b.diagnostic.logger.setup(runtimeErr, lifecycleErr)

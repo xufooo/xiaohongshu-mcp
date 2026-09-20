@@ -296,7 +296,7 @@ func (s *ActionStateStore) saveLocked(state ActionState) error {
 	if s.path == "" {
 		return nil
 	}
-	data, err := json.MarshalIndent(state, "", "  ")
+	data, err := json.Marshal(state)
 	if err != nil {
 		return err
 	}

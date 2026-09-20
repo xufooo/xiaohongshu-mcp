@@ -14,6 +14,9 @@ func main() {
 	logrus.SetOutput(os.Stdout)
 	logrus.SetFormatter(&logrus.TextFormatter{FullTimestamp: true})
 
+	// 先按环境变量收紧 Go 运行时内存（低资源设备上避免与 Chromium 抢内存）。
+	configs.ApplyRuntimeLimits()
+
 	var (
 		headless bool
 		binPath  string // 浏览器二进制文件路径

@@ -119,3 +119,76 @@ func TestWithFingerprintSeedConfig(t *testing.T) {
 		t.Fatalf("显式 seed 不应为 0（0 表示随机）")
 	}
 }
+
+// TestApplyLowMemoryLauncherProfile 低开销档必须逐项落下 flag，并带上堆上限与进程上限。
+func TestApplyLowMemoryLauncherProfile(t *testing.T) {
+	l := applyLowMemoryLauncherProfile(launcher.New(), 192, 2)
+
+	for _, name := range []string{
+		"disable-extensions",
+		"disable-component-update",
+		"no-default-browser-check",
+		"aggressive-cache-discard",
+		"mute-audio",
+	} {
+		if !l.Has(name) {
+			t.Fatalf("低开销档缺少 flag %s", name)
+		}
+	}
+
+	// WebGL 指纹相关 flag 不得出现在默认档：--disable-software-rasterizer 会让 WebGL 直接消失。
+	for _, forbidden := range []string{"disable-gpu", "disable-software-rasterizer"} {
+		if l.Has(forbidden) {
+			t.Fatalf("低开销档不应默认添加 %s（见 docs/pi3b-optimization.md 实测）", forbidden)
+		}
+	}
+
+	jsFlags, ok := l.GetFlags("js-flags")
+	if !ok || len(jsFlags) != 1 || jsFlags[0] != "--max-old-space-size=192" {
+		t.Fatalf("js-flags = %v, want [--max-old-space-size=192]", jsFlags)
+	}
+	limit, ok := l.GetFlags("renderer-process-limit")
+	if !ok || len(limit) != 1 || limit[0] != "2" {
+		t.Fatalf("renderer-process-limit = %v, want [2]", limit)
+	}
+}
+
+// TestApplyLowMemoryLauncherProfileDefaults 未给出参数时用默认值（256MB / 2 个 renderer）。
+func TestApplyLowMemoryLauncherProfileDefaults(t *testing.T) {
+	l := applyLowMemoryLauncherProfile(launcher.New(), 0, 0)
+
+	jsFlags, _ := l.GetFlags("js-flags")
+	if len(jsFlags) != 1 || jsFlags[0] != "--max-old-space-size=256" {
+		t.Fatalf("默认 js-flags = %v, want [--max-old-space-size=256]", jsFlags)
+	}
+	limit, _ := l.GetFlags("renderer-process-limit")
+	if len(limit) != 1 || limit[0] != "2" {
+		t.Fatalf("默认 renderer-process-limit = %v, want [2]", limit)
+	}
+}
+
+// TestWithLowMemoryProfileConfig 选项必须写入 Config。
+func TestWithLowMemoryProfileConfig(t *testing.T) {
+	cfg := newDefaultConfig()
+	WithLowMemoryProfile(128, 1)(cfg)
+	if !cfg.LowMemory || cfg.JSHeapMB != 128 || cfg.RendererLimit != 1 {
+		t.Fatalf("WithLowMemoryProfile 未写入 Config: %+v", cfg)
+	}
+}
+
+// TestWithBlockedURLsDefensiveCopy 拦截列表必须防御性复制，空列表等同不拦截。
+func TestWithBlockedURLsDefensiveCopy(t *testing.T) {
+	patterns := []string{"*.mp4*"}
+	cfg := newDefaultConfig()
+	WithBlockedURLs(patterns)(cfg)
+	patterns[0] = "*.mutated*"
+	if len(cfg.BlockedURLs) != 1 || cfg.BlockedURLs[0] != "*.mp4*" {
+		t.Fatalf("WithBlockedURLs 必须复制切片，got %v", cfg.BlockedURLs)
+	}
+
+	cfg2 := newDefaultConfig()
+	WithBlockedURLs(nil)(cfg2)
+	if cfg2.BlockedURLs != nil {
+		t.Fatalf("空列表应表示不拦截，got %v", cfg2.BlockedURLs)
+	}
+}
