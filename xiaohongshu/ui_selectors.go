@@ -23,18 +23,18 @@ const (
 	SelectorCommentSubmitButton       = `.btn.submit`
 
 	// 通知页选择器
-	SelectorNotificationEntry          = `a[href="/notification"]`                              // 侧栏通知入口
-	SelectorNotificationPage           = `.notification-page`                                    // 通知页容器
-	SelectorNotificationTab            = `.notification-page .reds-tab-item.tab-item`            // 通知 tab（3 个）
-	SelectorNotificationItem           = `.notification-page .tabs-content-container .container` // 通知 item
-	SelectorNotificationUserAvatar     = `.user-avatar`                                          // item 内头像链接
-	SelectorNotificationNickname       = `.user-info a`                                          // item 内昵称链接
-	SelectorNotificationContent        = `.interaction-content`                                  // item 内评论内容(仅 mentions)
-	SelectorNotificationReplyButton    = `.action-reply`                                         // 回复按钮(仅 mentions)
-	SelectorNotificationLikeButton     = `.action-like`                                          // 点赞按钮(仅 mentions)
-	SelectorNotificationLikeUse        = `.action-like svg use`                                  // 点赞状态 svg use
-	SelectorNotificationReplyInput     = `textarea.comment-input`                                // 回复输入框
-	SelectorNotificationReplySubmit    = `.input-buttons .submit`                                // 发送按钮
+	SelectorNotificationEntry       = `a[href="/notification"]`                               // 侧栏通知入口
+	SelectorNotificationPage        = `.notification-page`                                    // 通知页容器
+	SelectorNotificationTab         = `.notification-page .reds-tab-item.tab-item`            // 通知 tab（3 个）
+	SelectorNotificationItem        = `.notification-page .tabs-content-container .container` // 通知 item
+	SelectorNotificationUserAvatar  = `.user-avatar`                                          // item 内头像链接
+	SelectorNotificationNickname    = `.user-info a`                                          // item 内昵称链接
+	SelectorNotificationContent     = `.interaction-content`                                  // item 内评论内容(仅 mentions)
+	SelectorNotificationReplyButton = `.action-reply`                                         // 回复按钮(仅 mentions)
+	SelectorNotificationLikeButton  = `.action-like`                                          // 点赞按钮(仅 mentions)
+	SelectorNotificationLikeUse     = `.action-like svg use`                                  // 点赞状态 svg use
+	SelectorNotificationReplyInput  = `textarea.comment-input`                                // 回复输入框
+	SelectorNotificationReplySubmit = `.comment-wrapper .submit, .input-buttons .submit`      // 发送按钮：线上实测为 .comment-wrapper .submit（文本「发送」）；旧版 .input-buttons .submit 已命中 0，保留兜底
 )
 
 type SelectorSpec struct {
@@ -69,10 +69,10 @@ var (
 		VisibleOnly: true,
 	}
 	FeedDetailReadySpec = SelectorSpec{
-		Name:       "feed_detail_ready",
-		Selector:   SelectorFeedDetailReady,
-		Purpose:    "笔记详情页主体",
-		Required:   true,
+		Name:     "feed_detail_ready",
+		Selector: SelectorFeedDetailReady,
+		Purpose:  "笔记详情页主体",
+		Required: true,
 	}
 	CommentBoxSpec = SelectorSpec{
 		Name:        "comment_box",

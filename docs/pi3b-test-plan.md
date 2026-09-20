@@ -766,3 +766,36 @@ DIV.filter-panel                     ← hover「筛选」后异步挂载
 `feedPageOps` / `LoadFeedBatch` 的「滚动 + 读状态增量」形状与线上一致。
 
 > 与用户主页那条一致：**DOM 卡片数不可作为条数依据**（主页 17↔9，信息流恒定 30 而状态 34→64）。
+
+### D.11 写操作行为级验证（真实账号，用户已授权，靶子=本人最新笔记）
+
+靶子笔记：《同一句预言，为什么谁赢了谁就能解释？》（谶纬 / 白虎观会议 / 《白虎通义》 / 三纲六纪）。
+评论与回复内容**按笔记内容撰写**（谶纬解释权、今古文之争、曹魏代汉借图谶）。
+
+| 工具 | 实测操作 | 数据层验证 | 结论 |
+|:--|:--|:--|:--|
+| `like_feed`（点赞） | 点 `.interact-container .left .like-wrapper` | `liked true→false`、`likedCount 1→0`；再点回 `false→true`、`0→1` | ✅ 双向验证通过（已恢复原状） |
+| `favorite_feed`（收藏） | 点 `.collect-wrapper` | `collected false→true`、count `0→1`；再点回 `false`/`0` | ✅ 双向验证通过（已恢复原状） |
+| `comment_feed`（评论） | 输入 122 字内容→点 `.btn.submit`（文本「发送」） | `commentCount 0→1`、DOM `.comment-item` 0→1、正文与作者标记「一画一话 作者」均出现、输入框清空 | ✅ 端到端通过 |
+| `reply_comment_in_feed`（回复评论） | 点 `.comment-item .right .interactions .reply` → 输入 79 字 → `.btn.submit` | `commentCount 1→2`、`.comment-item-sub` 0→1 | ✅ 端到端通过 |
+| `get_unread_count` | 读 `notification.notificationCount` | `{"unreadCount":0,"mentions":0,"likes":0,"connections":0}` | ✅ 路径有效 |
+| `list_notifications` | 读 tab=3 / 条目 / 文案 | tab key `0`、5 条、每条含 `.action-like`/`.action-reply` | ✅ |
+| `like_notification` | 点第 1 条 `.action-like` | `svg use` 的 href → **`#liked`**（其余 4 条未变） | ✅ |
+| `reply_notification` | 点 `.action-reply` → 输入 64 字 → 点真实「发送」 | 输入框 `textarea.comment-input`（placeholder「回复 青史拾页」）出现→消失（= 代码 `waitNotificationReplyAccepted` 判据） | ⚠️ **站点链路正常，但代码会失败 —— 见下方 BUG #2** |
+
+#### BUG #2（已确认，本次扫描第一个功能性 bug）：`reply_notification` 提交按钮选择器失效
+
+- **代码**：`SelectorNotificationReplySubmit = ".input-buttons .submit"`，`findNotificationSubmitButton` 在**通知行内**查找且**禁止页面级退路**（fail-closed）。
+- **线上实测**：该选择器**全页命中 0**（`document.querySelectorAll('.input-buttons .submit').length === 0`）。
+  真实按钮是 `BUTTON.submit`（文本「发送」），父链
+  `BUTTON.submit < DIV.comment-wrapper.action-comment < DIV.actions < DIV.info < DIV.main < DIV.container`；
+  同一 `.comment-wrapper` 内 `.submit` 恰好 1 个；输入框 `textarea.comment-input` 也在同一行内（`insideWhichRow=1`）。
+- **后果**：`reply_notification` 会卡在提交步并返回「目标通知行内找不到发送按钮」，回复永远不会发出。
+- **修复**：选择器改为 `.comment-wrapper .submit, .input-buttons .submit`（线上式 + 旧版兜底；行内查找与「发送」文本/禁用校验保持不变）。
+
+#### 顺带得到的两条「不可用判据」（两个方向都实测了）
+
+| 判据 | 反例（实测） |
+|:--|:--|
+| DOM class 判定点赞 | 取消赞后 `.like-wrapper` **仍是 `like-active`**；已收藏时 `.collect-wrapper` **仍是裸 `collect-wrapper`**（无 active 类）→ class 与状态无关，必须读数据层 `interactInfo` |
+| 通知点赞状态 | 通知行的状态**确实**由 `.action-like svg use` 的 href 表达（点后 → `#liked`）→ 这里读 svg href 是对的（与 `parseNotificationLikeHref` 一致） |
