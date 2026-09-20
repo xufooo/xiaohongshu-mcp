@@ -12,14 +12,15 @@
 | 项 | 改动 | 依据等级 |
 |:--|:--|:--|
 | Chromium 低资源档（arm/arm64 默认开） | V8 old space 192MB、renderer 上限 2、关扩展/组件更新/默认浏览器检查、激进缓存回收、静音 | 本机 x86 实测（方向性）+ 代码确认 |
-| 逐页资源拦截 | `Network.setBlockedURLs`，低资源档默认拦 `*.mp4*`/`*.m3u8*`/`*.m4s*`/`*.mpd*`/`*.flv*` | 本机实测（命令无需 `Network.enable`） |
+| 逐页资源拦截 | `Network.setBlockedURLs`，低资源档默认拦**图片 CDN**（`sns-webpic/sns-img/sns-avatar`）与视频分片 | 真实页面实测：图片占详情页 93% 流量，拦后提取面不变 |
 | Go 堆软上限 | `XHS_GO_MEMLIMIT`，低资源档默认 128MiB；`XHS_GOGC` 可选 | 代码确认 |
 | 图片下载流式化 | 不再 `io.ReadAll` 整张图（原上限 50MiB），只读 307 字节头部判类型 | 代码确认 |
 | 限流状态写放大 | 裁剪无变化不写盘；落盘改紧凑 JSON | 代码确认 |
 | ActionState 写放大 | 落盘改紧凑 JSON | 代码确认 |
 | 身份指纹采集节流 | 默认 10 分钟一次（`XHS_IDENTITY_CHECK_INTERVAL`） | 代码确认 |
 | network capture 泄漏 | panic 路径也停采集 | 代码确认（缺陷修复） |
-| 构建产物 | `-trimpath -ldflags="-s -w"` | CI 产物字节数 |
+| 构建产物 | `-trimpath -ldflags="-s -w"` | CI 产物实测 −27.5% |
+| 状态目录回退 | 状态目录不可写时回退 `os.TempDir()`，不再 fatal 退出 | 本机实测复现 + 修复后验证 |
 | Docker `/dev/shm` | compose 补 `shm_size: "256m"`；修正文档错误说法 | 代码 + rod 源码确认 |
 
 **明确没做**（有意为之，见 §4）：
@@ -60,6 +61,111 @@ RSS = 该 `--user-data-dir` 下所有 Chrome 进程 RSS 之和（KB，含共享�
 - 上表绝对值**不代表**树莓派上真实信息流页面的占用，只能作 flag 之间的相对比较；
 - 本机**无法**做需要登录态的小红书端到端验证（见测试文档 §5 的环境约束）。
 
+### 2.2 本机端到端实测（真实 Chromium，优化后二进制）
+
+用 CI 产出的 `linux/amd64` 产物 + `google-chrome-stable 153` 实跑：
+
+```
+time=... level=info  msg="GOMEMLIMIT set to low-resource default 134217728 bytes"
+time=... level=info  msg="low resource profile enabled: js_heap_mb=192 renderer_limit=2"
+time=... level=info  msg="blocking 8 URL patterns per page"
+time=... level=info  msg="launching browser" arg_count=36
+time=... level=info  msg="browser connected" pid=27
+```
+
+| 检查 | 结果 |
+|:--|:--|
+| `/health` | 200 `{"success":true,...}` |
+| `GET /api/v1/login/status` | 200 `{"is_logged_in":false}`（无 cookies，符合预期） |
+| `GET /api/v1/login/qrcode` | 200，`success=true`，`timeout=4m0s`，`img` = 6030 字符 base64 PNG → **扫码登录链路可用** |
+| Chromium 实际收到的 flag | `--js-flags=--max-old-space-size=192`、`--renderer-process-limit=2`、`--disable-extensions`、`--aggressive-cache-discard`、`--no-default-browser-check`、`--mute-audio`、`--no-sandbox`、`--headless` |
+| Chrome 进程数 / RSS 合计 | 11 个 / 1,640,536 KB（x86 代理量，非 Pi 数字） |
+| `set blocked URLs failed` 计数 | **0** → 逐页资源拦截在真实路径上被接受 |
+| MCP 工具注册 | `Registered 22 MCP tools`（无回归） |
+
+产物体积（同一 workflow、同平台）：
+
+| 产物 | 基线 `35501381743` | 优化后 `35502300270` | 变化 |
+|:--|--:|--:|:--|
+| linux/amd64 | 23,267,136 B | 16,875,704 B | **−27.5%** |
+| linux/arm64 | — | 16,187,576 B | — |
+
+### 2.3 顺带发现并修掉的问题：状态目录不可写导致服务起不来
+
+本机复现（`HOME` 的 XDG 缓存目录只读）：
+
+```
+level=fatal msg="failed to initialize service: 初始化风控状态存储失败:
+  mkdir /home/ooo/.cache/xiaohongshu-mcp: read-only file system"
+```
+
+树莓派上只读 rootfs 或 systemd `ProtectHome=true` 会命中同一路径。
+修复后同一环境：
+
+```
+level=warning msg="action state dir /home/ooo/.cache/xiaohongshu-mcp/action_state 不可写
+  （mkdir ...: read-only file system），回退到 /tmp/xiaohongshu-mcp-action-state"
+GET /health 200
+```
+
+### 2.4 真实页面实测（内置浏览器，真实小红书，未登录）
+
+用内置浏览器直接打开真实站点（**不是** headless Chrome —— headless 在本机出口 IP 上会被小红书
+风控直接拦到 `/website-login/error?...error_code=300012`，内置浏览器则能正常打开，见 §2.5）。
+
+**信息流 `/explore`：**
+
+| 指标 | 值 |
+|:--|--:|
+| DOM 节点 | 1,338 |
+| 资源条目 / 传输字节 | 50 / 169,737 B |
+| 其中 xhr / fetch | 36 / 11 条（基本全是接口） |
+| 图片（img） | 63 张（缩略图为主） |
+| 媒体（mp4/m3u8…） | **0** |
+| 字体 | **0** |
+| 选择器命中 | `search_input`=1、`feed_card`=28、`like-wrapper`=28、`search_result`=1 ✅ |
+
+**笔记详情 `/explore/<id>?xsec_token=…`（代码 `makeFeedDetailURL` 的同款 URL）：**
+
+| 指标 | 值 |
+|:--|--:|
+| DOM 节点 | 1,982 |
+| 资源条目 / 传输字节 | 65 / **1,772,378 B** |
+| 其中 `sns-webpic` 图片 | 34 张 / **1,616,448 B（占该页 93%）** |
+| `sns-avatar` 头像 | 16 张 / 29,594 B |
+| 媒体 / 字体 | **0 / 0** |
+| 选择器命中 | `note-detail-mask`=1、`note-container`=1、`interact-container`=1、`comments-container`=1、`note-scroller`=1、`comment-box`=1、`comment-item`=19、`show-more`=7 ✅ |
+| 就绪探针成本（模仿 `ready.go` 的 detail probe，20 次均值） | **0.57 ms/次**（桌面；说明轮询本身不是瓶颈） |
+
+**「把图片全部换成占位」的前后对比（模拟被拦）：**
+
+| 检查 | 换之前 | 换之后 |
+|:--|--:|--:|
+| DOM 节点 | 1,982 | 1,982 |
+| `.comment-item` | 19 | 19 |
+| `.like-wrapper` / `.collect-wrapper` | 50 / 1 | 50 / 1 |
+| 评论输入框 | 1 | 1 |
+| 正文 `#detail-desc` | 有 | 有（文本不变） |
+| `.note-scroller` 可滚动 | 是 | 是 |
+| 笔记图片 URL（数据层 `noteDetailMap[].note.imageList`） | 6+ 条 | **仍在** |
+
+结论：**文本、评论、互动、正文提取都不依赖图片像素；图片 URL 来自页面数据层，与图片请求成败无关。**
+因此把图片 CDN 放进低资源档默认拦截列表，是这次改动里对 Pi 收益最大的一项
+（1.5MiB/篇的下载 + 38 张大图的解码 CPU + 解码位图常驻内存）。
+`fe-static.xhscdn.com`（JS/CSS）**绝不拦**，测试里有专门断言。
+
+### 2.5 headless 与真实浏览器的差异（环境事实）
+
+同一台机器、同一条出口：
+
+| 客户端 | `/explore` | 笔记详情 |
+|:--|:--|:--|
+| 内置浏览器（正常 Chrome 画像） | ✅ 正常渲染 28 张卡片 | ✅ 正常渲染（正文/19 条评论/点赞 3002） |
+| `google-chrome-stable --headless` | ❌ 302 到 `/website-login/error`，`error_code=300012 IP存在风险` | ❌ 同上 |
+
+所以：**本机的 headless 端到端验证做不了**（会被风控拦），
+但「页面结构 / 资源构成 / 提取面」这些结论用内置浏览器拿到的一手数据是有效的。
+
 ---
 
 ## 3. 逐项改动与代码位置
@@ -83,7 +189,8 @@ RSS = 该 `--user-data-dir` 下所有 Chrome 进程 RSS 之和（KB，含共享�
   在 `Page()` 里对新建 target 调一次 `proto.NetworkSetBlockedURLs{Urls: ...}`；
   失败只 `Warn`，不影响建页。
 - `configs.BrowserBlockedURLPatterns()`：`XHS_BROWSER_BLOCK_URLS`（逗号分隔，`-` 表示不拦）优先；
-  未设置且处于低资源档时返回默认媒体列表。
+  未设置且处于低资源档时返回默认列表：`*sns-webpic*.xhscdn.com/*`、`*sns-img*.xhscdn.com/*`、
+  `*sns-avatar*.xhscdn.com/*` + 视频分片（依据见 §2.4；**不含** `fe-static`）。
 - 实测结论：**不需要先 `Network.enable`**（探针里 `setBlockedURLsWithoutEnable: "ok"`），
   因此没有引入 Network 域的事件流开销。
 
@@ -122,7 +229,13 @@ RSS = 该 `--user-data-dir` 下所有 Chrome 进程 RSS 之和（KB，含共享�
 - `service.go` `GetFeedDetailCommentsBatch()`：`capture` 用 `defer` 兜底停止，
   避免 panic 路径漏掉 `Stop()` 导致 `EachEvent` goroutine 与 ctx 常驻。
 
-### 3.8 构建与部署
+### 3.8 状态目录降级
+
+- `xiaohongshu/action_state.go`：`NewActionStateStore()` 先 `MkdirAll`，再用临时文件
+  **真探测**目录是否可写（`dirWritable`），不可写则回退 `os.TempDir()/xiaohongshu-mcp-action-state`，
+  两处都不可用才返回错误。与 `pkg/ratelimit` 已有的「持久化不可用就降级内存存储」策略一致。
+
+### 3.9 构建与部署
 
 - `.github/workflows/build.yml`：`CGO_ENABLED=0` + `-trimpath -ldflags="-s -w"`，并打印产物大小。
 - `docker/docker-compose.yml`：`shm_size: "256m"`。
@@ -151,7 +264,7 @@ RSS = 该 `--user-data-dir` 下所有 Chrome 进程 RSS 之和（KB，含共享�
 XHS_LOW_RESOURCE=1
 XHS_BROWSER_JS_HEAP_MB=192          # 内存紧张可降到 128
 XHS_BROWSER_RENDERER_LIMIT=2        # 极紧可试 1，注意页面可能变慢
-XHS_BROWSER_BLOCK_URLS=-            # 需要看视频内容时用 "-" 关掉媒体拦截
+XHS_BROWSER_BLOCK_URLS=-            # 需要真正加载图片/视频（例如要人工核对页面）时用 "-" 全部放行
 XHS_GO_MEMLIMIT=128MiB
 XHS_IDENTITY_CHECK_INTERVAL=10m
 XHS_BROWSER_IDLE_TIMEOUT=30m        # 见测试文档 §7：Pi 上重启 Chromium 很贵

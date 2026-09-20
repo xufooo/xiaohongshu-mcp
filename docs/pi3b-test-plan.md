@@ -83,7 +83,7 @@ gh run download <run-id> -n xiaohongshu-mcp-linux-amd64 -D /tmp/xhs-amd64
 | C1 | 低资源档判定（`XHS_LOW_RESOURCE`，arm 默认开） | `configs/browser.go` | L1 单测 | T1-1 |
 | C2 | V8 堆上限 / renderer 上限解析 | `configs/browser.go` | L1 单测 | T1-2 |
 | C3 | flag 组装（含"不得出现 WebGL 杀手 flag"） | `third_party/headless_browser` | L1 单测 | T1-3 |
-| C4 | URL 拦截模式解析（显式 / `-` / 默认 / 非低资源） | `configs/browser.go` | L1 单测 | T1-4 |
+| C4 | URL 拦截模式解析（显式 / `-` / 默认含图片 CDN / 非低资源） | `configs/browser.go` | L1 单测 | T1-4 |
 | C5 | `Network.setBlockedURLs` 实际可用性 | `third_party/headless_browser` | L2 探针 | T2-2 |
 | C6 | 低资源档真实生效（进程数 / RSS / WebGL 未被破坏） | 全部 | L2 探针 | T2-3 |
 | C7 | Go 运行时内存上限解析 | `configs/runtime.go` | L1 单测 | T1-5 |
@@ -114,7 +114,7 @@ gh run view <run-id> --log-failed
 | T1-1 | `TestLowResourceProfileExplicit` | `configs/browser_test.go` | `XHS_LOW_RESOURCE=1` 开；`0/false/off/no` 全关（压过架构默认） |
 | T1-2 | `TestBrowserJSHeapMB` | `configs/browser_test.go` | 显式值优先；`0`/非法值回落；低资源档 192；非低资源档 256 |
 | T1-2 | `TestBrowserRendererLimit` | `configs/browser_test.go` | 默认 2；显式覆盖；负数回落 2 |
-| T1-4 | `TestBrowserBlockedURLPatterns` | `configs/browser_test.go` | 显式逗号列表（含空格）；`-` = 不拦截；空值按未设置；非低资源档返回 nil |
+| T1-4 | `TestBrowserBlockedURLPatterns` | `configs/browser_test.go` | 显式逗号列表（含空格）；`-` = 不拦截；空值按未设置；非低资源档返回 nil；**默认档必须含 `sns-webpic` 且不得含 `fe-static`** |
 | T1-8 | `TestIdentityCheckInterval` | `configs/browser_test.go` | 默认 10m；`0` = 每次；`90s` 解析；非法/负值回落 |
 | T1-5 | `TestParseByteSize` | `configs/runtime_test.go` | `128MiB`/`128MB`/`1GiB`/`512KiB`/纯字节/`64B` 正确；空串与 `abc` 报错 |
 | T1-3 | `TestApplyLowMemoryLauncherProfile` | `third_party/headless_browser/headless_browser_test.go` | 5 个固定 flag 在位；`js-flags=--max-old-space-size=192`；`renderer-process-limit=2`；**断言 `disable-gpu`/`disable-software-rasterizer` 不在默认档** |
@@ -225,7 +225,7 @@ curl -s http://127.0.0.1:18060/health
 判据：
 
 1. 日志出现 `low resource profile enabled: js_heap_mb=192 renderer_limit=2`（**[源码]** `browser/browser.go`）；
-2. 日志出现 `blocking 5 URL patterns per page`（低资源档默认媒体列表）；
+2. 日志出现 `blocking 8 URL patterns per page`（低资源档默认：图片 CDN + 视频分片）；
 3. `/health` 返回 200；
 4. 首次调用后 `ps -eo args | grep chrome` 能看到 `--js-flags=--max-old-space-size=192`
    与 `--renderer-process-limit=2` 真的传给了 Chromium；
@@ -317,14 +317,14 @@ XHS_GO_MEMLIMIT=128MiB XHS_BROWSER_BLOCK_URLS=- \   # 先不拦媒体，单独�
 | Mem available | | | | 上升；不得出现 OOM |
 | 首页/搜索页可见耗时 | | | | 不得劣化超过 20% |
 | dmesg OOM 记录 | | | | 无 `Out of memory: Killed process` |
-| 视频笔记是否仍可正常浏览文本/图片 | | | | 拦截媒体后功能不受影响 |
+| 图片被拦后，笔记正文/评论/图片 URL 是否正常 | | | | 见 `pi3b-optimization.md` §2.4：真实页面实测提取面不变 |
 
 ### 6.4 真机验收判据（硬性）
 
 1. `free -m` 的 available 在持续操作 10 分钟后 **不低于 120MB**；
 2. `dmesg | grep -i "killed process"` **无** Chromium 被杀记录；
 3. 搜索、打开笔记、读取评论、点赞、收藏、发布（图）**各至少 1 次成功**；
-4. 媒体拦截开启后，视频笔记的**文本与图片提取仍然正常**；
+4. 图片/媒体拦截开启后，笔记**正文、评论、图片 URL 提取仍然正常**（真机复测 `pi3b-optimization.md` §2.4 的结论）；
 5. 登录态在重启后仍有效（cookies 持久化未被破坏）；
 6. 连续 20 次操作无 "browser busy" 之外的异常，无 goroutine 累积
    （`curl /health` 前后对比进程 RSS 无单调暴涨）。

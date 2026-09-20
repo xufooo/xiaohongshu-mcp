@@ -198,11 +198,22 @@ func BrowserRendererLimit() int {
 	return 2
 }
 
-// lowResourceBlockedURLPatterns 低资源档默认拦截的媒体分片。
-// 只拦视频/音频流：本项目只需要文本与图片 URL，不需要解码媒体，
-// 而视频解码是 A53 上最贵的一项。可用 XHS_BROWSER_BLOCK_URLS 覆盖。
+// lowResourceBlockedURLPatterns 低资源档默认拦截的资源。
+//
+// 一手实测（2026-09-20，真实小红书笔记详情页，见 docs/pi3b-optimization.md §2.4）：
+//   - 该页 1.69MiB 流量里 1.54MiB（93%）是 sns-webpic 图片（34 张）；
+//   - 把全部 <img> 换成占位后，DOM 节点数、正文、评论数、点赞按钮、评论框、
+//     滚动容器完全不变 → 文本/评论/互动提取不依赖像素；
+//   - 笔记图片 URL 来自页面数据层 __INITIAL_STATE__.note.noteDetailMap[].note.imageList，
+//     与图片请求是否成功无关 → 图片 URL 提取也不受影响；
+//   - 该页没有任何字体与视频请求，所以不拦字体（避免无收益的改动）。
+//
+// 注意：绝不能拦 fe-static.xhscdn.com（它同时提供 JS/CSS）。
 var lowResourceBlockedURLPatterns = []string{
-	"*.mp4*",
+	"*sns-webpic*.xhscdn.com/*", // 笔记图片（最大头）
+	"*sns-img*.xhscdn.com/*",    // 图片 CDN 的另一种域名形态
+	"*sns-avatar*.xhscdn.com/*", // 头像：单张很小但请求次数多，Pi 上每次都要 TLS+解码
+	"*.mp4*",                    // 视频笔记
 	"*.m3u8*",
 	"*.m4s*",
 	"*.mpd*",
