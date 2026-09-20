@@ -210,14 +210,14 @@ var lowResourceBlockedURLPatterns = []string{
 }
 
 // BrowserBlockedURLPatterns 返回逐页拦截的 URL 模式。
-// XHS_BROWSER_BLOCK_URLS 逗号分隔且**优先**（设为 "-" 表示不拦截任何资源）；
-// 未设置时低资源档返回默认媒体拦截列表，其他平台返回空。
+// XHS_BROWSER_BLOCK_URLS 逗号分隔且**优先**（设为 "-" 表示不拦截任何资源，
+// 空值按"未设置"处理）；未设置时低资源档返回默认媒体拦截列表，其他平台返回空。
 func BrowserBlockedURLPatterns() []string {
-	if raw, ok := os.LookupEnv("XHS_BROWSER_BLOCK_URLS"); ok {
-		raw = strings.TrimSpace(raw)
-		if raw == "" || raw == "-" {
-			return nil
-		}
+	raw := strings.TrimSpace(os.Getenv("XHS_BROWSER_BLOCK_URLS"))
+	if raw == "-" {
+		return nil
+	}
+	if raw != "" {
 		patterns := make([]string, 0, 4)
 		for _, part := range strings.Split(raw, ",") {
 			if p := strings.TrimSpace(part); p != "" {
