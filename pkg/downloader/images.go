@@ -33,7 +33,11 @@ type ImageDownloader struct {
 }
 
 // maxRemoteImageBytes 远程图片单张大小上限（50MiB），防止无界内存增长。
-const maxRemoteImageBytes int64 = 50 << 20
+// 声明为变量仅为便于测试下调阈值；生产路径不做修改。
+var maxRemoteImageBytes int64 = 50 << 20
+
+// imageHeaderBytes 类型判定需要读取的头部字节数（覆盖 filetype 的全部图片签名）。
+const imageHeaderBytes = 307
 
 // readImageBody 读取响应体并限制大小；超过 limit 返回明确错误。
 func readImageBody(r io.Reader, limit int64) ([]byte, error) {
@@ -45,6 +49,51 @@ func readImageBody(r io.Reader, limit int64) ([]byte, error) {
 		return nil, fmt.Errorf("remote image exceeds size limit (%d bytes)", limit)
 	}
 	return data, nil
+}
+
+// writeImageStream 把已读出的头部与剩余响应体流式写入文件，超限即失败并清理半成品。
+// 全程只持有头部 buffer，避免 50MiB 级堆峰值（树莓派 3B 无 swap 时会 OOM）。
+func writeImageStream(target string, header []byte, body io.Reader) error {
+	if int64(len(header)) > maxRemoteImageBytes {
+		return fmt.Errorf("remote image exceeds size limit (%d bytes)", maxRemoteImageBytes)
+	}
+
+	tmp := target + ".tmp"
+	file, err := os.Create(tmp)
+	if err != nil {
+		return errors.Wrap(err, "failed to create image file")
+	}
+
+	written := int64(len(header))
+	if _, err := file.Write(header); err != nil {
+		file.Close()
+		os.Remove(tmp)
+		return errors.Wrap(err, "failed to write image data")
+	}
+
+	remaining := maxRemoteImageBytes - written
+	copied, err := io.Copy(file, io.LimitReader(body, remaining+1))
+	if err != nil {
+		file.Close()
+		os.Remove(tmp)
+		return errors.Wrap(err, "failed to write image data")
+	}
+	written += copied
+	if written > maxRemoteImageBytes {
+		file.Close()
+		os.Remove(tmp)
+		return fmt.Errorf("remote image exceeds size limit (%d bytes)", maxRemoteImageBytes)
+	}
+
+	if err := file.Close(); err != nil {
+		os.Remove(tmp)
+		return errors.Wrap(err, "failed to write image data")
+	}
+	if err := os.Rename(tmp, target); err != nil {
+		os.Remove(tmp)
+		return errors.Wrap(err, "failed to save image")
+	}
+	return nil
 }
 
 // displayImageURL 移除 URL 的 userinfo/query/fragment，仅保留 scheme/host/path，避免日志泄露 token；解析失败 fail-closed。
@@ -114,19 +163,21 @@ func (d *ImageDownloader) DownloadImage(imageURL string) (string, error) {
 		return "", fmt.Errorf("remote image exceeds size limit (%d bytes): %s", maxRemoteImageBytes, displayImageURL(imageURL))
 	}
 
-	// 读取图片数据（限制单张大小）
-	imageData, err := readImageBody(resp.Body, maxRemoteImageBytes)
-	if err != nil {
+	// 读取图片头部（仅 307 字节）做类型判定，其余流式落盘。
+	header := make([]byte, imageHeaderBytes)
+	read, err := io.ReadFull(resp.Body, header)
+	if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
 		return "", errors.Wrapf(err, "failed to read image data from %s", displayImageURL(imageURL))
 	}
+	header = header[:read]
 
 	// 检测图片格式
-	kind, err := filetype.Match(imageData)
+	kind, err := filetype.Match(header)
 	if err != nil {
 		return "", errors.Wrap(err, "failed to detect file type")
 	}
 
-	if !filetype.IsImage(imageData) {
+	if !filetype.IsImage(header) {
 		return "", errors.New("downloaded file is not a valid image")
 	}
 
@@ -139,8 +190,8 @@ func (d *ImageDownloader) DownloadImage(imageURL string) (string, error) {
 		return filePath, nil
 	}
 
-	// 保存到文件
-	if err := os.WriteFile(filePath, imageData, 0644); err != nil {
+	// 流式保存到文件
+	if err := writeImageStream(filePath, header, resp.Body); err != nil {
 		return "", errors.Wrap(err, "failed to save image")
 	}
 

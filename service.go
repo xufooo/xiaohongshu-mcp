@@ -17,8 +17,8 @@ import (
 	"github.com/xpzouying/xiaohongshu-mcp/browser"
 	"github.com/xpzouying/xiaohongshu-mcp/configs"
 	"github.com/xpzouying/xiaohongshu-mcp/cookies"
-	"github.com/xpzouying/xiaohongshu-mcp/pkg/downloader"
 	hrod "github.com/xpzouying/xiaohongshu-mcp/humanize/rod"
+	"github.com/xpzouying/xiaohongshu-mcp/pkg/downloader"
 	"github.com/xpzouying/xiaohongshu-mcp/pkg/ratelimit"
 	"github.com/xpzouying/xiaohongshu-mcp/pkg/xhsutil"
 	"github.com/xpzouying/xiaohongshu-mcp/xiaohongshu"
@@ -42,6 +42,12 @@ type XiaohongshuService struct {
 	cursorGuardMu    sync.Mutex
 	cursorGuardMap   map[string]*cursorGuardEntry
 
+	// 身份指纹采集节流：同一浏览器 + 同一 profile 下指纹不会变，
+	// 每次取页都采集一次只是白白多一次 CDP Eval（树莓派上是实打实的开销）。
+	identityMu            sync.Mutex
+	identityCheckedAt     time.Time
+	identityCheckInterval time.Duration
+
 	createSessionMu sync.Mutex
 }
 
@@ -61,11 +67,12 @@ func NewXiaohongshuService() (*XiaohongshuService, error) {
 			browser.WithIdleTimeout(configs.GetBrowserIdleTimeout()),
 			browser.WithSessionIdleGrace(configs.GetBrowserSessionIdleGrace()),
 		),
-		actionState: actionState,
-		browseSessions: xiaohongshu.NewBrowseSessionManager(xiaohongshu.DefaultBrowseSessionTimeout),
-		commentCursorTTL: 15 * time.Minute,
-		feedCursorTTL:   5 * time.Minute,
-		cursorGuardMap:  make(map[string]*cursorGuardEntry),
+		actionState:           actionState,
+		browseSessions:        xiaohongshu.NewBrowseSessionManager(xiaohongshu.DefaultBrowseSessionTimeout),
+		commentCursorTTL:      15 * time.Minute,
+		feedCursorTTL:         5 * time.Minute,
+		cursorGuardMap:        make(map[string]*cursorGuardEntry),
+		identityCheckInterval: configs.IdentityCheckInterval(),
 	}, nil
 }
 
@@ -421,15 +428,15 @@ func stopReadNetworkCapture(capture *xiaohongshu.NetworkCapture) []xiaohongshu.N
 
 // PublishRequest 发布请求
 type PublishRequest struct {
-	Title      string   `json:"title" binding:"required"`
-	Content    string   `json:"content" binding:"required"`
-	Images     []string `json:"images" binding:"required,min=1"`
-	Tags       []string `json:"tags,omitempty"`
-	ScheduleAt string   `json:"schedule_at,omitempty"` // 定时发布时间，ISO8601格式，为空则立即发布
-	IsOriginal bool     `json:"is_original,omitempty"` // 是否声明原创
-	Visibility string   `json:"visibility,omitempty"`  // 可见范围: "公开可见"(默认), "仅自己可见", "仅互关好友可见"
-	Products     []string `json:"products,omitempty"` // 商品关键词列表，用于绑定带货商品
-	ConfirmToken string `json:"confirm_token,omitempty"`
+	Title        string   `json:"title" binding:"required"`
+	Content      string   `json:"content" binding:"required"`
+	Images       []string `json:"images" binding:"required,min=1"`
+	Tags         []string `json:"tags,omitempty"`
+	ScheduleAt   string   `json:"schedule_at,omitempty"` // 定时发布时间，ISO8601格式，为空则立即发布
+	IsOriginal   bool     `json:"is_original,omitempty"` // 是否声明原创
+	Visibility   string   `json:"visibility,omitempty"`  // 可见范围: "公开可见"(默认), "仅自己可见", "仅互关好友可见"
+	Products     []string `json:"products,omitempty"`    // 商品关键词列表，用于绑定带货商品
+	ConfirmToken string   `json:"confirm_token,omitempty"`
 }
 
 // LoginStatusResponse 登录状态响应
@@ -456,14 +463,14 @@ type PublishResponse struct {
 
 // PublishVideoRequest 发布视频请求（仅支持本地单个视频文件）
 type PublishVideoRequest struct {
-	Title      string   `json:"title" binding:"required"`
-	Content    string   `json:"content" binding:"required"`
-	Video      string   `json:"video" binding:"required"`
-	Tags       []string `json:"tags,omitempty"`
-	ScheduleAt string   `json:"schedule_at,omitempty"` // 定时发布时间，ISO8601格式，为空则立即发布
-	Visibility string   `json:"visibility,omitempty"`  // 可见范围: "公开可见"(默认), "仅自己可见", "仅互关好友可见"
-	Products     []string `json:"products,omitempty"` // 商品关键词列表，用于绑定带货商品
-	ConfirmToken string `json:"confirm_token,omitempty"`
+	Title        string   `json:"title" binding:"required"`
+	Content      string   `json:"content" binding:"required"`
+	Video        string   `json:"video" binding:"required"`
+	Tags         []string `json:"tags,omitempty"`
+	ScheduleAt   string   `json:"schedule_at,omitempty"` // 定时发布时间，ISO8601格式，为空则立即发布
+	Visibility   string   `json:"visibility,omitempty"`  // 可见范围: "公开可见"(默认), "仅自己可见", "仅互关好友可见"
+	Products     []string `json:"products,omitempty"`    // 商品关键词列表，用于绑定带货商品
+	ConfirmToken string   `json:"confirm_token,omitempty"`
 }
 
 // PublishVideoResponse 发布视频响应
@@ -545,12 +552,12 @@ func deepCopyFeedDetailResponse(src *xiaohongshu.FeedDetailResponse) *xiaohongsh
 	return &xiaohongshu.FeedDetailResponse{
 		Note: noteCopy,
 		Comments: xiaohongshu.CommentList{
-			List:            deepCopyCommentList(src.Comments.List),
-			Cursor:          src.Comments.Cursor,
-			HasMore:         src.Comments.HasMore,
-			TotalItems:      src.Comments.TotalItems,
-			SeenCount:       src.Comments.SeenCount,
-			Complete:        src.Comments.Complete,
+			List:             deepCopyCommentList(src.Comments.List),
+			Cursor:           src.Comments.Cursor,
+			HasMore:          src.Comments.HasMore,
+			TotalItems:       src.Comments.TotalItems,
+			SeenCount:        src.Comments.SeenCount,
+			Complete:         src.Comments.Complete,
 			IncompleteReason: src.Comments.IncompleteReason,
 		},
 	}
@@ -994,8 +1001,16 @@ func (s *XiaohongshuService) GetFeedDetailCommentsBatch(ctx context.Context, fee
 		defer s.browserManager.Release(page)
 		action := xiaohongshu.NewFeedDetailActionWithState(page.Context(detailCtx), s.actionState)
 		capture := s.startReadNetworkCapture(page)
+		captured := false
+		// panic 路径也必须停采集，否则 EachEvent goroutine 与 context 会一直泄漏。
+		defer func() {
+			if !captured {
+				stopReadNetworkCapture(capture)
+			}
+		}()
 		detail, nextCursor, hasMore, err := action.GetFeedDetailCommentsBatch(detailCtx, feedID, xsecToken, guardCursor, maxItems, config)
 		network := stopReadNetworkCapture(capture)
+		captured = true
 		if err != nil {
 			s.recordRiskFromPage(page, err)
 			return nil, err
@@ -1786,8 +1801,24 @@ func (s *XiaohongshuService) acquirePageFor(ctx context.Context, owner string) (
 	return page, nil
 }
 
+// identityProbeDue 判断是否该重新采集身份指纹；interval<=0 表示每次都采集。
+// 先记录时间戳再采集：采集失败时也不要在每个操作上重复触发同一开销。
+func (s *XiaohongshuService) identityProbeDue(now time.Time) bool {
+	s.identityMu.Lock()
+	defer s.identityMu.Unlock()
+	if s.identityCheckInterval > 0 && !s.identityCheckedAt.IsZero() &&
+		now.Sub(s.identityCheckedAt) < s.identityCheckInterval {
+		return false
+	}
+	s.identityCheckedAt = now
+	return true
+}
+
 func (s *XiaohongshuService) checkFixedIdentity(page *hrod.Page) error {
 	if !configs.UseFixedIdentity() || s.actionState == nil {
+		return nil
+	}
+	if !s.identityProbeDue(time.Now()) {
 		return nil
 	}
 	current, err := xiaohongshu.CaptureIdentityMetadata(page)

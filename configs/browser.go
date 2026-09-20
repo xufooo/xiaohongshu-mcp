@@ -2,6 +2,8 @@ package configs
 
 import (
 	"os"
+	"runtime"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -147,6 +149,7 @@ func BrowserLanguage() string {
 	return "zh-CN"
 }
 
+// UseFixedIdentity 是否启用浏览器身份指纹漂移检测。
 func UseFixedIdentity() bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("XHS_FIXED_IDENTITY"))) {
 	case "0", "false", "off", "no":
@@ -154,6 +157,110 @@ func UseFixedIdentity() bool {
 	default:
 		return true
 	}
+}
+
+// LowResourceProfile 判断是否启用低资源（树莓派 3B 等 1GB 设备）浏览器档。
+// 规则：XHS_LOW_RESOURCE 显式设置时以它为准；未设置时 arm/arm64 默认启用
+// （本项目的首要部署目标是树莓派）。x86/darwin 默认不启用，保持上游行为。
+func LowResourceProfile() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("XHS_LOW_RESOURCE"))) {
+	case "1", "true", "on", "yes":
+		return true
+	case "0", "false", "off", "no":
+		return false
+	}
+	switch runtime.GOARCH {
+	case "arm", "arm64":
+		return true
+	default:
+		return false
+	}
+}
+
+// BrowserJSHeapMB 返回 V8 old space 上限（MB）。XHS_BROWSER_JS_HEAP_MB 优先，
+// 未设置或非法时低资源档用 192MB，其他用 256MB。
+func BrowserJSHeapMB() int {
+	if v := envPositiveInt("XHS_BROWSER_JS_HEAP_MB"); v > 0 {
+		return v
+	}
+	if LowResourceProfile() {
+		return 192
+	}
+	return 256
+}
+
+// BrowserRendererLimit 返回 renderer 进程数上限。XHS_BROWSER_RENDERER_LIMIT 优先，
+// 默认 2（配合 rod 默认关闭 site-per-process，压住 1GB 设备上的进程数）。
+func BrowserRendererLimit() int {
+	if v := envPositiveInt("XHS_BROWSER_RENDERER_LIMIT"); v > 0 {
+		return v
+	}
+	return 2
+}
+
+// lowResourceBlockedURLPatterns 低资源档默认拦截的媒体分片。
+// 只拦视频/音频流：本项目只需要文本与图片 URL，不需要解码媒体，
+// 而视频解码是 A53 上最贵的一项。可用 XHS_BROWSER_BLOCK_URLS 覆盖。
+var lowResourceBlockedURLPatterns = []string{
+	"*.mp4*",
+	"*.m3u8*",
+	"*.m4s*",
+	"*.mpd*",
+	"*.flv*",
+}
+
+// BrowserBlockedURLPatterns 返回逐页拦截的 URL 模式。
+// XHS_BROWSER_BLOCK_URLS 逗号分隔且**优先**（设为 "-" 表示不拦截任何资源）；
+// 未设置时低资源档返回默认媒体拦截列表，其他平台返回空。
+func BrowserBlockedURLPatterns() []string {
+	if raw, ok := os.LookupEnv("XHS_BROWSER_BLOCK_URLS"); ok {
+		raw = strings.TrimSpace(raw)
+		if raw == "" || raw == "-" {
+			return nil
+		}
+		patterns := make([]string, 0, 4)
+		for _, part := range strings.Split(raw, ",") {
+			if p := strings.TrimSpace(part); p != "" {
+				patterns = append(patterns, p)
+			}
+		}
+		return patterns
+	}
+	if !LowResourceProfile() {
+		return nil
+	}
+	return append([]string(nil), lowResourceBlockedURLPatterns...)
+}
+
+// defaultIdentityCheckInterval 身份指纹采集的默认节流间隔。
+// 同一浏览器 + 同一 profile 下指纹不会变化，10 分钟采集一次足以发现漂移。
+const defaultIdentityCheckInterval = 10 * time.Minute
+
+// IdentityCheckInterval 返回身份指纹采集的最小间隔。
+// XHS_IDENTITY_CHECK_INTERVAL 未设置用 10m；"0" 表示每次都采集；非法值回落默认。
+func IdentityCheckInterval() time.Duration {
+	raw := strings.TrimSpace(os.Getenv("XHS_IDENTITY_CHECK_INTERVAL"))
+	if raw == "" {
+		return defaultIdentityCheckInterval
+	}
+	parsed, err := time.ParseDuration(raw)
+	if err != nil || parsed < 0 {
+		return defaultIdentityCheckInterval
+	}
+	return parsed
+}
+
+// envPositiveInt 读取正整数环境变量，缺失或非法返回 0。
+func envPositiveInt(name string) int {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return 0
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil || v <= 0 {
+		return 0
+	}
+	return v
 }
 
 func UseWriteConfirmation() bool {

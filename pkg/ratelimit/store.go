@@ -38,16 +38,36 @@ func (s *State) ensure() {
 	}
 }
 
-func (s *State) prune(now time.Time) {
+// prune 丢弃 24 小时窗口外的事件；返回是否有内容被裁剪，
+// 供调用方跳过"没有变化也写盘"的无效写入（SD 卡设备上写入放大显著）。
+func (s *State) prune(now time.Time) bool {
 	s.ensure()
 	cutoff := now.Add(-24 * time.Hour).Unix()
+	changed := false
 	for action, events := range s.Actions {
-		s.Actions[action] = pruneEvents(events, cutoff)
+		pruned := pruneEvents(events, cutoff)
+		if len(pruned) != len(events) {
+			changed = true
+		}
+		s.Actions[action] = pruned
 	}
-	s.All = pruneEvents(s.All, cutoff)
-	s.Interaction = pruneEvents(s.Interaction, cutoff)
-	s.Write = pruneEvents(s.Write, cutoff)
-	s.Publish = pruneEvents(s.Publish, cutoff)
+	if pruned := pruneEvents(s.All, cutoff); len(pruned) != len(s.All) {
+		s.All = pruned
+		changed = true
+	}
+	if pruned := pruneEvents(s.Interaction, cutoff); len(pruned) != len(s.Interaction) {
+		s.Interaction = pruned
+		changed = true
+	}
+	if pruned := pruneEvents(s.Write, cutoff); len(pruned) != len(s.Write) {
+		s.Write = pruned
+		changed = true
+	}
+	if pruned := pruneEvents(s.Publish, cutoff); len(pruned) != len(s.Publish) {
+		s.Publish = pruned
+		changed = true
+	}
+	return changed
 }
 
 func pruneEvents(events []int64, cutoff int64) []int64 {
@@ -135,7 +155,8 @@ func (s *FileStore) Load() (*State, error) {
 
 func (s *FileStore) Save(state *State) error {
 	state.ensure()
-	data, err := json.MarshalIndent(state, "", "  ")
+	// 用紧凑 JSON：内容等价，但写入量与 CPU 更小（树莓派 SD 卡上的写入放大）。
+	data, err := json.Marshal(state)
 	if err != nil {
 		return err
 	}

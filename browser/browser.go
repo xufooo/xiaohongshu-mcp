@@ -8,6 +8,7 @@ import (
 
 	"github.com/sirupsen/logrus"
 	"github.com/xpzouying/headless_browser"
+	"github.com/xpzouying/xiaohongshu-mcp/configs"
 	"github.com/xpzouying/xiaohongshu-mcp/cookies"
 	"github.com/xpzouying/xiaohongshu-mcp/humanize"
 	hrod "github.com/xpzouying/xiaohongshu-mcp/humanize/rod"
@@ -173,6 +174,20 @@ func NewBrowser(ctx context.Context, headless bool, options ...Option) (*hrod.Br
 	if len(cfg.extraArgs) > 0 {
 		opts = append(opts, headless_browser.WithExtraArgs(cfg.extraArgs))
 		logrus.Infof("using %d extra browser launch args", len(cfg.extraArgs))
+	}
+
+	// 低资源档：树莓派 3B 等 1GB 设备上压住 Chromium 的内存与进程数。
+	if configs.LowResourceProfile() {
+		opts = append(opts, headless_browser.WithLowMemoryProfile(
+			configs.BrowserJSHeapMB(),
+			configs.BrowserRendererLimit(),
+		))
+		logrus.Infof("low resource profile enabled: js_heap_mb=%d renderer_limit=%d",
+			configs.BrowserJSHeapMB(), configs.BrowserRendererLimit())
+	}
+	if patterns := configs.BrowserBlockedURLPatterns(); len(patterns) > 0 {
+		opts = append(opts, headless_browser.WithBlockedURLs(patterns))
+		logrus.Infof("blocking %d URL patterns per page", len(patterns))
 	}
 
 	// Read proxy from environment variable

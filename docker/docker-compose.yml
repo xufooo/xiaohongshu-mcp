@@ -8,6 +8,9 @@ services:
     restart: unless-stopped
     init: true
     tty: true
+    # Chromium 重度依赖 /dev/shm；Docker 默认 64MB 会让渲染进程崩溃或卡死。
+    # 1GB 设备给 256MB 足够，给满 1GB 反而会挤掉浏览器自己的内存。
+    shm_size: "256m"
     volumes:
       - ./data:/app/data
       - ./images:/app/images

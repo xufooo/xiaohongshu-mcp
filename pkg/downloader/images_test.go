@@ -1,10 +1,13 @@
 package downloader
 
 import (
+	"bytes"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -128,5 +131,71 @@ func TestDownloadImageErrorStripsURLToken(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "example.com/img.jpg") {
 		t.Fatalf("错误信息应保留脱敏 URL: %v", err)
+	}
+}
+
+// TestDownloadImageChunkedStreams 无 Content-Length 的分块响应也要能落盘，且字节完全一致。
+func TestDownloadImageChunkedStreams(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 不设置 Content-Length，并主动 Flush 触发分块传输。
+		w.Header().Set("Content-Type", "image/png")
+		flusher, _ := w.(http.Flusher)
+		_, _ = w.Write(tinyPNG[:16])
+		if flusher != nil {
+			flusher.Flush()
+		}
+		_, _ = w.Write(tinyPNG[16:])
+	}))
+	defer srv.Close()
+
+	d := NewImageDownloader(t.TempDir())
+	path, err := d.DownloadImage(srv.URL + "/chunked.png")
+	if err != nil {
+		t.Fatalf("分块 PNG 下载失败: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("读取落盘文件失败: %v", err)
+	}
+	if !bytes.Equal(data, tinyPNG) {
+		t.Fatalf("流式落盘内容不一致: got %d bytes, want %d bytes", len(data), len(tinyPNG))
+	}
+}
+
+// TestWriteImageStreamRejectsOversize 流式写入超限时必须报错且不留下半成品。
+func TestWriteImageStreamRejectsOversize(t *testing.T) {
+	original := maxRemoteImageBytes
+	maxRemoteImageBytes = 64
+	defer func() { maxRemoteImageBytes = original }()
+
+	dir := t.TempDir()
+	target := filepath.Join(dir, "big.png")
+	err := writeImageStream(target, tinyPNG, strings.NewReader(strings.Repeat("x", 128)))
+	if err == nil {
+		t.Fatal("超过上限的流式写入应报错")
+	}
+	if !strings.Contains(err.Error(), "exceeds size limit") {
+		t.Fatalf("错误信息不清晰: %v", err)
+	}
+	if _, statErr := os.Stat(target); !os.IsNotExist(statErr) {
+		t.Fatalf("失败后不应留下目标文件: %v", statErr)
+	}
+	if _, statErr := os.Stat(target + ".tmp"); !os.IsNotExist(statErr) {
+		t.Fatalf("失败后不应留下临时文件: %v", statErr)
+	}
+}
+
+// TestWriteImageStreamWithinLimit 正常路径：头部 + 剩余流全部写入目标文件。
+func TestWriteImageStreamWithinLimit(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "ok.png")
+	if err := writeImageStream(target, tinyPNG[:16], strings.NewReader(string(tinyPNG[16:]))); err != nil {
+		t.Fatalf("正常流式写盘失败: %v", err)
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("读取落盘文件失败: %v", err)
+	}
+	if !bytes.Equal(data, tinyPNG) {
+		t.Fatalf("内容不一致: got %d bytes, want %d bytes", len(data), len(tinyPNG))
 	}
 }

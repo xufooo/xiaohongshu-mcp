@@ -42,8 +42,8 @@ type ActionLimitConfig struct {
 }
 
 type AccountKey struct {
-	AccountID  string
-	ProfileDir string
+	AccountID   string
+	ProfileDir  string
 	CookiesPath string
 }
 
@@ -433,9 +433,12 @@ func (l *Limiter) loadState(now time.Time) (*State, error) {
 		return nil, err
 	}
 	state.ensure()
-	state.prune(now)
-	if err := l.store.Save(state); err != nil {
-		return nil, err
+	// 仅在裁剪确实改变了内容时才写盘：每次检查都写会让一次操作产生
+	// 两轮文件写入（loadState + recordLocked），在 SD 卡设备上是明显的写入放大。
+	if state.prune(now) {
+		if err := l.store.Save(state); err != nil {
+			return nil, err
+		}
 	}
 	return state, nil
 }
