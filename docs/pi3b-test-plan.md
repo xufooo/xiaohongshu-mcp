@@ -699,3 +699,39 @@ DIV.filter-panel                     ← hover「筛选」后异步挂载
 
 > 附：本轮扫描里第三次「差一点误报」——前两次是筛选面板与登录判定。三次都靠**再下钻一层**澄清
 > （异步渲染 / 隐藏克隆 / 嵌套结构）。**方法论**：把差异当 bug 之前，至少再下钻一层数据结构或交互状态。
+
+**`open_note`（P0：从信息流卡片点击进详情）—— 行为级实测通过**
+
+在 `/explore` 上对第一张卡片执行真实点击（目标 `section.note-item a.cover`，即代码 `findFeedCardAnchor` 使用的同一类锚点）：
+
+| 观测 | 结果 | 含义 |
+|:--|:--|:--|
+| URL | `/explore/6a91523c0000000003029840?xsec_token=…` | 点击后带 token 进入详情 ✅ |
+| 标题 | 笔记标题（`oots上海南京路 - 小红书`） | 页面确实切换 ✅ |
+| `.note-detail-mask` | **1** | 详情以**浮层**打开 —— 正是 `SelectorFeedDetailReady` 期望的形态 ✅ |
+| `.note-container` / `.interact-container` / `.comments-container` | 1 / 1 / 1 | 四个就绪信号齐全 ✅ |
+| 背后 `section.note-item` | 仍 30 张 | 信息流未被销毁，未触发整页跳转 ✅ |
+
+结合此前直接导航 `/explore/<id>` 也能以**独立页**形态打开（`.note-detail-mask`=1 且四信号齐全）：
+**两条进入路径在线上都成立**，`SelectorFeedDetailReady` 的并集写法同时覆盖了「卡片点击的浮层」与「直接 URL 的独立页」两种形态 —— 设计正确。
+
+### D.8 行为级验证进度小结
+
+| 功能 | 选择器级 | 行为级（只读） | 行为级（写） |
+|:--|:--|:--|:--|
+| `list_feeds` | ✅ | ⏸ 未做（翻页） | — |
+| `search_feeds` + 筛选 | ✅ | ⏸ 未做（翻页/筛选生效） | — |
+| `get_note_detail` 读评论 | ✅ | ✅ **懒加载成立**（滚一次 +14 条，scrollHeight +79%） | — |
+| `open_note` | ✅ | ✅ **卡片点击→浮层详情，四就绪信号齐全** | — |
+| `user_profile` | ✅ | ✅ **状态路径/分区选择有效** | — |
+| `like_feed` / `favorite_feed` | ✅ 按钮唯一 | ❌ | ❌ **会改真实账号，需授权** |
+| `comment_feed` / `reply_comment_in_feed` | ✅ 输入框 | ❌ | ❌ **会真发评论，需授权** |
+| notification 系列（含点赞/回复） | ✅ | ⏸ 未读未读数/列表 | ❌ **回复会真发，需授权** |
+| `publish_content` / `publish_with_video` | ✅ 早期 | ❌ | ❌ **会真发布，需授权 + 本地图片** |
+| `check_login_status` | ✅ 已登录态 | ⚠️ 登出态待真机 | — |
+| session 系列（`start_page`/`go_back`/`get_page_state`/`close_page`） | 同详情页 | ⏸ 未做 | — |
+
+**阻塞点只有一个**：所有**写操作**都会改到内置浏览器里那个**真实账号**（`loggedIn=true`，昵称「一画一话」），
+我不会在未获授权时执行。要验证写链路，需要三选一：
+① 明确授权我在这个账号上操作（并指定靶子笔记）；② 提供一个测试账号/干净 profile；
+③ 留到树莓派上按本文件 §6.4 的真机验收清单做。
