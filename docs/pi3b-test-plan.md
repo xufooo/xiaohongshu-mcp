@@ -573,3 +573,31 @@ try {
   process.exit(0)
 }
 ```
+
+---
+
+## 附录 D：功能全量扫描与 bug 清单（2026-09-20 起，进行中）
+
+扫描方式：内置浏览器打开真实站点 → 每页**只打一次极小探针**（不做 `scrollIntoView`、不做长等待、不做循环基准）
+→ 把命中数与代码里的选择器/数据路径逐一对照。证据等级：**[实测]** = 浏览器实测；**[源码]** = 读代码确认。
+
+### D.1 已扫
+
+| # | 功能 | 页面 | 代码依赖（[源码]） | 实测（[实测]） | 结论 |
+|:--|:--|:--|:--|:--|:--|
+| A | `list_feeds` | `/explore` | `SelectorFeedCard` 并集；`__INITIAL_STATE__.feed.feeds.value ?? ._value` | 卡片 **30**；`feed.feeds` = `_value array:33`；`like-wrapper` 30；`a[href="/notification"]` **2** | ✅ 正常 |
+| B1 | `search_feeds`（结果） | `/search_result?keyword=咖啡&source=web_explore_feed&type=51` | `makeSearchURL` → `search_result_ai`；`search.feeds`；卡片并集 | 卡片 **22**；`search.feeds` = `array:22`；搜索框并集命中 1 | ✅ 正常 |
+| B2 | `search_feeds`（**筛选**） | 同上 | `div.filter` 按钮 → hover+click → `.filter-panel` → `div.filter-panel div.filters` → `:scope > span` 分组标题（期望「排序依据/笔记类型/发布时间/搜索范围/位置距离」）→ `div.tags` 选项 | 按钮 `div.filter`（文本「筛选」，父链 `DIV.search-layout__top > DIV.search-layout > DIV.feeds-page`）存在；**真实 CDP 点击后 `.filter-panel` 仍不存在**；整份 HTML（209,095 字符）里 `filter-panel`/`排序依据`/`笔记类型`/`发布时间`/`最多点赞` **全部不存在**；页面只有 `DIV.channel`（图文/视频）与位置 tab 条 | ❌ **BUG #1：筛选选择器已漂移**，筛选链路必然失败（未登录态确认；登录态待复核） |
+
+**扫描中修正的一处我自己的误报**：早前记的「搜索页顶层没有 `search` 键」是错的 —— 那是 `Object.keys(...).slice(0,8)` 截断造成的假象；完整键列表里 `search`/`note`/`notification` 都在，`search.feeds` 实测可用。
+
+### D.2 待扫
+
+| # | 功能 | 目标页面 | 主要风险点 |
+|:--|:--|:--|:--|
+| C | `get_note_detail` / `open_note` / 评论分页 | `/explore/<id>`、`/search_result/<id>` | 评论树、`.show-more`「展开 N 条回复」、`.note-scroller` |
+| D | `like_feed` / `favorite_feed` / `comment_feed` / `reply_comment_in_feed` | 详情页 | `.interact-container .left .like-wrapper/.collect-wrapper`、评论输入框、互动状态来源 |
+| E | `check_login_status` / `get_login_qrcode` / `delete_cookies` | `/explore`、登录浮层 | `.main-container .user .link-wrapper .channel`、`.login-container .qrcode-img` |
+| F | `user_profile` | `/user/profile/<id>` | 侧栏导航入口、`userPageData` 数据层 |
+| G | `list_notifications` / `get_unread_count` / `like_notification` / `reply_notification` | `/notification` | `.notification-page`、tab、`.action-like`、`textarea.comment-input` |
+| H | `publish_content` / `publish_with_video` | `creator.xiaohongshu.com` | 上传页 tab、标题/正文输入、发布按钮 |
