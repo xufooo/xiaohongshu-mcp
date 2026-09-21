@@ -18,9 +18,9 @@ import (
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/cdp"
 	"github.com/go-rod/rod/lib/proto"
-	"github.com/ysmood/gson"
 	xerrors "github.com/xpzouying/xiaohongshu-mcp/errors"
 	hrod "github.com/xpzouying/xiaohongshu-mcp/humanize/rod"
+	"github.com/ysmood/gson"
 )
 
 func TestMergeOpenedNoteUserFromSearchResult(t *testing.T) {
@@ -244,8 +244,8 @@ func TestIsConfirmedRendererDead(t *testing.T) {
 
 func TestClassifyProbeError(t *testing.T) {
 	cases := []struct {
-		name string
-		err  error
+		name  string
+		err   error
 		fatal bool
 	}{
 		{name: "nil", err: nil, fatal: false},
@@ -474,7 +474,7 @@ func TestOpenNoteAtomicCommit(t *testing.T) {
 
 func TestLivePageKindPrefersVisibleDetail(t *testing.T) {
 	probe := xhsReadyProbe{
-		URL:               "https://www.xiaohongshu.com/search_result?keyword=%E4%B8%89%E4%BA%9A",
+		URL:                "https://www.xiaohongshu.com/search_result?keyword=%E4%B8%89%E4%BA%9A",
 		VisibleDetailCount: 1,
 	}
 	if kind := inferLivePageKind(probe, true); kind != XHSReadyDetail {
@@ -611,12 +611,12 @@ func TestPollOpenedNoteSnapshotAttemptReceivesBudget(t *testing.T) {
 
 func TestHistoryTargetReadyDetailOverlay(t *testing.T) {
 	fromProbe := xhsReadyProbe{
-		URL:               "https://www.xiaohongshu.com/search_result?keyword=%E4%B8%89%E4%BA%9A",
+		URL:                "https://www.xiaohongshu.com/search_result?keyword=%E4%B8%89%E4%BA%9A",
 		VisibleDetailCount: 1,
 	}
 	fromURL := "https://www.xiaohongshu.com/search_result?keyword=%E4%B8%89%E4%BA%9A"
 	targetProbe := xhsReadyProbe{
-		URL:               fromURL,
+		URL:                fromURL,
 		VisibleDetailCount: 0,
 		SearchResultCount:  12,
 		SearchFeedCount:    12,
@@ -632,7 +632,7 @@ func TestHistoryTargetReadyDetailOverlay(t *testing.T) {
 func TestHistoryTargetReadyNonDetailRequiresURLChange(t *testing.T) {
 	fromURL := "https://www.xiaohongshu.com/search_result?keyword=%E4%B8%89%E4%BA%9A"
 	probe := xhsReadyProbe{
-		URL:          fromURL,
+		URL:           fromURL,
 		HomeFeedCount: 10,
 	}
 	if historyTargetReady(probe, fromURL, XHSReadyHome, false) {
@@ -790,10 +790,10 @@ func TestTryCloseIdleClosesWhenFree(t *testing.T) {
 	page := &hrod.Page{}
 	closed := false
 	session := &BrowseSession{
-		page:      page,
-		opToken:   make(chan struct{}, 1),
-		closedCh:  make(chan struct{}),
-		onRemove:  func(s *BrowseSession) { closed = true },
+		page:     page,
+		opToken:  make(chan struct{}, 1),
+		closedCh: make(chan struct{}),
+		onRemove: func(s *BrowseSession) { closed = true },
 	}
 	session.opToken <- struct{}{}
 	if !session.TryCloseIdle() {
@@ -808,10 +808,10 @@ func TestTryCloseIdleRefusesWhenBusy(t *testing.T) {
 	page := &hrod.Page{}
 	closed := false
 	session := &BrowseSession{
-		page:      page,
-		opToken:   make(chan struct{}, 1),
-		closedCh:  make(chan struct{}),
-		onRemove:  func(s *BrowseSession) { closed = true },
+		page:     page,
+		opToken:  make(chan struct{}, 1),
+		closedCh: make(chan struct{}),
+		onRemove: func(s *BrowseSession) { closed = true },
 	}
 	// opToken 空 = 操作占用中（busy）
 	if session.TryCloseIdle() {
@@ -936,12 +936,12 @@ func TestOpenNoteJSONImageListContract(t *testing.T) {
 	var payload struct {
 		Data struct {
 			Note struct {
-				NoteID       string        `json:"note_id"`
-				Title        string        `json:"title"`
-				Desc         string        `json:"desc"`
-				Type         string        `json:"type"`
-				User         User          `json:"user"`
-				InteractInfo InteractInfo  `json:"interactInfo"`
+				NoteID       string       `json:"note_id"`
+				Title        string       `json:"title"`
+				Desc         string       `json:"desc"`
+				Type         string       `json:"type"`
+				User         User         `json:"user"`
+				InteractInfo InteractInfo `json:"interactInfo"`
 				ImageList    []struct {
 					URLDefault string `json:"urlDefault"`
 					URLPre     string `json:"urlPre"`
@@ -1156,7 +1156,11 @@ func TestParseAndValidateShareURL(t *testing.T) {
 		{name: "合法短链www", input: "https://www.xhslink.com/abc123", isShort: true},
 		{name: "合法短链xhslink.cn", input: "https://xhslink.cn/abc123", isShort: true},
 		{name: "合法短链www.xhslink.cn", input: "https://www.xhslink.cn/abc123", isShort: true},
-		{name: "非HTTPS", input: "http://www.xiaohongshu.com/explore/5f4d8e7b00000000010001a2", wantErr: true, errContains: "HTTPS"},
+		// 分享文案里给的就是 http://（甚至不带 scheme），只升级 scheme 后照常接受。
+		{name: "http笔记URL升级为https", input: "http://www.xiaohongshu.com/explore/5f4d8e7b00000000010001a2", expectedID: "5f4d8e7b00000000010001a2"},
+		{name: "无scheme短链", input: "xhslink.com/abc123", isShort: true},
+		{name: "http短链升级为https", input: "http://xhslink.com/abc123", isShort: true},
+		{name: "无scheme短链cn", input: "www.xhslink.cn/abc123", isShort: true},
 		{name: "相对URL", input: "/explore/5f4d8e7b00000000010001a2", wantErr: true, errContains: "绝对URL"},
 		{name: "协议相对", input: "//www.xiaohongshu.com/explore/5f4d8e7b00000000010001a2", wantErr: true, errContains: "绝对URL"},
 		{name: "userinfo", input: "https://user:pass@www.xiaohongshu.com/explore/5f4d8e7b00000000010001a2", wantErr: true, errContains: "userinfo"},
@@ -1193,6 +1197,9 @@ func TestParseAndValidateShareURL(t *testing.T) {
 			if err != nil {
 				t.Fatalf("不期望错误: %v", err)
 			}
+			if strings.HasPrefix(parsed.NormalizedURL, "http://") {
+				t.Fatalf("NormalizedURL 必须已升级为 https: %q", parsed.NormalizedURL)
+			}
 			if parsed.IsShortLink != tt.isShort {
 				t.Fatalf("IsShortLink = %v, 期望 %v", parsed.IsShortLink, tt.isShort)
 			}
@@ -1218,7 +1225,6 @@ func TestValidateFinalNoteURL(t *testing.T) {
 		{name: "合法explore", input: "https://www.xiaohongshu.com/explore/5f4d8e7b00000000010001a2", noteID: "5f4d8e7b00000000010001a2"},
 		{name: "合法discovery", input: "https://www.xiaohongshu.com/discovery/item/6a5e9f8c10000000020002b3", noteID: "6a5e9f8c10000000020002b3"},
 		{name: "带token", input: "https://www.xiaohongshu.com/explore/5f4d8e7b00000000010001a2?xsec_token=tok", noteID: "5f4d8e7b00000000010001a2", xsecToken: "tok"},
-		{name: "非HTTPS", input: "http://www.xiaohongshu.com/explore/5f4d8e7b00000000010001a2", wantErr: true, errContains: "HTTPS"},
 		{name: "相对URL", input: "/explore/5f4d8e7b00000000010001a2", wantErr: true, errContains: "绝对URL"},
 		{name: "userinfo", input: "https://user:pass@www.xiaohongshu.com/explore/5f4d8e7b00000000010001a2", wantErr: true, errContains: "userinfo"},
 		{name: "fragment", input: "https://www.xiaohongshu.com/explore/5f4d8e7b00000000010001a2#section", wantErr: true, errContains: "fragment"},
@@ -1848,13 +1854,13 @@ func TestCurrentDetailProbeRuntimeEvaluateResponseHandling(t *testing.T) {
 		wantProbe     *currentFeedDetailProbe
 	}{
 		{
-			name:     "transport error",
-			callErr:  wantTransportErr,
-			wantErr:  wantTransportErr,
+			name:    "transport error",
+			callErr: wantTransportErr,
+			wantErr: wantTransportErr,
 		},
 		{
-			name: "exception details",
-			response: []byte(`{"result":{"type":"undefined"},"exceptionDetails":{"text":"Uncaught","exception":{"type":"string","description":"probe failed","value":"probe failed"}}}`),
+			name:          "exception details",
+			response:      []byte(`{"result":{"type":"undefined"},"exceptionDetails":{"text":"Uncaught","exception":{"type":"string","description":"probe failed","value":"probe failed"}}}`),
 			wantEvalError: true,
 		},
 		{
