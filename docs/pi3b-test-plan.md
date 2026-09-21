@@ -906,8 +906,13 @@ renderer 死亡熔断是必需项，不能放宽。
 | 笔记详情页 | 窗口同样不可滚 | `.note-scroller`（实测 scrollTop 0 → **2335**，scrollHeight 2969） |
 
 **后果**：`get_page_state` 报的 `scroll_y` 在这两类页面上**恒为 0**，与真实阅读/滚动位置不符。
-若后续有基于 `scroll_y` 的判断（例如「已滚动到评论区」），在搜索页/详情页上会失效。
-最小修法：一次 eval 里同时读「最内层可滚容器的 scrollTop」或按页面种类指定容器（详情页取 `.note-scroller`、搜索页取 `.search-layout-wrapper`），并保留窗口值作为兜底。
+
+**✅ 已修（2026-09-21，`e9ec2be`）**：三处内联 `window.scrollY || document.scrollingElement.scrollTop`
+收敛为共享片段 `xhsScrollYJS` 的 `scrollY()` —— 窗口能滚就用窗口值；窗口不可滚时回退到
+本附录实测命中的两个滚动宿主（详情页 `.note-scroller`、搜索页 `.search-layout-wrapper`），
+取可滚动量更大的那个。只列这两个实测容器、不做全树扫描（该函数在每次就绪探测里都会执行，
+全树 `getComputedStyle` 在 Pi 上代价过高）。新增 `TestScrollYIsSingleSource` 防止再内联。
+注：上游 main 至今未修此缺陷。
 
 ### D.16 「下一步工具」指引重构（2026-09-21，单元测试 + 本机服务实测）
 
