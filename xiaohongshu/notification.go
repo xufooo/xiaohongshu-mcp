@@ -72,18 +72,18 @@ type NotificationUser struct {
 // NotificationItem 通知条目（只读信息 + 写操作引用）
 type NotificationItem struct {
 	NotificationRef string           `json:"notification_ref"`
-	ID             string           `json:"id"`
-	Type           string           `json:"type"`
-	Title          string           `json:"title"`
-	Time           int64            `json:"time"`
-	From           NotificationUser `json:"from"`
-	CommentID      string           `json:"comment_id,omitempty"`
-	CommentText    string           `json:"comment_text,omitempty"`
-	Liked          bool             `json:"liked"`
-	FeedID         string           `json:"feed_id,omitempty"`
-	FeedXsecToken  string           `json:"feed_xsec_token,omitempty"`
-	FeedTitle      string           `json:"feed_title,omitempty"`
-	Actionable     bool             `json:"actionable"`
+	ID              string           `json:"id"`
+	Type            string           `json:"type"`
+	Title           string           `json:"title"`
+	Time            int64            `json:"time"`
+	From            NotificationUser `json:"from"`
+	CommentID       string           `json:"comment_id,omitempty"`
+	CommentText     string           `json:"comment_text,omitempty"`
+	Liked           bool             `json:"liked"`
+	FeedID          string           `json:"feed_id,omitempty"`
+	FeedXsecToken   string           `json:"feed_xsec_token,omitempty"`
+	FeedTitle       string           `json:"feed_title,omitempty"`
+	Actionable      bool             `json:"actionable"`
 }
 
 // NotificationList list_notifications 结果。
@@ -356,12 +356,17 @@ func switchNotificationTab(ctx context.Context, page *hrod.Page, counter *evalTi
 
 // waitNotificationTabActive 轮询等待目标 tab 获得 .active（上限 10 秒）。
 func waitNotificationTabActive(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, tab NotificationTab) error {
+	started := time.Now()
+	probes := 0
+	defer func() { observeWaitWithProbes("notification_tab", time.Since(started), probes) }()
+
 	label := notificationTabLabel(tab)
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		probes++
 		obj, err := evalJS(ctx, counter, page, `(label) => {
 			const active = Array.from(document.querySelectorAll('.notification-page .reds-tab-item.tab-item.active'));
 			return active.some((el) => String(el.textContent || "").replace(/\s+/g, " ").trim() === label);

@@ -1467,6 +1467,10 @@ func historyTargetReady(probe xhsReadyProbe, fromURL string, kind XHSReadyKind, 
 }
 
 func waitForHistoryTargetReady(ctx context.Context, page *hrod.Page, fromURL, sourceURL string, fromDetail bool) (xhsReadyProbe, error) {
+	started := time.Now()
+	probes := 0
+	defer func() { observeWaitWithProbes("history_target_ready", time.Since(started), probes) }()
+
 	deadline := time.Now().Add(browseSessionBackTimeout)
 	var last xhsReadyProbe
 	var lastErr error
@@ -1474,6 +1478,7 @@ func waitForHistoryTargetReady(ctx context.Context, page *hrod.Page, fromURL, so
 		if err := ctx.Err(); err != nil {
 			return last, err
 		}
+		probes++
 		probe, err := probeXHSReadyFull(page.Context(ctx), "")
 		if err != nil {
 			lastErr = err
@@ -3157,7 +3162,12 @@ func waitForNoteURLStable(ctx context.Context, wallClock time.Duration, readURL 
 	}
 	deadline := time.Now().Add(wallClock)
 	const pollInterval = 500 * time.Millisecond
+	// URL 连续这么多次没变、且都不是笔记页 ⇒ 已经定型（例如无效/过期的分享短链、风控页），
+	// 再等下去只是空等：立即如实报错，并把落点 URL 带进诊断。
+	const settledChecks = 4
 	var lastErr error
+	settledURL := ""
+	settledCount := 0
 	for {
 		if ctx.Err() != nil {
 			return noteURLPollResult{}, ctx.Err()
@@ -3217,6 +3227,20 @@ func waitForNoteURLStable(ctx context.Context, wallClock time.Duration, readURL 
 			sample = "empty_url"
 		}
 		lastErr = newNoteURLPollError(sample, "false", "ok", nil)
+		if rawURL == settledURL {
+			settledCount++
+		} else {
+			settledURL, settledCount = rawURL, 0
+		}
+		if settledCount >= settledChecks {
+			settled := trimNetworkCaptureURL(rawURL)
+			if settled == "" {
+				settled = "(空 URL)"
+			}
+			return noteURLPollResult{}, fmt.Errorf("笔记URL已定型在非笔记页（%s 内未变化）: %w",
+				time.Duration(settledChecks)*pollInterval,
+				newNoteURLPollError("settled:"+settled, "false", "ok", nil))
+		}
 		sleepDur := min(pollInterval, time.Until(deadline))
 		if sleepDur <= 0 {
 			break

@@ -581,3 +581,36 @@ Cloak 模式下代码显式用了 `NoDefaultDevice()`（`third_party/headless_br
 Pi 上慢一个量级也远低于它；真到 15s 说明渲染进程已经不正常，应如实报错而不是无限等。
 
 单测钉住四种情况：无 deadline → 有界；3s → 原样；5 分钟 → 收到 ≤15s；有 deadline 时 CDP 请求带 `Timeout`。
+
+## 18. 剩余等待：先量后判；无效短链：定型即报错（2026-09-21）
+
+### 18.1 未迁移的等待——量化后判定「不迁移」
+
+先给可只读触达的等待接上**永久观测**（`waits` 里新增 5 个 kind，口径与引擎一致：次数/累计/最大/探测数），
+再跑纯只读电池（start_page → search → open_note → get_note_detail → go_back → list_notifications）：
+
+| 等待 | 次数 | 总耗时 | 探测 | 判定 |
+|:--|--:|--:|--:|:--|
+| `search_input` | 1 | **6ms** | 1 | 首次探测即命中，迁移零收益 |
+| `feed_detail_visible` | 1 | **449ms** | 2 | 约占 open(5.3s) 的 8%，迁移最多省一次轮询间隔（~200ms） |
+| `history_target_ready` | 1 | **95ms** | 1 | 已经是一次探测，无可优化 |
+| `notification_tab`、`feeds_changed` | 0 | — | — | 只读路径不触发（切 tab / 使用筛选才走） |
+
+**结论：不迁移**。可达的几处合计 <0.6s，且低于引擎分辨率；不可达的那些属于写路径（发布控件、回复、切 tab），
+不能为测量去写真实账号。观测已永久接上——真机上只要某处变大，`waits` 立刻能看见。
+
+### 18.2 无效/过期分享短链：从空等 60s 改为定型即报错
+
+`waitForNoteURLStable` 原来会把 60s 预算耗满才报 `sample=invalid_url`。
+改为：URL **连续 4 次（≈2s）没有变化且不是笔记页** ⇒ 已经定型（无效/过期短链、风控页都属此类），
+立即报错并把落点 URL 写进诊断。
+
+实测（本机，只读）：`https://xhslink.com/ShareCode` 与 `http://xhslink.com/ShareCode`
+**60.9s → 4.7～4.8s**，错误里带 `sample=settled:https://www.xiaohongshu.com/explore…`；
+单测覆盖「定型在非笔记页→2s 内失败且保留 NoteURLPollError」「短链跳转后落到笔记页→正常成功」。
+
+### 18.3 过程教训
+
+测量脚本用的是 scratch 目录里的**拷贝二进制**：改完代码只 `go build ./...` 不会更新它，
+我第一次量到"5 处观测全是 0 次"就是这个原因（第二次重建后才得到真实数字）。
+**规矩：跑测量前必须 `go build -o <scratch 二进制>`。**

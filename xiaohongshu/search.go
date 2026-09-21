@@ -568,11 +568,16 @@ func readFeedIDs(ctx context.Context, page *hrod.Page, counter *evalTimeoutCount
 
 // waitFeedsChanged 轮询等待搜索结果 ID 列表发生变化
 func waitFeedsChanged(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, before string, timeout time.Duration) bool {
+	started := time.Now()
+	probes := 0
+	defer func() { observeWaitWithProbes("feeds_changed", time.Since(started), probes) }()
+
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if err := page.Err(); err != nil {
 			return false
 		}
+		probes++
 		after, err := readFeedIDs(ctx, page, counter)
 		if err == nil && after != "" && after != before {
 			return true
@@ -597,6 +602,10 @@ type searchInputProbe struct {
 }
 
 func waitForSearchInput(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, timeout time.Duration, searchSelector string) (*hrod.Element, error) {
+	started := time.Now()
+	probes := 0
+	defer func() { observeWaitWithProbes("search_input", time.Since(started), probes) }()
+
 	deadline := time.Now().Add(timeout)
 	var last searchInputProbe
 	var lastErr error
@@ -606,6 +615,7 @@ func waitForSearchInput(ctx context.Context, page *hrod.Page, counter *evalTimeo
 			return nil, err
 		}
 
+		probes++
 		probe, err := probeSearchInput(ctx, page, counter, searchSelector, SelectorSearchInput)
 		if err != nil {
 			if IsFatalRendererError(err) {
