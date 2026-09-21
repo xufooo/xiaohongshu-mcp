@@ -265,7 +265,7 @@ func (s *SearchAction) searchByUI(ctx context.Context, page *hrod.Page, counter 
 		wait: func(b searchResultsBaseline) error {
 			return waitForSearchResults(ctx, page, counter, keyword, b)
 		},
-		pageErr:  page.Err,
+		pageErr: page.Err,
 		navigate: func(url string) error {
 			if info, infoErr := page.Rod.Info(); infoErr == nil && info != nil {
 				if isSearchResultPage(info.URL) {
@@ -373,19 +373,19 @@ func waitForSearchResults(ctx context.Context, page *hrod.Page, counter *evalTim
 }
 
 type searchResultsKeywordProbe struct {
-	StateKeyword     string `json:"state_keyword"`
-	HasStateKeyword  bool   `json:"has_state_keyword"`
-	KeywordMatched   bool   `json:"keyword_matched"`
-	URLKeyword       string `json:"url_keyword"`
-	HasURLKeyword    bool   `json:"has_url_keyword"`
+	StateKeyword      string `json:"state_keyword"`
+	HasStateKeyword   bool   `json:"has_state_keyword"`
+	KeywordMatched    bool   `json:"keyword_matched"`
+	URLKeyword        string `json:"url_keyword"`
+	HasURLKeyword     bool   `json:"has_url_keyword"`
 	URLKeywordMatched bool   `json:"url_keyword_matched"`
-	InputKeyword     string `json:"input_keyword"`
-	InputMatched     bool   `json:"input_matched"`
-	OnSearchPage     bool   `json:"on_search_page"`
-	HasStateFeeds    bool   `json:"has_state_feeds"`
-	HasVisibleCards  bool   `json:"has_visible_cards"`
-	StateSignature   string `json:"state_signature"`
-	DOMSignature     string `json:"dom_signature"`
+	InputKeyword      string `json:"input_keyword"`
+	InputMatched      bool   `json:"input_matched"`
+	OnSearchPage      bool   `json:"on_search_page"`
+	HasStateFeeds     bool   `json:"has_state_feeds"`
+	HasVisibleCards   bool   `json:"has_visible_cards"`
+	StateSignature    string `json:"state_signature"`
+	DOMSignature      string `json:"dom_signature"`
 }
 
 func probeSearchResultsKeyword(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, keyword string) (searchResultsKeywordProbe, error) {
@@ -668,7 +668,7 @@ func waitForSearchInput(ctx context.Context, page *hrod.Page, counter *evalTimeo
 			return nil, err
 		}
 
-		probe, err := probeSearchInput(ctx, page, counter, searchSelector, SelectorSearchInputInFeeds+", "+SelectorSearchInputInSearchResult+", #search-input-ai")
+		probe, err := probeSearchInput(ctx, page, counter, searchSelector, SelectorSearchInput)
 		if err != nil {
 			if IsFatalRendererError(err) {
 				return nil, err
@@ -1482,31 +1482,25 @@ type searchPageDecision struct {
 	SearchSelector  string
 }
 
+// decideSearchPage 按路由给出该页面上**唯一精确**的搜索框选择器（2026-09 实测）：
+// /explore → #search-input-in-feeds；/search-result → #search-input；/search-result-ai → #search-input-ai。
+// 未知页面先导航到发现页，用发现页的搜索框。
 func decideSearchPage(pageURL string) searchPageDecision {
-	if isSearchResultPage(pageURL) {
-		return searchPageDecision{
-			NavigateExplore: false,
-			SearchSelector:  SelectorSearchInput,
-		}
-	}
-	if isExplorePage(pageURL) {
-		return searchPageDecision{
-			NavigateExplore: false,
-			SearchSelector:  SelectorSearchInput,
+	parsed, err := url.Parse(pageURL)
+	if err == nil && parsed.Host == "www.xiaohongshu.com" {
+		switch parsed.Path {
+		case "/search_result":
+			return searchPageDecision{SearchSelector: SelectorSearchInputInSearchResult}
+		case "/search_result_ai":
+			return searchPageDecision{SearchSelector: SelectorSearchInputInAISearchResult}
+		case "/explore":
+			return searchPageDecision{SearchSelector: SelectorSearchInputInFeeds}
 		}
 	}
 	return searchPageDecision{
 		NavigateExplore: true,
-		SearchSelector:  SelectorSearchInput,
+		SearchSelector:  SelectorSearchInputInFeeds,
 	}
-}
-
-func isExplorePage(rawURL string) bool {
-	parsed, err := url.Parse(rawURL)
-	if err != nil {
-		return false
-	}
-	return parsed.Scheme == "https" && parsed.Host == "www.xiaohongshu.com" && parsed.Path == "/explore"
 }
 
 func isSearchResultPage(rawURL string) bool {
