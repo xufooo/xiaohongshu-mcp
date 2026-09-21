@@ -316,3 +316,39 @@ func TestRiskRulesSingleSource(t *testing.T) {
 		t.Fatal("文本探针关键词也应来自同一张表")
 	}
 }
+
+// AI 总结的取值判据：conversation（页面在用的 AI 会话）优先，且"完成"才算就绪。
+// 背景：原实现只读 dqa/onebox 且只等 3s，而实测 AI 答案要 ~13s 才生成完 → 永远读不到。
+func TestNormalizeAIResponsePrefersConversation(t *testing.T) {
+	// 会话活跃但还没有正文：不算就绪，且应继续等（pending=true）
+	probe := aiStateProbe{ConversationActive: true}
+	if reply, pending := normalizeAIResponse(probe); reply != nil || !pending {
+		t.Fatalf("会话活跃但无正文: reply=%v pending=%v", reply, pending)
+	}
+
+	// 流式中（有正文但未完成）：返回正文并标记 pending
+	probe = aiStateProbe{ConversationActive: true, ConversationText: "露营要注意…"}
+	if reply, pending := normalizeAIResponse(probe); reply == nil || !pending || reply.Content != "露营要注意…" {
+		t.Fatalf("流式中: reply=%v pending=%v", reply, pending)
+	}
+
+	// 完成（round.isComplete && aiMessage.isFinished）：就绪
+	probe = aiStateProbe{
+		ConversationActive:   true,
+		ConversationText:     "露营要注意…",
+		ConversationComplete: true,
+		ConversationFinished: true,
+	}
+	reply, pending := normalizeAIResponse(probe)
+	if reply == nil || pending {
+		t.Fatalf("完成态应就绪: reply=%v pending=%v", reply, pending)
+	}
+	if reply.Content != "露营要注意…" || reply.HasMore {
+		t.Fatalf("完成态内容/HasMore 不对: %+v", reply)
+	}
+
+	// 没有 AI 会话（普通搜索页）：不影响既有 dqa/onebox 路径
+	if reply, pending := normalizeAIResponse(aiStateProbe{}); reply != nil || pending {
+		t.Fatalf("无 AI 会话: reply=%v pending=%v", reply, pending)
+	}
+}

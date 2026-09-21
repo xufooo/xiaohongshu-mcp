@@ -617,3 +617,41 @@ Pi 上慢一个量级也远低于它；真到 15s 说明渲染进程已经不正
 测量脚本用的是 scratch 目录里的**拷贝二进制**：改完代码只 `go build ./...` 不会更新它，
 我第一次量到"5 处观测全是 0 次"就是这个原因（第二次重建后才得到真实数字）。
 **规矩：跑测量前必须 `go build -o <scratch 二进制>`。**
+
+## 19. 搜索页 AI 总结没被利用：根因与修复（2026-09-21）
+
+### 19.1 现象
+
+`search_feeds` 的响应里从来**没有** `ai_chat`，页面上那份 AI 总结（小红书「问点点」/ AI 搜索答案）等于白丢。
+所有者指出："工具都不会利用搜索 AI 总结的内容"。
+
+### 19.2 根因（代码 + 实测互相印证）
+
+- 搜索实际落在 `https://www.xiaohongshu.com/search_result_ai?keyword=…`（AI 搜索页）；
+- 答案与完成标志都在页面 state 的
+  `conversation.activeConversation.rounds[].aiMessage.{text,isFinished}` + `round.isComplete`；
+- **而原探针只读 `search.dqaInstantElements` / `oneboxInfo`**，没读这条路径；
+- 更关键的是等待上限：`aiResponseWaitTimeout = 3s`，而**实测答案要 ~13s 才生成完**
+  （搜索 11.4s 返回时 0 字；+1s→88 字 … +12s→1425 字 → +13s `isComplete/isFinished=true`、1437 字）。
+  ⇒ 3s 必然超时 → `normalizeAIResponse` 返回 nil → `ai_chat` 为空。
+
+### 19.3 改法（一次做对，且不引入新成本）
+
+1. **探针读权威路径**：`probeAIResponseState` 增加 conversation 读取（text + `round.isComplete` + `aiMessage.isFinished`），
+   `normalizeAIResponse` 让 conversation **优先**（有会话就按它的完成标志判就绪，否则仍走原 dqa/onebox 路径）。
+2. **搜索不等待**：`search_feeds` 只保留原来的"顺手读一次"（3s），所以耗时不变（实测 12.8s，与改前同级）——
+   实测若让搜索等 AI，会把 11s 变成 24s，Pi 上更不可接受。
+3. **新增 `get_ai_summary(session_id)` 工具**：按页面**自己的完成标志**等待（`waitForCondition`，kind `ai_summary`，
+   上限 180s），生成完即返回；页面没有 AI 会话时**立即如实报错**（0.2s），不干等。
+4. **指引挂上工具**：会话记下最近搜索关键词，`guidanceLocked` 在"搜索过"之后把 `get_ai_summary` 加入
+   `available_tools`（`next_step` 仍是 `open_note`，不抢主推荐）。
+
+### 19.4 实测（本机 + CloakBrowser，只读）
+
+| 调用 | 结果 |
+|:--|:--|
+| 搜索前 `get_ai_summary` | **0.2s** 报错「当前搜索页没有 AI 总结（该关键词未触发 AI 回复）」 |
+| `search_feeds 露营需要注意什么` | **12.8s**（不等 AI，成本不变）；`available_tools` 含 `get_ai_summary` |
+| 搜索后 `get_ai_summary` | **12.4s** 返回 **1639 字** AI 总结（"露营是一项非常治愈的户外活动…"） |
+
+单测：`TestNormalizeAIResponsePrefersConversation`（无正文→未就绪、流式中→带 pending、完成→就绪、无会话→走原路径）。

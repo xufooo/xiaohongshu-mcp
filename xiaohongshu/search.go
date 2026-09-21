@@ -910,6 +910,11 @@ type aiStateProbe struct {
 	DomAIMessageID     string          `json:"dom_ai_message_id"`
 	DomAITextLength    int             `json:"dom_ai_text_length"`
 	DomAIText          string          `json:"dom_ai_text"`
+	// 页面真正在用的 AI 会话（实测 search_result_ai）：答案与完成标志都在这里。
+	ConversationActive   bool   `json:"conversation_active"`
+	ConversationText     string `json:"conversation_text"`
+	ConversationComplete bool   `json:"conversation_complete"`
+	ConversationFinished bool   `json:"conversation_finished"`
 }
 
 func readAIResponseFromState(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, previousState *aiStateProbe) (*AIChatReply, error) {
@@ -1142,7 +1147,30 @@ func probeAIResponseState(ctx context.Context, page *hrod.Page, counter *evalTim
 			} catch (e) { return {messageID: "", textLength: 0, text: ""}; }
 		})();
 
+		// 实测（search_result_ai）：AI 答案与完成标志都在 conversation.activeConversation：
+		// rounds[last].aiMessage.text 流式增长；round.isComplete 与 aiMessage.isFinished 是页面自己的完成标志。
+		const conversation = (() => {
+			const conv = unwrapRef(window.__INITIAL_STATE__?.conversation?.activeConversation);
+			const rounds = unwrapRef(conv?.rounds);
+			if (!Array.isArray(rounds) || rounds.length === 0) {
+				return {active: false, text: "", complete: false, finished: false};
+			}
+			const round = unwrapRef(rounds[rounds.length - 1]);
+			const ai = unwrapRef(round?.aiMessage);
+			const text = typeof ai?.text === "string" ? ai.text : "";
+			return {
+				active: true,
+				text: text.slice(0, textLimit),
+				complete: Boolean(round?.isComplete),
+				finished: Boolean(ai?.isFinished),
+			};
+		})();
+
 		return JSON.stringify({
+			conversation_active: conversation.active,
+			conversation_text: conversation.text,
+			conversation_complete: conversation.complete,
+			conversation_finished: conversation.finished,
 			onebox_info: project(pick("oneboxInfo", "oneBoxInfo")),
 			dqa_instant_elements: project(pick("dqaInstantElements", "dqaElements")),
 			active: Boolean(pick("aiWendianActive", "wendianActive", "aiActive")),
@@ -1168,6 +1196,15 @@ func probeAIResponseState(ctx context.Context, page *hrod.Page, counter *evalTim
 }
 
 func normalizeAIResponse(probe aiStateProbe) (*AIChatReply, bool) {
+	// conversation（页面正在使用的 AI 会话）优先：它是流式答案本体，完成标志也在同一处。
+	if probe.ConversationActive {
+		pending := !probe.ConversationComplete || !probe.ConversationFinished
+		if text := strings.TrimSpace(probe.ConversationText); text != "" {
+			return &AIChatReply{Content: text, HasMore: pending}, pending
+		}
+		return nil, pending
+	}
+
 	dqa := decodeAIStateValue(probe.DQAInstantElements)
 	onebox := decodeAIStateValue(probe.OneboxInfo)
 	content := firstNonEmpty(probe.DomAIText, extractAIText(dqa), extractAIText(onebox))

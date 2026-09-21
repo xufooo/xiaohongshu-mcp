@@ -453,6 +453,22 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 		}),
 	)
 
+	// 工具 21: 读取搜索页 AI 总结（问点点 / AI 搜索答案）
+	mcp.AddTool(server,
+		&mcp.Tool{
+			Name:        "get_ai_summary",
+			Description: "读取当前搜索页的 AI 总结（小红书「问点点」/ AI 搜索答案，正文可能上千字）。AI 答案在笔记就绪之后才开始流式生成，本工具按页面自己的完成标志等它生成完再返回；页面没有 AI 会话（该关键词未触发 AI 回复）时立刻如实报错。search_feeds 响应里带 ai_chat 说明已就绪，可直接用",
+			Annotations: &mcp.ToolAnnotations{
+				Title:        "Get AI Summary",
+				ReadOnlyHint: true,
+			},
+		},
+		withPanicRecovery("get_ai_summary", func(ctx context.Context, req *mcp.CallToolRequest, args BrowseSessionIDArgs) (*mcp.CallToolResult, any, error) {
+			result := appServer.handleSessionAISummary(ctx, args)
+			return convertToMCPResult(result), nil, nil
+		}),
+	)
+
 	// 工具 22: 后退（通用）
 	mcp.AddTool(server,
 		&mcp.Tool{
