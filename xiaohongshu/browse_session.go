@@ -2415,10 +2415,9 @@ func (s *BrowseSession) refreshPageState(ctx context.Context) {
 	}
 	got := false
 	if s.evalJS != nil {
-		if result, err := s.evalJS(evalCtx, page, `() => JSON.stringify({
-			url: location.href,
-			scroll_y: Math.round(window.scrollY || document.scrollingElement?.scrollTop || 0),
-		})`); err == nil && result != nil {
+		if result, err := s.evalJS(evalCtx, page, `() => {` + xhsScrollYJS + `
+			return JSON.stringify({ url: location.href, scroll_y: scrollY() });
+		}`); err == nil && result != nil {
 			if err := json.Unmarshal([]byte(result.Value.Str()), &snapshot); err == nil {
 				got = true
 			}
