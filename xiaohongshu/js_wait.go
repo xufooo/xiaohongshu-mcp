@@ -2,6 +2,7 @@ package xiaohongshu
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	hrod "github.com/xpzouying/xiaohongshu-mcp/humanize/rod"
@@ -22,16 +23,18 @@ const xhsPageSignalJS = `
 			let settled = null;
 			let hard = null;
 			let finished = false;
+			let mutations = 0;
 			const finish = (reason) => {
 				if (finished) return;
 				finished = true;
 				observer.disconnect();
 				clearTimeout(settled);
 				clearTimeout(hard);
-				resolve(reason);
+				resolve(JSON.stringify({ reason, mutations }));
 			};
 			const observer = new MutationObserver(() => {
 				if (finished) return;
+				mutations++;
 				clearTimeout(settled);
 				settled = setTimeout(() => finish("settled"), settleMs);
 			});
@@ -41,17 +44,35 @@ const xhsPageSignalJS = `
 			});
 			hard = setTimeout(() => finish("max"), maxMs);
 		})
-`
+	`
+
+// pageSignal 是一次「等页面变化」的结果：结束原因 + 这段时间里 DOM 变化次数。
+// mutations=0 说明页面一动没动——结合"网络也没有在途请求"，就能判断页面是不是卡死了，
+// 而不需要猜"它该用多久"。
+type pageSignal struct {
+	Reason    string `json:"reason"`
+	Mutations int    `json:"mutations"`
+}
 
 // waitForPageSignal 让页面自己等到「变化后静默 settle」或最长 max。
 // 返回错误说明连等待信号都拿不到（页面销毁 / 上下文取消），调用方按探测失败处理。
-func waitForPageSignal(ctx context.Context, page *hrod.Page, settle, max time.Duration) error {
+func waitForPageSignal(ctx context.Context, page *hrod.Page, settle, max time.Duration) (pageSignal, error) {
 	if page == nil {
-		return context.Canceled
+		return pageSignal{}, context.Canceled
 	}
 	waitCtx, cancel := context.WithTimeout(ctx, max+2*time.Second)
 	defer cancel()
-	_, err := evalJSDirect(waitCtx, page, xhsPageSignalJS,
+	obj, err := evalJSDirect(waitCtx, page, xhsPageSignalJS,
 		int(settle.Milliseconds()), int(max.Milliseconds()))
-	return err
+	if err != nil {
+		return pageSignal{}, err
+	}
+	if obj == nil {
+		return pageSignal{}, nil
+	}
+	var signal pageSignal
+	if err := json.Unmarshal([]byte(obj.Value.Str()), &signal); err != nil {
+		return pageSignal{}, err
+	}
+	return signal, nil
 }

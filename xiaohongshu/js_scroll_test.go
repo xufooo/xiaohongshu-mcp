@@ -64,9 +64,10 @@ func TestWaitStatsRegistry(t *testing.T) {
 	}
 }
 
-// TestPageSignalJSShape 页面内等待信号必须靠 MutationObserver + resolve，不得用轮询定时器空转。
+// TestPageSignalJSShape 页面内等待信号必须靠 MutationObserver + resolve，不得用轮询定时器空转；
+// 回报里必须带 mutations（页面还活着的证据），用于区分"慢"和"卡死"。
 func TestPageSignalJSShape(t *testing.T) {
-	for _, want := range []string{"new MutationObserver", "observer.observe", "resolve(reason)", "finished"} {
+	for _, want := range []string{"new MutationObserver", "observer.observe", "resolve(JSON.stringify({ reason, mutations }))", "mutations++", "finished"} {
 		if !strings.Contains(xhsPageSignalJS, want) {
 			t.Fatalf("等待信号片段缺少 %q", want)
 		}

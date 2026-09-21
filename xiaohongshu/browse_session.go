@@ -121,8 +121,7 @@ type BrowserRuntimeStats struct {
 	BlockedURLPatterns int   `json:"blocked_url_patterns"`
 	ProfilePersistent  bool  `json:"profile_persistent"`
 	IdleTimeoutSecs    int64 `json:"idle_timeout_seconds"`
-	// Waits 是各类等待的观测量（次数 / 累计 / 最大耗时）：用来用数据校准预算，
-	// 而不是继续拍固定秒数。
+	// Waits 是各类等待的观测量（次数 / 累计 / 最大耗时 / 探测次数）。
 	Waits map[string]WaitStat `json:"waits,omitempty"`
 }
 
