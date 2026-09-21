@@ -225,20 +225,25 @@ func (s *AppServer) handleCheckLoginStatus(ctx context.Context) *MCPToolResult {
 		return sessionMCPErrorFromErr("检查登录状态失败", err, sessionNextStepCreateSession())
 	}
 
-	// 根据 IsLoggedIn 判断并返回友好的提示
-	var resultText string
+	// 根据 IsLoggedIn 判断并返回友好的提示，并给出下一步该调用的工具
 	if status.IsLoggedIn {
-		resultText = fmt.Sprintf("✅ 已登录\n用户名: %s\n\n你可以使用其他功能了。", status.Username)
-	} else {
-		resultText = fmt.Sprintf("❌ 未登录\n\n请使用 get_login_qrcode 工具获取二维码进行登录。")
-	}
-
-	return &MCPToolResult{
-		Content: []MCPContent{{
+		return &MCPToolResult{Content: appendNextStep([]MCPContent{{
 			Type: "text",
-			Text: resultText,
-		}},
+			Text: fmt.Sprintf("✅ 已登录\n用户名: %s", status.Username),
+		}}, xiaohongshu.NextStep{
+			Tool:   "start_page",
+			Reason: "登录有效，可以创建页面会话",
+			Hint:   "调用 start_page 拿 session_id 后即可搜索、打开笔记和互动",
+		})}
 	}
+	return &MCPToolResult{Content: appendNextStep([]MCPContent{{
+		Type: "text",
+		Text: "❌ 未登录",
+	}}, xiaohongshu.NextStep{
+		Tool:   "get_login_qrcode",
+		Reason: "未登录，除登录相关工具外其它工具都会失败",
+		Hint:   "调用 get_login_qrcode 拿二维码，用小红书 App 扫码；扫码确认后再调 check_login_status",
+	})}
 }
 
 // handleGetLoginQrcode 处理获取登录二维码请求。
@@ -251,16 +256,22 @@ func (s *AppServer) handleGetLoginQrcode(ctx context.Context) *MCPToolResult {
 
 	result, err := s.xiaohongshuService.GetLoginQrcode(ctx)
 	if err != nil {
-		return &MCPToolResult{
-			Content: []MCPContent{{Type: "text", Text: "获取登录扫码图片失败: " + err.Error()}},
-			IsError: true,
-		}
+		return sessionMCPErrorFromErr("获取登录扫码图片失败", err, xiaohongshu.NextStep{
+			Tool:   "check_login_status",
+			Reason: "扫码图片获取失败，先确认浏览器与登录状态",
+			Hint:   "调用 check_login_status 确认登录状态，再决定是否重试 get_login_qrcode",
+		})
 	}
 
 	if result.IsLoggedIn {
-		return &MCPToolResult{
-			Content: []MCPContent{{Type: "text", Text: "你当前已处于登录状态"}},
-		}
+		return &MCPToolResult{Content: appendNextStep([]MCPContent{{
+			Type: "text",
+			Text: "你当前已处于登录状态",
+		}}, xiaohongshu.NextStep{
+			Tool:   "start_page",
+			Reason: "已登录，无需扫码",
+			Hint:   "直接调用 start_page 创建页面会话",
+		})}
 	}
 
 	now := time.Now()
@@ -272,15 +283,18 @@ func (s *AppServer) handleGetLoginQrcode(ctx context.Context) *MCPToolResult {
 		return now.Add(d).Format("2006-01-02 15:04:05")
 	}()
 
-	// 已登录：文本 + 图片
-	contents := []MCPContent{
-		{Type: "text", Text: "请用小红书 App 在 " + deadline + " 前扫码登录 👇"},
+	contents := appendNextStep([]MCPContent{
+		{Type: "text", Text: "请用小红书 App 在 " + deadline + " 前扫码登录，并在手机上确认 👇"},
 		{
 			Type:     "image",
 			MimeType: "image/png",
 			Data:     strings.TrimPrefix(result.Img, "data:image/png;base64,"),
 		},
-	}
+	}, xiaohongshu.NextStep{
+		Tool:   "check_login_status",
+		Reason: "二维码已生成，等手机上确认登录",
+		Hint:   "扫码并在手机端确认后调用 check_login_status；确认登录成功再调 start_page",
+	})
 	return &MCPToolResult{Content: contents}
 }
 
@@ -895,6 +909,22 @@ func jsonMCPResult(value any, fallback string) *MCPToolResult {
 		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: fallback + "，但序列化失败: " + err.Error()}}, IsError: true}
 	}
 	return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: string(data)}}}
+}
+
+// appendNextStep 在纯文本/图片响应后追加一段 {"next_step":{...}}，
+// 让不返回 data 的工具（登录流程）也能给出下一步工具，且与其它响应用同一个键名。
+func appendNextStep(contents []MCPContent, next xiaohongshu.NextStep) []MCPContent {
+	if next.Tool == "" {
+		return contents
+	}
+	payload := struct {
+		NextStep xiaohongshu.NextStep `json:"next_step"`
+	}{NextStep: next}
+	data, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return contents
+	}
+	return append(contents, MCPContent{Type: "text", Text: string(data)})
 }
 
 // sessionToolResult 输出 {data, next_step, available_tools}；
