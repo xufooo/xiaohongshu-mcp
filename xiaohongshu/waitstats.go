@@ -91,6 +91,7 @@ var waitCeilings = map[string]time.Duration{
 	"ready:comment_box": 120 * time.Second,
 	"search_results":    120 * time.Second,
 	"publish_success":   180 * time.Second,
+	"ai_summary":        180 * time.Second,
 }
 
 // waitCeilingForKind 返回该类等待的失败上限（未登记则 ok=false）。

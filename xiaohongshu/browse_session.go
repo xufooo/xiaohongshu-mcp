@@ -264,9 +264,11 @@ type BrowseSession struct {
 
 	touchOnFinish bool
 
-	currentURL        string
-	sourceURL         string
-	scrollY           int
+	currentURL string
+	sourceURL  string
+	scrollY    int
+	// searchKeyword 是最近一次搜索的关键词，用于给 AI 总结标注来源。
+	searchKeyword     string
 	seenNotes         map[string]bool
 	results           map[string]Feed
 	nextResultIndex   int
@@ -678,6 +680,7 @@ func (s *BrowseSession) searchBatch(ctx context.Context, keyword string, filters
 		s.read = false
 		s.results, s.nextResultIndex = replaceSessionResults(feeds)
 		s.resetNotificationSurfaceLocked()
+		s.searchKeyword = keyword
 		s.recordTimelineLocked("search", keyword, "ok", time.Now(), fmt.Sprintf("results=%d", len(feeds)))
 		s.mu.Unlock()
 		s.probeWatchdogSelectorsForKind(opCtx, XHSReadySearch, "")
@@ -2587,6 +2590,44 @@ func (s *BrowseSession) semanticResultsLocked() []BrowseSessionResult {
 }
 
 // Guidance 在没有任何页面探测的前提下给出下一步指引：操作能成功执行，就说明页面是就绪的。
+// AISummary 读取当前搜索页的 AI 总结（问点点 / AI 搜索答案）。
+// 页面自己在 state 里带完成标志（round.isComplete / aiMessage.isFinished），所以这里是条件等待：
+// 生成完就返回，页面没有 AI 会话则立刻如实报错。
+func (s *BrowseSession) AISummary(ctx context.Context) (*AISummaryResponse, error) {
+	opCtx, err := s.beginLockedOperation(ctx, true)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { s.finishOperation(err) }()
+
+	s.mu.Lock()
+	page := s.page
+	keyword := s.searchKeyword
+	s.mu.Unlock()
+	if page == nil {
+		return nil, fmt.Errorf("browse session 页面不存在: %s", s.id)
+	}
+
+	reply, err := readAISummaryFromState(opCtx, page)
+	if err != nil {
+		return nil, err
+	}
+	return &AISummaryResponse{
+		SessionID: s.id,
+		Keyword:   keyword,
+		Content:   reply.Content,
+		Length:    len([]rune(reply.Content)),
+	}, nil
+}
+
+// AISummaryResponse 是 AI 总结的返回结构。
+type AISummaryResponse struct {
+	SessionID string `json:"session_id"`
+	Keyword   string `json:"keyword,omitempty"`
+	Content   string `json:"content"`
+	Length    int    `json:"length"`
+}
+
 func (s *BrowseSession) Guidance(excludeTool string) BrowseSessionGuidance {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -2619,6 +2660,10 @@ func (s *BrowseSession) guidanceLocked(query guidanceQuery, results []BrowseSess
 	}
 
 	available := []string{"get_page_state", "search_feeds", "list_feeds", "get_unread_count", "list_notifications", "close_page"}
+	if s.searchKeyword != "" {
+		// 搜索过才可能出现 AI 总结（问点点），此时才把读取工具挂上。
+		available = append(available, "get_ai_summary")
+	}
 	actions := []BrowseSessionAction{
 		{Ref: "get_page_state", Tool: "get_page_state", Label: "查看当前页面会话状态"},
 		{Ref: "search_feeds", Tool: "search_feeds", Label: "搜索笔记"},

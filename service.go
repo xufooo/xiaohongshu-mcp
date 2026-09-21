@@ -1412,6 +1412,20 @@ func (s *XiaohongshuService) SessionSearch(ctx context.Context, id, keyword, cur
 	}, nil
 }
 
+// SessionAISummary 读取当前搜索页的 AI 总结（问点点 / AI 搜索答案）。
+func (s *XiaohongshuService) SessionAISummary(ctx context.Context, id string) (*xiaohongshu.AISummaryResponse, error) {
+	session, err := s.browseSessions.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	result, err := session.AISummary(ctx)
+	if err != nil {
+		s.handleSessionOperationError(ctx, id, session, err)
+		return nil, err
+	}
+	return result, nil
+}
+
 func (s *XiaohongshuService) SessionOpenNote(ctx context.Context, id, resultRef, shareURL, xsecToken string) (*xiaohongshu.SessionOpenNoteResponse, error) {
 	session, err := s.browseSessions.Get(id)
 	if err != nil {

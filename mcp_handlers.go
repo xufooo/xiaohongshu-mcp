@@ -938,6 +938,18 @@ func (s *AppServer) sessionToolResult(sessionID, calledTool string, value any) *
 	return toolResultWithStep(value, next, guidance.AvailableTools)
 }
 
+// handleSessionAISummary 读取当前搜索页的 AI 总结。
+func (s *AppServer) handleSessionAISummary(ctx context.Context, args BrowseSessionIDArgs) *MCPToolResult {
+	if args.SessionID == "" {
+		return sessionMCPErrorResult("读取AI总结失败: 缺少session_id参数", sessionNextStepCreateSession())
+	}
+	result, err := s.xiaohongshuService.SessionAISummary(ctx, args.SessionID)
+	if err != nil {
+		return sessionMCPErrorFromErr("读取AI总结失败", err, sessionNextStepState(args.SessionID))
+	}
+	return s.sessionToolResult(args.SessionID, "get_ai_summary", result)
+}
+
 // startPageErrorResult 把 start_page 的失败翻译成下一步工具：
 // 页面已加载但就绪判定失败时先读登录态（同页读取，不额外导航），未登录就直接引导扫码。
 func (s *AppServer) startPageErrorResult(ctx context.Context, err error) *MCPToolResult {
