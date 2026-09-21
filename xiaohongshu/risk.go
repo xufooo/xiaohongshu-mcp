@@ -49,7 +49,7 @@ type riskProbe struct {
 
 func ClassifyRisk(page *hrod.Page) (RiskSignal, error) {
 	now := time.Now()
-	obj, err := page.Eval(`() => {
+	obj, err := page.Eval(`() => {` + xhsVisibleJS + `
 		const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim();
 		const bodyText = normalize(document.body?.innerText || "").slice(0, 2000);
 		const title = normalize(document.title || "");
@@ -61,23 +61,9 @@ func ClassifyRisk(page *hrod.Page) (RiskSignal, error) {
 			const index = haystack.indexOf(keyword);
 			return haystack.slice(Math.max(0, index - 40), Math.min(haystack.length, index + 120));
 		};
-		const visible = (el) => {
-			if (!el || !el.isConnected) return false;
-			if (typeof el.checkVisibility === "function") {
-				return el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
-			}
-			if (el.offsetParent !== null) return true;
-			const rect = el.getBoundingClientRect();
-			const style = window.getComputedStyle(el);
-			return style.display !== "none" &&
-				style.visibility !== "hidden" &&
-				Number(style.opacity || "1") > 0 &&
-				rect.width > 0 &&
-				rect.height > 0;
-		};
 		const hasDOM = (selector) => {
 			try {
-				return Array.from(document.querySelectorAll(selector)).some(visible);
+				return Array.from(document.querySelectorAll(selector)).some((el) => visibleInCSS(el));
 			} catch (_) {
 				return false;
 			}

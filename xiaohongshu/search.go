@@ -344,7 +344,7 @@ type searchResultsKeywordProbe struct {
 }
 
 func probeSearchResultsKeyword(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, keyword string) (searchResultsKeywordProbe, error) {
-	obj, err := evalJS(ctx, counter, page, `(keyword, feedCardSelector, searchInputSelector, markedSearchInputSelector) => {
+	obj, err := evalJS(ctx, counter, page, `(keyword, feedCardSelector, searchInputSelector, markedSearchInputSelector) => {` + xhsVisibleJS + `
 		const unwrap = (value) => {
 			if (value && typeof value === "object") {
 				if ("value" in value) return value.value;
@@ -356,16 +356,6 @@ func probeSearchResultsKeyword(ctx context.Context, page *hrod.Page, counter *ev
 		const noteIDFromHref = (href) => {
 			const match = String(href || "").match(/\/(?:explore|discovery\/item)\/([^/?#]+)/);
 			return match ? decodeURIComponent(match[1]) : "";
-		};
-		const visible = (el) => {
-			if (!el || !el.isConnected) return false;
-			const style = window.getComputedStyle(el);
-			const rect = el.getBoundingClientRect();
-			return style.display !== "none" &&
-				style.visibility !== "hidden" &&
-				Number(style.opacity || "1") > 0 &&
-				rect.width > 1 &&
-				rect.height > 1;
 		};
 		const inputValue = (el) => normalize("value" in el ? el.value : (el.innerText || el.textContent));
 		const stateSignature = (items) => {
@@ -380,7 +370,7 @@ func probeSearchResultsKeyword(ctx context.Context, page *hrod.Page, counter *ev
 			}));
 		};
 		const domSignature = () => {
-			const cards = Array.from(document.querySelectorAll(feedCardSelector)).filter(visible).slice(0, 6);
+			const cards = Array.from(document.querySelectorAll(feedCardSelector)).filter((el) => visibleWithSize(el, 1)).slice(0, 6);
 			if (cards.length === 0) return "";
 			return JSON.stringify(cards.map((card) => {
 				const link = Array.from(card.querySelectorAll("a[href]"))
@@ -412,7 +402,7 @@ func probeSearchResultsKeyword(ctx context.Context, page *hrod.Page, counter *ev
 		const stateKeywordText = normalize(stateKeyword);
 		const urlKeywordText = urlKeyword();
 		const markedInput = document.querySelector(markedSearchInputSelector);
-		const searchInput = markedInput || Array.from(document.querySelectorAll(searchInputSelector)).find(visible);
+		const searchInput = markedInput || Array.from(document.querySelectorAll(searchInputSelector)).find((el) => visibleWithSize(el, 1));
 		const inputKeyword = searchInput ? inputValue(searchInput) : "";
 		const feeds = unwrap(search?.feeds);
 		const hasStateFeeds = Array.isArray(feeds) && feeds.length > 0;
@@ -662,21 +652,7 @@ func waitForSearchInput(ctx context.Context, page *hrod.Page, counter *evalTimeo
 }
 
 func probeSearchInput(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, searchSelector, primarySelector string) (searchInputProbe, error) {
-	obj, err := evalJS(ctx, counter, page, `(searchSelector, primarySelector) => {
-		const visible = (el) => {
-			if (!el || !el.isConnected) return false;
-			const style = window.getComputedStyle(el);
-			const rect = el.getBoundingClientRect();
-			return style.display !== "none" &&
-				style.visibility !== "hidden" &&
-				Number(style.opacity || "1") > 0 &&
-				rect.width > 1 &&
-				rect.height > 1 &&
-				rect.bottom > 0 &&
-				rect.right > 0 &&
-				rect.top < window.innerHeight &&
-				rect.left < window.innerWidth;
-		};
+	obj, err := evalJS(ctx, counter, page, `(searchSelector, primarySelector) => {` + xhsVisibleJS + `
 		const label = (el) => [
 			el.tagName,
 			el.getAttribute("type") || "",
@@ -701,14 +677,14 @@ func probeSearchInput(ctx context.Context, page *hrod.Page, counter *evalTimeout
 		};
 		let searchInput = null;
 		const navSearchInput = document.querySelector("#search-input");
-		if (navSearchInput && visible(navSearchInput)) {
+		if (navSearchInput && visibleOnScreen(navSearchInput, 1)) {
 			searchInput = navSearchInput;
 		}
 		if (!searchInput) {
-			searchInput = Array.from(document.querySelectorAll(primarySelector)).find((el) => visible(el) && clickHit(el));
+			searchInput = Array.from(document.querySelectorAll(primarySelector)).find((el) => visibleOnScreen(el, 1) && clickHit(el));
 		}
 		if (!searchInput) {
-			searchInput = Array.from(document.querySelectorAll(searchSelector)).find((el) => visible(el) && clickHit(el));
+			searchInput = Array.from(document.querySelectorAll(searchSelector)).find((el) => visibleOnScreen(el, 1) && clickHit(el));
 		}
 		if (searchInput) {
 			searchInput.setAttribute("data-xhs-mcp-search-input", "selected");
@@ -719,14 +695,14 @@ func probeSearchInput(ctx context.Context, page *hrod.Page, counter *evalTimeout
 			: "";
 		const inputs = Array.from(document.querySelectorAll('input, textarea, [contenteditable="true"]'))
 			.slice(0, 8)
-			.map((el) => label(el).replace(/\s+/g, " ").trim() + " visible=" + visible(el));
+			.map((el) => label(el).replace(/\s+/g, " ").trim() + " visible=" + visibleOnScreen(el, 1));
 		return JSON.stringify({
 			url: location.href,
 			title: document.title,
 			readyState: document.readyState,
 			hasApp: !!document.querySelector("#app"),
 			hasSearchInput: !!searchInput,
-			searchInputVisible: !!searchInput && visible(searchInput),
+			searchInputVisible: !!searchInput && visibleOnScreen(searchInput, 1),
 			selectedSelector: selectedSelector,
 			inputSummary: inputs,
 			bodyText: (document.body?.innerText || "").replace(/\s+/g, " ").slice(0, 180),

@@ -113,21 +113,7 @@ var (
 func ProbeSelectors(page *hrod.Page, specs []SelectorSpec) ([]SelectorProbeResult, error) {
 	ctx, cancel := context.WithTimeout(page.Rod.GetContext(), 5*time.Second)
 	defer cancel()
-	obj, err := evalJSDirect(ctx, page, `(specs) => {
-		const visible = (el) => {
-			if (!el || !el.isConnected) return false;
-			if (typeof el.checkVisibility === "function") {
-				return el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
-			}
-			if (el.offsetParent !== null) return true;
-			const rect = el.getBoundingClientRect();
-			const style = window.getComputedStyle(el);
-			return style.display !== "none" &&
-				style.visibility !== "hidden" &&
-				Number(style.opacity || "1") > 0 &&
-				rect.width > 0 &&
-				rect.height > 0;
-		};
+	obj, err := evalJSDirect(ctx, page, `(specs) => {` + xhsVisibleJS + `
 		const sampleText = (el) => (el.textContent || "")
 			.replace(/\s+/g, " ")
 			.trim()
@@ -147,7 +133,7 @@ func ProbeSelectors(page *hrod.Page, specs []SelectorSpec) ([]SelectorProbeResul
 				name,
 				selector,
 				count: elements.length,
-				visible_count: elements.filter(visible).length,
+				visible_count: elements.filter((el) => visibleInCSS(el)).length,
 				samples,
 			};
 		});

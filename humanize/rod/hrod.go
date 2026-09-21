@@ -452,18 +452,6 @@ func (el *Element) ClickNoScroll() error {
 	return el.actor.Mouse.ClickNoScroll(el.Rod)
 }
 
-// ClickPoint moves to a viewport-relative point and clicks there.
-func (p *Page) ClickPoint(point proto.Point) error {
-	p.bindActorContext()
-	return p.actor.Mouse.ClickPoint(point)
-}
-
-// MovePoint moves to a viewport-relative point.
-func (p *Page) MovePoint(point proto.Point) error {
-	p.bindActorContext()
-	return p.actor.Mouse.MovePoint(point)
-}
-
 // MustClick is the humanized MustClick.
 // It panics if the element cannot be clicked.
 func (el *Element) MustClick() *Element {
