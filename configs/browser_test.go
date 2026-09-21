@@ -1,6 +1,8 @@
 package configs
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -137,4 +139,47 @@ func TestDefaultBrowserIdleTimeout(t *testing.T) {
 	if got := DefaultBrowserIdleTimeout(); got != 30*time.Minute {
 		t.Fatalf("低资源档默认应为 30m，got %s", got)
 	}
+}
+
+// TestResolveBrowserProfileDir 默认 profile 必须落在稳定目录（而非随机临时目录），
+// 显式环境变量优先；缓存目录不可写时回退到临时目录并标记为非持久。
+func TestResolveBrowserProfileDir(t *testing.T) {
+	t.Run("显式设置优先", func(t *testing.T) {
+		t.Setenv("XHS_BROWSER_PROFILE_DIR", "/tmp/custom-profile")
+		dir, persistent := ResolveBrowserProfileDir()
+		if dir != "/tmp/custom-profile" || !persistent {
+			t.Fatalf("显式设置应原样返回且视为持久, got %q persistent=%v", dir, persistent)
+		}
+	})
+
+	t.Run("未设置时给稳定路径", func(t *testing.T) {
+		t.Setenv("XHS_BROWSER_PROFILE_DIR", "")
+		cache := t.TempDir()
+		t.Setenv("XDG_CACHE_HOME", cache)
+		dir, persistent := ResolveBrowserProfileDir()
+		if !persistent {
+			t.Fatalf("可写缓存目录应返回持久 profile")
+		}
+		want := filepath.Join(cache, "xiaohongshu-mcp", "browser-profile")
+		if dir != want {
+			t.Fatalf("默认 profile = %q, 期望 %q", dir, want)
+		}
+	})
+
+	t.Run("缓存目录不可写时回退", func(t *testing.T) {
+		t.Setenv("XHS_BROWSER_PROFILE_DIR", "")
+		// 指向一个必然创建失败的路径（父级是文件）
+		file := filepath.Join(t.TempDir(), "not-a-dir")
+		if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+			t.Fatalf("准备测试文件失败: %v", err)
+		}
+		t.Setenv("XDG_CACHE_HOME", file)
+		dir, persistent := ResolveBrowserProfileDir()
+		if persistent {
+			t.Fatalf("不可写时不应标记为持久, got %q", dir)
+		}
+		if !strings.HasPrefix(dir, os.TempDir()) {
+			t.Fatalf("回退目录应在临时目录下, got %q", dir)
+		}
+	})
 }
