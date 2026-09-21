@@ -13,59 +13,14 @@ import (
 	"github.com/xpzouying/xiaohongshu-mcp/xiaohongshu"
 )
 
-// session 基础工具
-var sessionBaseTools = []string{"close_page"}
-var sessionCreateTools = []string{"start_page", "check_login_status"}
+// session 已关闭：没有 session 可用，只能重新开会话或检查登录。
+var afterCloseTools = []string{"start_page", "check_login_status"}
 
-// session 不同状态下的可用工具
-var (
-	// 含通知只读：搜索/列表/返回后可读未读或进入通知
-	sessionToolsWithNotification = append([]string{"get_unread_count", "list_notifications"}, sessionBaseTools...)
-
-	afterCreateTools = append([]string{
-		"search_feeds", "list_feeds",
-	}, sessionToolsWithNotification...)
-
-	afterFeedsTools = append([]string{
-		"open_note", "search_feeds", "list_feeds",
-	}, sessionToolsWithNotification...)
-
-	afterSearchTools = append([]string{
-		"open_note", "search_feeds", "list_feeds",
-	}, sessionToolsWithNotification...)
-
-	// 详情弹层内只读未读数，不推荐直接进入通知
-	afterOpenTools = append([]string{
-		"like_feed",
-		"favorite_feed",
-		"comment_feed",
-		"reply_comment_in_feed",
-		"get_note_detail",
-		"go_back",
-		"get_unread_count",
-	}, sessionBaseTools...)
-
-	// 通知页基础可用工具（只读）
-	afterNotificationTools = []string{
-		"get_page_state", "get_unread_count", "list_notifications", "go_back", "close_page",
-	}
-
-	// mentions tab 存在 actionable 条目时追加写操作
-	afterNotificationMentionsTools = append([]string{
-		"like_notification", "reply_notification",
-	}, afterNotificationTools...)
-
-	afterBackTools = append([]string{
-		"search_feeds", "open_note", "list_feeds",
-	}, sessionToolsWithNotification...)
-
-	afterCloseTools = sessionCreateTools
-)
-
-// toolResult 包装响应数据，附上下一步可用工具列表
+// toolResult 是 session 工具的统一响应壳：数据 + 下一步该调用的工具 + 当前允许的工具。
 type toolResult struct {
-	Data           interface{} `json:"data"`
-	AvailableTools []string    `json:"available_tools"`
+	Data           interface{}           `json:"data"`
+	NextStep       *xiaohongshu.NextStep `json:"next_step,omitempty"`
+	AvailableTools []string              `json:"available_tools,omitempty"`
 }
 
 // MCP 工具处理函数
@@ -78,13 +33,13 @@ func (s *AppServer) requireBrowserAvailableForMCP(name string) *MCPToolResult {
 	if !ok {
 		return nil
 	}
-	msg := fmt.Sprintf("browser busy - session active: session_id=%s expires_at=%s. Use get_page_state or close_page first.",
+	msg := fmt.Sprintf("browser busy - session active: session_id=%s expires_at=%s.",
 		info.ID, info.ExpiresAt.Format(time.RFC3339))
 	logrus.Warnf("MCP: %s blocked because browse session is active: %s", name, info.ID)
-	return &MCPToolResult{
-		Content: []MCPContent{{Type: "text", Text: msg}},
-		IsError: true,
-	}
+	// 引导回 session 工具：先看状态，或者关掉会话再重试当前工具。
+	next := sessionNextStepState(info.ID)
+	next.Hint = "先用 get_page_state 查看当前会话状态；不再需要该会话就 close_page 关闭后再重试 " + name
+	return sessionMCPErrorResult(msg, next)
 }
 
 func (s *AppServer) requireWriteConfirmation(action, key, summary, token string) *MCPToolResult {
@@ -112,24 +67,15 @@ func compactWriteSummary(value string) string {
 	return value[:117] + "..."
 }
 
-type mcpSessionNextStep struct {
-	Tool   string `json:"tool"`
-	Reason string `json:"reason"`
-	Hint   string `json:"hint,omitempty"`
-}
-
 type mcpSessionErrorPayload struct {
-	Error    string             `json:"error"`
-	NextStep mcpSessionNextStep `json:"next_step"`
+	Error    string               `json:"error"`
+	NextStep xiaohongshu.NextStep `json:"next_step"`
 }
 
-func sessionMCPErrorResult(message string, next mcpSessionNextStep) *MCPToolResult {
+func sessionMCPErrorResult(message string, next xiaohongshu.NextStep) *MCPToolResult {
 	text := message
 	if next.Tool != "" {
-		payload := mcpSessionErrorPayload{
-			Error:    message,
-			NextStep: next,
-		}
+		payload := mcpSessionErrorPayload{Error: message, NextStep: next}
 		if data, err := json.MarshalIndent(payload, "", "  "); err == nil {
 			text = message + "\n" + string(data)
 		} else {
@@ -139,7 +85,7 @@ func sessionMCPErrorResult(message string, next mcpSessionNextStep) *MCPToolResu
 	return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: text}}, IsError: true}
 }
 
-func sessionMCPErrorFromErr(prefix string, err error, fallback mcpSessionNextStep) *MCPToolResult {
+func sessionMCPErrorFromErr(prefix string, err error, fallback xiaohongshu.NextStep) *MCPToolResult {
 	message := prefix
 	errText := ""
 	if err != nil {
@@ -149,76 +95,121 @@ func sessionMCPErrorFromErr(prefix string, err error, fallback mcpSessionNextSte
 	return sessionMCPErrorResult(message, sessionNextStepForError(errText, fallback))
 }
 
-func sessionNextStepForError(errText string, fallback mcpSessionNextStep) mcpSessionNextStep {
+// sessionNextStepForError 由报错文本决定下一步该调用的工具。
+// 已知参数从 fallback 继承，保证 next_step 里的 args 可以直接照抄调用。
+func sessionNextStepForError(errText string, fallback xiaohongshu.NextStep) xiaohongshu.NextStep {
+	var next xiaohongshu.NextStep
 	switch {
 	case strings.Contains(errText, "不存在或已过期"),
 		strings.Contains(errText, "已过期"),
 		strings.Contains(errText, "已关闭"):
-		return sessionNextStepCreateSession()
+		next = sessionNextStepCreateSession()
 	case strings.Contains(errText, "未找到搜索结果引用"),
 		strings.Contains(errText, "搜索结果参数无效"):
-		return sessionNextStepSearch()
+		next = sessionNextStepSearch("")
 	case strings.Contains(errText, "必须先打开笔记"),
-		strings.Contains(errText, "只能对已打开的笔记执行"):
-		return sessionNextStepOpenNote()
-	case strings.Contains(errText, "只能对已阅读的笔记执行"):
-		return sessionNextStepOpenNote()
+		strings.Contains(errText, "只能对已打开的笔记执行"),
+		strings.Contains(errText, "只能对已阅读的笔记执行"):
+		next = sessionNextStepOpenNote()
+	case strings.Contains(errText, "comment_id"),
+		strings.Contains(errText, "user_id"):
+		next = sessionNextStepDetail()
 	case strings.Contains(errText, "读取当前页面 URL"),
 		strings.Contains(errText, "页面不存在"),
 		strings.Contains(errText, "ready"),
 		strings.Contains(errText, "selector"),
 		strings.Contains(errText, "选择器"):
-		return sessionNextStepState()
+		next = sessionNextStepState("")
 	default:
-		return fallback
+		next = fallback
 	}
+	return inheritSessionArgs(next, fallback)
 }
 
-func sessionNextStepCreateSession() mcpSessionNextStep {
-	return mcpSessionNextStep{
+// inheritSessionArgs 用 fallback 已知道的参数补齐 next 的 args：
+// session_id 只补给真正接受它的工具（start_page 不接受），keyword 只补给 search_feeds。
+func inheritSessionArgs(next, fallback xiaohongshu.NextStep) xiaohongshu.NextStep {
+	args := map[string]any{}
+	for key, value := range next.Args {
+		args[key] = value
+	}
+	if next.Tool != "start_page" {
+		if value, ok := fallback.Args["session_id"]; ok {
+			if _, exists := args["session_id"]; !exists {
+				args["session_id"] = value
+			}
+		}
+	}
+	if next.Tool == "search_feeds" {
+		if value, ok := fallback.Args["keyword"]; ok {
+			if _, exists := args["keyword"]; !exists {
+				args["keyword"] = value
+			}
+		}
+	}
+	if len(args) > 0 {
+		next.Args = args
+	}
+	return next
+}
+
+func sessionNextStepCreateSession() xiaohongshu.NextStep {
+	return xiaohongshu.NextStep{
 		Tool:   "start_page",
 		Reason: "当前页面会话不可用或缺少 session_id",
-		Hint:   "先调用 start_page 获取 session_id",
+		Hint:   "先调用 start_page 获取 session_id；会话状态异常时带 force_recreate=true 重建",
 	}
 }
 
-func sessionNextStepState() mcpSessionNextStep {
-	return mcpSessionNextStep{
+func sessionNextStepState(sessionID string) xiaohongshu.NextStep {
+	return xiaohongshu.NextStep{
 		Tool:   "get_page_state",
+		Args:   xiaohongshu.NextStepArgs(map[string]any{"session_id": sessionID}),
 		Reason: "需要重新确认当前页面会话状态和可执行动作",
-		Hint:   "读取 current、results、actions 和 timeline 后再决定下一步",
+		Hint:   "读取 next_step、available_tools、results 后再决定下一步",
 	}
 }
 
-func sessionNextStepSearch() mcpSessionNextStep {
-	return mcpSessionNextStep{
+func sessionNextStepSearch(keyword string) xiaohongshu.NextStep {
+	return xiaohongshu.NextStep{
 		Tool:   "search_feeds",
+		Args:   xiaohongshu.NextStepArgs(map[string]any{"keyword": keyword}),
 		Reason: "搜索结果引用不可用或已失效",
 		Hint:   "重新搜索后使用 results 中最新的 result_ref 打开笔记",
 	}
 }
 
-func sessionNextStepSearchInput() mcpSessionNextStep {
-	return mcpSessionNextStep{
+func sessionNextStepSearchInput(sessionID string) xiaohongshu.NextStep {
+	return xiaohongshu.NextStep{
 		Tool:   "search_feeds",
+		Args:   xiaohongshu.NextStepArgs(map[string]any{"session_id": sessionID}),
 		Reason: "缺少搜索关键词",
-		Hint:   "提供 session_id 和 keyword 后重新搜索",
+		Hint:   "补齐 keyword 参数后重新调用 search_feeds",
 	}
 }
 
-func sessionNextStepOpenNote() mcpSessionNextStep {
-	return mcpSessionNextStep{
+func sessionNextStepOpenNote() xiaohongshu.NextStep {
+	return xiaohongshu.NextStep{
 		Tool:   "open_note",
 		Reason: "当前页面会话还没有打开可操作的笔记",
-		Hint:   "先从 get_page_state.results 中选择 result_ref 打开笔记",
+		Hint:   "先从 get_page_state.results 中选择 result_ref 再调用 open_note",
 	}
 }
 
-func sessionNextStepCommentInput() mcpSessionNextStep {
-	return mcpSessionNextStep{
+func sessionNextStepCommentInput(sessionID string) xiaohongshu.NextStep {
+	return xiaohongshu.NextStep{
 		Tool:   "comment_feed",
+		Args:   xiaohongshu.NextStepArgs(map[string]any{"session_id": sessionID}),
 		Reason: "缺少评论内容",
-		Hint:   "提供 content 后重新调用 comment_feed",
+		Hint:   "补齐 content 参数后重新调用 comment_feed",
+	}
+}
+
+func sessionNextStepDetail() xiaohongshu.NextStep {
+	return xiaohongshu.NextStep{
+		Tool:   "get_note_detail",
+		Reason: "回复评论需要 comment_id 或 user_id",
+		Hint:   "先 get_note_detail 读取当前笔记评论，用其中的 comment_id/user_id 再回复",
 	}
 }
 
@@ -231,13 +222,7 @@ func (s *AppServer) handleCheckLoginStatus(ctx context.Context) *MCPToolResult {
 
 	status, err := s.xiaohongshuService.CheckLoginStatus(ctx)
 	if err != nil {
-		return &MCPToolResult{
-			Content: []MCPContent{{
-				Type: "text",
-				Text: "检查登录状态失败: " + err.Error(),
-			}},
-			IsError: true,
-		}
+		return sessionMCPErrorFromErr("检查登录状态失败", err, sessionNextStepCreateSession())
 	}
 
 	// 根据 IsLoggedIn 判断并返回友好的提示
@@ -469,7 +454,7 @@ func (s *AppServer) handleListFeeds(ctx context.Context, args ListFeedsArgs) *MC
 	}
 
 	// 成功后直接包上 available_tools，避免序列化往返
-	return jsonMCPResultWithTools(result, afterFeedsTools)
+	return s.sessionToolResult(args.SessionID, "list_feeds", result)
 }
 
 // handleUserProfile 获取用户主页
@@ -551,9 +536,9 @@ func (s *AppServer) handleFavoriteFeed(ctx context.Context, args FavoriteFeedArg
 	}
 	result, err := s.xiaohongshuService.SessionFavorite(ctx, args.SessionID, args.Unfavorite)
 	if err != nil {
-		return sessionMCPErrorFromErr(action+"失败", err, sessionNextStepState())
+		return sessionMCPErrorFromErr(action+"失败", err, sessionNextStepState(args.SessionID))
 	}
-	return jsonMCPResultWithTools(result, afterOpenTools)
+	return s.sessionToolResult(args.SessionID, "favorite_feed", result)
 }
 
 // handleReplyComment 处理回复评论（session 语义）
@@ -566,10 +551,10 @@ func (s *AppServer) handleReplyComment(ctx context.Context, args ReplyCommentArg
 	args.UserID = strings.TrimSpace(args.UserID)
 	args.Content = strings.TrimSpace(args.Content)
 	if args.CommentID == "" && args.UserID == "" {
-		return sessionMCPErrorResult("回复评论失败: 缺少comment_id或user_id参数", sessionNextStepState())
+		return sessionMCPErrorResult("回复评论失败: 缺少comment_id或user_id参数", sessionNextStepState(args.SessionID))
 	}
 	if args.Content == "" {
-		return sessionMCPErrorResult("回复评论失败: 缺少content参数", sessionNextStepState())
+		return sessionMCPErrorResult("回复评论失败: 缺少content参数", sessionNextStepState(args.SessionID))
 	}
 	key := writeConfirmationKey("reply_comment_in_feed", args.SessionID, args.CommentID, args.UserID, args.Content)
 	summary := fmt.Sprintf("回复评论: session_id=%s comment_id=%s user_id=%s content=%q", args.SessionID, args.CommentID, args.UserID, compactWriteSummary(args.Content))
@@ -578,9 +563,9 @@ func (s *AppServer) handleReplyComment(ctx context.Context, args ReplyCommentArg
 	}
 	result, err := s.xiaohongshuService.SessionReply(ctx, args.SessionID, args.CommentID, args.UserID, args.Content)
 	if err != nil {
-		return sessionMCPErrorFromErr("回复评论失败", err, sessionNextStepState())
+		return sessionMCPErrorFromErr("回复评论失败", err, sessionNextStepState(args.SessionID))
 	}
-	return jsonMCPResultWithTools(result, afterOpenTools)
+	return s.sessionToolResult(args.SessionID, "reply_comment_in_feed", result)
 }
 
 func (s *AppServer) handleCreateBrowseSession(ctx context.Context, args CreateBrowseSessionArgs) *MCPToolResult {
@@ -592,7 +577,7 @@ func (s *AppServer) handleCreateBrowseSession(ctx context.Context, args CreateBr
 			IsError: true,
 		}
 	}
-	return jsonMCPResultWithTools(info, afterCreateTools)
+	return s.startPageToolResult(ctx, info)
 }
 
 func (s *AppServer) handleCloseBrowseSession(ctx context.Context, args BrowseSessionIDArgs) *MCPToolResult {
@@ -602,7 +587,7 @@ func (s *AppServer) handleCloseBrowseSession(ctx context.Context, args BrowseSes
 	if err := s.xiaohongshuService.CloseBrowseSession(args.SessionID); err != nil {
 		return sessionMCPErrorFromErr("关闭浏览会话失败", err, sessionNextStepCreateSession())
 	}
-	return jsonMCPResultWithTools(map[string]string{"closed_session_id": args.SessionID}, afterCloseTools)
+	return toolResultWithStep(map[string]string{"closed_session_id": args.SessionID}, sessionNextStepCreateSession(), afterCloseTools)
 }
 
 func (s *AppServer) handleSessionState(ctx context.Context, args BrowseSessionIDArgs) *MCPToolResult {
@@ -621,7 +606,7 @@ func (s *AppServer) handleSessionSearch(ctx context.Context, args SessionSearchA
 		return sessionMCPErrorResult("搜索失败: 缺少session_id参数", sessionNextStepCreateSession())
 	}
 	if args.Keyword == "" {
-		return sessionMCPErrorResult("搜索失败: 缺少keyword参数", sessionNextStepSearchInput())
+		return sessionMCPErrorResult("搜索失败: 缺少keyword参数", sessionNextStepSearchInput(args.SessionID))
 	}
 	filter := xiaohongshu.FilterOption{
 		SortBy:      args.Filters.SortBy,
@@ -635,9 +620,9 @@ func (s *AppServer) handleSessionSearch(ctx context.Context, args SessionSearchA
 	}
 	result, err := s.xiaohongshuService.SessionSearch(ctx, args.SessionID, args.Keyword, args.Cursor, args.MaxItems, filter)
 	if err != nil {
-		return sessionMCPErrorFromErr("搜索失败", err, sessionNextStepState())
+		return sessionMCPErrorFromErr("搜索失败", err, sessionNextStepState(args.SessionID))
 	}
-	return jsonMCPResultWithTools(result, afterSearchTools)
+	return s.sessionToolResult(args.SessionID, "search_feeds", result)
 }
 
 func detailVisibilityDiagnosticSuffix(err error) string {
@@ -716,22 +701,22 @@ func (s *AppServer) handleSessionOpenNote(ctx context.Context, args SessionOpenN
 	hasResultRef := args.ResultRef != ""
 	hasShareURL := args.ShareURL != ""
 	if !hasResultRef && !hasShareURL {
-		return sessionMCPErrorResult("打开笔记失败: result_ref与share_url必须且只能提供一个", sessionNextStepState())
+		return sessionMCPErrorResult("打开笔记失败: result_ref与share_url必须且只能提供一个", sessionNextStepState(args.SessionID))
 	}
 	if hasResultRef && hasShareURL {
-		return sessionMCPErrorResult("打开笔记失败: result_ref与share_url必须且只能提供一个", sessionNextStepState())
+		return sessionMCPErrorResult("打开笔记失败: result_ref与share_url必须且只能提供一个", sessionNextStepState(args.SessionID))
 	}
 	if hasShareURL && args.XsecToken != "" {
-		return sessionMCPErrorResult("打开笔记失败: share_url不能与xsec_token同时使用", sessionNextStepState())
+		return sessionMCPErrorResult("打开笔记失败: share_url不能与xsec_token同时使用", sessionNextStepState(args.SessionID))
 	}
 	info, err := s.xiaohongshuService.SessionOpenNote(ctx, args.SessionID, args.ResultRef, args.ShareURL, args.XsecToken)
 	if err != nil {
 		if hasShareURL {
-			return sessionMCPErrorResult("打开笔记失败: "+shareURLOpenErrorStage(err), sessionNextStepState())
+			return sessionMCPErrorResult("打开笔记失败: "+shareURLOpenErrorStage(err), sessionNextStepState(args.SessionID))
 		}
-		return sessionMCPErrorFromErr("打开笔记失败", fmt.Errorf("%w%s", err, detailVisibilityDiagnosticSuffix(err)), sessionNextStepState())
+		return sessionMCPErrorFromErr("打开笔记失败", fmt.Errorf("%w%s", err, detailVisibilityDiagnosticSuffix(err)), sessionNextStepState(args.SessionID))
 	}
-	return jsonMCPResultWithTools(info, afterOpenTools)
+	return s.sessionToolResult(args.SessionID, "open_note", info)
 }
 
 func (s *AppServer) handleSessionDetail(ctx context.Context, args SessionDetailArgs) *MCPToolResult {
@@ -767,7 +752,7 @@ func (s *AppServer) handleSessionDetail(ctx context.Context, args SessionDetailA
 		if err != nil {
 			return sessionMCPErrorFromErr("分批加载评论失败", err, sessionNextStepOpenNote())
 		}
-		return jsonMCPResultWithTools(result, afterOpenTools)
+		return s.sessionToolResult(args.SessionID, "get_note_detail", result)
 	}
 
 	detail, err := s.xiaohongshuService.SessionDetail(ctx, args.SessionID, false, 0)
@@ -778,7 +763,7 @@ func (s *AppServer) handleSessionDetail(ctx context.Context, args SessionDetailA
 	if detail.Comments == nil {
 		detail.Comments = []xiaohongshu.Comment{}
 	}
-	return jsonMCPResultWithTools(detail, afterOpenTools)
+	return s.sessionToolResult(args.SessionID, "get_note_detail", detail)
 }
 
 func (s *AppServer) handleSessionLike(ctx context.Context, args SessionLikeArgs) *MCPToolResult {
@@ -796,9 +781,9 @@ func (s *AppServer) handleSessionLike(ctx context.Context, args SessionLikeArgs)
 	}
 	result, err := s.xiaohongshuService.SessionLike(ctx, args.SessionID, args.Unlike)
 	if err != nil {
-		return sessionMCPErrorFromErr("点赞失败", err, sessionNextStepState())
+		return sessionMCPErrorFromErr("点赞失败", err, sessionNextStepState(args.SessionID))
 	}
-	return jsonMCPResultWithTools(result, afterOpenTools)
+	return s.sessionToolResult(args.SessionID, "like_feed", result)
 }
 
 func (s *AppServer) handleSessionComment(ctx context.Context, args SessionCommentArgs) *MCPToolResult {
@@ -806,7 +791,7 @@ func (s *AppServer) handleSessionComment(ctx context.Context, args SessionCommen
 		return sessionMCPErrorResult("评论失败: 缺少session_id参数", sessionNextStepCreateSession())
 	}
 	if args.Content == "" {
-		return sessionMCPErrorResult("评论失败: 缺少content参数", sessionNextStepCommentInput())
+		return sessionMCPErrorResult("评论失败: 缺少content参数", sessionNextStepCommentInput(args.SessionID))
 	}
 	key := writeConfirmationKey("comment_feed", args.SessionID, args.Content)
 	summary := fmt.Sprintf("评论当前笔记: session_id=%s content=%q", args.SessionID, compactWriteSummary(args.Content))
@@ -815,9 +800,9 @@ func (s *AppServer) handleSessionComment(ctx context.Context, args SessionCommen
 	}
 	result, err := s.xiaohongshuService.SessionComment(ctx, args.SessionID, args.Content)
 	if err != nil {
-		return sessionMCPErrorFromErr("评论失败", err, sessionNextStepState())
+		return sessionMCPErrorFromErr("评论失败", err, sessionNextStepState(args.SessionID))
 	}
-	return jsonMCPResultWithTools(result, afterOpenTools)
+	return s.sessionToolResult(args.SessionID, "comment_feed", result)
 }
 
 func (s *AppServer) handleSessionBack(ctx context.Context, args BrowseSessionIDArgs) *MCPToolResult {
@@ -826,9 +811,9 @@ func (s *AppServer) handleSessionBack(ctx context.Context, args BrowseSessionIDA
 	}
 	info, err := s.xiaohongshuService.SessionBack(ctx, args.SessionID)
 	if err != nil {
-		return sessionMCPErrorFromErr("返回上一页失败", err, sessionNextStepState())
+		return sessionMCPErrorFromErr("返回上一页失败", err, sessionNextStepState(args.SessionID))
 	}
-	return jsonMCPResultWithTools(info, afterBackTools)
+	return s.sessionToolResult(args.SessionID, "go_back", info)
 }
 
 func (s *AppServer) handleGetUnreadCount(ctx context.Context, args UnreadNotificationCountArgs) *MCPToolResult {
@@ -837,9 +822,9 @@ func (s *AppServer) handleGetUnreadCount(ctx context.Context, args UnreadNotific
 	}
 	count, err := s.xiaohongshuService.SessionUnreadNotificationCount(ctx, args.SessionID)
 	if err != nil {
-		return sessionMCPErrorFromErr("获取通知未读失败", err, sessionNextStepState())
+		return sessionMCPErrorFromErr("获取通知未读失败", err, sessionNextStepState(args.SessionID))
 	}
-	return jsonMCPResultWithTools(count, sessionToolsWithNotification)
+	return s.sessionToolResult(args.SessionID, "get_unread_count", count)
 }
 
 func (s *AppServer) handleListNotifications(ctx context.Context, args ListNotificationsArgs) *MCPToolResult {
@@ -857,16 +842,9 @@ func (s *AppServer) handleListNotifications(ctx context.Context, args ListNotifi
 	}
 	list, err := s.xiaohongshuService.SessionListNotifications(ctx, args.SessionID, args.Tab, args.Cursor, args.MaxItems)
 	if err != nil {
-		return sessionMCPErrorFromErr("通知列表失败", err, sessionNextStepState())
+		return sessionMCPErrorFromErr("通知列表失败", err, sessionNextStepState(args.SessionID))
 	}
-	tools := afterNotificationTools
-	for _, it := range list.Items {
-		if it.Actionable {
-			tools = afterNotificationMentionsTools
-			break
-		}
-	}
-	return jsonMCPResultWithTools(list, tools)
+	return s.sessionToolResult(args.SessionID, "list_notifications", list)
 }
 
 func (s *AppServer) handleLikeNotification(ctx context.Context, args LikeNotificationArgs) *MCPToolResult {
@@ -876,7 +854,7 @@ func (s *AppServer) handleLikeNotification(ctx context.Context, args LikeNotific
 		return sessionMCPErrorResult("点赞通知失败: 缺少session_id参数", sessionNextStepCreateSession())
 	}
 	if args.NotificationRef == "" {
-		return sessionMCPErrorResult("点赞通知失败: 缺少notification_ref参数", sessionNextStepState())
+		return sessionMCPErrorResult("点赞通知失败: 缺少notification_ref参数", sessionNextStepState(args.SessionID))
 	}
 	action := "点赞通知评论"
 	if args.Unlike {
@@ -889,9 +867,9 @@ func (s *AppServer) handleLikeNotification(ctx context.Context, args LikeNotific
 	}
 	result, err := s.xiaohongshuService.SessionLikeNotification(ctx, args.SessionID, args.NotificationRef, args.Unlike)
 	if err != nil {
-		return sessionMCPErrorFromErr("点赞通知失败", err, sessionNextStepState())
+		return sessionMCPErrorFromErr("点赞通知失败", err, sessionNextStepState(args.SessionID))
 	}
-	return jsonMCPResultWithTools(result, afterNotificationMentionsTools)
+	return s.sessionToolResult(args.SessionID, "like_notification", result)
 }
 
 func (s *AppServer) handleReplyNotification(ctx context.Context, args ReplyNotificationArgs) *MCPToolResult {
@@ -902,10 +880,10 @@ func (s *AppServer) handleReplyNotification(ctx context.Context, args ReplyNotif
 		return sessionMCPErrorResult("回复通知失败: 缺少session_id参数", sessionNextStepCreateSession())
 	}
 	if args.NotificationRef == "" {
-		return sessionMCPErrorResult("回复通知失败: 缺少notification_ref参数", sessionNextStepState())
+		return sessionMCPErrorResult("回复通知失败: 缺少notification_ref参数", sessionNextStepState(args.SessionID))
 	}
 	if args.Content == "" {
-		return sessionMCPErrorResult("回复通知失败: 缺少content参数", sessionNextStepState())
+		return sessionMCPErrorResult("回复通知失败: 缺少content参数", sessionNextStepState(args.SessionID))
 	}
 	key := writeConfirmationKey("reply_notification", args.SessionID, args.NotificationRef, args.Content)
 	summary := fmt.Sprintf("回复通知评论: session_id=%s notification_ref=%s content=%q",
@@ -915,9 +893,9 @@ func (s *AppServer) handleReplyNotification(ctx context.Context, args ReplyNotif
 	}
 	result, err := s.xiaohongshuService.SessionReplyNotification(ctx, args.SessionID, args.NotificationRef, args.Content)
 	if err != nil {
-		return sessionMCPErrorFromErr("回复通知失败", err, sessionNextStepState())
+		return sessionMCPErrorFromErr("回复通知失败", err, sessionNextStepState(args.SessionID))
 	}
-	return jsonMCPResultWithTools(result, afterNotificationMentionsTools)
+	return s.sessionToolResult(args.SessionID, "reply_notification", result)
 }
 
 func jsonMCPResult(value any, fallback string) *MCPToolResult {
@@ -928,9 +906,64 @@ func jsonMCPResult(value any, fallback string) *MCPToolResult {
 	return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: string(data)}}}
 }
 
-// jsonMCPResultWithTools 在返回数据中附带下一步可用工具列表
-func jsonMCPResultWithTools(value any, tools []string) *MCPToolResult {
-	data, err := json.MarshalIndent(toolResult{Data: value, AvailableTools: tools}, "", "  ")
+// sessionToolResult 输出 {data, next_step, available_tools}；
+// next_step 由会话已跟踪的状态推导（纯内存，不探测页面），所以不会推荐当前状态不允许的工具。
+func (s *AppServer) sessionToolResult(sessionID, calledTool string, value any) *MCPToolResult {
+	guidance := s.xiaohongshuService.SessionGuidance(sessionID, calledTool)
+	next := xiaohongshu.NextStep{}
+	if guidance.NextStep != nil {
+		next = *guidance.NextStep
+	}
+	return toolResultWithStep(value, next, guidance.AvailableTools)
+}
+
+// startPageToolResult 拿到会话就按会话状态给指引；没拿到会话只能重新调 start_page。
+func (s *AppServer) startPageToolResult(ctx context.Context, info *xiaohongshu.CreateBrowseSessionResult) *MCPToolResult {
+	if info.Session != nil {
+		return s.sessionToolResult(info.Session.ID, "start_page", info)
+	}
+	return toolResultWithStep(info, startPageBlockedStep(ctx, info), nil)
+}
+
+// startPageBlockedStep 在 start_page 拿不到可用会话时，给出重新调用 start_page 的最小参数。
+func startPageBlockedStep(ctx context.Context, info *xiaohongshu.CreateBrowseSessionResult) xiaohongshu.NextStep {
+	switch {
+	case ctx.Err() != nil:
+		return xiaohongshu.NextStep{
+			Tool:   "start_page",
+			Reason: "请求已取消或超时，会话未就绪",
+			Hint:   "重新调用 start_page",
+		}
+	case info.Status.Status == xiaohongshu.SessionBusy:
+		return xiaohongshu.NextStep{
+			Tool:   "start_page",
+			Reason: "会话正在执行其他操作，暂不可复用",
+			Hint:   "等当前操作结束后重新调用 start_page",
+		}
+	default:
+		step := xiaohongshu.NextStep{
+			Tool:   "start_page",
+			Args:   xiaohongshu.NextStepArgs(map[string]any{"force_recreate": true}),
+			Reason: "会话状态不可复用",
+			Hint:   "用 force_recreate=true 关闭旧会话并重建",
+		}
+		if info.Status.Status != "" {
+			step.Reason = "会话状态不可复用: " + string(info.Status.Status)
+		}
+		if info.Status.LastError != "" {
+			step.Hint += "（" + info.Status.LastError + "）"
+		}
+		return step
+	}
+}
+
+// toolResultWithStep 输出 {data, next_step, available_tools}；next_step 为空时不写该字段。
+func toolResultWithStep(value any, next xiaohongshu.NextStep, tools []string) *MCPToolResult {
+	payload := toolResult{Data: value, AvailableTools: tools}
+	if next.Tool != "" {
+		payload.NextStep = &next
+	}
+	data, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
 		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "操作成功，但序列化失败: " + err.Error()}}, IsError: true}
 	}

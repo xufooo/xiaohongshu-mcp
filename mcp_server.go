@@ -393,7 +393,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 	mcp.AddTool(server,
 		&mcp.Tool{
 			Name:        "start_page",
-			Description: "创建一个保留同一浏览器页面的页面会话（start_page），用于连续执行搜索、打开、阅读、互动和返回",
+			Description: "创建一个保留同一浏览器页面的页面会话（start_page），用于连续执行搜索、打开、阅读、互动和返回。所有 session 工具的成功响应都带 next_step（唯一推荐的下一步工具及可直接使用的 args）和 available_tools（当前状态允许的工具）；失败响应也带 next_step，照着调用即可，不要自己猜工具",
 			Annotations: &mcp.ToolAnnotations{
 				Title:        "Start Page",
 				ReadOnlyHint: true,
@@ -409,7 +409,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 	mcp.AddTool(server,
 		&mcp.Tool{
 			Name:        "get_page_state",
-			Description: "获取页面会话的紧凑页面状态，包括当前URL、页面类型、就绪状态、风险信号和可执行的下一步动作",
+			Description: "获取页面会话的紧凑页面状态：next_step（唯一推荐的下一步工具及 args）、available_tools（当前状态允许的工具）、actions（带参数的语义动作菜单）、current/results/timeline 与风险信号",
 			Annotations: &mcp.ToolAnnotations{
 				Title:        "Get Page State",
 				ReadOnlyHint: true,

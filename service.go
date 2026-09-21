@@ -1207,9 +1207,8 @@ func (s *XiaohongshuService) CreateBrowseSession(ctx context.Context, forceRecre
 	s.browserManager.UpdateOwner("session:" + session.ID())
 	info := session.Info()
 	return &xiaohongshu.CreateBrowseSessionResult{
-		Outcome:           "created",
-		Session:           &info,
-		RecommendedAction: "continue",
+		Outcome: "created",
+		Session: &info,
 		Status: xiaohongshu.BrowseSessionStatusInfo{
 			Status:  xiaohongshu.SessionReady,
 			Session: &info,
@@ -1238,8 +1237,7 @@ func (s *XiaohongshuService) tryReuseSession(ctx context.Context) *xiaohongshu.C
 		return buildBrowseSessionReuseResult(previous, info, check.HealthCheckedAt)
 	case xiaohongshu.SessionBusy:
 		return &xiaohongshu.CreateBrowseSessionResult{
-			Outcome:           "blocked",
-			RecommendedAction: "wait",
+			Outcome: "blocked",
 			Status: xiaohongshu.BrowseSessionStatusInfo{
 				Status:    xiaohongshu.SessionBusy,
 				LastError: "session 正在执行操作",
@@ -1248,8 +1246,7 @@ func (s *XiaohongshuService) tryReuseSession(ctx context.Context) *xiaohongshu.C
 	case xiaohongshu.SessionExpired, xiaohongshu.SessionNotReady, xiaohongshu.SessionUnhealthy:
 		if ctx.Err() != nil {
 			return &xiaohongshu.CreateBrowseSessionResult{
-				Outcome:           "blocked",
-				RecommendedAction: "retry",
+				Outcome: "blocked",
 				Status: xiaohongshu.BrowseSessionStatusInfo{
 					Status:    check.Status,
 					LastError: check.LastError,
@@ -1260,8 +1257,7 @@ func (s *XiaohongshuService) tryReuseSession(ctx context.Context) *xiaohongshu.C
 			return nil
 		}
 		return &xiaohongshu.CreateBrowseSessionResult{
-			Outcome:           "blocked",
-			RecommendedAction: "wait",
+			Outcome: "blocked",
 			Status: xiaohongshu.BrowseSessionStatusInfo{
 				Status:    xiaohongshu.SessionBusy,
 				LastError: "session 正在执行操作",
@@ -1269,8 +1265,7 @@ func (s *XiaohongshuService) tryReuseSession(ctx context.Context) *xiaohongshu.C
 		}
 	default:
 		return &xiaohongshu.CreateBrowseSessionResult{
-			Outcome:           "blocked",
-			RecommendedAction: "recreate",
+			Outcome: "blocked",
 			Status: xiaohongshu.BrowseSessionStatusInfo{
 				Status:    check.Status,
 				LastError: check.LastError,
@@ -1288,8 +1283,7 @@ func (s *XiaohongshuService) CloseBrowseSession(id string) error {
 func buildBrowseSessionReuseResult(previous, renewed xiaohongshu.BrowseSessionInfo, healthCheckedAt time.Time) *xiaohongshu.CreateBrowseSessionResult {
 	if !renewed.ExpiresAt.After(previous.ExpiresAt) {
 		return &xiaohongshu.CreateBrowseSessionResult{
-			Outcome:           "blocked",
-			RecommendedAction: "retry",
+			Outcome: "blocked",
 			Status: xiaohongshu.BrowseSessionStatusInfo{
 				Status:    xiaohongshu.SessionExpired,
 				LastError: "session 已过期",
@@ -1298,9 +1292,8 @@ func buildBrowseSessionReuseResult(previous, renewed xiaohongshu.BrowseSessionIn
 		}
 	}
 	return &xiaohongshu.CreateBrowseSessionResult{
-		Outcome:           "reused",
-		Session:           &renewed,
-		RecommendedAction: "continue",
+		Outcome: "reused",
+		Session: &renewed,
 		Status: xiaohongshu.BrowseSessionStatusInfo{
 			Status:          xiaohongshu.SessionReady,
 			Session:         &renewed,
@@ -1338,6 +1331,16 @@ func (s *XiaohongshuService) SessionState(ctx context.Context, id string) (*xiao
 		return nil, err
 	}
 	return state, nil
+}
+
+// SessionGuidance 只读会话已跟踪的状态给出「下一步该调用哪个工具」，不做页面探测。
+// 用于成功响应：操作能返回，就说明页面可用、状态可信；excludeTool 是刚调用过的工具，不再重复推荐。
+func (s *XiaohongshuService) SessionGuidance(id, excludeTool string) xiaohongshu.BrowseSessionGuidance {
+	session, err := s.browseSessions.Get(id)
+	if err != nil {
+		return xiaohongshu.BrowseSessionGuidance{}
+	}
+	return session.Guidance(excludeTool)
 }
 
 // SessionListFeeds 在 session 浏览器中获取首页 Feeds 列表
