@@ -962,3 +962,48 @@ renderer 死亡熔断是必需项，不能放宽。
 **未完成项（需要所有者动作）**：登录态下的成功路径指引（`search_feeds` → `open_note(result_ref)` →
 `get_note_detail` → `close_page`）尚未在本机服务上跑通 —— 本机 Chrome profile 未登录，
 需要用手机扫码（`get_login_qrcode`）或在服务侧放入 `cookies.json` 后才能补齐这一条 [未见]。
+
+### D.17 本轮优化的一手证据（2026-09-21，本机 x86 + Chrome 153）
+
+**① 热页面复用与 TTL（CDP page 目标数实测）**
+
+| 时点 | page 目标数 | 说明 |
+|:--|--:|:--|
+| `check_login_status` 之后 | **1**（`https://www.xiaohongshu.com/explore`） | 页面被放入热页面缓存，不再立即关闭 |
+| 等 35s（> TTL 30s）后 | **0** | 到期自动关闭，内存归还 |
+
+改前行为：每次 `Release` 立即关页 → 调用间隙 page 目标数恒为 0。
+
+**② 首屏资源结构（真实 `/explore` 与详情页，新 profile，18–22s 观察窗）**
+
+| 场景 | 总下载 | 请求数 | 其中 JS | 其中图片 |
+|:--|--:|--:|--:|--:|
+| 发现页 · 不拦截 | 5.35 MB | 209 | 2.97 MB (44) | 2.00 MB (92) |
+| 发现页 · 项目拦截 | 3.34 MB | 119 | 2.97 MB | ≈0（仅剩 2–3 张 UI 小图） |
+| 详情页 · 不拦截 | 5.50 MB | 207 | 2.97 MB | 2.15 MB (92) |
+| 详情页 · 项目拦截 | 3.34 MB | 122 | 2.97 MB | ≈0 |
+
+**③ 持久 profile 的 HTTP 缓存效应（同一 profile 连续两次访问）**
+
+| 次 | 总下载 | JS 下载 |
+|:--|--:|--:|
+| 第 1 次（冷缓存） | 3.38 MB | 3.01 MB |
+| 第 2 次（热缓存） | **0.27 MB** | 0.11 MB |
+
+**④ 端到端计时（本机 `start_page`，冷/热 profile）**：7.9s / 9.1s / 9.9s —— **本机看不出差别**，
+说明快机上网速与 CPU 都不是瓶颈、耗时被探测与固定等待主导；JS 解析成本在 Pi 的 A53 上是数量级放大 `[推断]`，
+必须真机标定才能定论。
+
+**⑤ 登录路径**：`get_login_qrcode` 首调用 6.3s 并正常返回二维码；第二次调用返回
+`browser busy: owner=login_qrcode_wait`（既有设计：首个调用持有页面等待扫码，最长 4 分钟），
+错误响应带 `next_step=tool: check_login_status`，指引正确。
+
+**⑥ 浏览器指纹对照（裸启动实测，供选型参考）**
+
+| 特征 | 全量 Chrome 153 `--headless` | chrome-headless-shell 153 |
+|:--|:--|:--|
+| `navigator.webdriver` | false | **true** |
+| `navigator.plugins.length` | 5 | **0** |
+| `window.chrome` | object | **undefined** |
+| UA | 含 `HeadlessChrome` | 含 `HeadlessChrome` |
+| 真实 `/explore` PSS | 632.7 MB / 9 进程 | **45.8 MB / 1 进程** |
