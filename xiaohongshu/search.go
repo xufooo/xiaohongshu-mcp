@@ -261,54 +261,9 @@ func (s *SearchAction) searchByUI(ctx context.Context, page *hrod.Page, counter 
 		return fmt.Errorf("提交搜索失败: %w", err)
 	}
 
-	if err := waitForSearchResultsWithURLFallback(keyword, baseline, searchResultsFallbackHooks{
-		wait: func(b searchResultsBaseline) error {
-			return waitForSearchResults(ctx, page, counter, keyword, b)
-		},
-		pageErr: page.Err,
-		navigate: func(url string) error {
-			if info, infoErr := page.Rod.Info(); infoErr == nil && info != nil {
-				if isSearchResultPage(info.URL) {
-					return errAlreadyOnSearchPage
-				}
-			}
-			counter.reset()
-			return page.Navigate(url)
-		},
-	}); err != nil {
-		return err
-	}
-	return nil
-}
-
-type searchResultsFallbackHooks struct {
-	wait     func(searchResultsBaseline) error
-	pageErr  func() error
-	navigate func(string) error
-}
-
-var errAlreadyOnSearchPage = errors.New("already on search page")
-
-func waitForSearchResultsWithURLFallback(keyword string, baseline searchResultsBaseline, hooks searchResultsFallbackHooks) error {
-	err := hooks.wait(baseline)
-	if err == nil {
-		return nil
-	}
-	if IsFatalRendererError(err) {
-		return err
-	}
-	if ctxErr := hooks.pageErr(); ctxErr != nil {
-		return fmt.Errorf("等待搜索结果失败: %w (context: %w)", err, ctxErr)
-	}
-	logrus.Warnf("UI搜索结果未就绪，使用搜索URL兜底: %v", err)
-	if navErr := hooks.navigate(makeSearchURL(keyword)); navErr != nil {
-		if errors.Is(navErr, errAlreadyOnSearchPage) {
-			return fmt.Errorf("等待搜索结果失败: %w; 已在搜索页不重复导航", err)
-		}
-		return fmt.Errorf("等待搜索结果失败: %w; URL兜底导航失败: %w", err, navErr)
-	}
-	if waitErr := hooks.wait(searchResultsBaseline{}); waitErr != nil {
-		return fmt.Errorf("等待搜索结果失败: %w; URL兜底等待搜索结果失败: %w", err, waitErr)
+	// 只走真实 UI 搜索路径：未就绪就显式报错，不再直接跳搜索 URL（那会绕过防封禁设计）。
+	if err := waitForSearchResults(ctx, page, counter, keyword, baseline); err != nil {
+		return fmt.Errorf("等待搜索结果失败: %w", err)
 	}
 	return nil
 }
@@ -1523,16 +1478,6 @@ func prepareSearchPage(infoFn func() string, navigateFn func(string) error) (str
 	return decision.SearchSelector, nil
 }
 
-func makeSearchURL(keyword string) string {
-
-	values := url.Values{}
-	values.Set("keyword", keyword)
-	values.Set("source", "web_explore_feed")
-
-	// From https://www.xiaohongshu.com/explore, the current search button routes to
-	// /search_result_ai while keeping source=web_explore_feed.
-	return fmt.Sprintf("https://www.xiaohongshu.com/search_result_ai?%s", values.Encode())
-}
 
 // isCurrentSearchPage 检查页面 URL 是否已在指定关键词搜索结果上
 func isCurrentSearchPage(page *hrod.Page, keyword string) bool {

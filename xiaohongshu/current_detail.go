@@ -80,13 +80,11 @@ const xhsProbeCollectionJS = `
 		};
 `
 
-const xhsProbeRiskJS = `
+// xhsProbeRiskJS 生成页面内风险文本探针；关键词与 Go 侧风控判定同源。
+func xhsProbeRiskJS() string {
+	return `
 		const riskOf = (text) => {
-			const riskKeywords = [
-				"登录已过期", "登录失效", "请先登录", "请登录", "扫码登录",
-				"验证码", "滑块", "安全验证", "请验证", "人机验证",
-				"操作频繁", "访问太频繁", "账号异常"
-			];
+			const riskKeywords = ` + riskKeywordsJSList() + `;
 			const risk = riskKeywords.find((keyword) => text.includes(keyword)) || "";
 			const riskIndex = risk ? text.indexOf(risk) : -1;
 			return risk
@@ -94,6 +92,7 @@ const xhsProbeRiskJS = `
 				: "";
 		};
 `
+}
 
 const xhsSearchInputReadyJS = `
 		const searchInputReady = (selector) => {
