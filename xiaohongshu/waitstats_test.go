@@ -58,31 +58,40 @@ func TestWaitSamplesAreWindowed(t *testing.T) {
 	}
 }
 
-// 页面信号窗口由本机探测成本推导：慢机器必须用更长的安静窗口。
-func TestPageSignalWindowTracksProbeCost(t *testing.T) {
+// 页面信号窗口：settle 是固定合并窗（不预测机器速度），max 才随本机探测成本给。
+func TestPageSignalWindowSemantics(t *testing.T) {
 	isolateWaitStats(t)
 
-	// 无样本：退回默认值。
-	settle, maxWait := pageSignalWindow(XHSReadyDetail, 300*time.Millisecond, 3*time.Second)
-	if settle != 300*time.Millisecond || maxWait != 3*time.Second {
-		t.Fatalf("默认窗口 = %v/%v", settle, maxWait)
+	// 无样本：settle 用合并窗，max 用调用方默认值。
+	settle, maxWait := pageSignalWindow("ready:detail", 500*time.Millisecond)
+	if settle != pageSignalDebounce || maxWait != 500*time.Millisecond {
+		t.Fatalf("无样本窗口 = %v/%v", settle, maxWait)
 	}
 
-	// 探测很便宜（x86，0.6ms）：clamp 到下限 120ms。
+	// 探测便宜（x86 0.6ms）：max 取下限 500ms。
 	for i := 0; i < waitSampleWindow; i++ {
-		observeWait("probe:"+string(XHSReadyDetail), 600*time.Microsecond)
+		observeWait("probe:ready:detail", 600*time.Microsecond)
 	}
-	if settle, maxWait = pageSignalWindow(XHSReadyDetail, 300*time.Millisecond, 3*time.Second); settle != 120*time.Millisecond || maxWait != 360*time.Millisecond {
-		t.Fatalf("快机窗口 = %v/%v, 期望 120ms/360ms", settle, maxWait)
+	if settle, maxWait = pageSignalWindow("ready:detail", 500*time.Millisecond); settle != pageSignalDebounce || maxWait != 500*time.Millisecond {
+		t.Fatalf("快机窗口 = %v/%v", settle, maxWait)
 	}
 
-	// 探测很贵（Pi，50ms）：20×50ms = 1s。
+	// 探测贵（Pi 50ms）：5×50ms = 250ms → 仍取 500ms 下限。
 	isolateWaitStats(t)
 	for i := 0; i < waitSampleWindow; i++ {
-		observeWait("probe:"+string(XHSReadyDetail), 50*time.Millisecond)
+		observeWait("probe:ready:detail", 50*time.Millisecond)
 	}
-	if settle, maxWait = pageSignalWindow(XHSReadyDetail, 300*time.Millisecond, 3*time.Second); settle != time.Second || maxWait != 3*time.Second {
-		t.Fatalf("慢机窗口 = %v/%v, 期望 1s/3s", settle, maxWait)
+	if _, maxWait = pageSignalWindow("ready:detail", 500*time.Millisecond); maxWait != 500*time.Millisecond {
+		t.Fatalf("Pi 窗口 max = %v, 期望下限 500ms", maxWait)
+	}
+
+	// 探测很贵（x86 实测 274ms）：5×274ms ≈ 1.37s，落在上下限之间。
+	isolateWaitStats(t)
+	for i := 0; i < waitSampleWindow; i++ {
+		observeWait("probe:ready:detail", 274*time.Millisecond)
+	}
+	if _, maxWait = pageSignalWindow("ready:detail", 500*time.Millisecond); maxWait != 1370*time.Millisecond {
+		t.Fatalf("贵探测 max = %v, 期望 1.37s", maxWait)
 	}
 }
 

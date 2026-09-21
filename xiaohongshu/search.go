@@ -20,7 +20,6 @@ import (
 
 const (
 	searchInputWaitTimeout         = 60 * time.Second
-	searchResultsWaitTimeout       = 45 * time.Second
 	searchFilterRefreshWaitTimeout = 20 * time.Second
 	aiResponseWaitTimeout          = 3 * time.Second
 	aiResponsePollInterval         = 500 * time.Millisecond
@@ -284,49 +283,41 @@ func captureSearchResultsBaseline(ctx context.Context, page *hrod.Page, counter 
 	}, nil
 }
 
+// waitForSearchResults 等搜索结果真正落到「关键词对应的那批数据」。
+// 用统一机制（等事件 + 无进展才报错），不再固定 300ms 轮询 + 预测超时。
 func waitForSearchResults(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, keyword string, baseline searchResultsBaseline) error {
-	waitStarted := time.Now()
-	defer func() { observeWait("search_results", time.Since(waitStarted)) }()
-	deadline := time.Now().Add(searchResultsWaitTimeout)
 	var last searchResultsKeywordProbe
 	var lastErr error
 
-	for time.Now().Before(deadline) {
-		if err := page.Err(); err != nil {
-			return err
-		}
-
-		probe, err := probeSearchResultsKeyword(ctx, page, counter, keyword)
-		if err != nil {
-			if IsFatalRendererError(err) {
-				return err
+	return waitForCondition(waitRound{
+		Kind: "search_results",
+		Page: page,
+		Probe: func() (string, bool, error) {
+			probe, err := probeSearchResultsKeyword(ctx, page, counter, keyword)
+			if err != nil {
+				lastErr = err
+				return "", false, err
 			}
-			lastErr = err
-		} else {
-			last = probe
 			lastErr = nil
-			if searchResultsReady(probe, baseline) {
-				return nil
+			last = probe
+			return probe.StateSignature + "|" + probe.DOMSignature, searchResultsReady(probe, baseline), nil
+		},
+		OnExhausted: func() error {
+			ceiling, _ := waitCeilingForKind("search_results")
+			if lastErr != nil {
+				return fmt.Errorf("等待搜索结果超时(%s): %w", ceiling, lastErr)
 			}
-		}
-
-		if err := page.Sleep(300 * time.Millisecond); err != nil {
-			return err
-		}
-	}
-
-	if lastErr != nil {
-		return fmt.Errorf("等待搜索结果超时(%s): %w", searchResultsWaitTimeout, lastErr)
-	}
-	if last.HasStateKeyword && !last.KeywordMatched {
-		return fmt.Errorf("搜索结果关键词不匹配: expected=%q state_keyword=%q url_keyword=%q input_keyword=%q visible_cards=%v",
-			keyword, last.StateKeyword, last.URLKeyword, last.InputKeyword, last.HasVisibleCards)
-	}
-	if last.HasStateKeyword && !last.HasStateFeeds {
-		return fmt.Errorf("搜索状态结果未加载: keyword=%q state_keyword=%q", keyword, last.StateKeyword)
-	}
-	return fmt.Errorf("搜索结果未加载: keyword=%q state_keyword=%q url_keyword=%q input_keyword=%q visible_cards=%v",
-		keyword, last.StateKeyword, last.URLKeyword, last.InputKeyword, last.HasVisibleCards)
+			if last.HasStateKeyword && !last.KeywordMatched {
+				return fmt.Errorf("搜索结果关键词不匹配: expected=%q state_keyword=%q url_keyword=%q input_keyword=%q visible_cards=%v",
+					keyword, last.StateKeyword, last.URLKeyword, last.InputKeyword, last.HasVisibleCards)
+			}
+			if last.HasStateKeyword && !last.HasStateFeeds {
+				return fmt.Errorf("搜索状态结果未加载: keyword=%q state_keyword=%q", keyword, last.StateKeyword)
+			}
+			return fmt.Errorf("搜索结果未加载: keyword=%q state_keyword=%q url_keyword=%q input_keyword=%q visible_cards=%v",
+				keyword, last.StateKeyword, last.URLKeyword, last.InputKeyword, last.HasVisibleCards)
+		},
+	})
 }
 
 type searchResultsKeywordProbe struct {
@@ -346,7 +337,7 @@ type searchResultsKeywordProbe struct {
 }
 
 func probeSearchResultsKeyword(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, keyword string) (searchResultsKeywordProbe, error) {
-	obj, err := evalJS(ctx, counter, page, `(keyword, feedCardSelector, searchInputSelector, markedSearchInputSelector) => {` + xhsVisibleJS + `
+	obj, err := evalJS(ctx, counter, page, `(keyword, feedCardSelector, searchInputSelector, markedSearchInputSelector) => {`+xhsVisibleJS+`
 		const unwrap = (value) => {
 			if (value && typeof value === "object") {
 				if ("value" in value) return value.value;
@@ -654,7 +645,7 @@ func waitForSearchInput(ctx context.Context, page *hrod.Page, counter *evalTimeo
 }
 
 func probeSearchInput(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, searchSelector, primarySelector string) (searchInputProbe, error) {
-	obj, err := evalJS(ctx, counter, page, `(searchSelector, primarySelector) => {` + xhsVisibleJS + `
+	obj, err := evalJS(ctx, counter, page, `(searchSelector, primarySelector) => {`+xhsVisibleJS+`
 		const label = (el) => [
 			el.tagName,
 			el.getAttribute("type") || "",
@@ -1455,7 +1446,6 @@ func prepareSearchPage(infoFn func() string, navigateFn func(string) error) (str
 	}
 	return decision.SearchSelector, nil
 }
-
 
 // isCurrentSearchPage 检查页面 URL 是否已在指定关键词搜索结果上
 func isCurrentSearchPage(page *hrod.Page, keyword string) bool {

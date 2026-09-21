@@ -365,7 +365,7 @@ func submitPublish(ctx context.Context, page *hrod.Page, title, content string, 
 		return err
 	}
 
-	return waitPublishSuccess(page, 15*time.Second)
+	return waitPublishSuccess(page)
 }
 
 // publishButton 新版发布控件（xhs-publish-btn）：内部按钮在 closed shadow root 里，
@@ -382,22 +382,33 @@ func clickPublishButton(page *hrod.Page) error {
 	return clickPublishWidget(page, btn.elem)
 }
 
-// waitPublishSuccess 轮询等待发布成功：小红书发布成功后会跳转离开发布表单页
-// （URL 不再含 /publish/publish）。超时仍未跳转 → 判定发布失败。
-func waitPublishSuccess(page *hrod.Page, timeout time.Duration) error {
-	waitStarted := time.Now()
-	defer func() { observeWait("publish_success", time.Since(waitStarted)) }()
-	deadline := time.Now().Add(timeout)
-	for {
-		if info, err := page.Rod.Info(); err == nil && !strings.Contains(info.URL, "/publish/publish") {
-			slog.Info("发布成功，已跳转离开发布页", "url", info.URL)
-			return nil
-		}
-		if time.Now().After(deadline) {
-			return errors.New("发布未确认成功：点击发布后未跳转离开发布页（可能校验未过或被拦截）")
-		}
-		page.SleepRandom(400*time.Millisecond, 600*time.Millisecond)
-	}
+// waitPublishSuccess 等发布成功的信号：小红书发布成功后会跳转离开发布表单页
+// （URL 不再含 /publish/publish）。用统一机制等待（等事件 + 无进展才报错），
+// 不再固定 15s + 固定间隔轮询。
+func waitPublishSuccess(page *hrod.Page) error {
+	var lastURL string
+	return waitForCondition(waitRound{
+		Kind: "publish_success",
+		Page: page,
+		Probe: func() (string, bool, error) {
+			info, err := page.Rod.Info()
+			if err != nil {
+				return "", false, err
+			}
+			lastURL = info.URL
+			return info.URL, publishLeftForm(info.URL), nil
+		},
+		OnReady: func() { slog.Info("发布成功，已跳转离开发布页", "url", lastURL) },
+		OnExhausted: func() error {
+			return errors.Errorf("发布未确认成功：点击发布后未跳转离开发布页（可能校验未过或被拦截）: url=%s", lastURL)
+		},
+	})
+}
+
+// publishLeftForm 判断 URL 是否已经离开发布表单页——发布成功的信号。
+// 独立成函数是为了能被测试钉住（发布链路不便反复真跑）。
+func publishLeftForm(rawURL string) bool {
+	return rawURL != "" && !strings.Contains(rawURL, "/publish/publish")
 }
 
 // waitForPublishButtonClickable 等待新版 xhs-publish-btn 或旧版 button.bg-red 可点击。

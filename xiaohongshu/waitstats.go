@@ -99,23 +99,28 @@ func waitCeilingForKind(kind string) (time.Duration, bool) {
 	return ceiling, ok
 }
 
-// pageSignalWindow 给出「页面变化信号」的 settle 与 max：
-// 由本机实测的探测成本推导——探测越贵，安静窗口越长（避免在慢机器上来回打转）。
-// 这是**给自己定节奏**（一次探测要占机器多久），不是预测页面何时就绪；
-// 没有样本时退回默认值。
-func pageSignalWindow(kind XHSReadyKind, fallbackSettle, fallbackMax time.Duration) (time.Duration, time.Duration) {
-	p90, ok := waitPercentile("probe:"+string(kind), 0.9)
+// pageSignalDebounce 是「等这一阵变化停下来」的合并窗（debounce）：
+// 变化一来就重新计时，所以它不预测机器速度——窗短了只是多探测一两次，
+// 而探测本身要花时间，天然就限了速（这就是不需要按探测成本放大它的原因）。
+const pageSignalDebounce = 120 * time.Millisecond
+
+// pageSignalWindow 给出「页面变化信号」的 (settle, max)：
+//   - settle：DOM 停下来多久算这一阵结束（固定合并窗，见上）；
+//   - max：页面一直不安静时的兜底节奏，按本机实测探测成本给（5×p90，clamp [0.5s, 3s]），
+//     免得在慢机器上把时间花在探测上；没有样本时用调用方给的默认值。
+func pageSignalWindow(kind string, fallbackMax time.Duration) (time.Duration, time.Duration) {
+	p90, ok := waitPercentile("probe:"+kind, 0.9)
 	if !ok {
-		return fallbackSettle, fallbackMax
+		return pageSignalDebounce, fallbackMax
 	}
-	settle := 20 * p90
-	if settle < 120*time.Millisecond {
-		settle = 120 * time.Millisecond
+	maxWait := 5 * p90
+	if maxWait < 500*time.Millisecond {
+		maxWait = 500 * time.Millisecond
 	}
-	if settle > 2*time.Second {
-		settle = 2 * time.Second
+	if maxWait > 3*time.Second {
+		maxWait = 3 * time.Second
 	}
-	return settle, 3 * settle
+	return pageSignalDebounce, maxWait
 }
 
 // WaitStatsSnapshot 返回各类等待的观测快照（供 get_page_state.browser.waits 暴露）。
