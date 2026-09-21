@@ -418,46 +418,12 @@ func (m *Mouse) ClickNoScroll(el *rod.Element) error {
 }
 
 // Scroll scrolls by deltaY (and optionally deltaX) in human-like increments.
-// maxCoverWaitAttempts 是"目标可见但被浮层盖住"时等待浮层让开的次数上限
-// （每次 200-400ms，约 6-9s；期间按 Escape 尝试关闭引导浮层）。
-const maxCoverWaitAttempts = 24
-
-// waitCoverCleared 等覆盖在目标上的浮层让开：
-// 先等它自己消失，等不到就按 Escape（关掉引导/气泡的通用做法，比乱点安全），
-// 一直不让开就明确报出遮挡物是谁——比原来"did not become visible"这种误导性错误可诊断得多。
-// stillCovered 返回 (是否仍被遮挡, 当前遮挡物描述)。
-func (m *Mouse) waitCoverCleared(target *rod.Element, cover string, stillCovered func() (bool, string)) (bool, error) {
-	for attempt := 0; attempt < maxCoverWaitAttempts; attempt++ {
-		// 浮层不会自己消失时，点它自己的关闭控件（实测小红书"新功能引导"就是这种：
-		// 等 9s、按 Escape 全都无效，点 aria-label=关闭 的 × 才有效）。
-		if attempt == 2 || attempt == 8 {
-			if clicked, desc, err := m.dismissCoverDialog(target); err != nil {
-				if clicked && desc != "" {
-					cover = desc
-				}
-			}
-		}
-		if err := sleepWithContext(m.ctx, randDuration(200*time.Millisecond, 400*time.Millisecond)); err != nil {
-			return false, err
-		}
-		if attempt == 4 {
-			if err := m.boundPage().Keyboard.Press(input.Escape); err != nil {
-				return false, err
-			}
-		}
-		covered, current := stillCovered()
-		if !covered {
-			return true, nil
-		}
-		if current != "" {
-			cover = current
-		}
-	}
-	if cover == "" {
-		cover = "未知浮层"
-	}
-	return false, fmt.Errorf("目标被浮层遮挡且未自行消失: %s", cover)
-}
+// 点掉遮挡浮层后，只观察这个动作是否生效：遮挡一消失就继续，最长等这么多次。
+// 这是"验证动作效果"，不是重试间隔——期间不做任何新动作。
+const (
+	coverEffectStep   = 150 * time.Millisecond
+	coverEffectChecks = 8
+)
 
 func (m *Mouse) Scroll(deltaX, deltaY float64) error {
 	if deltaY == 0 && deltaX == 0 {
@@ -671,6 +637,9 @@ func (m *Mouse) ScrollIntoView(el *rod.Element) error {
 		}
 		return errors.New("element did not become visible after maximum window scroll attempts")
 	}
+	// dismissedCover 记录已经点过关闭控件的浮层：同一个浮层再挡住就直接报错，
+	// 避免"点不动就反复点/换招"这种兜底式循环。
+	dismissedCover := ""
 	for i := 0; i < maxAttempts; i++ {
 		before, err := readProbe()
 		if err != nil {
@@ -695,19 +664,41 @@ func (m *Mouse) ScrollIntoView(el *rod.Element) error {
 		var deltaY float64
 		if centerVisible && !before.centerHit {
 			if before.coverIsDialog {
-				// 对话框/引导浮层盖住目标：滚动改变不了遮挡（浮层跟着字段走），
-				// 等它让开、等不到就点它自己的关闭控件（实测小红书"新功能引导"）。
-				if _, err := m.waitCoverCleared(el, before.cover, func() (bool, string) {
+				// 浮层盖住目标（实测小红书"图片可以编辑啦"引导）：滚动改变不了遮挡，
+				// 因为浮层跟着字段走。**一种遮挡只做一个确定动作**——点浮层自己的关闭控件；
+				// 同一个浮层点过一次还在，就直接把它报出来，不再等待、不再换策略。
+				if before.cover == dismissedCover {
+					return fmt.Errorf("目标被浮层遮挡，其关闭控件无效: %s", before.cover)
+				}
+				dismissedCover = before.cover
+				if err := m.dismissCoverDialog(el); err != nil {
+					return fmt.Errorf("关闭遮挡目标的浮层失败(%s): %w", before.cover, err)
+				}
+				// 只观察这一次动作是否生效：遮挡一消失就继续，超时即如实报告。
+				// 期间不做任何新动作（不重复点、不按 Escape），所以不是兜底重试。
+				cleared := false
+				for check := 0; check < coverEffectChecks; check++ {
+					if err := sleepWithContext(m.ctx, coverEffectStep); err != nil {
+						return err
+					}
 					next, probeErr := readProbe()
-					if probeErr != nil || !next.found {
-						return true, before.cover
+					if probeErr != nil {
+						break
+					}
+					if !next.found {
+						cleared = true
+						break
 					}
 					cx := (next.target.left + next.target.right) / 2
 					cy := (next.target.top + next.target.bottom) / 2
-					inside := cx >= next.visible.left && cx <= next.visible.right && cy >= next.visible.top && cy <= next.visible.bottom
-					return inside && !next.centerHit, next.cover
-				}); err != nil {
-					return err
+					inView := cx >= next.visible.left && cx <= next.visible.right && cy >= next.visible.top && cy <= next.visible.bottom
+					if !inView || next.centerHit {
+						cleared = true
+						break
+					}
+				}
+				if !cleared {
+					return fmt.Errorf("目标仍被浮层遮挡: %s", before.cover)
 				}
 				continue
 			}
@@ -716,9 +707,6 @@ func (m *Mouse) ScrollIntoView(el *rod.Element) error {
 			invalidHitRect := before.hitRect.right-before.hitRect.left <= 0 || before.hitRect.bottom-before.hitRect.top <= 0
 			fullHeightHit := before.hitRect.top <= before.visible.top+boundaryTolerance && before.hitRect.bottom >= before.visible.bottom-boundaryTolerance
 			if invalidHitRect || fullHeightHit {
-				if err := sleepWithContext(m.ctx, randDuration(100*time.Millisecond, 300*time.Millisecond)); err != nil {
-					return err
-				}
 				deltaY = centerY - (before.visible.top+before.visible.bottom)/2
 			} else if before.hitRect.bottom >= before.visible.bottom-boundaryTolerance {
 				deltaY = centerY - before.hitRect.top + boundaryTolerance
