@@ -478,17 +478,22 @@ func verifyCommentSubmission(page *hrod.Page, content string, initialMatchCount 
 	return fmt.Errorf("等待评论出现在评论区超时")
 }
 
-func getCommentSubmissionState(page *hrod.Page, content string) (commentSubmissionState, error) {
-	var state commentSubmissionState
-	result, err := page.Eval(`(content) => {
+// commentSubmissionStateJS 生成评论提交状态探针；失败关键词与风控表同源。
+func commentSubmissionStateJS() string {
+	return `(content) => {
 		const commentSelector = ".comments-container .parent-comment, .comments-container .comment-item, .comments-container .comment, .comments-container .sub-comment, .comments-container .reply-item";
 		const matchCount = Array.from(document.querySelectorAll(commentSelector))
 			.filter((el) => (el.innerText || el.textContent || "").includes(content)).length;
-		const errorKeywords = ["操作频繁", "评论过于频繁", "请验证", "滑块验证", "安全验证", "评论失败", "发送失败", "提交失败", "禁止评论"];
+		const errorKeywords = ` + writeFailureKeywords("评论") + `;
 		const pageText = document.body?.innerText || "";
 		const error = errorKeywords.find((keyword) => pageText.includes(keyword)) || "";
 		return JSON.stringify({ matchCount, error });
-	}`, content)
+	}`
+}
+
+func getCommentSubmissionState(page *hrod.Page, content string) (commentSubmissionState, error) {
+	var state commentSubmissionState
+	result, err := page.Eval(commentSubmissionStateJS(), content)
 	if err != nil {
 		return state, err
 	}

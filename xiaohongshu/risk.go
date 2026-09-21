@@ -189,29 +189,50 @@ func riskSignalFromReadyProbe(probe xhsReadyProbe) RiskSignal {
 	return signal
 }
 
+// riskKeywordGroups 是文本风控关键词的唯一来源：
+// Go 侧分类、页面内 JS 探针、写操作失败判定都从这里取，避免多份副本各自漂移。
+// 顺序即优先级（如「滑块验证」先命中滑块，再考虑验证码）。
+var riskKeywordGroups = []struct {
+	Kind     RiskKind
+	Keywords []string
+}{
+	{RiskLoginExpired, []string{"登录已过期", "登录失效", "请先登录", "请登录", "扫码登录"}},
+	{RiskSliderChallenge, []string{"滑块"}},
+	{RiskCaptcha, []string{"验证码", "安全验证", "请验证", "人机验证"}},
+	{RiskAccessAnomaly, []string{"操作频繁", "访问太频繁", "账号异常"}},
+}
+
 // RiskKindFromText 用风险关键词表把页面文本分类成 RiskKind。
-// 关键词表只在这里维护：页面探测和「失败后该调用哪个工具」共用同一份判定。
 func RiskKindFromText(text string) RiskKind {
-	switch {
-	case strings.Contains(text, "登录已过期") ||
-		strings.Contains(text, "登录失效") ||
-		strings.Contains(text, "请先登录") ||
-		strings.Contains(text, "请登录") ||
-		strings.Contains(text, "扫码登录"):
-		return RiskLoginExpired
-	case strings.Contains(text, "滑块"):
-		return RiskSliderChallenge
-	case strings.Contains(text, "验证码") ||
-		strings.Contains(text, "安全验证") ||
-		strings.Contains(text, "请验证") ||
-		strings.Contains(text, "人机验证"):
-		return RiskCaptcha
-	case strings.Contains(text, "操作频繁") ||
-		strings.Contains(text, "访问太频繁") ||
-		strings.Contains(text, "账号异常"):
-		return RiskAccessAnomaly
+	for _, group := range riskKeywordGroups {
+		for _, keyword := range group.Keywords {
+			if strings.Contains(text, keyword) {
+				return group.Kind
+			}
+		}
 	}
 	return RiskNone
+}
+
+// riskKeywordsJSList 生成页面内探针用的关键词 JSON 数组（与 Go 侧判定同源）。
+func riskKeywordsJSList() string {
+	all := make([]string, 0, 16)
+	for _, group := range riskKeywordGroups {
+		all = append(all, group.Keywords...)
+	}
+	data, _ := json.Marshal(all) // []string 不会序列化失败
+	return string(data)
+}
+
+// writeFailureKeywords 返回写操作失败/被限流的关键词 JSON 数组：
+// 公共词 + 动作专属词（评论/回复各自的后缀）。
+func writeFailureKeywords(action string) string {
+	keywords := []string{
+		"操作频繁", "请验证", "滑块验证", "安全验证", "发送失败", "提交失败",
+		action + "过于频繁", action + "失败", "禁止" + action,
+	}
+	data, _ := json.Marshal(keywords)
+	return string(data)
 }
 
 func riskKindReason(kind RiskKind) string {

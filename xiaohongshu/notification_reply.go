@@ -161,6 +161,18 @@ func waitNotificationReplyInput(ctx context.Context, page *hrod.Page, row *hrod.
 
 // waitNotificationReplyAccepted 提交后轮询确认：目标行内 textarea.comment-input 消失/隐藏即成功；
 // 同一次 Eval 顺带检查明确的风控/发送失败提示。最长等待 8 秒，不重试发送。
+// replySubmitStateJS 生成回复提交状态探针；失败关键词与风控表同源。
+func replySubmitStateJS() string {
+	return `() => {
+			const input = this.querySelector('textarea.comment-input');
+			const gone = !input || input.offsetParent === null || input.offsetWidth === 0 || input.offsetHeight === 0;
+			const keywords = ` + writeFailureKeywords("回复") + `;
+			const pageText = document.body?.innerText || "";
+			const error = keywords.find((keyword) => pageText.includes(keyword)) || "";
+			return JSON.stringify({ gone, error });
+		}`
+}
+
 func waitNotificationReplyAccepted(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, row *hrod.Element) error {
 	if row == nil {
 		return fmt.Errorf("等待回复提交确认失败: 目标通知行缺失")
@@ -170,14 +182,7 @@ func waitNotificationReplyAccepted(ctx context.Context, page *hrod.Page, counter
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		obj, err := evalElementJS(ctx, counter, row, `() => {
-			const input = this.querySelector('textarea.comment-input');
-			const gone = !input || input.offsetParent === null || input.offsetWidth === 0 || input.offsetHeight === 0;
-			const keywords = ["操作频繁", "回复过于频繁", "请验证", "滑块验证", "安全验证", "回复失败", "发送失败", "提交失败", "禁止回复"];
-			const pageText = document.body?.innerText || "";
-			const error = keywords.find((keyword) => pageText.includes(keyword)) || "";
-			return JSON.stringify({ gone, error });
-		}`)
+		obj, err := evalElementJS(ctx, counter, row, replySubmitStateJS())
 		if err == nil && obj != nil {
 			var state struct {
 				Gone  bool   `json:"gone"`

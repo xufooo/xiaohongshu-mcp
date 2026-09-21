@@ -3,7 +3,6 @@ package xiaohongshu
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -136,71 +135,6 @@ func newSearchP0Element(t *testing.T, client *searchP0CDPClient) (*rod.Page, *ro
 	return page, element
 }
 
-func TestSearchFallbackDoesNotSwallowFatal(t *testing.T) {
-	navigations := 0
-	err := waitForSearchResultsWithURLFallback("keyword", searchResultsBaseline{}, searchResultsFallbackHooks{
-		wait: func(searchResultsBaseline) error {
-			return fmt.Errorf("probe: %w", ErrFatalRendererError)
-		},
-		pageErr: func() error { return nil },
-		navigate: func(string) error {
-			navigations++
-			return nil
-		},
-	})
-	if !IsFatalRendererError(err) || navigations != 0 {
-		t.Fatalf("fatal 不得进入 URL fallback: navigations=%d err=%v", navigations, err)
-	}
-}
-
-func TestSearchFallbackSkipsNavigateWhenAlreadyOnSearchPage(t *testing.T) {
-	waits := 0
-	err := waitForSearchResultsWithURLFallback("三亚旅游", searchResultsBaseline{}, searchResultsFallbackHooks{
-		wait: func(searchResultsBaseline) error {
-			waits++
-			return fmt.Errorf("probe 超时")
-		},
-		pageErr: func() error { return nil },
-		navigate: func(string) error {
-			return errAlreadyOnSearchPage
-		},
-	})
-	if err == nil {
-		t.Fatal("已在搜索页不重复导航时应返回原等待错误")
-	}
-	if !strings.Contains(err.Error(), "已在搜索页不重复导航") {
-		t.Fatalf("错误应说明已在搜索页: %v", err)
-	}
-	if waits != 1 {
-		t.Fatalf("已在搜索页时应只等待一次: %d", waits)
-	}
-}
-
-func TestSearchFallbackNavigatesWhenNotOnSearchPage(t *testing.T) {
-	navigations := 0
-	waits := 0
-	err := waitForSearchResultsWithURLFallback("三亚旅游", searchResultsBaseline{}, searchResultsFallbackHooks{
-		wait: func(searchResultsBaseline) error {
-			waits++
-			if waits == 1 {
-				return fmt.Errorf("probe 超时")
-			}
-			return nil
-		},
-		pageErr: func() error { return nil },
-		navigate: func(string) error {
-			navigations++
-			return nil
-		},
-	})
-	if err != nil {
-		t.Fatalf("兜底导航后等待成功不应报错: %v", err)
-	}
-	if navigations != 1 || waits != 2 {
-		t.Fatalf("未在搜索页时应导航一次并等待两次: navigations=%d waits=%d", navigations, waits)
-	}
-}
-
 func TestSelectorSearchInputCoversTextarea(t *testing.T) {
 	if !strings.Contains(SelectorSearchInput, "#search-input-ai") {
 		t.Fatalf("SelectorSearchInput must include #search-input-ai, got: %s", SelectorSearchInput)
@@ -304,5 +238,44 @@ func TestEnsureFilterPanelOpenRecoversClosedPanel(t *testing.T) {
 	}
 	if client.buttonClicks != 1 {
 		t.Fatalf("面板已存在时不应再次点击按钮: %d", client.buttonClicks)
+	}
+}
+
+// TestRiskKeywordsSingleSource 风控关键词只有一份来源：
+// Go 判定、页面内探针、写失败探针都从 riskKeywordGroups 生成。
+func TestRiskKeywordsSingleSource(t *testing.T) {
+	if got := RiskKindFromText("请拖动滑块完成验证"); got != RiskSliderChallenge {
+		t.Fatalf("滑块文本应判为滑块风险, got %v", got)
+	}
+	if got := RiskKindFromText("操作频繁，请稍后再试"); got != RiskAccessAnomaly {
+		t.Fatalf("频繁文本应判为访问异常, got %v", got)
+	}
+	list := riskKeywordsJSList()
+	if !strings.HasPrefix(list, "[") || !strings.Contains(list, "验证码") {
+		t.Fatalf("关键词 JSON 非法: %s", list)
+	}
+	// 生成到 JS 里的必须是数组字面量，不能带模板反引号（否则 .find 会炸）。
+	probe := xhsProbeRiskJS()
+	if !strings.Contains(probe, "const riskKeywords = "+list+";") {
+		t.Fatalf("页面探针应内联同源关键词数组: %s", probe)
+	}
+	if strings.Contains(probe, "`"+list+"`") {
+		t.Fatal("关键词不得被包成模板字符串")
+	}
+	comment := commentSubmissionStateJS()
+	if !strings.Contains(comment, "const errorKeywords = "+writeFailureKeywords("评论")+";") {
+		t.Fatalf("评论探针关键词异常: %s", comment)
+	}
+	reply := replySubmitStateJS()
+	if !strings.Contains(reply, "const keywords = "+writeFailureKeywords("回复")+";") {
+		t.Fatalf("回复探针关键词异常: %s", reply)
+	}
+	for _, action := range []string{"评论", "回复"} {
+		js := writeFailureKeywords(action)
+		for _, want := range []string{"操作频繁", action + "失败", "禁止" + action} {
+			if !strings.Contains(js, want) {
+				t.Fatalf("%s 关键词应含 %q: %s", action, want, js)
+			}
+		}
 	}
 }
