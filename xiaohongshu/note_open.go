@@ -179,6 +179,10 @@ func waitFeedDetailVisibleWith(
 	probe func(context.Context) (currentFeedDetailProbe, error),
 	sleep func(context.Context, time.Duration, time.Duration) error,
 ) error {
+	started := time.Now()
+	probes := 0
+	defer func() { observeWaitWithProbes("feed_detail_visible", time.Since(started), probes) }()
+
 	deadline := time.Now().Add(feedDetailVisibleWaitBudget)
 	waitCtx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
@@ -193,6 +197,7 @@ func waitFeedDetailVisibleWith(
 		if err := pageErr(); err != nil {
 			return err
 		}
+		probes++
 		probeResult, err := probe(waitCtx)
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
