@@ -425,3 +425,24 @@ func TestStartPageNextStepByRisk(t *testing.T) {
 		})
 	}
 }
+
+// TestLoginFlowNextStep 登录流程的两步工具也要给出下一步：扫码→check_login_status→start_page。
+func TestLoginFlowNextStep(t *testing.T) {
+	step := xiaohongshu.NextStep{Tool: "check_login_status", Reason: "二维码已生成"}
+	contents := appendNextStep([]MCPContent{{Type: "text", Text: "扫码登录"}}, step)
+	if len(contents) != 2 {
+		t.Fatalf("应追加一段 next_step 文本: %+v", contents)
+	}
+	var payload struct {
+		NextStep xiaohongshu.NextStep `json:"next_step"`
+	}
+	if err := json.Unmarshal([]byte(contents[1].Text), &payload); err != nil {
+		t.Fatalf("next_step 块解析失败: %v\n%s", err, contents[1].Text)
+	}
+	if payload.NextStep.Tool != "check_login_status" {
+		t.Fatalf("next_step.tool = %q, 期望 check_login_status", payload.NextStep.Tool)
+	}
+	if got := appendNextStep(contents, xiaohongshu.NextStep{}); len(got) != len(contents) {
+		t.Fatal("空 next_step 不应追加内容块")
+	}
+}
