@@ -39,10 +39,6 @@ type interactAction struct {
 	state *ActionStateStore
 }
 
-func newInteractAction(page *hrod.Page) *interactAction {
-	return &interactAction{page: page}
-}
-
 func newInteractActionWithState(page *hrod.Page, state *ActionStateStore) *interactAction {
 	return &interactAction{page: page, state: state}
 }

@@ -88,8 +88,7 @@ func TestValidateInteractionCommentThreshold(t *testing.T) {
 		t.Fatal("未阅读应失败")
 	}
 	// 20 秒阅读且正文滚动
-	_ = store.RecordRead("feed1", 20*time.Second)
-	_ = store.RecordFeedScroll("feed1", 1)
+	_ = store.RecordReadStage("feed1", 20*time.Second, 1)
 	if err := store.ValidateInteraction("feed1", "comment"); err != nil {
 		t.Fatalf("阅读 20s 且滚动后应通过: %v", err)
 	}

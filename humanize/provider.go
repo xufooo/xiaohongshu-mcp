@@ -70,8 +70,3 @@ func (DefaultProvider) Timing() TimingProfile {
 
 var defaultProvider Provider = DefaultProvider{}
 
-func SetProvider(p Provider) {
-	if p != nil {
-		defaultProvider = p
-	}
-}

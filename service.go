@@ -1065,82 +1065,6 @@ func (s *XiaohongshuService) PostCommentToFeed(ctx context.Context, feedID, xsec
 	return &PostCommentResponse{FeedID: feedID, Success: true, Message: "评论发表成功"}, nil
 }
 
-// LikeFeed 点赞笔记。当存在活跃 session 且已打开同一笔记时，委托给 session。
-func (s *XiaohongshuService) LikeFeed(ctx context.Context, feedID, xsecToken string) (*ActionResult, error) {
-	if sid, ok := s.activeSessionForFeed(feedID); ok {
-		return s.SessionLikeForFeed(ctx, sid, feedID, false)
-	}
-	page, err := s.acquirePageFor(ctx, "like")
-	if err != nil {
-		return nil, err
-	}
-	defer s.browserManager.Release(page)
-
-	action := xiaohongshu.NewLikeActionWithState(page.Context(ctx), s.actionState)
-	if err := action.Like(ctx, feedID, xsecToken); err != nil {
-		s.recordRiskFromPage(page, err)
-		return nil, err
-	}
-	return &ActionResult{FeedID: feedID, Success: true, Message: "点赞成功或已点赞"}, nil
-}
-
-// UnlikeFeed 取消点赞笔记。当存在活跃 session 且已打开同一笔记时，委托给 session。
-func (s *XiaohongshuService) UnlikeFeed(ctx context.Context, feedID, xsecToken string) (*ActionResult, error) {
-	if sid, ok := s.activeSessionForFeed(feedID); ok {
-		return s.SessionLikeForFeed(ctx, sid, feedID, true)
-	}
-	page, err := s.acquirePageFor(ctx, "unlike")
-	if err != nil {
-		return nil, err
-	}
-	defer s.browserManager.Release(page)
-
-	action := xiaohongshu.NewLikeActionWithState(page.Context(ctx), s.actionState)
-	if err := action.Unlike(ctx, feedID, xsecToken); err != nil {
-		s.recordRiskFromPage(page, err)
-		return nil, err
-	}
-	return &ActionResult{FeedID: feedID, Success: true, Message: "取消点赞成功或未点赞"}, nil
-}
-
-// FavoriteFeed 收藏笔记。当存在活跃 session 且已打开同一笔记时，委托给 session。
-func (s *XiaohongshuService) FavoriteFeed(ctx context.Context, feedID, xsecToken string) (*ActionResult, error) {
-	if sid, ok := s.activeSessionForFeed(feedID); ok {
-		return s.SessionFavoriteForFeed(ctx, sid, feedID, false)
-	}
-	page, err := s.acquirePageFor(ctx, "favorite")
-	if err != nil {
-		return nil, err
-	}
-	defer s.browserManager.Release(page)
-
-	action := xiaohongshu.NewFavoriteActionWithState(page.Context(ctx), s.actionState)
-	if err := action.Favorite(ctx, feedID, xsecToken); err != nil {
-		s.recordRiskFromPage(page, err)
-		return nil, err
-	}
-	return &ActionResult{FeedID: feedID, Success: true, Message: "收藏成功或已收藏"}, nil
-}
-
-// UnfavoriteFeed 取消收藏笔记。当存在活跃 session 且已打开同一笔记时，委托给 session。
-func (s *XiaohongshuService) UnfavoriteFeed(ctx context.Context, feedID, xsecToken string) (*ActionResult, error) {
-	if sid, ok := s.activeSessionForFeed(feedID); ok {
-		return s.SessionFavoriteForFeed(ctx, sid, feedID, true)
-	}
-	page, err := s.acquirePageFor(ctx, "unfavorite")
-	if err != nil {
-		return nil, err
-	}
-	defer s.browserManager.Release(page)
-
-	action := xiaohongshu.NewFavoriteActionWithState(page.Context(ctx), s.actionState)
-	if err := action.Unfavorite(ctx, feedID, xsecToken); err != nil {
-		s.recordRiskFromPage(page, err)
-		return nil, err
-	}
-	return &ActionResult{FeedID: feedID, Success: true, Message: "取消收藏成功或未收藏"}, nil
-}
-
 // ReplyCommentToFeed 回复指定评论。当存在活跃 session 且已打开同一笔记时，委托给 session。
 func (s *XiaohongshuService) ReplyCommentToFeed(ctx context.Context, feedID, xsecToken, commentID, userID, content string) (*ReplyCommentResponse, error) {
 	if sid, ok := s.activeSessionForFeed(feedID); ok {
@@ -1524,10 +1448,6 @@ func (s *XiaohongshuService) SessionLike(ctx context.Context, id string, unlike 
 	return s.sessionLike(ctx, id, "", unlike)
 }
 
-func (s *XiaohongshuService) SessionLikeForFeed(ctx context.Context, id, feedID string, unlike bool) (*ActionResult, error) {
-	return s.sessionLike(ctx, id, feedID, unlike)
-}
-
 func (s *XiaohongshuService) sessionLike(ctx context.Context, id, feedID string, unlike bool) (*ActionResult, error) {
 	session, err := s.browseSessions.Get(id)
 	if err != nil {
@@ -1547,10 +1467,6 @@ func (s *XiaohongshuService) sessionLike(ctx context.Context, id, feedID string,
 
 func (s *XiaohongshuService) SessionFavorite(ctx context.Context, id string, unfavorite bool) (*ActionResult, error) {
 	return s.sessionFavorite(ctx, id, "", unfavorite)
-}
-
-func (s *XiaohongshuService) SessionFavoriteForFeed(ctx context.Context, id, feedID string, unfavorite bool) (*ActionResult, error) {
-	return s.sessionFavorite(ctx, id, feedID, unfavorite)
 }
 
 func (s *XiaohongshuService) sessionFavorite(ctx context.Context, id, feedID string, unfavorite bool) (*ActionResult, error) {

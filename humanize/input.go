@@ -202,16 +202,6 @@ func Hover(elem *rod.Element) error {
 	return moveMouseCurved(elem.Page().Mouse, target)
 }
 
-func ClickAt(page *rod.Page, pt proto.Point) error {
-	if err := ensurePointInViewport(page, pt); err != nil {
-		return err
-	}
-	if err := moveMouseCurved(page.Mouse, pt); err != nil {
-		return err
-	}
-	return pressAndRelease(page.Mouse)
-}
-
 func Type(ctx context.Context, elem *rod.Element, text string) error {
 	dist := defaultProvider.Timing()[Keystroke]
 
