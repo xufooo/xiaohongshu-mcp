@@ -183,31 +183,49 @@ func riskSignalFromReadyProbe(probe xhsReadyProbe) RiskSignal {
 		return signal
 	}
 
+	signal.Kind = RiskKindFromText(text)
+	signal.Reason = riskKindReason(signal.Kind)
+	applyRiskPolicy(&signal)
+	return signal
+}
+
+// RiskKindFromText 用风险关键词表把页面文本分类成 RiskKind。
+// 关键词表只在这里维护：页面探测和「失败后该调用哪个工具」共用同一份判定。
+func RiskKindFromText(text string) RiskKind {
 	switch {
 	case strings.Contains(text, "登录已过期") ||
 		strings.Contains(text, "登录失效") ||
 		strings.Contains(text, "请先登录") ||
 		strings.Contains(text, "请登录") ||
 		strings.Contains(text, "扫码登录"):
-		signal.Kind = RiskLoginExpired
-		signal.Reason = "登录状态失效"
+		return RiskLoginExpired
 	case strings.Contains(text, "滑块"):
-		signal.Kind = RiskSliderChallenge
-		signal.Reason = "滑块验证"
+		return RiskSliderChallenge
 	case strings.Contains(text, "验证码") ||
 		strings.Contains(text, "安全验证") ||
 		strings.Contains(text, "请验证") ||
 		strings.Contains(text, "人机验证"):
-		signal.Kind = RiskCaptcha
-		signal.Reason = "验证码或安全验证"
+		return RiskCaptcha
 	case strings.Contains(text, "操作频繁") ||
 		strings.Contains(text, "访问太频繁") ||
 		strings.Contains(text, "账号异常"):
-		signal.Kind = RiskAccessAnomaly
-		signal.Reason = "访问异常或操作频繁"
+		return RiskAccessAnomaly
 	}
-	applyRiskPolicy(&signal)
-	return signal
+	return RiskNone
+}
+
+func riskKindReason(kind RiskKind) string {
+	switch kind {
+	case RiskLoginExpired:
+		return "登录状态失效"
+	case RiskSliderChallenge:
+		return "滑块验证"
+	case RiskCaptcha:
+		return "验证码或安全验证"
+	case RiskAccessAnomaly:
+		return "访问异常或操作频繁"
+	}
+	return ""
 }
 
 func applyRiskPolicy(signal *RiskSignal) {

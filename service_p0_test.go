@@ -398,3 +398,30 @@ func TestNextStepArgsMatchToolSchemas(t *testing.T) {
 		t.Fatal("没有扫描到任何 next_step 参数，正则失配")
 	}
 }
+
+// TestStartPageNextStepByRisk 用与页面探测同一份风险关键词表决定 start_page 失败后的下一步。
+func TestStartPageNextStepByRisk(t *testing.T) {
+	cases := []struct {
+		name     string
+		errText  string
+		wantTool string
+		wantHint string
+	}{
+		{"登录失效指向扫码", "等待探索页就绪失败: 页面出现风险信号: 登录已过期", "get_login_qrcode", "扫码登录"},
+		{"验证码要求人工处理", "等待探索页就绪失败: 页面出现风险信号: 请完成安全验证", "start_page", "人工"},
+		{"滑块要求人工处理", "页面出现风险信号: 请拖动滑块", "start_page", "人工"},
+		{"访问异常要求等待", "页面出现风险信号: 操作频繁，请稍后再试", "start_page", "等待"},
+		{"普通失败重建会话", "等待探索页就绪失败: 页面就绪超时", "start_page", "force_recreate=true"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			step := startPageNextStep(fmt.Errorf("%s", tc.errText))
+			if step.Tool != tc.wantTool {
+				t.Fatalf("tool = %q, 期望 %q", step.Tool, tc.wantTool)
+			}
+			if !strings.Contains(step.Hint, tc.wantHint) {
+				t.Fatalf("hint = %q, 应包含 %q", step.Hint, tc.wantHint)
+			}
+		})
+	}
+}
