@@ -47,7 +47,7 @@ func evalJSDirect(ctx context.Context, page *hrod.Page, fn string, args ...inter
 		return nil, fmt.Errorf("Runtime.evaluate returned nil")
 	}
 	if result.ExceptionDetails != nil {
-		return nil, &rod.EvalError{result.ExceptionDetails}
+		return nil, &rod.EvalError{RuntimeExceptionDetails: result.ExceptionDetails}
 	}
 	if result.Result == nil {
 		return nil, fmt.Errorf("Runtime.evaluate result is nil")

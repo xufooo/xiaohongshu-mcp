@@ -70,6 +70,7 @@ func main() {
 	configs.InitHeadless(headless)
 	configs.SetBinPath(binPath)
 	configs.SetProfileDir(profileDir)
+	configs.SetBrowserProfilePersistent(profilePersistent)
 	configs.SetBrowserMode(browserMode)
 	configs.SetBrowserIdleTimeout(idleTimeout)
 	configs.SetBrowserSessionIdleGrace(sessionIdleGrace)

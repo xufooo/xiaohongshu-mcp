@@ -319,6 +319,16 @@ func BrowserExtraArgsFromEnv() []string {
 	return args
 }
 
+// profilePersistent 记录启动时解析出的 profile 是否落在持久目录，
+// 供 get_page_state.browser 暴露（false = 每次冷启动都是冷缓存）。
+var profilePersistent bool
+
+// SetBrowserProfilePersistent 由入口层在解析 profile 后调用。
+func SetBrowserProfilePersistent(persistent bool) { profilePersistent = persistent }
+
+// BrowserProfilePersistent 返回 profile 是否持久。
+func BrowserProfilePersistent() bool { return profilePersistent }
+
 // DirWritable 用一次临时文件创建探测目录是否真的可写（MkdirAll 成功不代表可写）。
 func DirWritable(dir string) bool {
 	file, err := os.CreateTemp(dir, ".probe-*")

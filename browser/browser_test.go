@@ -15,9 +15,9 @@ func TestCloakFingerprintEnabled(t *testing.T) {
 		ua      string
 		enabled bool
 	}{
-		{true, "", true},              // Cloak + 无 UA：启用 fingerprint
+		{true, "", true},                   // Cloak + 无 UA：启用 fingerprint
 		{true, "Mozilla/5.0 (X11)", false}, // Cloak + 显式 UA：跳过 fingerprint
-		{false, "", false},             // 普通 Chrome：不启用
+		{false, "", false},                 // 普通 Chrome：不启用
 	}
 	for _, c := range cases {
 		if got := cloakFingerprintEnabled(c.cloak, c.ua); got != c.enabled {
@@ -152,5 +152,17 @@ func TestParkWarmPageDisabledWhenTTLZero(t *testing.T) {
 	m := NewManager(nil, WithWarmPageTTL(0))
 	if m.parkWarmPage(&hrod.Page{}) {
 		t.Fatal("TTL<=0 时不应缓存热页面")
+	}
+}
+
+// TestManagerStatsDefaults 计数与空闲回收时间的快照契约。
+func TestManagerStatsDefaults(t *testing.T) {
+	m := NewManager(nil, WithIdleTimeout(30*time.Minute))
+	stats := m.Stats()
+	if stats.PagesCreated != 0 || stats.WarmPageReused != 0 || stats.WarmPageCached {
+		t.Fatalf("初始计数应为零: %+v", stats)
+	}
+	if stats.IdleTimeoutSecs != int64((30 * time.Minute).Seconds()) {
+		t.Fatalf("IdleTimeoutSecs = %d, 期望 1800", stats.IdleTimeoutSecs)
 	}
 }

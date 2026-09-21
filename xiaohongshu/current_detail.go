@@ -151,7 +151,7 @@ func probeCurrentFeedDetail(ctx context.Context, page *hrod.Page, feedID string)
 		return currentFeedDetailProbe{}, fmt.Errorf("%w: 当前详情页探测无返回", errPermanentCurrentDetailProbe)
 	}
 	if result.ExceptionDetails != nil {
-		return currentFeedDetailProbe{}, normalizeCurrentDetailProbeError(ctx, &rod.EvalError{result.ExceptionDetails})
+		return currentFeedDetailProbe{}, normalizeCurrentDetailProbeError(ctx, &rod.EvalError{RuntimeExceptionDetails: result.ExceptionDetails})
 	}
 	if result.Result == nil {
 		return currentFeedDetailProbe{}, fmt.Errorf("%w: 当前详情页探测无返回", errPermanentCurrentDetailProbe)

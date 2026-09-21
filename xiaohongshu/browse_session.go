@@ -91,22 +91,36 @@ type reusePageState struct {
 }
 
 type BrowseSessionPageState struct {
-	Session           BrowseSessionInfo       `json:"session"`
-	Summary           string                  `json:"summary,omitempty"`
-	Kind              XHSReadyKind            `json:"kind"`
-	Ready             bool                    `json:"ready"`
-	Risk              RiskSignal              `json:"risk"`
-	Counts            BrowseSessionPageCounts `json:"counts"`
-	Current           BrowseSessionCurrent    `json:"current"`
-	Results           []BrowseSessionResult   `json:"results,omitempty"`
-	Actions           []BrowseSessionAction   `json:"actions,omitempty"`
-	NextStep          *NextStep               `json:"next_step,omitempty"`
-	Timeline          []BrowseSessionEvent    `json:"timeline,omitempty"`
-	StateFragment     string                  `json:"state_fragment,omitempty"`
-	ResultsCount      int                               `json:"results_count"`
-	SeenCount         int                               `json:"seen_count"`
-	AvailableTools    []string                          `json:"available_tools,omitempty"`
-	Notification      *BrowseSessionNotificationSurface `json:"notification,omitempty"`
+	Session        BrowseSessionInfo                 `json:"session"`
+	Summary        string                            `json:"summary,omitempty"`
+	Kind           XHSReadyKind                      `json:"kind"`
+	Ready          bool                              `json:"ready"`
+	Risk           RiskSignal                        `json:"risk"`
+	Counts         BrowseSessionPageCounts           `json:"counts"`
+	Current        BrowseSessionCurrent              `json:"current"`
+	Results        []BrowseSessionResult             `json:"results,omitempty"`
+	Actions        []BrowseSessionAction             `json:"actions,omitempty"`
+	NextStep       *NextStep                         `json:"next_step,omitempty"`
+	Timeline       []BrowseSessionEvent              `json:"timeline,omitempty"`
+	StateFragment  string                            `json:"state_fragment,omitempty"`
+	ResultsCount   int                               `json:"results_count"`
+	SeenCount      int                               `json:"seen_count"`
+	AvailableTools []string                          `json:"available_tools,omitempty"`
+	Notification   *BrowseSessionNotificationSurface `json:"notification,omitempty"`
+	Browser        *BrowserRuntimeStats              `json:"browser,omitempty"`
+}
+
+// BrowserRuntimeStats 是浏览器层的运行时可观测数据：
+// 用于在树莓派上量化「复用热页面 / 跳过重复导航 / 拦了多少请求 / 缓存是否真的持久」，
+// 而不是靠推断。全部为进程内计数，读它不产生任何页面操作。
+type BrowserRuntimeStats struct {
+	PagesCreated       int64 `json:"pages_created"`
+	WarmPageReused     int64 `json:"warm_page_reused"`
+	WarmPageCached     bool  `json:"warm_page_cached"`
+	NavigationSkipped  int64 `json:"navigation_skipped"`
+	BlockedURLPatterns int   `json:"blocked_url_patterns"`
+	ProfilePersistent  bool  `json:"profile_persistent"`
+	IdleTimeoutSecs    int64 `json:"idle_timeout_seconds"`
 }
 
 type BrowseSessionCurrent struct {
@@ -194,14 +208,14 @@ type BrowseSessionEvent struct {
 
 // BrowseSessionNotificationSurface 通知页面会话的对外状态。
 type BrowseSessionNotificationSurface struct {
-	Tab         NotificationTab     `json:"tab"`
-	Generation  uint64              `json:"generation"`
-	EnteredAt   time.Time           `json:"entered_at"`
-	ScrollCount int                 `json:"scroll_count"`
-	ResultCount int                 `json:"result_count"`
-	Items       []NotificationItem  `json:"items"`
-	Cursor      string              `json:"cursor,omitempty"`
-	HasMore     bool                `json:"has_more"`
+	Tab         NotificationTab    `json:"tab"`
+	Generation  uint64             `json:"generation"`
+	EnteredAt   time.Time          `json:"entered_at"`
+	ScrollCount int                `json:"scroll_count"`
+	ResultCount int                `json:"result_count"`
+	Items       []NotificationItem `json:"items"`
+	Cursor      string             `json:"cursor,omitempty"`
+	HasMore     bool               `json:"has_more"`
 }
 
 // browseNotificationState 通知 surface 的会话内部状态。
@@ -2415,7 +2429,7 @@ func (s *BrowseSession) refreshPageState(ctx context.Context) {
 	}
 	got := false
 	if s.evalJS != nil {
-		if result, err := s.evalJS(evalCtx, page, `() => {` + xhsScrollYJS + `
+		if result, err := s.evalJS(evalCtx, page, `() => {`+xhsScrollYJS+`
 			return JSON.stringify({ url: location.href, scroll_y: scrollY() });
 		}`); err == nil && result != nil {
 			if err := json.Unmarshal([]byte(result.Value.Str()), &snapshot); err == nil {

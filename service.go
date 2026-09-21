@@ -1318,7 +1318,23 @@ func (s *XiaohongshuService) SessionState(ctx context.Context, id string) (*xiao
 		s.handleSessionOperationError(ctx, id, session, err)
 		return nil, err
 	}
+	state.Browser = s.browserRuntimeStats()
 	return state, nil
+}
+
+// browserRuntimeStats 汇总进程内计数，供 get_page_state.browser 暴露。
+// 纯内存读取，不做任何页面操作。
+func (s *XiaohongshuService) browserRuntimeStats() *xiaohongshu.BrowserRuntimeStats {
+	stats := s.browserManager.Stats()
+	return &xiaohongshu.BrowserRuntimeStats{
+		PagesCreated:       stats.PagesCreated,
+		WarmPageReused:     stats.WarmPageReused,
+		WarmPageCached:     stats.WarmPageCached,
+		NavigationSkipped:  xiaohongshu.NavigationSkippedCount(),
+		BlockedURLPatterns: len(configs.BrowserBlockedURLPatterns()),
+		ProfilePersistent:  configs.BrowserProfilePersistent(),
+		IdleTimeoutSecs:    stats.IdleTimeoutSecs,
+	}
 }
 
 // SessionGuidance 只读会话已跟踪的状态给出「下一步该调用哪个工具」，不做页面探测。
