@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -30,7 +31,16 @@ func main() {
 	if len(binPath) == 0 {
 		binPath = os.Getenv("ROD_BROWSER_BIN")
 	}
-	profileDir := os.Getenv("XHS_BROWSER_PROFILE_DIR")
+	// 未显式指定时用默认的持久 profile：随机临时目录等于每次冷启动都是冷缓存
+	// （实测同一 profile 第二次访问首屏下载 3.38MB → 0.27MB）。
+	profileDir, profilePersistent := configs.ResolveBrowserProfileDir()
+	if strings.TrimSpace(os.Getenv("XHS_BROWSER_PROFILE_DIR")) == "" {
+		if profilePersistent {
+			logrus.Infof("using default persistent browser profile: %s", profileDir)
+		} else {
+			logrus.Warnf("cache dir 不可写，浏览器 profile 退到 %s（冷启动缓存不持久）", profileDir)
+		}
+	}
 	browserMode := os.Getenv("XHS_BROWSER_MODE")
 	browserUserAgent := os.Getenv("XHS_BROWSER_USER_AGENT")
 	idleTimeout := configs.DefaultBrowserIdleTimeout()
@@ -65,8 +75,8 @@ func main() {
 	configs.SetBrowserSessionIdleGrace(sessionIdleGrace)
 	configs.SetBrowserUserAgent(browserUserAgent)
 	configs.SetBrowserExtraArgs(configs.BrowserExtraArgsFromEnv())
-	if profileDir != "" {
-		logrus.Infof("using persistent browser profile: %s", profileDir)
+	if explicit := strings.TrimSpace(os.Getenv("XHS_BROWSER_PROFILE_DIR")); explicit != "" {
+		logrus.Infof("using browser profile from XHS_BROWSER_PROFILE_DIR: %s", explicit)
 	}
 	logrus.Infof("browser idle timeout: %s", idleTimeout)
 	if configs.UseCloakBrowser() {

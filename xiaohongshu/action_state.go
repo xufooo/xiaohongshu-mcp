@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
+	"github.com/xpzouying/xiaohongshu-mcp/configs"
 )
 
 const (
@@ -68,7 +69,7 @@ func NewActionStateStore(root string, accountKey string) (*ActionStateStore, err
 // 不该因为一个缓存目录就让整个服务起不来（与 ratelimit 的降级策略一致）。
 func ensureWritableStateDir(root string) (string, error) {
 	err := os.MkdirAll(root, 0755)
-	if err == nil && dirWritable(root) {
+	if err == nil && configs.DirWritable(root) {
 		return root, nil
 	}
 
@@ -76,23 +77,11 @@ func ensureWritableStateDir(root string) (string, error) {
 	if fallback == root {
 		return "", fmt.Errorf("状态目录不可写: %s: %w", root, err)
 	}
-	if fallbackErr := os.MkdirAll(fallback, 0755); fallbackErr != nil || !dirWritable(fallback) {
+	if fallbackErr := os.MkdirAll(fallback, 0755); fallbackErr != nil || !configs.DirWritable(fallback) {
 		return "", fmt.Errorf("状态目录不可写: %s: %v（回退目录 %s 同样不可用: %v）", root, err, fallback, fallbackErr)
 	}
 	logrus.Warnf("action state dir %s 不可写（%v），回退到 %s", root, err, fallback)
 	return fallback, nil
-}
-
-// dirWritable 用一次临时文件创建探测目录是否真的可写（MkdirAll 成功不代表可写）。
-func dirWritable(dir string) bool {
-	file, err := os.CreateTemp(dir, ".probe-*")
-	if err != nil {
-		return false
-	}
-	name := file.Name()
-	_ = file.Close()
-	_ = os.Remove(name)
-	return true
 }
 
 func DefaultActionStateStore(accountParts ...string) (*ActionStateStore, error) {

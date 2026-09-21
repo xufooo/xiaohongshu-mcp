@@ -1,6 +1,7 @@
 package xiaohongshu
 
 import (
+	"github.com/xpzouying/xiaohongshu-mcp/configs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -16,7 +17,7 @@ func TestEnsureWritableStateDirKeepsWritable(t *testing.T) {
 	if got != want {
 		t.Fatalf("应沿用调用方目录，got %s want %s", got, want)
 	}
-	if !dirWritable(got) {
+	if !configs.DirWritable(got) {
 		t.Fatalf("返回的目录应可写: %s", got)
 	}
 }
@@ -38,7 +39,7 @@ func TestEnsureWritableStateDirFallsBackWhenMkdirFails(t *testing.T) {
 	if got == filepath.Join(blocked, "sub") {
 		t.Fatal("不可写目录不应被采用")
 	}
-	if !dirWritable(got) {
+	if !configs.DirWritable(got) {
 		t.Fatalf("回退目录应可写: %s", got)
 	}
 }

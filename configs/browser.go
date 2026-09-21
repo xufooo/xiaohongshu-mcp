@@ -2,6 +2,7 @@ package configs
 
 import (
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -316,4 +317,44 @@ func BrowserExtraArgsFromEnv() []string {
 	args = append(args, strings.Fields(os.Getenv("CLOAK_FLAGS"))...)
 	args = append(args, strings.Fields(os.Getenv("XHS_BROWSER_EXTRA_ARGS"))...)
 	return args
+}
+
+// DirWritable 用一次临时文件创建探测目录是否真的可写（MkdirAll 成功不代表可写）。
+func DirWritable(dir string) bool {
+	file, err := os.CreateTemp(dir, ".probe-*")
+	if err != nil {
+		return false
+	}
+	name := file.Name()
+	_ = file.Close()
+	_ = os.Remove(name)
+	return true
+}
+
+// defaultBrowserProfileDir 返回默认的浏览器 profile 目录（与 action_state 同一约定）。
+func defaultBrowserProfileDir() string {
+	if dir, err := os.UserCacheDir(); err == nil && dir != "" {
+		return filepath.Join(dir, "xiaohongshu-mcp", "browser-profile")
+	}
+	return filepath.Join(os.TempDir(), "xiaohongshu-mcp-browser-profile")
+}
+
+// ResolveBrowserProfileDir 解析浏览器持久 profile 目录。
+//
+// XHS_BROWSER_PROFILE_DIR 显式设置时原样使用（第二个返回值恒为 true）。
+// 未设置时给一个稳定路径，而不是让 go-rod 用 /tmp/rod/user-data/<随机>：
+// 随机目录等于每次冷启动都是冷缓存，实测同一 profile 第二次访问首屏下载
+// 3.38MB → 0.27MB（−92%），其中 JS 3.01MB → 0.11MB。
+//
+// 第二个返回值表示缓存是否持久：false 表示落到了临时目录（只读 rootfs），
+// 调用方应明确告警——此时行为与"不设 profile"等价。
+func ResolveBrowserProfileDir() (string, bool) {
+	if v := strings.TrimSpace(os.Getenv("XHS_BROWSER_PROFILE_DIR")); v != "" {
+		return v, true
+	}
+	dir := defaultBrowserProfileDir()
+	if err := os.MkdirAll(dir, 0755); err == nil && DirWritable(dir) {
+		return dir, true
+	}
+	return filepath.Join(os.TempDir(), "xiaohongshu-mcp-browser-profile"), false
 }
