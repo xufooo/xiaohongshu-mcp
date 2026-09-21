@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/xpzouying/headless_browser"
+	hrod "github.com/xpzouying/xiaohongshu-mcp/humanize/rod"
 )
 
 func TestCloakFingerprintEnabled(t *testing.T) {
@@ -102,5 +103,54 @@ func TestIdleCloseDelay(t *testing.T) {
 				t.Fatalf("idleCloseDelay(%q, %v, %v) = %v, 期望 %v", tc.owner, tc.configured, tc.sessionGrace, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestWarmPageReusableExpiry 热页面缓存的过期/禁用判断（不触碰真实页面）。
+func TestWarmPageReusableExpiry(t *testing.T) {
+	now := time.Now()
+	page := &hrod.Page{}
+	cases := []struct {
+		name     string
+		page     *hrod.Page
+		parkedAt time.Time
+		ttl      time.Duration
+		want     bool
+	}{
+		{"无缓存页面", nil, now, time.Minute, false},
+		{"TTL 关闭", page, now, 0, false},
+		{"TTL 负数", page, now, -time.Second, false},
+		{"已过期", page, now.Add(-2 * time.Minute), time.Minute, false},
+	}
+	for _, c := range cases {
+		if got := warmPageReusable(c.page, nil, c.parkedAt, now, c.ttl); got != c.want {
+			t.Errorf("%s: warmPageReusable = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// TestClearWarmPageLockedClearsCache 缓存被取走后不得残留引用。
+func TestClearWarmPageLockedClearsCache(t *testing.T) {
+	m := NewManager(nil, WithWarmPageTTL(time.Minute))
+	page := &hrod.Page{}
+	if !m.parkWarmPage(page) {
+		t.Fatal("TTL>0 时应能缓存热页面")
+	}
+	if got := m.clearWarmPageLocked(); got != page {
+		t.Fatalf("clearWarmPageLocked 应返回缓存的页面")
+	}
+	if m.warmPage != nil || m.warmPageTimer != nil {
+		t.Fatal("清理后不应残留页面或定时器")
+	}
+	if got := m.clearWarmPageLocked(); got != nil {
+		t.Fatal("重复清理应返回 nil")
+	}
+}
+
+// TestParkWarmPageDisabledWhenTTLZero TTL<=0 时 Release 直接关页面，不缓存。
+func TestParkWarmPageDisabledWhenTTLZero(t *testing.T) {
+	m := NewManager(nil, WithWarmPageTTL(0))
+	if m.parkWarmPage(&hrod.Page{}) {
+		t.Fatal("TTL<=0 时不应缓存热页面")
 	}
 }

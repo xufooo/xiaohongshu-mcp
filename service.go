@@ -1192,11 +1192,8 @@ func (s *XiaohongshuService) CreateBrowseSession(ctx context.Context, forceRecre
 		return nil, err
 	}
 
-	if err := page.Navigate("https://www.xiaohongshu.com/explore"); err != nil {
-		s.browserManager.Release(page)
-		return nil, fmt.Errorf("导航探索页失败: %w", err)
-	}
-	if err := xiaohongshu.WaitForXHSReady(page, xiaohongshu.XHSReadyOptions{Kind: xiaohongshu.XHSReadyHomeSearch, Timeout: 120 * time.Second}); err != nil {
+	// 热页面已经就绪在发现页时跳过重复导航（Pi 上一次整页加载是分钟级成本）。
+	if err := xiaohongshu.EnsureReadyOn(page, xiaohongshu.ExploreURL, xiaohongshu.XHSReadyHomeSearch, 120*time.Second); err != nil {
 		s.browserManager.Release(page)
 		return nil, fmt.Errorf("等待探索页就绪失败: %w", err)
 	}

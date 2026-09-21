@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"time"
+
+	"github.com/sirupsen/logrus"
 
 	"github.com/go-rod/rod/lib/proto"
 	"github.com/xpzouying/xiaohongshu-mcp/humanize"
@@ -54,18 +57,56 @@ func findVisibleProfileEntry(page *hrod.Page) (*hrod.Element, error) {
 	return nil, fmt.Errorf("个人页入口均不可见（命中 %d 个）", len(elems))
 }
 
-// onExplorePage 判断当前页是否已在 /explore。
-// Pi 上一次全页导航是分钟级成本，已在目标页时不得重复导航。
-func onExplorePage(page *hrod.Page) bool {
+// 站点入口 URL：发现页与首页（feeds 列表）。
+const (
+	ExploreURL = "https://www.xiaohongshu.com/explore"
+	HomeURL    = "https://www.xiaohongshu.com"
+)
+
+// readyProbeTimeout 是「已在目标页」时的就绪确认预算：只做一次快速确认，
+// 通过就跳过导航，不通过就走正常导航路径。
+const readyProbeTimeout = 5 * time.Second
+
+// onURL 判断当前页是否已经是目标 URL（同 host、path 一致，忽略 query）。
+func onURL(page *hrod.Page, target string) bool {
 	info, err := page.Rod.Info()
 	if err != nil || info == nil {
 		return false
 	}
-	parsed, err := url.Parse(info.URL)
+	current, err := url.Parse(info.URL)
 	if err != nil {
 		return false
 	}
-	return parsed.Host == "www.xiaohongshu.com" && strings.TrimRight(parsed.Path, "/") == "/explore"
+	want, err := url.Parse(target)
+	if err != nil {
+		return false
+	}
+	if !strings.EqualFold(current.Host, want.Host) {
+		return false
+	}
+	return strings.TrimRight(current.Path, "/") == strings.TrimRight(want.Path, "/")
+}
+
+// onExplorePage 判断当前页是否已在 /explore。
+// Pi 上一次全页导航是分钟级成本，已在目标页时不得重复导航。
+func onExplorePage(page *hrod.Page) bool {
+	return onURL(page, ExploreURL)
+}
+
+// EnsureReadyOn 目标页已经就绪时跳过重复导航，否则导航过去再等就绪。
+// 热页面复用（Manager.Release 保留页面）后，这条判断会经常命中：
+// 例如 check_login_status 刚加载过 /explore，紧接着 start_page 不必再加载一次。
+func EnsureReadyOn(page *hrod.Page, target string, kind XHSReadyKind, timeout time.Duration) error {
+	if onURL(page, target) {
+		if err := WaitForXHSReady(page, XHSReadyOptions{Kind: kind, Timeout: readyProbeTimeout}); err == nil {
+			logrus.Infof("skip redundant navigation: already ready at %s", target)
+			return nil
+		}
+	}
+	if err := page.Navigate(target); err != nil {
+		return fmt.Errorf("navigate to %s failed: %w", target, err)
+	}
+	return WaitForXHSReady(page, XHSReadyOptions{Kind: kind, Timeout: timeout})
 }
 
 func (n *NavigateAction) ToProfilePage(ctx context.Context) error {
