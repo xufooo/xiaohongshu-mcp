@@ -31,6 +31,17 @@ fi
 
 note() { printf '%-44s %s\n' "$1" "$2"; }
 
+# print_waits 打印 waits 块：每类等待的次数 / 累计耗时 / 最大耗时 / 页内探测次数。
+# 这些数字是真机验收的关键证据（探测次数不随等待时长增长 = 机制与机器状态无关）。
+# 只用 grep/sed/tr，保持本脚本"不依赖 node/python"的约束。
+print_waits() {
+  printf '%s' "$1" | tr -d ' \n\t' \
+    | grep -oE '"waits":\{.*\}' \
+    | grep -oE '"[^"]+":\{"count":[0-9]+,"total_ms":[0-9]+,"max_ms":[0-9]+(,"probes":[0-9]+)?\}' \
+    | sed -E 's/^"([^"]+)":\{"count":([0-9]+),"total_ms":([0-9]+),"max_ms":([0-9]+)(,"probes":([0-9]+))?\}$/   \1 count=\2 total=\3ms max=\4ms probes=\6/' \
+    | sed -E 's/probes=$/probes=0/'
+}
+
 # 从服务日志里取 profile 目录：三种日志形态都要覆盖，并剥掉尾部中文括注与引号
 profile_dir_from_log() {
   grep -oE '(default persistent browser profile: *[^"]*|browser profile from XHS_BROWSER_PROFILE_DIR: *[^"]*|浏览器 profile 退到 *[^ ]*)' "$1" \
@@ -141,6 +152,11 @@ STATE=$(unescape "$(run_tool get_page_state "{\"session_id\":\"${SESS}\"}")")
 for key in pages_created warm_page_reused warm_page_cached navigation_skipped blocked_url_patterns profile_persistent idle_timeout_seconds; do
   note "   $key" "$(field "$STATE" "$key")"
 done
+
+echo
+echo "== 5b) waits（各类等待：次数 / 累计 / 最大 / 页内探测数）"
+print_waits "$STATE"
+note "   读法" "探测次数不随时长增长 = 机制与机器状态无关；Pi 上应比 x86 更慢但探测次数不涨"
 
 echo
 echo "== 6) 再调一次 start_page（会话/热页面复用，看 navigation_skipped 是否增加）"
