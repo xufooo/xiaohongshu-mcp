@@ -53,7 +53,7 @@ func readHomeFeedsFromState(page *hrod.Page) ([]Feed, error) {
 	if err := json.Unmarshal([]byte(result), &feeds); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal home feeds: %w", err)
 	}
-	return feeds, nil
+	return onlyNotes(feeds), nil
 }
 
 func collectHomeFeeds(page *hrod.Page) ([]Feed, error) {

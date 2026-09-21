@@ -341,6 +341,10 @@ func extractSearchFeedSources(ctx context.Context, page *hrod.Page, counter *eva
 	if err := json.Unmarshal([]byte(result.Value.Str()), &sources); err != nil {
 		return searchFeedSources{}, fmt.Errorf("解析搜索结果失败: %w", err)
 	}
+	// 在「JSON → []Feed」的边界收口：DOM 与 state 两路都只保留笔记条目，
+	// 下游（mergeFeedsByID / collectSearchFeeds / session 路径）不必各自过滤。
+	sources.DOM = onlyNotes(sources.DOM)
+	sources.State = onlyNotes(sources.State)
 	return sources, nil
 }
 
