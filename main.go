@@ -33,7 +33,7 @@ func main() {
 	profileDir := os.Getenv("XHS_BROWSER_PROFILE_DIR")
 	browserMode := os.Getenv("XHS_BROWSER_MODE")
 	browserUserAgent := os.Getenv("XHS_BROWSER_USER_AGENT")
-	idleTimeout := 5 * time.Minute
+	idleTimeout := configs.DefaultBrowserIdleTimeout()
 	if rawTimeout := os.Getenv("XHS_BROWSER_IDLE_TIMEOUT"); rawTimeout != "" {
 		parsed, err := time.ParseDuration(rawTimeout)
 		if err != nil {

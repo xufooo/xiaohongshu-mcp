@@ -18,10 +18,6 @@ type NoteOpenAction struct {
 	state *ActionStateStore
 }
 
-func NewNoteOpenAction(page *hrod.Page) *NoteOpenAction {
-	return &NoteOpenAction{page: page}
-}
-
 func NewNoteOpenActionWithState(page *hrod.Page, state *ActionStateStore) *NoteOpenAction {
 	return &NoteOpenAction{page: page, state: state}
 }

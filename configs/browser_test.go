@@ -126,3 +126,15 @@ func TestIdentityCheckInterval(t *testing.T) {
 		t.Fatalf("负间隔应回落 10m，got %s", got)
 	}
 }
+
+// TestDefaultBrowserIdleTimeout 低资源档默认放宽空闲回收，避免把 Chromium 冷启动反复重付。
+func TestDefaultBrowserIdleTimeout(t *testing.T) {
+	t.Setenv("XHS_LOW_RESOURCE", "0")
+	if got := DefaultBrowserIdleTimeout(); got != 5*time.Minute {
+		t.Fatalf("非低资源档默认应为 5m，got %s", got)
+	}
+	t.Setenv("XHS_LOW_RESOURCE", "1")
+	if got := DefaultBrowserIdleTimeout(); got != 30*time.Minute {
+		t.Fatalf("低资源档默认应为 30m，got %s", got)
+	}
+}

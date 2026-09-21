@@ -22,8 +22,8 @@ import (
 
 // ========== 配置常量 ==========
 const (
-	commentPollInterval       = 100 * time.Millisecond
-	replyExpansionRetryDelay  = time.Second
+	commentPollInterval      = 100 * time.Millisecond
+	replyExpansionRetryDelay = time.Second
 	// The note is available before the asynchronously populated comment ref on
 	// some versions of the web client. Keep this short: it is only used when
 	// the note reports comments but the state snapshot has none.
@@ -62,10 +62,6 @@ func DefaultCommentLoadConfig() CommentLoadConfig {
 type FeedDetailAction struct {
 	page  *hrod.Page
 	state *ActionStateStore
-}
-
-func NewFeedDetailAction(page *hrod.Page) *FeedDetailAction {
-	return &FeedDetailAction{page: page}
 }
 
 func NewFeedDetailActionWithState(page *hrod.Page, state *ActionStateStore) *FeedDetailAction {
@@ -787,10 +783,6 @@ func nextShowMoreButton(ctx context.Context, page *hrod.Page, maxRepliesThreshol
 // clickShowMoreButton 按坐标真实点击展开按钮（pre 验证过的点击方式）。
 func clickShowMoreButton(page *hrod.Page, button *showMoreButtonSnapshot) error {
 	return page.ClickPoint(proto.Point{X: button.X, Y: button.Y})
-}
-
-func sleepRandom(page *hrod.Page, minMs, maxMs int) error {
-	return page.SleepRandom(time.Duration(minMs)*time.Millisecond, time.Duration(maxMs)*time.Millisecond)
 }
 
 func scrollToCommentsArea(ctx context.Context, page *hrod.Page) error {
