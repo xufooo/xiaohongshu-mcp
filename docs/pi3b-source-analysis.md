@@ -463,8 +463,16 @@ Cloak 模式下代码显式用了 `NoDefaultDevice()`（`third_party/headless_br
 
 ### 14.5 遗留
 
-- **短链打开笔记未做端到端验证**：`open_note` 的 `share_url` 支持 xhslink 短链，但
-  `strictValidateHTTPSURL` 要求 **https**，而小红书分享文案里的短链是 `http://xhslink.com/...`
-  （也常见不带 scheme 直接粘 `xhslink.com/...`）——这两种都会被拒。需要一个真实短链才能验通顺路径。
+- **短链打开笔记**：发现并修掉一个真 bug——`strictValidateHTTPSURL` 要求 https，而小红书分享文案给的
+  正是 `http://xhslink.com/...`（手动复制还常不带 scheme），两种都会**直接被拒**。
+  改为 `normalizeShareURLScheme`：只把 scheme 补成 https（host 白名单、无 userinfo/端口/fragment
+  等严格校验全部保留）。单测覆盖 http / 无 scheme / www.xhslink.cn 三种形态。
+  **端到端（本机服务 + CloakBrowser）**：`http://xhslink.com/ShareCode`、`xhslink.com/ShareCode`、
+  `https://xhslink.com/ShareCode` 三种写法都通过校验并进入导航（用占位码，60s 后以
+  `最终详情URL读取失败 sample=invalid_url` 结束）；`https://evil.com/...` 0.9s 内被拒。
+  **仍未验证**：一条**真实**短链的完整跳转（短链 → 笔记页 → 读取正文/评论）。
+  需要所有者提供一条真实分享短链；公开渠道只找到占位码。
+- 附带观察：无效短链要等到 60s 才报错（`sample=invalid_url`）——URL 稳定且明显不是笔记页时
+  其实可以更早失败，属可优化项。
 - 创建页正常文本里含"无权限访问"会被风控关键词误报（12:14 那次 `permission_denied`）。
 - 一次 `ready:publish` 探针阻塞 297s（未复现）。

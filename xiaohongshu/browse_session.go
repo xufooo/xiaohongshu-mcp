@@ -3003,11 +3003,31 @@ func shareURLToken(finalToken, inputToken string) string {
 	return inputToken
 }
 
+// normalizeShareURLScheme 把用户粘贴的短链/笔记链接补成 https。
+// 小红书分享文案里的短链就是 http://xhslink.com/...（手动复制还常常不带 scheme），
+// 按原样直接拒掉会让"粘贴分享链接打开笔记"这条最自然的用法失效；
+// 短链服务本身支持 https，所以只升级 scheme，其余严格校验（host 白名单、无 userinfo/端口/fragment）全部保留。
+func normalizeShareURLScheme(raw string) string {
+	lower := strings.ToLower(raw)
+	switch {
+	case strings.HasPrefix(lower, "http://"):
+		return "https://" + raw[len("http://"):]
+	case strings.HasPrefix(lower, "https://"):
+		return raw
+	case strings.HasPrefix(raw, "/"): // 相对路径 / 协议相对：原样交给校验层报错
+		return raw
+	default:
+		return "https://" + raw
+	}
+}
+
 func parseAndValidateShareURL(raw string) (*parsedShareURL, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return nil, fmt.Errorf("share_url不能为空")
 	}
+	// 先补齐 scheme：http:// 与不带 scheme 的粘贴形式都按 https 处理。
+	raw = normalizeShareURLScheme(raw)
 	u, err := strictValidateHTTPSURL(raw)
 	if err != nil {
 		return nil, err
