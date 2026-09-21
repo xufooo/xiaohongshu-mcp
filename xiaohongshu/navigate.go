@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -63,6 +64,15 @@ const (
 	HomeURL    = "https://www.xiaohongshu.com"
 )
 
+// navigationSkipped 记录「已在目标页因此跳过整页导航」的次数，
+// 用于在真机上确认这条优化是否真的命中（默认不打印，读 get_page_state.browser）。
+var navigationSkipped int64
+
+// NavigationSkippedCount 返回跳过的整页导航次数。
+func NavigationSkippedCount() int64 {
+	return atomic.LoadInt64(&navigationSkipped)
+}
+
 // readyProbeTimeout 是「已在目标页」时的就绪确认预算：只做一次快速确认，
 // 通过就跳过导航，不通过就走正常导航路径。
 const readyProbeTimeout = 5 * time.Second
@@ -99,6 +109,7 @@ func onExplorePage(page *hrod.Page) bool {
 func EnsureReadyOn(page *hrod.Page, target string, kind XHSReadyKind, timeout time.Duration) error {
 	if onURL(page, target) {
 		if err := WaitForXHSReady(page, XHSReadyOptions{Kind: kind, Timeout: readyProbeTimeout}); err == nil {
+			atomic.AddInt64(&navigationSkipped, 1)
 			logrus.Infof("skip redundant navigation: already ready at %s", target)
 			return nil
 		}

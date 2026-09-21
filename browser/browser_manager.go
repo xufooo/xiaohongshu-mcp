@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -91,6 +92,10 @@ type Manager struct {
 	idleTimeout time.Duration
 	idleTimer   *time.Timer
 	idleVersion uint64
+
+	// 运行时计数：用于在树莓派上量化"复用/新建页面"是否真的生效。
+	pagesCreated   int64
+	warmPageReused int64
 
 	warmPage      *hrod.Page
 	warmPageAt    time.Time
@@ -179,7 +184,11 @@ func (m *Manager) AcquireFor(ctx context.Context, owner string) (*hrod.Page, err
 		}
 
 		page := m.takeWarmPage(b)
+		if page != nil {
+			atomic.AddInt64(&m.warmPageReused, 1)
+		}
 		if page == nil {
+			atomic.AddInt64(&m.pagesCreated, 1)
 			page, err = newPage(b)
 			if err != nil {
 				m.discardBrowser(b)
@@ -188,6 +197,28 @@ func (m *Manager) AcquireFor(ctx context.Context, owner string) (*hrod.Page, err
 			}
 		}
 		return page, nil
+	}
+}
+
+// BrowserStats 是浏览器层的运行时计数，供 get_page_state 与日志量化优化效果。
+type BrowserStats struct {
+	PagesCreated    int64 `json:"pages_created"`
+	WarmPageReused  int64 `json:"warm_page_reused"`
+	WarmPageCached  bool  `json:"warm_page_cached"`
+	IdleTimeoutSecs int64 `json:"idle_timeout_seconds"`
+}
+
+// Stats 返回当前计数（读快照，不加锁）。
+func (m *Manager) Stats() BrowserStats {
+	m.mu.Lock()
+	cached := m.warmPage != nil
+	idle := m.idleTimeout
+	m.mu.Unlock()
+	return BrowserStats{
+		PagesCreated:    atomic.LoadInt64(&m.pagesCreated),
+		WarmPageReused:  atomic.LoadInt64(&m.warmPageReused),
+		WarmPageCached:  cached,
+		IdleTimeoutSecs: int64(idle.Seconds()),
 	}
 }
 
@@ -574,6 +605,8 @@ func (m *Manager) closeIfIdle(version uint64) {
 	m.idleTimer = nil
 	m.idleVersion++
 	m.mu.Unlock()
+	logrus.Infof("browser idle close: pages_created=%d warm_page_reused=%d",
+		atomic.LoadInt64(&m.pagesCreated), atomic.LoadInt64(&m.warmPageReused))
 
 	if b != nil {
 		_ = b.Close()
