@@ -7,9 +7,9 @@ import (
 
 func TestHomeSearchReadyRequiresInputSignal(t *testing.T) {
 	probe := xhsReadyProbe{
-		URL:                    "https://www.xiaohongshu.com/explore",
-		HomeFeedCount:          10,
-		FeedCardCount:          5,
+		URL:                     "https://www.xiaohongshu.com/explore",
+		HomeFeedCount:           10,
+		FeedCardCount:           5,
 		SearchInputInFeedsReady: false,
 	}
 	if isXHSReady(probe, XHSReadyHomeSearch, "", false) {
@@ -118,11 +118,11 @@ func TestOtherReadyKindsDoNotRequireStableWindow(t *testing.T) {
 }
 
 func TestXHSReadyPollRange(t *testing.T) {
-	min, max := xhsReadyPollRange(XHSReadyHomeSearch)
+	min, max := waitPollRange("ready:" + string(XHSReadyHomeSearch))
 	if min != homeSearchPollMin || max != homeSearchPollMax {
 		t.Fatalf("home_search 轮询应为 800-1200ms，得到 %v-%v", min, max)
 	}
-	min, max = xhsReadyPollRange(XHSReadyHome)
+	min, max = waitPollRange("ready:" + string(XHSReadyHome))
 	if min != defaultReadyPollMin || max != defaultReadyPollMax {
 		t.Fatalf("普通 kind 轮询应为 300-500ms，得到 %v-%v", min, max)
 	}

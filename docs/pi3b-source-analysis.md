@@ -332,3 +332,53 @@ Cloak 模式下代码显式用了 `NoDefaultDevice()`（`third_party/headless_br
 与所有者此前"先优化，最后再上板"的指示相反——信号很弱，留给所有者定。
 
 调用脚本：`/home/ooo/Works/.tmp-xhs-perf/jev-wait-mechanism.mjs`（state 里带全部一手实测数据）。
+
+## 12. 统一等待引擎 + 一处被本地实测抓出来的设计错误（2026-09-21 已实施）
+
+### 12.1 一处机制 → 一个引擎（`xiaohongshu/waitloop.go`）
+
+原先"等条件成立"的代码各写一遍（就绪等待内联、搜索结果固定 300ms 轮询、发布成功固定 15s）。
+现在共用 `waitForCondition`：探测节奏（页面信号 + debounce）、卡死判定（无进展）、失败上限（宽松兜底）
+只有一份实现，三类等待的差异只在 `Probe` 闭包里。观测（`waits.probes`、`probe:<kind>`）也随之统一。
+
+| 等待 | 改前 | 改后 |
+|:--|:--|:--|
+| 页面就绪 | 内联循环（各自一份机制） | 引擎 + `Probe`（风控信号走 `fatalWait` 立即结束；HomeSearch 稳定窗保留在闭包内；超时兜底/看门狗走 `OnReady`/`OnExhausted`） |
+| 搜索结果 | 固定 300ms 轮询 + 45s 预测上限 | 引擎 + 指纹（`StateSignature|DOMSignature`），上限换成登记的宽松兜底 120s |
+| 发布成功 | 固定 400–600ms 轮询 + 15s 固定上限 | 引擎 + Go 侧 URL 判据（`publishLeftForm`，已单测钉住），上限 180s |
+
+### 12.2 本地实测抓出的设计错误：settle 窗口不该按探测成本放大
+
+统一后本地一测就发现 **`search_results` 变慢了**：1392ms → **4396ms**（探测次数反而只有 2）。
+原因是我把 settle 窗口设成 `clamp(20×p90(探测成本), 120ms, 2s)`，本机探测 p90≈274ms → settle 被顶到 **2s**，
+于是**每次都要在最后一个 DOM 变化之后再等 2s 才回来看**——纯粹的检测延迟。
+
+当时的理由是"别探测得比机器能回答的更快"。**这个理由是错的**：一次探测本身就阻塞了它的耗时，
+探测天然就限了速，不需要再按成本放大窗口。改成：
+
+- `settle` = **固定 120ms 的合并窗（debounce）**：只用来把一串变化合并成一次探测，不预测机器速度；
+  窗短了只是多探测一两次，而每次探测都要花时间，代价自限。
+- `max`（页面一直不安静时的兜底节奏）才按本机探测成本给：`clamp(5×p90, 500ms, 3s)`。
+
+### 12.3 改前/改后（本机 x86 + CloakBrowser 146，已登录，同一套测量脚本）
+
+| 指标 | 统一引擎 + settle=2s | **统一引擎 + debounce 120ms** | 变化 |
+|:--|--:|--:|:--|
+| `start_page` 总耗时 | 7.3s | **6.4s** | −12% |
+| `ready:home_search` | 6426ms / 7 探测 | **4095ms / 6 探测** | **−36%** |
+| `search_results`（原先固定 300ms 轮询） | 4396ms / 2 探测 | **1351ms / 4 探测** | **−69%** |
+| `ready:detail` | 21ms / 1 探测 | **15ms / 1 探测** | — |
+| 单核限流 `start_page` | 15.4s | **10.3s** | −33% |
+| 单核限流 `ready:home_search` | 12337ms / 6 探测 | **7008ms / 5 探测** | −43% |
+
+机器状态伸缩性依旧：正常 6.4s ↔ 单核 10.3s（×1.6），而探测次数 6 ↔ 5（基本不变）。
+
+### 12.4 尚未迁移的固定间隔等待（同一类问题，逐项按需迁移）
+
+`waitForSearchInput`(60s)、`waitForPublishButtonClickable`(15s)、`waitForUploadComplete`、
+`waitPublishControl`、`waitForProductModal`、`waitForModalClose`、`waitNotificationTabActive`、
+`waitNotificationReplyInput/Accepted`、`waitFeedsChanged`、`waitFeedDetailVisible`、
+`waitForHistoryTargetReady`、`waitForElement`、`waitForLoginSurface`。
+其中 `waitForSearchInput` 实测收益≈0（首次探测通常即命中），故不迁移；
+其余按"命中率/长尾"排序后再做，不为了统一而统一。
+`SleepRandom` 系列的延时是**防封禁节奏**（所有者明确不动），不属于此类。

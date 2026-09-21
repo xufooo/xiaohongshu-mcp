@@ -148,5 +148,5 @@ func submitPublishVideo(ctx context.Context, page *hrod.Page, title, content str
 		return err
 	}
 
-	return waitPublishSuccess(page, 15*time.Second)
+	return waitPublishSuccess(page)
 }

@@ -70,9 +70,10 @@ func (s *xhsReadyStability) Observe(now time.Time, ready bool) bool {
 	return true
 }
 
-// xhsReadyPollRange 按 kind 返回轮询间隔范围；HomeSearch 低频以减轻冷启动 CPU 压力。
-func xhsReadyPollRange(kind XHSReadyKind) (time.Duration, time.Duration) {
-	if kind == XHSReadyHomeSearch {
+// waitPollRange 给出某类等待在**没有本机样本时**的默认节奏（settle 下限 / 最长等待）。
+// HomeSearch 低频以减轻冷启动 CPU 压力；有样本后由 pageSignalWindow 按实测探测成本自定节奏。
+func waitPollRange(kind string) (time.Duration, time.Duration) {
+	if kind == "ready:"+string(XHSReadyHomeSearch) {
 		return homeSearchPollMin, homeSearchPollMax
 	}
 	return defaultReadyPollMin, defaultReadyPollMax
@@ -131,88 +132,46 @@ func WaitForXHSReady(page *hrod.Page, opts XHSReadyOptions) error {
 		}
 	}
 
-	started := time.Now()
-	probes := 0
-	defer func() { observeWaitWithProbes("ready:"+string(opts.Kind), time.Since(started), probes) }()
-
-	deadline := time.Now().Add(opts.Timeout)
 	var last xhsReadyProbe
 	var lastErr error
 	var stability xhsReadyStability
-	// 最后一次「看到页面有动静」的时刻：DOM 变了、网络有事件、或探测结果变了都算。
-	// 一直没动静说明页面卡住了——这才是该报错的时候，而不是"等够 N 秒"。
-	lastProgressAt := time.Now()
-	// pollMin 现在表示「DOM 变化后静默多久再探测」，pollMax 是「页面完全不动时的最长等待」。
-	pollMin, pollMax := xhsReadyPollRange(opts.Kind)
 
-	for {
-		if err := page.Err(); err != nil {
-			return err
-		}
-
-		probes++
-		probeStarted := time.Now()
-		probe, err := probeXHSReady(page, opts.Kind, opts.FeedID)
-		// 探测成本入观测：慢机器上探测更贵，信号窗随之放宽（见 pageSignalWindow）。
-		observeWait("probe:"+string(opts.Kind), time.Since(probeStarted))
-		if err != nil {
-			lastErr = err
-			stability.Observe(time.Now(), false)
-		} else {
-			lastErr = nil
-			if probe != last {
-				lastProgressAt = time.Now()
+	return waitForCondition(waitRound{
+		Kind:    "ready:" + string(opts.Kind),
+		Page:    page,
+		Ceiling: opts.Timeout,
+		Probe: func() (string, bool, error) {
+			probe, err := probeXHSReady(page, opts.Kind, opts.FeedID)
+			if err != nil {
+				lastErr = err
+				stability.Observe(time.Now(), false)
+				return "", false, err
 			}
+			lastErr = nil
 			last = probe
 			if probe.RiskText != "" {
-				return fmt.Errorf("页面出现风险信号: %s; %s", probe.RiskText, formatXHSReadyProbe(probe))
+				// 风控信号是致命的：立刻结束，不再等。
+				return "", false, fatalWait(fmt.Errorf("页面出现风险信号: %s; %s", probe.RiskText, formatXHSReadyProbe(probe)))
 			}
 			ready := isXHSReady(probe, opts.Kind, opts.FeedID, false)
-			if xhsReadyDecision(opts.Kind, &stability, time.Now(), ready) {
-				probeWatchdogSelectors(page, opts)
-				return nil
-			}
-		}
-
-		if !time.Now().Before(deadline) {
+			return formatXHSReadyProbe(probe), xhsReadyDecision(opts.Kind, &stability, time.Now(), ready), nil
+		},
+		OnReady: func() { probeWatchdogSelectors(page, opts) },
+		OnExhausted: func() error {
 			// 超时直接用最后一次 scoped probe 结果完成 URL fallback 与诊断（对齐 pre，不换 full probe）。
 			// HomeSearch 不允许 fallback 绕过稳定窗：未连续稳定满窗即使最后一次为 true 也返回 timeout。
 			if opts.Kind != XHSReadyHomeSearch && lastErr == nil && isXHSReady(last, opts.Kind, opts.FeedID, true) {
 				probeWatchdogSelectors(page, opts)
 				return nil
 			}
-			break
-		}
-		// 页面长时间毫无动静就不是"慢"，是卡住了：早报错，别耗到失败上限。
-		if time.Since(lastProgressAt) >= readyStallBudget {
-			return fmt.Errorf("页面停止推进（%s 内无 DOM 变化、无网络事件、探测结果不变）: %s",
-				readyStallBudget, formatXHSReadyProbe(last))
-		}
-
-		// 页面还活着吗：探测结果变了、DOM 动了、或数据请求在进出，都算"有进展"。
-		// 慢机器只是慢，它的 DOM / 网络依然在动；一直毫无动静才是卡死。
-		if activity := networkOf(page); activity.lastEvent().After(lastProgressAt) {
-			lastProgressAt = time.Now()
-		}
-
-		// 网络已经安静，就等页面自己把 DOM 画稳（或最多 pollMax）再探测。
-		// settle/max 由本机实测的探测成本给自己定节奏，而不是写死毫秒。
-		settle, maxWait := pageSignalWindow(opts.Kind, pollMin, pollMax)
-		signal, err := waitForPageSignal(page.Rod.GetContext(), page, settle, maxWait)
-		if err != nil {
-			lastErr = fmt.Errorf("等待页面变化信号失败: %w", err)
-			stability.Observe(time.Now(), false)
-		} else if signal.Mutations > 0 {
-			lastProgressAt = time.Now()
-		}
-	}
-
-	if lastErr != nil {
-		return fmt.Errorf("等待小红书页面就绪超时(kind=%s timeout=%s): %w; %s",
-			opts.Kind, opts.Timeout, lastErr, formatXHSReadyProbe(last))
-	}
-	return fmt.Errorf("等待小红书页面就绪超时(kind=%s timeout=%s): %s",
-		opts.Kind, opts.Timeout, formatXHSReadyProbe(last))
+			if lastErr != nil {
+				return fmt.Errorf("等待小红书页面就绪超时(kind=%s timeout=%s): %w; %s",
+					opts.Kind, opts.Timeout, lastErr, formatXHSReadyProbe(last))
+			}
+			return fmt.Errorf("等待小红书页面就绪超时(kind=%s timeout=%s): %s",
+				opts.Kind, opts.Timeout, formatXHSReadyProbe(last))
+		},
+	})
 }
 
 // probeWatchdogSelectors 在页面就绪后探测相关选择器健康状态。
