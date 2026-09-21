@@ -385,6 +385,8 @@ func clickPublishButton(page *hrod.Page) error {
 // waitPublishSuccess 轮询等待发布成功：小红书发布成功后会跳转离开发布表单页
 // （URL 不再含 /publish/publish）。超时仍未跳转 → 判定发布失败。
 func waitPublishSuccess(page *hrod.Page, timeout time.Duration) error {
+	waitStarted := time.Now()
+	defer func() { observeWait("publish_success", time.Since(waitStarted)) }()
 	deadline := time.Now().Add(timeout)
 	for {
 		if info, err := page.Rod.Info(); err == nil && !strings.Contains(info.URL, "/publish/publish") {

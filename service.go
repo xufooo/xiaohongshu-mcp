@@ -1334,6 +1334,7 @@ func (s *XiaohongshuService) browserRuntimeStats() *xiaohongshu.BrowserRuntimeSt
 		BlockedURLPatterns: len(configs.BrowserBlockedURLPatterns()),
 		ProfilePersistent:  configs.BrowserProfilePersistent(),
 		IdleTimeoutSecs:    stats.IdleTimeoutSecs,
+		Waits:              xiaohongshu.WaitStatsSnapshot(),
 	}
 }
 
