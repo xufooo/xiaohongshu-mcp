@@ -40,9 +40,10 @@ type XHSReadyOptions struct {
 
 const (
 	// readyStallBudget 是"页面多久没动静就算卡住"的判定线。
-	// 它量的不是"预计要等多久"，而是"完全没有生命迹象"的持续时间，
-	// 所以与机器快慢无关：慢机器只是慢，它的 DOM / 网络依然在动。
-	readyStallBudget       = 45 * time.Second
+	// 它量的不是"预计要等多久"，而是"完全没有生命迹象"的持续时间：
+	// 判据只有 DOM 变化与探测指纹变化（不依赖网络事件），故取值放宽到 60s——
+	// 慢机器只是慢，它的 DOM 总会动；一直一动不动才是真卡死。
+	readyStallBudget       = 60 * time.Second
 	homeSearchStableWindow = 3 * time.Second
 	defaultReadyPollMin    = 300 * time.Millisecond
 	defaultReadyPollMax    = 500 * time.Millisecond

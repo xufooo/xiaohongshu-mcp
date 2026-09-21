@@ -1799,8 +1799,6 @@ func (s *XiaohongshuService) acquirePageFor(ctx context.Context, owner string) (
 	if err := s.checkFixedIdentity(page); err != nil {
 		logrus.Warnf("browser identity check skipped: %v", err)
 	}
-	// 页面创建即挂上网络事件观察：等待就绪时要靠它判断「机器还在取数据」。
-	xiaohongshu.WatchPageNetwork(page)
 	return page, nil
 }
 

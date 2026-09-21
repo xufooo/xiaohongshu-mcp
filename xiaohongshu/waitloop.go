@@ -125,16 +125,11 @@ func waitForCondition(round waitRound) error {
 		// 页面长时间毫无动静就不是"慢"，是卡住了：早报错，别耗到失败上限。
 		if time.Since(lastProgressAt) >= readyStallBudget {
 			if lastErr != nil {
-				return fmt.Errorf("页面停止推进（%s 内无 DOM 变化、无网络事件、状态不变, kind=%s）: %w",
+				return fmt.Errorf("页面停止推进（%s 内无 DOM 变化、状态指纹不变, kind=%s）: %w",
 					readyStallBudget, round.Kind, lastErr)
 			}
-			return fmt.Errorf("页面停止推进（%s 内无 DOM 变化、无网络事件、状态不变, kind=%s）",
+			return fmt.Errorf("页面停止推进（%s 内无 DOM 变化、状态指纹不变, kind=%s）",
 				readyStallBudget, round.Kind)
-		}
-
-		// 页面还活着：有数据请求在进出也算"有进展"。
-		if activity := networkOf(round.Page); activity.lastEvent().After(lastProgressAt) {
-			lastProgressAt = time.Now()
 		}
 
 		settle, maxWait := pageSignalWindow(round.Kind, pollMax)

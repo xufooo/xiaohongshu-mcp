@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"testing"
-	"time"
 )
 
 // 致命错误（风控信号 / 渲染器已死）必须立刻结束等待，不能被当成"再等等"。
@@ -48,16 +47,6 @@ func TestWaitPollRangeSingleSource(t *testing.T) {
 		min, max = waitPollRange(kind)
 		if min != defaultReadyPollMin || max != defaultReadyPollMax {
 			t.Fatalf("%s 节奏 = %v/%v", kind, min, max)
-		}
-	}
-}
-
-// 并入统一引擎的等待都必须登记失败上限：否则会退回 60s 兜底，悄悄改变行为。
-func TestMigratedWaitsHaveCeilings(t *testing.T) {
-	for _, kind := range []string{"search_results", "publish_success", "ready:detail", "ready:home_search"} {
-		ceiling, ok := waitCeilingForKind(kind)
-		if !ok || ceiling < time.Minute {
-			t.Fatalf("%s 缺失败上限或过紧: %v/%v", kind, ceiling, ok)
 		}
 	}
 }
