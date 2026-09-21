@@ -19,12 +19,12 @@ func isolateWaitStats(t *testing.T) {
 	})
 }
 
-// 失败上限只是"别再等了"的线：必须存在且宽松，不能被观测值收紧
-// （收紧就会在机器变慢时误判超时）。
+// 失败上限只是"别再等了"的线：每类等待都必须存在、且宽松，不能被观测值收紧
+// （收紧就会在机器变慢时误判超时，或退回 60s 兜底悄悄改行为）。
 func TestWaitCeilingsAreGenerousConstants(t *testing.T) {
 	isolateWaitStats(t)
 
-	for _, kind := range []string{"ready:detail", "ready:home_search"} {
+	for _, kind := range []string{"ready:detail", "ready:home_search", "search_results", "publish_success"} {
 		before, ok := waitCeilingForKind(kind)
 		if !ok || before < time.Minute {
 			t.Fatalf("%s 上限缺失或过紧: %v", kind, before)
