@@ -12,7 +12,7 @@ import (
 
 const (
 	loginReadySelector       = ".main-container .user .link-wrapper .channel"
-	loginQRCodeSelector     = ".login-container .qrcode-img"
+	loginQRCodeSelector      = ".login-container .qrcode-img"
 	defaultLoginWaitTimeout  = 4 * time.Minute
 	defaultQRCodeWaitTimeout = 30 * time.Second
 )
@@ -27,21 +27,31 @@ func NewLogin(page *hrod.Page) *LoginAction {
 
 func (a *LoginAction) CheckLoginStatus(ctx context.Context) (bool, error) {
 	pp := a.page.Context(ctx)
-	if err := pp.Navigate("https://www.xiaohongshu.com/explore"); err != nil {
-		return false, errors.Wrap(err, "navigate to explore")
+
+	// 已在发现页时跳过重复导航：Pi 上一次全页加载是分钟级成本。
+	if !onExplorePage(pp) {
+		if err := pp.Navigate("https://www.xiaohongshu.com/explore"); err != nil {
+			return false, errors.Wrap(err, "navigate to explore")
+		}
 	}
 
-	// 等待页面加载（3s缓冲），然后检查元素
-	if err := pp.Sleep(3 * time.Second); err != nil {
-		return false, err
+	// 有界轮询等侧栏入口出现：上限仍是原来的 3s，命中即返回，不再固定睡满 3s。
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		exists, _, err := pp.Has(loginReadySelector)
+		if err != nil {
+			return false, errors.Wrap(err, "check login status failed")
+		}
+		if exists {
+			return true, nil
+		}
+		if !time.Now().Before(deadline) {
+			return false, nil
+		}
+		if err := pp.Sleep(300 * time.Millisecond); err != nil {
+			return false, err
+		}
 	}
-
-	exists, _, err := pp.Has(loginReadySelector)
-	if err != nil {
-		return false, errors.Wrap(err, "check login status failed")
-	}
-
-	return exists, nil
 }
 
 // CurrentUser 当前登录用户的基础信息。

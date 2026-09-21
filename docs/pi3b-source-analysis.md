@@ -1,0 +1,186 @@
+# xiaohongshu-mcp 源码成本分析与决策问题（树莓派 3B）
+
+> 本文只做**分析**，不含实现改动。结论里区分 **[源码]**（读代码得到）、**[实测]**（本机真实站点/浏览器实测）、**[推断]**、**[待真机]**。
+> 决策排序使用 TypeSafe Jev（`jev-latest`）辅助，两轮调用见 §4。
+
+## 1. 现场事实（所有者口述 + 我们的实测）
+
+| 事实 | 来源 |
+|:--|:--|
+| 打开浏览器、导航到主页**极度耗时**；一旦加载完，交互还好；等待时间很长 | 所有者口述（Pi 3B 实机） |
+| 内容页流量 **93%（详情）/100%（搜索）** 是图片 | [实测] 本机真实站点 |
+| 单次 `Runtime.evaluate` 在真实详情页**两次超过 20s**；`example.com` 秒开 | [实测] |
+| 就绪探针本身很便宜（**0.57 ms/次**，桌面 20 次均值） | [实测] |
+| 搜索页与详情页**窗口不可滚**，内容在 `.search-layout-wrapper` / `.note-scroller` 内滚动 | [实测] |
+| XHS 大面积渲染重复节点（侧栏入口 ×2 其一 0×0、筛选项 ×2、creator tab ×3） | [实测] |
+
+**结论**：这台设备上昂贵的是**整页加载（冷启动 + SPA 首屏）**，不是 CPU 计算。jev 对此判 `noul = 0.89`。
+
+## 2. 成本模型：一次工具调用要付什么 [源码]
+
+| 成本项 | 现状 | 证据 |
+|:--|:--|:--|
+| 冷启动 | 惰性启动；内部启动超时 **120s**，暗示分钟级 | `browser/browser_manager.go:18` |
+| 空闲回收 | 默认 **5 分钟**就关掉浏览器，之后每个安静期后都要重付冷启动 | `browser/browser_manager.go:114`、`main.go:33` |
+| 新建 page | **16 处** `acquirePageFor(`，每次调用新建一个 Chromium page/target，`Release` 时关闭 | `service.go` |
+| 就绪轮询 | 300–500ms（`home_search` 800–1200ms）+ **3s 稳定窗**，默认超时 60s | `xiaohongshu/ready.go:34-41` |
+| 固定等待 | `publish.go` 29 处、`search.go` 4 处、`login.go` 4 处（其中 3 处固定 3s）等 | grep 计数 |
+| eval 预算 | 4 档：5s / 2s / 5s / 5s，约 60 个调用点 | `feed_detail.go:927/941/949/955` |
+
+### 2.1 每个工具一次调用的**整页加载数** [源码]
+
+| 工具 | 整页加载 | 说明 |
+|:--|--:|:--|
+| `check_login_status` | **1** | 无条件 `Navigate("…/explore")`（即使已在发现页）`login.go:33` |
+| `user_profile` | **2** | 先 `ToExplorePage` 导航（`navigate.go:24`），再点侧栏入口加载主页 |
+| `search_feeds` | 1（失败兜底 2） | `search.go:276` |
+| `get_note_detail` | 1（卡片点击路径 0） | |
+| `like_feed` / `favorite_feed` / `comment_feed` / `reply_comment_in_feed` | **各 1** | 每次互动都**从零重新导航到该笔记**：`like_favorite.go:73`、`comment_feed.go:283` |
+| `list_feeds` | 1 | `feeds.go:21` 导航到 `xiaohongshu.com` |
+| `publish_content` / `publish_with_video` | 1 | `publish.go:45`、`publish_video.go:29` |
+| session 四件套 | `start_page` 1；`get_page_state`/`close_page` **0**；`go_back` = `history.back`（非整页） | `browse_session.go` |
+
+**要点**：**只有 session 路径是「页面常驻 + 就地操作」**；其余工具全是「新建 page → 整页导航 → 关闭 page」。
+在「交互还好、导航极慢」的实机上，**互动工具每次重新导航**是最刺眼的一处浪费。
+
+## 3. 源码里的决策问题（D 清单）
+
+| # | 决策点 | 现状选择 | 代价 | 备选 |
+|:--|:--|:--|:--|:--|
+| D1 | 是否每次新建 page | 总是新建（16 处） | renderer 生成 + 首帧 | 复用热页面 / 仅会话内复用 / 空闲降级 |
+| D2 | 空闲多久回收浏览器 | 固定 5m | 反复重付冷启动 | 30m / 不回收 / 空闲导航到 about:blank |
+| D3 | 检查/进主页前是否必须导航 | 无条件导航 | 1–2 次整页加载 | 已在目标页就跳过 |
+| D4 | 互动工具是否必须整页导航到笔记 | 每次都导航 | **每次互动 1 次整页加载** | 当前页已在同一笔记则就地操作 |
+| D5 | 等待策略 | 固定 sleep + 固定超时 | 墙钟时间 | 固定 sleep → 有界轮询；超时按冷/热自适应 |
+| D6 | 就绪判定 | 选择器轮询（3s 稳定窗，60s 上限） | 判错一次 = 1 分钟 | 自适应预算；便宜化每次轮询 |
+| D7 | 页面种类 / 风险判定 | 关键词表 + 可见数阈值 | 判错 = 走错链路（要重载） | 语义判定（外部调用，慎用于 Pi） |
+| D8 | 重复节点消歧 | 逐候选 `elementFromPoint` 复核 | 多次 eval | 保持（这是**必要**的正确性成本） |
+| D9 | 数据提取体积 | 整段 `__INITIAL_STATE__` 过 CDP | 序列化/解析慢 | 按需裁剪字段 |
+
+## 4. Jev 裁决（TypeSafe System One，`jev-latest`）
+
+### 4.1 第一轮：优化项排序
+
+| 问题 | 裁决 | 概率/置信度 |
+|:--|:--|:--|
+| 第一步做哪个 | `A_提高空闲保持` **0.47** 与 `C_去冗余导航` **0.40** 几乎并列 → **两条都做** | 置信度 0.36（低，故两条一起） |
+| 防封禁节奏要不要动 | **不动**（noul **0.78**） | — |
+| 先砍哪类代码 | **死函数与过期首路径 0.70** > 从不调用的 Diagnostic 0.25 >> 合并重复 JS 0.02 | 0.62 |
+
+> ⚠️ 我按一手证据**否掉了 jev 的 0.25 那条**：`*Diagnostic()` 实际在 `mcp_handlers.go:646/662` 被调用且有测试 —— 不删。
+
+### 4.2 第二轮：代码决策问题
+
+| 决策 | jev 裁决 | 置信度 | 概率分布要点 |
+|:--|:--|--:|:--|
+| 最大杠杆是「减少整页加载/冷启动」吗 | **是** | — | noul 0.89 |
+| D4 互动工具的导航策略 | **当前页已在同一笔记就复用，否则才导航** | **0.95** | p=0.97；「保持每次导航」=0 |
+| D5 等待策略 | **自适应预算**（热页面短、冷启动长） | **0.96** | p=0.97；「全局缩短」=0 |
+| D1 页面生命周期 | **复用一个热页面** | 0.63 | 0.72 / 空闲降级 0.14 / 仅会话内 0.12 |
+
+## 5. 由此得到的优化路线（按风险×收益排序）
+
+| 阶段 | 内容 | 对应决策 | 风险 | 预期 |
+|:--|:--|:--|:--|:--|
+| **P0** | 去冗余导航：`check_login_status` / `user_profile` 已在发现页就不再导航；固定 3s 等待 → 上限不变的有界轮询；死代码清理（4 个零调用构造器 + `sleepRandom`）；正文编辑器先试现役 TipTap | D3 | 低 | 每次省 1–2 次整页加载；代码更轻 |
+| **P0** | 低资源档空闲回收默认 5m → 30m（可覆盖） | D2 | 低-中（常驻 RAM↑） | 避免每个安静期后重付冷启动 |
+| **P1** | **互动工具就地操作**：当前 URL/笔记与目标一致时不重新导航（否则保持现状） | **D4（jev 0.97）** | 中（需 feed id + token 一致性判定，判错会点错笔记） | 顺序使用时每次互动省 **1 次整页加载** —— 收益最大 |
+| **P2** | **自适应等待预算**：页面已是热的时候用短预算（如 8–15s），只有冷启动首载用长预算（60s） | **D5（jev 0.97）** | 中（判错会过早放弃） | 减少「等满 60s」的长尾 |
+| **P3** | 页面生命周期：复用热页面（jev 0.72）或空闲时导航到 about:blank（0.14） | D1/D2 | 高（状态串味 / 生命周期语义） | renderer 不再每次生成；需真机标定 RAM |
+
+**明确不做**：不动防封禁节奏（随机延迟、阅读阶段、限流阈值）；不把 TypeSafe 接进 MCP 代码；不删 `*Diagnostic()`；D8 的逐候选复核保留（那是正确性成本，不是浪费）。
+
+## 6. 与工作区未提交改动的关系
+
+当前工作区有 9 个**未提交**文件，正好覆盖上表 **P0 的前两项**（去冗余导航 + 有界轮询 + 空闲回收默认 + 死代码 + 编辑器顺序），**没有**涉及 P1/P2/P3。
+是否保留、要不要拆成独立提交、P1/P2/P3 怎么做，等所有者确认后再动。
+
+## 7. 坐标依赖审计（D10：视口每次可能不同 → 少用坐标）
+
+**前提（所有者一手信息 + 源码佐证）**：每次启动浏览器视口大小可能不一样 ——
+Cloak 模式下代码显式用了 `NoDefaultDevice()`（`third_party/headless_browser/headless_browser.go:357`），
+即视口由浏览器指纹自己决定，不固定。因此「把坐标算出来存起来、之后再点」这种写法在这个项目上不可靠。
+
+### 7.1 审计结果（[源码]）
+
+| 位置 | 写法 | 判定 |
+|:--|:--|:--|
+| `publish.go:116 clickEmptyPosition` | **硬编码猜点** `x = 380+rand(100)`、`y = 20+rand(60)`，用于关闭浮层 | ❌ **危险**：视口不同、页面版式不同时，这个「空白位置」可能正好落在可交互元素上（导航/tab），点出意外行为 |
+| `feed_detail.go:660 + :785` | `showMoreButtonSnapshot` 只存 `Text/X/Y/Count/ParentIndex`（**不含元素句柄**），`clickShowMoreButton` 用**快照里的 X/Y** 点；注释自称「pre 验证过的点击方式」 | ❌ **危险**：坐标在快照时刻固定，之后任何滚动/重排（实测详情页滚动会让 scrollHeight 2969→8604、位置全变）或不同视口都会点空/点偏 |
+| `note_open.go:115 feedCardClickPoint` | **活体几何**：一次 eval 里读 `getBoundingClientRect()` → 中点夹到视口内 → **`elementFromPoint` 校验命中在 anchor 内**，不命中就返回带 `failure_reason` 的诊断 | ✅ 可接受（点击瞬间解析 + 命中校验）；且 fixup 历史表明卡片改元素级点击曾误触图片预览态，**不要盲目改成元素点击** |
+| `search.go:742` | 同一 eval 内读 rect → 夹到视口 → 再点 | ✅ 可接受 |
+| `humanize`（`actor_mouse_ext.go:539/736`、`input.go:39/129/155/186`） | 一律用 `elem.Shape()`（CDP `DOM.getContentQuads`）**在点击/输入瞬间**取几何 | ✅ 正确范式（应作为其他地方的模板） |
+| `humanize/mouse.go:50` | 贝塞尔控制点由**活体端点**推导 | ✅ 可接受 |
+
+### 7.2 建议的最小改法（尚未实施）
+
+1. `clickEmptyPosition` → **去掉猜点**：优先用 `Escape` 关浮层（无坐标、无副作用）；确有需要时，先在一次 eval 里用
+   `document.elementFromPoint` 确认该点不在任何可交互元素内，再点，否则放弃。
+2. `clickShowMoreButton` → **带上元素句柄**（或在点击前按键位 `ParentIndex`/文本重新定位 `.show-more`），
+   然后走元素级点击 —— 几何在点击瞬间解析，并复用现成的可见/遮挡校验。
+   这样同时消掉「快照过期」这个失败模式。
+3. `feedCardClickPoint` / `search.go` 的两处：**保留**（已是活体 + 校验），在注释里写清为什么不用元素点击（卡片元素点击会误触图片预览）。
+4. 原则沉淀：**新增代码一律不得缓存坐标**；需要点击位置时，必须在同一次 eval/同一次点击调用里解析。
+
+## 8. 兜底/多路径清点与精简清单（D11：准确优先，不要层层兜底）
+
+所有者原则：**逻辑正确的前提下精简代码、提升效率；不要堆兜底代码，要准确。** 兜底本质是把不确定性堆进代码，
+与「轻量可靠」相反。下表把全仓的兜底/多路径逐项列出，并给出裁决（**[实测]** 为本机真实站点实测）。
+
+### 8.1 建议删除（未观测到的投机分支）
+
+| 项 | 现状 | 实测 | 精确化后 |
+|:--|:--|:--|:--|
+| 搜索框并集 | `#search-input-in-feeds, #search-input, #search-input-ai, input[placeholder*="搜索"]` | 首页命中 3（含隐藏克隆）；**`input[placeholder*="搜索"]` 命中 0**（线上是 textarea，且 placeholder 是滚动热搜词） | 按页面种类取 `#search-input-in-feeds`（发现页）/ `#search-input`（搜索结果页） |
+| 搜索结果并集 | `.feeds-container, .note-list, .search-layout, div[data-v-]` | `div[data-v-]` 是 Vue 通用属性、语义上永不精确 | `.search-layout` / `.feeds-container` |
+| 卡片并集 | `section.note-item, .note-item, .feeds-container section, .note-list section` | **`section.note-item` 单独命中 30 张**，其余 3 个分支从未提供命中 | `section.note-item` |
+| 通知发送按钮 | `.comment-wrapper .submit, .input-buttons .submit` | `.comment-wrapper .submit` 命中；`.input-buttons .submit` **全页 0** | 只留 `.comment-wrapper .submit`（我上轮为兼容加的旧分支删掉） |
+| 发布按钮 | `xhs-publish-btn` + `.publish-page-publish-btn button.bg-red` | 前者命中，后者 **0** | 只留 `xhs-publish-btn` |
+| 正文编辑器 | `div.tiptap.ProseMirror` + `div.ql-editor` + placeholder 兜底 | TipTap 命中；`div.ql-editor` **0**；placeholder 兜底也命中 | 只留 `div.tiptap.ProseMirror` |
+| 搜索 URL 兜底 | `waitForSearchResultsWithURLFallback` 整套：UI 搜索没就绪就**直接拼 URL 导航** | 与「必须走真实 UI 路径」的防封禁设计直接冲突 | **整段删除，改为明确报错** |
+| 空位猜点 | `publish.go clickEmptyPosition`：硬编码 `x=380+rand(100), y=20+rand(60)` | 视口每次可能不同（`NoDefaultDevice()`） | 删；改用 `Escape` 关浮层 |
+
+### 8.2 建议合并（同一逻辑的多份副本）
+
+| 项 | 份数 | 位置 |
+|:--|--:|:--|
+| 风险关键词表 | **4 份** | `risk.go`、`current_detail.go`、`notification_reply.go`、`comment_feed.go` |
+| `visible(el)` JS 片段 | **4–5 份** | `search.go`（4 处）、`current_detail.go`、`feed_detail.go`、`risk.go`、`note_open.go` |
+
+合并为一份共享常量（同包内），避免「改一处漏三处」——这本身就是可靠性问题。
+
+### 8.3 建议精简但保留一处显式路径
+
+| 项 | 现状 | 裁决 |
+|:--|:--|:--|
+| 双路数据提取 | 搜索结果/详情同时读 DOM 与 `__INITIAL_STATE__`，再 `mergeFeedsByID` + `fillMissingFeedFields`（约 70 字段逐项回填） | jev：**DOM 为唯一来源、去掉逐字段回填**（0.81）；仅当 DOM 确实拿不到该值时，保留**一处**显式 state 读取 |
+
+### 8.4 明确保留（不是兜底，是必要的正确性成本）
+
+| 项 | 理由（[实测]） |
+|:--|:--|
+| `SelectorFeedDetailReady` 四路并集 | 详情页**四种信号在浮层形态与独立页形态下都命中**，覆盖两种真实形态 |
+| 逐候选 `elementFromPoint` 命中校验 | 线上确实存在重复节点（筛选项 ×2，creator tab ×3），不校验就会点到不可点击的克隆 |
+| `isElementVisible` 里的 `left: -9999px` / `opacity: 1e-05` 字面量检查 | 实测那两类隐藏克隆就是用这两个内联样式实现的 —— 这是**精确**判定，不是猜测 |
+| `*Diagnostic()` 方法 | 在 `mcp_handlers.go:646/662` 被调用且有测试 |
+| `New*WithState` 构造器、4 档 eval 预算 | 有真实调用方 / 对应不同代价路径 |
+
+### 8.5 Jev 裁决（第三轮，`jev-latest`）
+
+| 问题 | 裁决 | 置信度 | 概率 |
+|:--|:--|--:|:--|
+| 未观测到的选择器分支 | **删** | **1.0** | 1.00 / 0 / 0 |
+| UI 搜索失败后的 URL 兜底 | **删，改报错** | **1.0** | 1.00 / 0 / 0 |
+| DOM+state 双路提取 | **DOM 唯一 + 去逐字段回填** | 0.74 | 0.81 / dom_only 0.18 / keep_merge 0.01 |
+| 旧一代页面选择器 | **整代删** | **1.0** | 1.00 / 0 / 0 |
+
+### 8.6 代价（诚实说明）
+
+删掉这些兜底后，遇到「旧形态页面 / UI 搜索迟迟不就绪」时**不再自我降级**，而是**显式报错**。
+这正是所有者要的「准确」：错误可见、可定位，而不是被兜底悄悄掩盖；代价是少了自愈路径。
+
+### 8.7 执行顺序建议（尚未实施）
+
+1. **逻辑正确性优先**：先补齐/跑通现有测试（当前 worktree 的 P0 改动需先过 CI）。
+2. **精简**：§8.1 的删除 + §8.2 的合并 + §8.3 的单源化。
+3. **效率/复用**：再动 §5 的 P1（互动就地操作）与 P3（页面复用）。

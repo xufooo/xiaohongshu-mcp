@@ -3,6 +3,8 @@ package xiaohongshu
 import (
 	"context"
 	"fmt"
+	"net/url"
+	"strings"
 
 	"github.com/go-rod/rod/lib/proto"
 	"github.com/xpzouying/xiaohongshu-mcp/humanize"
@@ -52,12 +54,28 @@ func findVisibleProfileEntry(page *hrod.Page) (*hrod.Element, error) {
 	return nil, fmt.Errorf("个人页入口均不可见（命中 %d 个）", len(elems))
 }
 
+// onExplorePage 判断当前页是否已在 /explore。
+// Pi 上一次全页导航是分钟级成本，已在目标页时不得重复导航。
+func onExplorePage(page *hrod.Page) bool {
+	info, err := page.Rod.Info()
+	if err != nil || info == nil {
+		return false
+	}
+	parsed, err := url.Parse(info.URL)
+	if err != nil {
+		return false
+	}
+	return parsed.Host == "www.xiaohongshu.com" && strings.TrimRight(parsed.Path, "/") == "/explore"
+}
+
 func (n *NavigateAction) ToProfilePage(ctx context.Context) error {
 	page := n.page.Context(ctx)
 
-	// First navigate to explore page
-	if err := n.ToExplorePage(ctx); err != nil {
-		return err
+	// 已在发现页时跳过重复导航（Pi 上一次全页加载是分钟级成本）。
+	if !onExplorePage(page) {
+		if err := n.ToExplorePage(ctx); err != nil {
+			return err
+		}
 	}
 
 	// Find and click the "我" channel link in sidebar

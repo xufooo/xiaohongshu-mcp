@@ -261,6 +261,17 @@ func IdentityCheckInterval() time.Duration {
 	return parsed
 }
 
+// DefaultBrowserIdleTimeout 返回浏览器空闲回收默认值。
+// 低资源档（树莓派）上 Chromium 冷启动与首屏导航是分钟级成本，
+// 5 分钟就回收等于把冷启动反复重付；默认放宽到 30 分钟。
+// XHS_BROWSER_IDLE_TIMEOUT 可覆盖（0 或负值表示不自动回收）。
+func DefaultBrowserIdleTimeout() time.Duration {
+	if LowResourceProfile() {
+		return 30 * time.Minute
+	}
+	return 5 * time.Minute
+}
+
 // envPositiveInt 读取正整数环境变量，缺失或非法返回 0。
 func envPositiveInt(name string) int {
 	raw := strings.TrimSpace(os.Getenv(name))

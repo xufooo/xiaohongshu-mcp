@@ -596,6 +596,11 @@ func makeMaxLengthError(elemText string) error {
 
 // 查找内容输入框，兼容当前编辑器和 placeholder 兜底结构。
 func getContentElement(page *hrod.Page) (*hrod.Element, bool) {
+	// 线上编辑器为 TipTap ProseMirror（2026-09 实测；Quill 的 div.ql-editor 已不存在）。
+	// 先试现役结构，再退回旧结构，最后 placeholder 兜底。
+	if editor, err := page.Timeout(5 * time.Second).Element("div.tiptap.ProseMirror"); err == nil && editor != nil {
+		return editor, true
+	}
 	if editor, err := page.Timeout(5 * time.Second).Element("div.ql-editor"); err == nil && editor != nil {
 		return editor, true
 	}

@@ -185,10 +185,6 @@ type LikeAction struct {
 	*interactAction
 }
 
-func NewLikeAction(page *hrod.Page) *LikeAction {
-	return &LikeAction{interactAction: newInteractAction(page)}
-}
-
 func NewLikeActionWithState(page *hrod.Page, state *ActionStateStore) *LikeAction {
 	return &LikeAction{interactAction: newInteractActionWithState(page, state)}
 }
@@ -219,10 +215,6 @@ func (a *LikeAction) perform(ctx context.Context, feedID, xsecToken string, targ
 // FavoriteAction 负责处理收藏相关交互
 type FavoriteAction struct {
 	*interactAction
-}
-
-func NewFavoriteAction(page *hrod.Page) *FavoriteAction {
-	return &FavoriteAction{interactAction: newInteractAction(page)}
 }
 
 func NewFavoriteActionWithState(page *hrod.Page, state *ActionStateStore) *FavoriteAction {
