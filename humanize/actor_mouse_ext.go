@@ -385,7 +385,9 @@ func (m *Mouse) ClickNoScroll(el *rod.Element) error {
 	}
 
 	final := m.posSnapshot()
+	// 命中判据与其它地方共用：shadow 内部元素的命中会被重定向到宿主（见 hit_target.go）。
 	result, err := el.Context(m.ctx).Eval(`(x, y) => {
+		`+HitTargetJS+`
 		const style = window.getComputedStyle(this);
 		const rect = this.getBoundingClientRect();
 		const visible = this.isConnected &&
@@ -394,7 +396,7 @@ func (m *Mouse) ClickNoScroll(el *rod.Element) error {
 			Number(style.opacity || "1") > 0 &&
 			rect.width > 0 && rect.height > 0;
 		const hit = visible ? document.elementFromPoint(x, y) : null;
-		return visible && !!hit && (hit === this || this.contains(hit));
+		return visible && hitTargets(this, hit);
 	}`, final.X, final.Y)
 	if err != nil {
 		return fmt.Errorf("最终点击命中校验失败: %w", err)
@@ -463,12 +465,13 @@ func (m *Mouse) ScrollIntoView(el *rod.Element) error {
 	boundEl := el.Context(m.ctx)
 	readProbe := func() (probe, error) {
 		obj, err := boundEl.Eval(`() => {
+			` + HitTargetJS + `
 			const r = this.getBoundingClientRect();
 			const target = {left: r.left, top: r.top, right: r.right, bottom: r.bottom};
 			const centerX = (r.left + r.right) / 2;
 			const centerY = (r.top + r.bottom) / 2;
 			const hit = document.elementFromPoint(centerX, centerY);
-			const centerHit = !!hit && (hit === this || this.contains(hit));
+			const centerHit = hitTargets(this, hit);
 			const hitRect = hit && !centerHit ? hit.getBoundingClientRect() : null;
 			let parent = this.parentElement;
 			while (parent) {
@@ -522,39 +525,81 @@ func (m *Mouse) ScrollIntoView(el *rod.Element) error {
 			var minX, maxX, minY, maxY float64
 			for j := 0; j < q.Len(); j++ {
 				x, y := q[j*2], q[j*2+1]
-				if j == 0 || x < minX { minX = x }
-				if j == 0 || x > maxX { maxX = x }
-				if j == 0 || y < minY { minY = y }
-				if j == 0 || y > maxY { maxY = y }
+				if j == 0 || x < minX {
+					minX = x
+				}
+				if j == 0 || x > maxX {
+					maxX = x
+				}
+				if j == 0 || y < minY {
+					minY = y
+				}
+				if j == 0 || y > maxY {
+					maxY = y
+				}
 			}
 			vp, err := m.viewport()
-			if err != nil { return err }
+			if err != nil {
+				return err
+			}
 			centerX, centerY := (minX+maxX)/2, (minY+maxY)/2
-			if centerX >= 0 && centerX <= vp.width && centerY >= 0 && centerY <= vp.height { return nil }
-			if centerX < 0 || centerX > vp.width { return errors.New("element center is outside viewport horizontally") }
+			if centerX >= 0 && centerX <= vp.width && centerY >= 0 && centerY <= vp.height {
+				return nil
+			}
+			if centerX < 0 || centerX > vp.width {
+				return errors.New("element center is outside viewport horizontally")
+			}
 			var deltaX, deltaY float64
-			if maxX < margin { deltaX = maxX - margin } else if minX > vp.width-margin { deltaX = minX - vp.width + margin }
-			if maxY < margin { deltaY = maxY - margin } else if minY > vp.height-margin { deltaY = minY - vp.height + margin }
-			if deltaX == 0 && deltaY == 0 { return errors.New("element center is outside viewport") }
-			if err := m.Scroll(deltaX, deltaY); err != nil { return err }
-			if err := sleepWithContext(m.ctx, randDuration(80*time.Millisecond, 200*time.Millisecond)); err != nil { return err }
+			if maxX < margin {
+				deltaX = maxX - margin
+			} else if minX > vp.width-margin {
+				deltaX = minX - vp.width + margin
+			}
+			if maxY < margin {
+				deltaY = maxY - margin
+			} else if minY > vp.height-margin {
+				deltaY = minY - vp.height + margin
+			}
+			if deltaX == 0 && deltaY == 0 {
+				return errors.New("element center is outside viewport")
+			}
+			if err := m.Scroll(deltaX, deltaY); err != nil {
+				return err
+			}
+			if err := sleepWithContext(m.ctx, randDuration(80*time.Millisecond, 200*time.Millisecond)); err != nil {
+				return err
+			}
 			afterVP, err := m.viewport()
-			if err != nil { return err }
-			if math.Abs(afterVP.scrollX-vp.scrollX) < 1 && math.Abs(afterVP.scrollY-vp.scrollY) < 1 { return errors.New("window scroll made no progress") }
+			if err != nil {
+				return err
+			}
+			if math.Abs(afterVP.scrollX-vp.scrollX) < 1 && math.Abs(afterVP.scrollY-vp.scrollY) < 1 {
+				return errors.New("window scroll made no progress")
+			}
 		}
 		return errors.New("element did not become visible after maximum window scroll attempts")
 	}
 	for i := 0; i < maxAttempts; i++ {
 		before, err := readProbe()
-		if err != nil { return err }
-		if !before.found { return windowScroll() }
-		if before.visible.right-before.visible.left <= 1 || before.visible.bottom-before.visible.top <= 1 { return errors.New("scroll container has no visible area") }
+		if err != nil {
+			return err
+		}
+		if !before.found {
+			return windowScroll()
+		}
+		if before.visible.right-before.visible.left <= 1 || before.visible.bottom-before.visible.top <= 1 {
+			return errors.New("scroll container has no visible area")
+		}
 		effectiveMargin := math.Min(margin, (before.visible.bottom-before.visible.top)/4)
 		centerX := (before.target.left + before.target.right) / 2
 		centerY := (before.target.top + before.target.bottom) / 2
 		centerVisible := centerX >= before.visible.left && centerX <= before.visible.right && centerY >= before.visible.top && centerY <= before.visible.bottom
-		if centerVisible && before.centerHit { return nil }
-		if centerX < before.visible.left || centerX > before.visible.right { return errors.New("element center is outside scroll container horizontally") }
+		if centerVisible && before.centerHit {
+			return nil
+		}
+		if centerX < before.visible.left || centerX > before.visible.right {
+			return errors.New("element center is outside scroll container horizontally")
+		}
 		var deltaY float64
 		if centerVisible && !before.centerHit {
 			invalidHitRect := before.hitRect.right-before.hitRect.left <= 0 || before.hitRect.bottom-before.hitRect.top <= 0
@@ -568,7 +613,9 @@ func (m *Mouse) ScrollIntoView(el *rod.Element) error {
 				deltaY = centerY - before.hitRect.top + boundaryTolerance
 			} else {
 				deltaY = centerY - before.hitRect.bottom - boundaryTolerance
-				if deltaY >= 0 { deltaY = -effectiveMargin }
+				if deltaY >= 0 {
+					deltaY = -effectiveMargin
+				}
 			}
 		} else if centerY < before.visible.top+effectiveMargin {
 			deltaY = centerY - before.visible.top - effectiveMargin
@@ -577,17 +624,31 @@ func (m *Mouse) ScrollIntoView(el *rod.Element) error {
 		} else {
 			return nil
 		}
-		if before.scrollTop <= 0 && deltaY < 0 || before.scrollTop >= before.scrollHeight-before.clientHeight-1 && deltaY > 0 { return errors.New("scroll container reached its boundary") }
+		if before.scrollTop <= 0 && deltaY < 0 || before.scrollTop >= before.scrollHeight-before.clientHeight-1 && deltaY > 0 {
+			return errors.New("scroll container reached its boundary")
+		}
 		wheelPoint := Point{X: (before.visible.left + before.visible.right) / 2, Y: (before.visible.top + before.visible.bottom) / 2}
-		if err := m.moveTo(wheelPoint, false); err != nil { return err }
-		if err := m.Scroll(0, deltaY); err != nil { return err }
-		if err := sleepWithContext(m.ctx, randDuration(80*time.Millisecond, 200*time.Millisecond)); err != nil { return err }
+		if err := m.moveTo(wheelPoint, false); err != nil {
+			return err
+		}
+		if err := m.Scroll(0, deltaY); err != nil {
+			return err
+		}
+		if err := sleepWithContext(m.ctx, randDuration(80*time.Millisecond, 200*time.Millisecond)); err != nil {
+			return err
+		}
 		after, err := readProbe()
-		if err != nil { return err }
+		if err != nil {
+			return err
+		}
 		afterCenterX := (after.target.left + after.target.right) / 2
 		afterCenterY := (after.target.top + after.target.bottom) / 2
-		if after.found && afterCenterX >= after.visible.left && afterCenterX <= after.visible.right && afterCenterY >= after.visible.top && afterCenterY <= after.visible.bottom && after.centerHit { return nil }
-		if math.Abs(after.target.top-before.target.top) < 1 && math.Abs(after.scrollTop-before.scrollTop) < 1 { return errors.New("scroll made no progress") }
+		if after.found && afterCenterX >= after.visible.left && afterCenterX <= after.visible.right && afterCenterY >= after.visible.top && afterCenterY <= after.visible.bottom && after.centerHit {
+			return nil
+		}
+		if math.Abs(after.target.top-before.target.top) < 1 && math.Abs(after.scrollTop-before.scrollTop) < 1 {
+			return errors.New("scroll made no progress")
+		}
 	}
 	return errors.New("element did not become visible after maximum scroll attempts")
 }
