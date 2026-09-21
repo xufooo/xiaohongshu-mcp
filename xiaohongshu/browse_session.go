@@ -3003,6 +3003,37 @@ func shareURLToken(finalToken, inputToken string) string {
 	return inputToken
 }
 
+// extractShareURL 从粘贴内容里取出链接。
+// 小红书分享文案是整句（"【标题】… 😆 http://xhslink.com/a/xxx 复制本条信息，打开【小红书】App查看精彩内容！"），
+// 用户往往整句复制，直接按 URL 解析会因为 host 不是白名单而失败；
+// 这里取其中第一段看起来像链接的 ASCII 串（中文文案、空格、结尾标点都是天然分隔符）。
+func extractShareURL(raw string) string {
+	// 相对路径 / 协议相对（//host/...）原样交给校验层报明确的错，不在这里改写。
+	if strings.HasPrefix(raw, "/") {
+		return raw
+	}
+	lower := strings.ToLower(raw)
+	for _, marker := range []string{"http://", "https://", "xhslink.com", "xhslink.cn", "xiaohongshu.com"} {
+		i := strings.Index(lower, marker)
+		if i < 0 {
+			continue
+		}
+		rest := raw[i:]
+		end := len(rest)
+		for j, r := range rest {
+			if r <= ' ' || r > 0x7f { // 空白或非 ASCII（中文文案）即结束
+				end = j
+				break
+			}
+		}
+		token := strings.TrimRight(rest[:end], ".,;:!?)]}\"'，。；：！？、）】")
+		if token != "" {
+			return token
+		}
+	}
+	return raw
+}
+
 // normalizeShareURLScheme 把用户粘贴的短链/笔记链接补成 https。
 // 小红书分享文案里的短链就是 http://xhslink.com/...（手动复制还常常不带 scheme），
 // 按原样直接拒掉会让"粘贴分享链接打开笔记"这条最自然的用法失效；
@@ -3026,8 +3057,8 @@ func parseAndValidateShareURL(raw string) (*parsedShareURL, error) {
 	if raw == "" {
 		return nil, fmt.Errorf("share_url不能为空")
 	}
-	// 先补齐 scheme：http:// 与不带 scheme 的粘贴形式都按 https 处理。
-	raw = normalizeShareURLScheme(raw)
+	// 先取出链接（可能是整句分享文案），再补齐 scheme（http:// 与不带 scheme 都按 https 处理）。
+	raw = normalizeShareURLScheme(extractShareURL(raw))
 	u, err := strictValidateHTTPSURL(raw)
 	if err != nil {
 		return nil, err
