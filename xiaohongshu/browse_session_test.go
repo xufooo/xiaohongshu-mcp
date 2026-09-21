@@ -1161,6 +1161,8 @@ func TestParseAndValidateShareURL(t *testing.T) {
 		{name: "无scheme短链", input: "xhslink.com/abc123", isShort: true},
 		{name: "http短链升级为https", input: "http://xhslink.com/abc123", isShort: true},
 		{name: "无scheme短链cn", input: "www.xhslink.cn/abc123", isShort: true},
+		{name: "整句分享文案-短链", input: "【露营装备清单】 😆 http://xhslink.com/a/AbC123 ，复制本条信息，打开【小红书】App查看精彩内容！", isShort: true},
+		{name: "整句分享文案-长链", input: "看看这篇笔记 https://www.xiaohongshu.com/explore/5f4d8e7b00000000010001a2?xsec_token=tok9 复制打开", expectedID: "5f4d8e7b00000000010001a2", xsecToken: "tok9"},
 		{name: "相对URL", input: "/explore/5f4d8e7b00000000010001a2", wantErr: true, errContains: "绝对URL"},
 		{name: "协议相对", input: "//www.xiaohongshu.com/explore/5f4d8e7b00000000010001a2", wantErr: true, errContains: "绝对URL"},
 		{name: "userinfo", input: "https://user:pass@www.xiaohongshu.com/explore/5f4d8e7b00000000010001a2", wantErr: true, errContains: "userinfo"},
