@@ -424,7 +424,7 @@ func TestOpenNoteAtomicCommit(t *testing.T) {
 	if !strings.Contains(session.timeline[0].Note, "ref-1") {
 		t.Fatalf("result_ref timeline detail 应包含 ref-1: %s", session.timeline[0].Note)
 	}
-	stageTools := strings.Join(session.availableActionsLocked(1), ",")
+	stageTools := strings.Join(session.Guidance("").AvailableTools, ",")
 	for _, tool := range []string{"get_note_detail", "like_feed", "favorite_feed", "comment_feed", "reply_comment_in_feed"} {
 		if !strings.Contains(stageTools, tool) {
 			t.Fatalf("原子提交应暴露工具 %s: %s", tool, stageTools)
@@ -653,7 +653,12 @@ func TestMismatchActionsExcludeDetailTools(t *testing.T) {
 		nextResultIndex: 2,
 	}
 	results := session.semanticResultsLocked()
-	available, actions := session.mismatchActionsLocked(results)
+	guidance := session.Guidance("")
+	mismatch := session.guidanceLocked(guidanceQuery{Ready: true, Mismatch: true}, results)
+	if guidance.NextStep == nil || mismatch.NextStep == nil {
+		t.Fatal("指引必须给出 next_step")
+	}
+	available, actions := mismatch.AvailableTools, mismatch.Actions
 	for _, tool := range []string{"get_note_detail", "like_feed", "favorite_feed", "comment_feed", "reply_comment_in_feed", "go_back"} {
 		for _, a := range available {
 			if a == tool {
@@ -2461,5 +2466,225 @@ func TestDetailVisibilityDiagnosticDoesNotExposeRawProbeError(t *testing.T) {
 		if strings.Contains(diagnostic, secret) {
 			t.Fatalf("诊断泄露敏感内容 %q: %q", secret, diagnostic)
 		}
+	}
+}
+
+// TestGuidanceMatrixAcrossSessionStates 锁定「下一步工具」契约：
+// 同一份会话状态只由 guidanceLocked 翻译成工具指引，且绝不推荐当前状态不允许的工具。
+func TestGuidanceMatrixAcrossSessionStates(t *testing.T) {
+	homeResults := map[string]Feed{}
+	searchResults := map[string]Feed{
+		"0": {ID: "feed-0", NoteCard: NoteCard{DisplayTitle: "t0"}},
+		"1": {ID: "feed-1", NoteCard: NoteCard{DisplayTitle: "t1"}},
+	}
+	cases := []struct {
+		name          string
+		session       *BrowseSession
+		ready         bool
+		mismatch      bool
+		wantTool      string
+		wantArgKeys   map[string]string
+		wantAvailable []string
+		notAvailable  []string
+		excludeTool   string
+	}{
+		{
+			name:          "首页无结果推荐搜索",
+			session:       &BrowseSession{id: "s-1", results: homeResults},
+			ready:         true,
+			wantTool:      "search_feeds",
+			wantArgKeys:   map[string]string{"session_id": "s-1"},
+			wantAvailable: []string{"get_page_state", "search_feeds", "list_feeds", "get_unread_count", "list_notifications", "close_page"},
+			notAvailable:  []string{"open_note", "like_feed", "comment_feed"},
+		},
+		{
+			name:          "有未读搜索结果推荐打开具体 result_ref",
+			session:       &BrowseSession{id: "s-2", results: searchResults, nextResultIndex: 2, seenNotes: map[string]bool{"feed-0": true}},
+			ready:         true,
+			wantTool:      "open_note",
+			wantArgKeys:   map[string]string{"session_id": "s-2", "result_ref": "1"},
+			wantAvailable: []string{"open_note", "get_page_state", "search_feeds"},
+			notAvailable:  []string{"like_feed", "get_note_detail", "go_back"},
+		},
+		{
+			name:          "全部已读时仍给出可打开的 result_ref",
+			session:       &BrowseSession{id: "s-3", results: searchResults, nextResultIndex: 2, seenNotes: map[string]bool{"feed-0": true, "feed-1": true}},
+			ready:         true,
+			wantTool:      "open_note",
+			wantArgKeys:   map[string]string{"result_ref": "0"},
+			wantAvailable: []string{"open_note"},
+		},
+		{
+			name:          "已读笔记推荐继续读评论并暴露互动工具",
+			session:       &BrowseSession{id: "s-4", results: searchResults, nextResultIndex: 2, opened: true, read: true, currentFeedID: "feed-0"},
+			ready:         true,
+			wantTool:      "get_note_detail",
+			wantArgKeys:   map[string]string{"session_id": "s-4"},
+			wantAvailable: []string{"get_note_detail", "like_feed", "favorite_feed", "comment_feed", "reply_comment_in_feed", "go_back"},
+			notAvailable:  []string{"open_note"},
+		},
+		{
+			name:          "打开但未读完推荐返回",
+			session:       &BrowseSession{id: "s-5", opened: true, currentFeedID: "feed-0"},
+			ready:         true,
+			wantTool:      "go_back",
+			wantArgKeys:   map[string]string{"session_id": "s-5"},
+			wantAvailable: []string{"go_back"},
+			notAvailable:  []string{"like_feed", "get_note_detail"},
+		},
+		{
+			name: "通知页有可写条目推荐回复并带 notification_ref",
+			session: &BrowseSession{
+				id: "s-6",
+				notification: browseNotificationState{
+					active:  true,
+					targets: map[string]notificationTarget{"n-1": {}},
+					items: []NotificationItem{
+						{NotificationRef: "n-0", Actionable: false},
+						{NotificationRef: "n-1", Actionable: true, From: NotificationUser{Nickname: "青史拾页"}},
+					},
+				},
+			},
+			ready:         true,
+			wantTool:      "reply_notification",
+			wantArgKeys:   map[string]string{"session_id": "s-6", "notification_ref": "n-1"},
+			wantAvailable: []string{"like_notification", "reply_notification", "list_notifications", "go_back"},
+			notAvailable:  []string{"open_note", "search_feeds", "like_feed"},
+		},
+		{
+			name: "通知页无可写条目推荐刷新列表",
+			session: &BrowseSession{
+				id:           "s-7",
+				notification: browseNotificationState{active: true},
+			},
+			ready:         true,
+			wantTool:      "list_notifications",
+			wantArgKeys:   map[string]string{"session_id": "s-7", "tab": "mentions"},
+			wantAvailable: []string{"get_page_state", "list_notifications"},
+			notAvailable:  []string{"like_notification", "reply_notification", "open_note"},
+		},
+		{
+			name:          "页面未就绪只允许确认状态或关闭",
+			session:       &BrowseSession{id: "s-8", results: searchResults, nextResultIndex: 2},
+			ready:         false,
+			wantTool:      "get_page_state",
+			wantArgKeys:   map[string]string{"session_id": "s-8"},
+			wantAvailable: []string{"get_page_state", "close_page"},
+			notAvailable:  []string{"open_note", "search_feeds", "like_feed"},
+		},
+		{
+			name:          "状态不一致时禁用详情工具",
+			session:       &BrowseSession{id: "s-9", opened: true, read: true, currentFeedID: "feed-0", results: searchResults, nextResultIndex: 2},
+			ready:         false,
+			mismatch:      true,
+			wantTool:      "open_note",
+			wantArgKeys:   map[string]string{"session_id": "s-9", "result_ref": "0"},
+			wantAvailable: []string{"open_note", "get_page_state", "search_feeds", "close_page"},
+			notAvailable:  []string{"like_feed", "get_note_detail", "go_back", "comment_feed"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			guidance := tc.session.guidanceLocked(guidanceQuery{Ready: tc.ready, Mismatch: tc.mismatch, ExcludeTool: tc.excludeTool}, tc.session.semanticResultsLocked())
+			if guidance.NextStep == nil {
+				t.Fatal("next_step 不能为空")
+			}
+			if guidance.NextStep.Tool != tc.wantTool {
+				t.Fatalf("next_step.tool = %q, 期望 %q", guidance.NextStep.Tool, tc.wantTool)
+			}
+			if guidance.NextStep.Reason == "" {
+				t.Fatal("next_step.reason 不能为空")
+			}
+			for key, want := range tc.wantArgKeys {
+				got, ok := guidance.NextStep.Args[key]
+				if !ok || got != want {
+					t.Fatalf("next_step.args[%s] = %v, 期望 %q（args=%v）", key, got, want, guidance.NextStep.Args)
+				}
+			}
+			if tc.wantTool != "start_page" {
+				if _, ok := guidance.NextStep.Args["session_id"]; !ok {
+					t.Fatalf("session 工具的 next_step 必须带 session_id: %v", guidance.NextStep.Args)
+				}
+			}
+			if tc.session.id != "" {
+				has := func(list []string, tool string) bool {
+					for _, item := range list {
+						if item == tool {
+							return true
+						}
+					}
+					return false
+				}
+				for _, tool := range tc.wantAvailable {
+					if !has(guidance.AvailableTools, tool) {
+						t.Fatalf("available_tools 应包含 %s: %v", tool, guidance.AvailableTools)
+					}
+				}
+				for _, tool := range tc.notAvailable {
+					if has(guidance.AvailableTools, tool) {
+						t.Fatalf("available_tools 不得包含 %s: %v", tool, guidance.AvailableTools)
+					}
+				}
+				if has(guidance.AvailableTools, guidance.NextStep.Tool) == false {
+					t.Fatalf("next_step.tool=%s 必须在 available_tools 内: %v", guidance.NextStep.Tool, guidance.AvailableTools)
+				}
+			}
+		})
+	}
+}
+
+// TestReplyNotificationClearsActionableForGuidance 回复过的通知条目不再进入 next_step，
+// 否则调用方会被指引回同一条通知重复回复。
+func TestReplyNotificationClearsActionableForGuidance(t *testing.T) {
+	session := &BrowseSession{
+		id: "s-reply",
+		notification: browseNotificationState{
+			active: true,
+			items: []NotificationItem{
+				{NotificationRef: "n-1", Actionable: true, From: NotificationUser{Nickname: "甲"}},
+				{NotificationRef: "n-2", Actionable: true, From: NotificationUser{Nickname: "乙"}},
+			},
+			targets: map[string]notificationTarget{"n-1": {}, "n-2": {}},
+		},
+	}
+	session.mu.Lock()
+	for i := range session.notification.items {
+		if session.notification.items[i].NotificationRef == "n-1" {
+			session.notification.items[i].Actionable = false
+		}
+	}
+	guidance := session.guidanceLocked(guidanceQuery{Ready: true}, session.semanticResultsLocked())
+	session.mu.Unlock()
+	if guidance.NextStep == nil || guidance.NextStep.Tool != "reply_notification" {
+		t.Fatalf("应继续推荐回复剩余条目: %+v", guidance.NextStep)
+	}
+	if got := guidance.NextStep.Args["notification_ref"]; got != "n-2" {
+		t.Fatalf("应推荐未被回复的 n-2: %v", guidance.NextStep.Args)
+	}
+}
+
+// TestGuidanceNeverRecommendsTheToolJustCalled 刚调用过的工具不再被推荐，
+// 避免「读完评论又让你读评论」这类原地打转的调用。
+func TestGuidanceNeverRecommendsTheToolJustCalled(t *testing.T) {
+	session := &BrowseSession{
+		id: "s-exclude", results: map[string]Feed{"0": {ID: "feed-0"}}, nextResultIndex: 1,
+		opened: true, read: true, currentFeedID: "feed-0",
+	}
+	first := session.Guidance("")
+	if first.NextStep == nil || first.NextStep.Tool != "get_note_detail" {
+		t.Fatalf("默认应推荐继续读评论: %+v", first.NextStep)
+	}
+	after := session.Guidance("get_note_detail")
+	if after.NextStep == nil || after.NextStep.Tool != "go_back" {
+		t.Fatalf("刚读完评论后应改推 go_back: %+v", after.NextStep)
+	}
+	if after.NextStep.Args["session_id"] != "s-exclude" {
+		t.Fatalf("go_back 指引应带 session_id: %v", after.NextStep.Args)
+	}
+
+	searched := &BrowseSession{id: "s-exclude2"}
+	repeat := searched.Guidance("search_feeds")
+	if repeat.NextStep == nil || repeat.NextStep.Tool != "search_feeds" {
+		t.Fatalf("无结果时没有别的候选，仍应推荐 search_feeds: %+v", repeat.NextStep)
 	}
 }

@@ -63,10 +63,9 @@ type SessionOpenNoteResponse struct {
 }
 
 type CreateBrowseSessionResult struct {
-	Outcome           string                  `json:"outcome"`
-	Session           *BrowseSessionInfo      `json:"session,omitempty"`
-	Status            BrowseSessionStatusInfo `json:"status"`
-	RecommendedAction string                  `json:"recommended_action"`
+	Outcome string                  `json:"outcome"`
+	Session *BrowseSessionInfo      `json:"session,omitempty"`
+	Status  BrowseSessionStatusInfo `json:"status"`
 }
 
 type BrowseSessionStatusInfo struct {
@@ -101,25 +100,22 @@ type BrowseSessionPageState struct {
 	Current           BrowseSessionCurrent    `json:"current"`
 	Results           []BrowseSessionResult   `json:"results,omitempty"`
 	Actions           []BrowseSessionAction   `json:"actions,omitempty"`
-	RecommendedAction *BrowseSessionAction    `json:"recommended_action,omitempty"`
+	NextStep          *NextStep               `json:"next_step,omitempty"`
 	Timeline          []BrowseSessionEvent    `json:"timeline,omitempty"`
 	StateFragment     string                  `json:"state_fragment,omitempty"`
 	ResultsCount      int                               `json:"results_count"`
 	SeenCount         int                               `json:"seen_count"`
-	AvailableActions  []string                          `json:"available_actions,omitempty"`
+	AvailableTools    []string                          `json:"available_tools,omitempty"`
 	Notification      *BrowseSessionNotificationSurface `json:"notification,omitempty"`
 }
 
 type BrowseSessionCurrent struct {
-	Kind           XHSReadyKind `json:"kind"`
-	URL            string       `json:"url,omitempty"`
-	FeedID         string       `json:"feed_id,omitempty"`
-	Opened         bool         `json:"opened"`
-	Read           bool         `json:"read"`
-	ScrollY        int          `json:"scroll_y,omitempty"`
-	NextHint       string       `json:"next_hint,omitempty"`
-	ResultsCount   int          `json:"results_count"`
-	AvailableTools []string     `json:"available_tools,omitempty"`
+	Kind    XHSReadyKind `json:"kind"`
+	URL     string       `json:"url,omitempty"`
+	FeedID  string       `json:"feed_id,omitempty"`
+	Opened  bool         `json:"opened"`
+	Read    bool         `json:"read"`
+	ScrollY int          `json:"scroll_y,omitempty"`
 }
 
 type BrowseSessionResult struct {
@@ -139,6 +135,53 @@ type BrowseSessionAction struct {
 	Requires        string `json:"requires,omitempty"`
 	Confirm         bool   `json:"confirm,omitempty"`
 	NotificationRef string `json:"notification_ref,omitempty"`
+}
+
+// NextStep 描述下一步该调用哪个工具。错误响应和成功响应共用同一结构，
+// 调用方只需读 next_step.tool（args 已在服务端填好已知参数）就能直接发起下一次调用。
+type NextStep struct {
+	Tool   string         `json:"tool"`
+	Args   map[string]any `json:"args,omitempty"`
+	Reason string         `json:"reason,omitempty"`
+	Hint   string         `json:"hint,omitempty"`
+}
+
+// guidanceQuery 描述一次指引推导的输入：页面是否就绪、是否与 session 声明不一致、
+// 以及调用方刚刚用过的工具（不推荐重复调用同一个工具）。
+type guidanceQuery struct {
+	Ready       bool
+	Mismatch    bool
+	ExcludeTool string
+}
+
+// BrowseSessionGuidance 是「当前状态下能调用什么」的唯一出口：
+// AvailableTools 列出当前状态允许的工具，Actions 给出带参数的语义动作，NextStep 是唯一推荐。
+type BrowseSessionGuidance struct {
+	AvailableTools []string              `json:"available_tools,omitempty"`
+	Actions        []BrowseSessionAction `json:"actions,omitempty"`
+	NextStep       *NextStep             `json:"next_step,omitempty"`
+}
+
+// NextStepArgs 过滤掉空参数，构造 next_step 的 args；没有可用参数时返回 nil（JSON 里省略）。
+func NextStepArgs(pairs map[string]any) map[string]any {
+	args := make(map[string]any, len(pairs))
+	for key, value := range pairs {
+		if text, ok := value.(string); ok {
+			if text == "" {
+				continue
+			}
+			args[key] = text
+			continue
+		}
+		if value == nil {
+			continue
+		}
+		args[key] = value
+	}
+	if len(args) == 0 {
+		return nil
+	}
+	return args
 }
 
 type BrowseSessionEvent struct {
@@ -420,40 +463,19 @@ func (s *BrowseSession) PageState(ctx context.Context) (state *BrowseSessionPage
 
 	kind := liveKind
 	var ready bool
-	var availableActions []string
-	var actions []BrowseSessionAction
-	var recommendedAction *BrowseSessionAction
-	var current BrowseSessionCurrent
-	var summary string
 	if mismatch {
 		ready = false
-		availableActions, actions = s.mismatchActionsLocked(results)
-		recommendedAction = &BrowseSessionAction{Ref: "search_feeds", Tool: "search_feeds", Label: "搜索笔记"}
-		if len(results) > 0 {
-			recommendedAction = &BrowseSessionAction{Ref: "open_note:" + results[0].Ref, Tool: "open_note", Label: "打开搜索结果 " + results[0].Ref, ResultRef: results[0].Ref, FeedID: results[0].FeedID}
-		}
-		current = BrowseSessionCurrent{
-			Kind:           kind,
-			URL:            redactSensitiveURL(s.currentURL),
-			FeedID:         "",
-			Opened:         false,
-			Read:           false,
-			ScrollY:        s.scrollY,
-			NextHint:       "页面状态不一致：session 声明已打开笔记，但当前页面无可见详情；详情工具已禁用",
-			ResultsCount:   resultsCount,
-			AvailableTools: append([]string(nil), availableActions...),
-		}
-		summary = fmt.Sprintf("state_mismatch expected_detail=%s live_kind=%s detail_tools_disabled", feedID, kind) + "\n" + browseSessionSummary(kind, ready, resultsCount, seenCount, current, recommendedAction)
 	} else {
 		ready = isXHSReady(probe, kind, feedID, true)
 		if ready {
 			probeWatchdogSelectors(page, XHSReadyOptions{Kind: kind, FeedID: feedID})
 		}
-		availableActions = s.availableActionsLocked(resultsCount)
-		actions = s.semanticActionsLocked(resultsCount)
-		recommendedAction = s.recommendedActionLocked(ready, results)
-		current = s.currentStateLocked(kind, resultsCount, availableActions)
-		summary = browseSessionSummary(kind, ready, resultsCount, seenCount, current, recommendedAction)
+	}
+	guidance := s.guidanceLocked(guidanceQuery{Ready: ready, Mismatch: mismatch}, results)
+	current := s.currentStateLocked(kind)
+	summary := browseSessionSummary(kind, ready, resultsCount, seenCount, current, guidance.NextStep)
+	if mismatch {
+		summary = fmt.Sprintf("state_mismatch expected_detail=%s live_kind=%s detail_tools_disabled", feedID, kind) + "\n" + summary
 	}
 	s.mu.Unlock()
 
@@ -475,16 +497,16 @@ func (s *BrowseSession) PageState(ctx context.Context) (state *BrowseSessionPage
 			LikeButtonCount:    probe.LikeButtonCount,
 			PublishSignalCount: probe.PublishSignalCount,
 		},
-		Current:           current,
-		Results:           results,
-		Actions:           actions,
-		RecommendedAction: recommendedAction,
-		Timeline:          timeline,
-		StateFragment:     probe.StateFragment,
-		ResultsCount:      resultsCount,
-		SeenCount:         seenCount,
-		AvailableActions:  availableActions,
-		Notification:      notification,
+		Current:        current,
+		Results:        results,
+		Actions:        guidance.Actions,
+		NextStep:       guidance.NextStep,
+		Timeline:       timeline,
+		StateFragment:  probe.StateFragment,
+		ResultsCount:   resultsCount,
+		SeenCount:      seenCount,
+		AvailableTools: guidance.AvailableTools,
+		Notification:   notification,
 	}, nil
 }
 
@@ -1867,6 +1889,12 @@ func (s *BrowseSession) ReplyNotification(ctx context.Context, notificationRef, 
 	}
 
 	s.mu.Lock()
+	// 已回复的条目不再 actionable，避免 next_step 把调用方引回同一条通知重复回复。
+	for i := range s.notification.items {
+		if s.notification.items[i].NotificationRef == target.Ref {
+			s.notification.items[i].Actionable = false
+		}
+	}
 	s.recordTimelineLocked("reply_notification", target.Ref, "ok", time.Now(), compactTimelineNote(content))
 	s.mu.Unlock()
 	if s.state != nil {
@@ -2491,34 +2519,15 @@ func (s *BrowseSession) infoLocked() BrowseSessionInfo {
 	}
 }
 
-func (s *BrowseSession) currentStateLocked(kind XHSReadyKind, resultsCount int, availableActions []string) BrowseSessionCurrent {
+func (s *BrowseSession) currentStateLocked(kind XHSReadyKind) BrowseSessionCurrent {
 	return BrowseSessionCurrent{
-		Kind:           kind,
-		URL:            redactSensitiveURL(s.currentURL),
-		FeedID:         s.currentFeedID,
-		Opened:         s.opened,
-		Read:           s.read,
-		ScrollY:        s.scrollY,
-		NextHint:       s.nextHintLocked(resultsCount),
-		ResultsCount:   resultsCount,
-		AvailableTools: append([]string(nil), availableActions...),
+		Kind:    kind,
+		URL:     redactSensitiveURL(s.currentURL),
+		FeedID:  s.currentFeedID,
+		Opened:  s.opened,
+		Read:    s.read,
+		ScrollY: s.scrollY,
 	}
-}
-
-func (s *BrowseSession) nextHintLocked(resultsCount int) string {
-	switch {
-	case s.read:
-		return "笔记已打开：首屏标题/正文/作者/互动数据/首页评论/笔记图片 URL（data.note.imageList[].urlDefault/urlPre）已在 open_note 返回；如需理解图片内容，请将 data.note.imageList 中的 URL 交给 vision 工具。可继续操作：get_note_detail(分批加载更多评论)、like_feed、favorite_feed、comment_feed、reply_comment_in_feed(回复当前笔记中的评论)"
-	case s.opened:
-		return "笔记已打开，内容尚未读取完成；可 go_back 返回搜索结果"
-	case s.notification.active:
-		return "已进入通知页：可切换 tab 读取列表 (list_notifications)、对 mentions tab 条目点赞 (like_notification) 或回复 (reply_notification)，或 go_back 返回"
-	case resultsCount > 0:
-		return "可继续：搜索新关键词 (search_feeds)、打开其他笔记 (open_note)、或滚动浏览 feed"
-	case resultsCount == 0:
-		return "可搜索关键词 (search_feeds) 查找笔记"
-	}
-	return ""
 }
 
 func (s *BrowseSession) uniqueResultCountLocked() int {
@@ -2557,256 +2566,240 @@ func (s *BrowseSession) semanticResultsLocked() []BrowseSessionResult {
 	return results
 }
 
-func (s *BrowseSession) availableActionsLocked(resultsCount int) []string {
-	// 通知页只暴露通知相关动作，不混入 feed 动作。
-	if s.notification.active {
-		actions := []string{"get_page_state", "get_unread_count", "list_notifications", "go_back", "close_page"}
-		if len(s.notification.targets) > 0 {
-			actions = append(actions, "like_notification", "reply_notification")
-		}
-		return actions
-	}
-	actions := []string{"get_page_state", "search_feeds", "close_page", "get_unread_count", "list_notifications"}
-	if resultsCount > 0 && !s.opened {
-		actions = append(actions, "open_note")
-	}
-	if s.read {
-		actions = append(actions, "get_note_detail", "like_feed", "favorite_feed", "comment_feed", "reply_comment_in_feed", "go_back")
-	} else if s.opened {
-		actions = append(actions, "go_back")
-	}
-	return actions
+// Guidance 在没有任何页面探测的前提下给出下一步指引：操作能成功执行，就说明页面是就绪的。
+func (s *BrowseSession) Guidance(excludeTool string) BrowseSessionGuidance {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.guidanceLocked(guidanceQuery{Ready: true, ExcludeTool: excludeTool}, s.semanticResultsLocked())
 }
 
-func (s *BrowseSession) mismatchActionsLocked(results []BrowseSessionResult) ([]string, []BrowseSessionAction) {
+// guidanceLocked 由会话已跟踪的状态推导「当前能调用什么」，不读页面。
+// ready/mismatch 由调用方的探测结果决定，同一份状态只在这里翻译成工具指引。
+func (s *BrowseSession) guidanceLocked(query guidanceQuery, results []BrowseSessionResult) BrowseSessionGuidance {
+	switch {
+	case query.Mismatch:
+		return s.mismatchGuidanceLocked(query, results)
+	case s.notification.active:
+		return s.notificationGuidanceLocked(query)
+	case !query.Ready:
+		// 页面就绪探测未通过时只允许确认状态或关闭，不诱导调用必然失败的详情工具。
+		return BrowseSessionGuidance{
+			AvailableTools: []string{"get_page_state", "close_page"},
+			Actions: []BrowseSessionAction{
+				{Ref: "get_page_state", Tool: "get_page_state", Label: "查看当前页面会话状态"},
+				{Ref: "close_page", Tool: "close_page", Label: "关闭当前页面会话"},
+			},
+			NextStep: &NextStep{
+				Tool:   "get_page_state",
+				Args:   NextStepArgs(map[string]any{"session_id": s.id}),
+				Reason: "页面就绪探测未通过，当前状态不确定",
+				Hint:   "确认状态后仍不可用：close_page 关闭会话再重新 start_page",
+			},
+		}
+	}
+
+	available := []string{"get_page_state", "search_feeds", "list_feeds", "get_unread_count", "list_notifications", "close_page"}
+	actions := []BrowseSessionAction{
+		{Ref: "get_page_state", Tool: "get_page_state", Label: "查看当前页面会话状态"},
+		{Ref: "search_feeds", Tool: "search_feeds", Label: "搜索笔记"},
+	}
+	backStep := &NextStep{
+		Tool:   "go_back",
+		Args:   NextStepArgs(map[string]any{"session_id": s.id}),
+		Reason: "笔记已打开但内容尚未读取完成",
+		Hint:   "go_back 返回列表后重新 open_note",
+	}
+	var next *NextStep
+
+	if len(results) > 0 && !s.opened {
+		available = append(available, "open_note")
+		for _, result := range results {
+			actions = append(actions, s.openNoteAction(result, "打开搜索结果 "+result.Ref))
+		}
+		next = nextStepFrom(query.ExcludeTool, s.openNoteStep(firstUnseenResult(results), "已有搜索结果但尚未打开笔记"))
+	}
+
+	if s.read {
+		available = append(available, "get_note_detail", "like_feed", "favorite_feed", "comment_feed", "reply_comment_in_feed", "go_back")
+		actions = append(actions,
+			BrowseSessionAction{Ref: "get_note_detail", Tool: "get_note_detail", Label: "继续读取当前笔记评论", FeedID: s.currentFeedID, Requires: "opened"},
+			BrowseSessionAction{Ref: "like_feed", Tool: "like_feed", Label: "点赞当前笔记", FeedID: s.currentFeedID, Requires: "opened", Confirm: true},
+			BrowseSessionAction{Ref: "favorite_feed", Tool: "favorite_feed", Label: "收藏当前笔记", FeedID: s.currentFeedID, Requires: "opened", Confirm: true},
+			BrowseSessionAction{Ref: "comment_feed", Tool: "comment_feed", Label: "评论当前笔记", FeedID: s.currentFeedID, Requires: "opened", Confirm: true},
+			BrowseSessionAction{Ref: "reply_comment_in_feed", Tool: "reply_comment_in_feed", Label: "回复当前笔记中的评论", FeedID: s.currentFeedID, Requires: "opened + comment_id/user_id", Confirm: true},
+		)
+		next = nextStepFrom(query.ExcludeTool,
+			&NextStep{
+				Tool:   "get_note_detail",
+				Args:   NextStepArgs(map[string]any{"session_id": s.id}),
+				Reason: "当前笔记已读取首屏",
+				Hint:   "要互动就调用 like_feed/favorite_feed/comment_feed/reply_comment_in_feed（写操作先带 confirm_token 确认，回复评论需先用 get_note_detail 取 comment_id/user_id）；笔记图片内容交给 vision 工具读 data.note.imageList[].urlDefault",
+			},
+			backStep,
+		)
+	} else if s.opened {
+		available = append(available, "go_back")
+		next = backStep
+	}
+	if s.opened {
+		actions = append(actions, BrowseSessionAction{Ref: "go_back", Tool: "go_back", Label: "后退到上一页（关闭笔记/返回）", FeedID: s.currentFeedID})
+	}
+	actions = append(actions, BrowseSessionAction{Ref: "close_page", Tool: "close_page", Label: "关闭当前页面会话"})
+
+	searchStep := &NextStep{
+		Tool:   "search_feeds",
+		Args:   NextStepArgs(map[string]any{"session_id": s.id}),
+		Reason: "当前会话没有可操作的搜索结果",
+		Hint:   "search_feeds 需要 keyword 参数；也可 list_feeds 浏览发现页 feed，或 get_unread_count 查看未读通知",
+	}
+	if next == nil {
+		next = searchStep
+	}
+	return BrowseSessionGuidance{AvailableTools: available, Actions: actions, NextStep: nextStepFrom(query.ExcludeTool, next, searchStep)}
+}
+
+// mismatchGuidanceLocked 处理「session 声明已打开笔记，但页面无可见详情」：详情工具全部禁用。
+func (s *BrowseSession) mismatchGuidanceLocked(query guidanceQuery, results []BrowseSessionResult) BrowseSessionGuidance {
 	available := []string{"get_page_state", "search_feeds", "close_page"}
 	actions := []BrowseSessionAction{
 		{Ref: "get_page_state", Tool: "get_page_state", Label: "查看当前页面会话状态"},
 		{Ref: "search_feeds", Tool: "search_feeds", Label: "搜索笔记"},
 	}
+	searchStep := &NextStep{
+		Tool:   "search_feeds",
+		Args:   NextStepArgs(map[string]any{"session_id": s.id}),
+		Reason: "session 声明已打开笔记，但当前页面没有可见详情（详情工具已禁用）",
+		Hint:   "search_feeds 需要 keyword 参数，搜索后用 results 里的 result_ref 重新打开笔记；不要调用 like_feed/comment_feed 等详情工具",
+	}
+	next := nextStepFrom(query.ExcludeTool, searchStep)
 	if len(results) > 0 {
 		available = append(available, "open_note")
-	}
-	for _, result := range results {
-		actions = append(actions, BrowseSessionAction{
-			Ref:       "open_note:" + result.Ref,
-			Tool:      "open_note",
-			Label:     "打开搜索结果 " + result.Ref,
-			ResultRef: result.Ref,
-			FeedID:    result.FeedID,
-		})
+		for _, result := range results {
+			actions = append(actions, s.openNoteAction(result, "打开搜索结果 "+result.Ref))
+		}
+		next = nextStepFrom(query.ExcludeTool, s.openNoteStep(results[0], "session 与页面不一致，需要重新打开一篇笔记"), next)
 	}
 	actions = append(actions, BrowseSessionAction{Ref: "close_page", Tool: "close_page", Label: "关闭当前页面会话"})
-	return available, actions
+	return BrowseSessionGuidance{AvailableTools: available, Actions: actions, NextStep: next}
 }
 
-func (s *BrowseSession) semanticActionsLocked(resultsCount int) []BrowseSessionAction {
+// notificationGuidanceLocked 只暴露通知相关动作，不混入 feed 动作。
+func (s *BrowseSession) notificationGuidanceLocked(query guidanceQuery) BrowseSessionGuidance {
+	available := []string{"get_page_state", "get_unread_count", "list_notifications", "go_back", "close_page"}
+	if len(s.notification.targets) > 0 {
+		available = append(available, "like_notification", "reply_notification")
+	}
 	actions := []BrowseSessionAction{
 		{Ref: "get_page_state", Tool: "get_page_state", Label: "查看当前页面会话状态"},
+		{Ref: "list_notifications", Tool: "list_notifications", Label: "查看通知列表"},
 	}
-	// 通知页按通知条目生成语义动作。
-	if s.notification.active {
-		actions = append(actions, BrowseSessionAction{Ref: "list_notifications", Tool: "list_notifications", Label: "查看通知列表"})
-		for _, item := range s.notification.items {
-			if !item.Actionable || item.NotificationRef == "" {
-				continue
-			}
-			nick := item.From.Nickname
-			if nick == "" {
-				nick = item.From.UserID
-			}
-			actions = append(actions,
-				BrowseSessionAction{
-					Ref:             "like_notification:" + item.NotificationRef,
-					Tool:            "like_notification",
-					Label:           "点赞通知评论 " + nick,
-					NotificationRef: item.NotificationRef,
-					Confirm:         true,
-				},
-				BrowseSessionAction{
-					Ref:             "reply_notification:" + item.NotificationRef,
-					Tool:            "reply_notification",
-					Label:           "回复通知评论 " + nick,
-					NotificationRef: item.NotificationRef,
-					Confirm:         true,
-				},
-			)
+	var next *NextStep
+	for _, item := range s.notification.items {
+		if !item.Actionable || item.NotificationRef == "" {
+			continue
+		}
+		nick := item.From.Nickname
+		if nick == "" {
+			nick = item.From.UserID
 		}
 		actions = append(actions,
-			BrowseSessionAction{Ref: "go_back", Tool: "go_back", Label: "后退到上一页（返回通知入口之前页面）"},
-			BrowseSessionAction{Ref: "close_page", Tool: "close_page", Label: "关闭当前页面会话"},
+			BrowseSessionAction{Ref: "like_notification:" + item.NotificationRef, Tool: "like_notification", Label: "点赞通知评论 " + nick, NotificationRef: item.NotificationRef, Confirm: true},
+			BrowseSessionAction{Ref: "reply_notification:" + item.NotificationRef, Tool: "reply_notification", Label: "回复通知评论 " + nick, NotificationRef: item.NotificationRef, Confirm: true},
 		)
-		return actions
-	}
-	actions = append(actions, BrowseSessionAction{Ref: "search_feeds", Tool: "search_feeds", Label: "搜索笔记"})
-	if resultsCount > 0 && !s.opened {
-		for index := 0; index < resultsCount; index++ {
-			ref := strconv.Itoa(index)
-			feed, ok := s.results[ref]
-			if !ok {
-				continue
+		if next == nil {
+			next = &NextStep{
+				Tool:   "reply_notification",
+				Args:   NextStepArgs(map[string]any{"session_id": s.id, "notification_ref": item.NotificationRef}),
+				Reason: "通知页有可回复的评论：" + nick,
+				Hint:   "写操作先带 confirm_token 确认；只点赞用 like_notification（notification_ref 相同）",
 			}
-			actions = append(actions, BrowseSessionAction{
-				Ref:       "open_note:" + ref,
-				Tool:      "open_note",
-				Label:     "打开搜索结果 " + ref,
-				ResultRef: ref,
-				FeedID:    feed.ID,
-			})
 		}
 	}
-	if s.read {
-		actions = append(actions,
-			BrowseSessionAction{
-				Ref:      "get_note_detail",
-				Tool:     "get_note_detail",
-				Label:    "继续读取当前笔记评论",
-				FeedID:   s.currentFeedID,
-				Requires: "opened",
-			},
-			BrowseSessionAction{
-				Ref:      "like_feed",
-				Tool:     "like_feed",
-				Label:    "点赞当前笔记",
-				FeedID:   s.currentFeedID,
-				Requires: "opened",
-				Confirm:  true,
-			},
-			BrowseSessionAction{
-				Ref:      "favorite_feed",
-				Tool:     "favorite_feed",
-				Label:    "收藏当前笔记",
-				FeedID:   s.currentFeedID,
-				Requires: "opened",
-				Confirm:  true,
-			},
-			BrowseSessionAction{
-				Ref:      "comment_feed",
-				Tool:     "comment_feed",
-				Label:    "评论当前笔记",
-				FeedID:   s.currentFeedID,
-				Requires: "opened",
-				Confirm:  true,
-			},
-			BrowseSessionAction{
-				Ref:      "reply_comment_in_feed",
-				Tool:     "reply_comment_in_feed",
-				Label:    "回复当前笔记中的评论",
-				FeedID:   s.currentFeedID,
-				Requires: "opened + comment_id/user_id",
-				Confirm:  true,
-			},
-		)
+	actions = append(actions,
+		BrowseSessionAction{Ref: "go_back", Tool: "go_back", Label: "后退到上一页（返回通知入口之前页面）"},
+		BrowseSessionAction{Ref: "close_page", Tool: "close_page", Label: "关闭当前页面会话"},
+	)
+	listStep := &NextStep{
+		Tool:   "list_notifications",
+		Args:   NextStepArgs(map[string]any{"session_id": s.id, "tab": string(TabMentions)}),
+		Reason: "通知页当前没有可回复/可点赞的条目",
+		Hint:   "list_notifications 的 tab 可换 likes（赞和收藏）或 connections（新增关注），或 go_back 返回",
 	}
-	if s.opened {
-		actions = append(actions, BrowseSessionAction{
-			Ref:    "go_back",
-			Tool:   "go_back",
-			Label:  "后退到上一页（关闭笔记/返回）",
-			FeedID: s.currentFeedID,
-		})
+	if next == nil {
+		next = listStep
 	}
-	actions = append(actions, BrowseSessionAction{Ref: "close_page", Tool: "close_page", Label: "关闭当前页面会话"})
-	return actions
+	next = nextStepFrom(query.ExcludeTool, next, listStep)
+	return BrowseSessionGuidance{AvailableTools: available, Actions: actions, NextStep: next}
 }
 
-func (s *BrowseSession) recommendedActionLocked(ready bool, results []BrowseSessionResult) *BrowseSessionAction {
-	if !ready {
-		return &BrowseSessionAction{
-			Ref:   "get_page_state",
-			Tool:  "get_page_state",
-			Label: "重新读取页面会话状态",
-		}
-	}
-	// 通知页按通知上下文推荐：有 actionable 条目先推荐操作，否则刷新列表。
-	if s.notification.active {
-		for _, item := range s.notification.items {
-			if !item.Actionable || item.NotificationRef == "" {
-				continue
-			}
-			nick := item.From.Nickname
-			if nick == "" {
-				nick = item.From.UserID
-			}
-			return &BrowseSessionAction{
-				Ref:             "reply_notification:" + item.NotificationRef,
-				Tool:            "reply_notification",
-				Label:           "回复通知评论 " + nick,
-				NotificationRef: item.NotificationRef,
-				Confirm:         true,
-			}
-		}
-		return &BrowseSessionAction{
-			Ref:   "list_notifications",
-			Tool:  "list_notifications",
-			Label: "刷新通知列表",
-		}
-	}
-	if s.opened {
-		return &BrowseSessionAction{
-			Ref:    "go_back",
-			Tool:   "go_back",
-			Label:  "后退到上一页",
-			FeedID: s.currentFeedID,
-		}
-	}
-	if !s.opened {
-		for _, result := range results {
-			if result.Seen {
-				continue
-			}
-			return &BrowseSessionAction{
-				Ref:       "open_note:" + result.Ref,
-				Tool:      "open_note",
-				Label:     "打开下一张未读笔记",
-				ResultRef: result.Ref,
-				FeedID:    result.FeedID,
-			}
-		}
-		if len(results) > 0 {
-			result := results[0]
-			return &BrowseSessionAction{
-				Ref:       "open_note:" + result.Ref,
-				Tool:      "open_note",
-				Label:     "打开搜索结果 " + result.Ref,
-				ResultRef: result.Ref,
-				FeedID:    result.FeedID,
-			}
-		}
-	}
-	return &BrowseSessionAction{
-		Ref:   "search_feeds",
-		Tool:  "search_feeds",
-		Label: "搜索笔记",
+func (s *BrowseSession) openNoteAction(result BrowseSessionResult, label string) BrowseSessionAction {
+	return BrowseSessionAction{
+		Ref:       "open_note:" + result.Ref,
+		Tool:      "open_note",
+		Label:     label,
+		ResultRef: result.Ref,
+		FeedID:    result.FeedID,
 	}
 }
 
-func browseSessionSummary(kind XHSReadyKind, ready bool, resultsCount, seenCount int, current BrowseSessionCurrent, recommendedAction *BrowseSessionAction) string {
+func (s *BrowseSession) openNoteStep(result BrowseSessionResult, reason string) *NextStep {
+	hint := "result_ref 取自 results"
+	if result.FeedID != "" {
+		hint += "；对应 feed_id=" + result.FeedID
+	}
+	return &NextStep{
+		Tool:   "open_note",
+		Args:   NextStepArgs(map[string]any{"session_id": s.id, "result_ref": result.Ref}),
+		Reason: reason,
+		Hint:   hint,
+	}
+}
+
+// nextStepFrom 取第一个不等于 excludeTool 的候选；全被排除时保留第一个，保证一定有指引。
+func nextStepFrom(excludeTool string, candidates ...*NextStep) *NextStep {
+	for _, candidate := range candidates {
+		if candidate != nil && candidate.Tool != excludeTool {
+			return candidate
+		}
+	}
+	return candidates[0]
+}
+
+func firstUnseenResult(results []BrowseSessionResult) BrowseSessionResult {
+	for _, result := range results {
+		if !result.Seen {
+			return result
+		}
+	}
+	return results[0]
+}
+
+func browseSessionSummary(kind XHSReadyKind, ready bool, resultsCount, seenCount int, current BrowseSessionCurrent, next *NextStep) string {
 	lines := []string{
 		fmt.Sprintf("当前: %s ready=%t results=%d seen=%d", kind, ready, resultsCount, seenCount),
 	}
 	if current.FeedID != "" {
 		lines[0] += fmt.Sprintf(" feed_id=%s opened=%t read=%t", current.FeedID, current.Opened, current.Read)
 	}
-	if current.NextHint != "" {
-		lines = append(lines, "下一步: "+current.NextHint)
-	}
-	if recommendedAction != nil {
-		lines = append(lines, "推荐: "+formatBrowseSessionRecommendedAction(*recommendedAction))
+	if text := formatNextStep(next); text != "" {
+		lines = append(lines, "下一步: "+text)
 	}
 	return strings.Join(lines, "\n")
 }
 
-func formatBrowseSessionRecommendedAction(action BrowseSessionAction) string {
-	parts := []string{action.Tool}
-	if action.ResultRef != "" {
-		parts = append(parts, "result_ref="+action.ResultRef)
+// formatNextStep 把下一步渲染成一行稳定的可读文本（顺序固定，便于人和日志比对）。
+func formatNextStep(step *NextStep) string {
+	if step == nil || step.Tool == "" {
+		return ""
 	}
-	if action.FeedID != "" {
-		parts = append(parts, "feed_id="+action.FeedID)
+	parts := []string{step.Tool}
+	for _, key := range []string{"result_ref", "notification_ref", "keyword", "tab"} {
+		if value, ok := step.Args[key].(string); ok && value != "" {
+			parts = append(parts, key+"="+value)
+		}
 	}
-	if action.ResultRef == "" && action.FeedID == "" && action.Ref != "" {
-		parts = append(parts, "ref="+action.Ref)
+	if step.Reason != "" {
+		parts = append(parts, "("+step.Reason+")")
 	}
 	return strings.Join(parts, " ")
 }
