@@ -818,3 +818,30 @@ DIV.filter-panel                     ← hover「筛选」后异步挂载
 **结论**：发布链路从「进页 → 切 tab → 传图 → 标题 → 正文（含新编辑器的兜底）→ 可见范围」全部实测通过；
 代码用 CDP 穿透 closed shadow root 点发布按钮的写法**只能由 MCP 自己执行**（页面 JS 够不到），
 因此这一击需要由 MCP 实跑（或在真机验收时执行）来闭环。
+
+#### 发布最后一击：已完成（2026-09-21）——closed shadow root 的正确打开方式
+
+D.12 里「页面级工具够不到发布按钮」的说法**已解决**，而且不用坐标：
+
+- closed shadow root 只是对 `element.shadowRoot` 隐藏；该自定义元素把内部引用挂成了**普通属性**：
+  `xhs-publish-btn._sr`（shadow root）、`._props`、`._onPublish()`（0 参函数）、`._onSave()`。
+- `_sr` 里的真实结构（实测）：
+
+| 按钮 | class | rect | disabled |
+|:--|:--|:--|:--|
+| 暂存离开 | `.ce-btn.white` | [549,771,120,40] | false |
+| **发布** | **`.ce-btn.bg-red`** | [693,771,120,40] | false |
+
+- 触发 `_sr.querySelectorAll('button')` 中文本为「发布」的那个 `.click()` 后：
+  **URL → `/publish/success?source=official…`**、页面提示「发布成功 · 2 秒后将返回发布页」。
+- 随后在 **笔记管理**（`/new/note-manager`）确认：标题《亡秦者胡也，算不算预言？》在列，
+  状态 **仅自己可见**、**审核中**，笔记数 17 → **18**。
+
+**结论**：`publish_content` 的「进页 → 切 tab → 传图 → 标题 → 正文（TipTap 兜底）→ 可见范围 → 发布」整条链路
+在真实账号上端到端验证通过；代码用 CDP `ShadowRoot()` + `ElementR("button","发布")` 定位的写法与我实测到的
+`<button class="ce-btn bg-red">发布</button>` 结构完全吻合。
+
+> 方法论补充（替代坐标）：遇到 closed shadow root，先看宿主元素上有没有把内部引用挂成属性
+> （如 `_sr`/`_onPublish`），有的话可以直接取到真实按钮并 `click()`；这比坐标猜测可靠得多，
+> 也解释了此前坐标点击全部落空的原因 —— 两个按钮实际在 [549,771] 与 [693,771]，
+> 而盲点的 x=681/900/1000 全在按钮之间的空隙或右侧空白。
