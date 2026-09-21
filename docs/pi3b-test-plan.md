@@ -1013,6 +1013,10 @@ renderer 死亡熔断是必需项，不能放宽。
 | UA | 含 `HeadlessChrome` | 含 `HeadlessChrome` |
 | 真实 `/explore` PSS | 632.7 MB / 9 进程 | **45.8 MB / 1 进程** |
 
+> 脚本更新（2026-09-21）：`scripts/pi-calibrate.sh` 第 5b 节会打印 `waits` 全量
+> （每类等待的次数 / 累计 / 最大 / **页内探测次数**），这是"探测次数不随等待时长增长 ⇒ 机制与机器状态无关"
+> 的直接证据；实现只用 bash/grep/sed/tr，保持脚本"不依赖 node/python"的约束。
+
 ### D.18 真机标定脚本（`scripts/pi-calibrate.sh`，2026-09-21）
 
 代码侧优化已经做完一批，但在 Pi 上的收益全部是 `[推断]`。这个脚本把「有没有生效」变成可读的数字，

@@ -249,8 +249,11 @@ Cloak 模式下代码显式用了 `NoDefaultDevice()`（`third_party/headless_br
 ### 10.2 尚未做
 
 - 真机标定（全部 Pi 侧数字仍是推断）：冷启动秒数、首屏秒数、PSS、风控命中率。
-- 未配置 `XHS_BROWSER_PROFILE_DIR` 时 rod 用 `/tmp/rod/user-data/<随机>` → 每次冷启动都是冷缓存（实测差价 3.38MB → 0.27MB）。是否给一个默认持久 profile，需所有者决定。
-- 图片策略三档（block/viewport/allow）：速度收益≈0，价值在隐身与「需要时能放行」。
+- ~~未配置 `XHS_BROWSER_PROFILE_DIR` 时的默认 profile~~ → ✅ **已完成**：`ResolveBrowserProfileDir()`
+  （env 优先 → 否则落 XDG 缓存 `xiaohongshu-mcp/browser-profile` 并视为持久 → 缓存不可写才退临时目录并标非持久），
+  `main.go` 启动即接线并有日志；单测 `TestResolveBrowserProfileDir`（显式优先 / 默认稳定路径 / 不可写回退）。
+- 图片策略三档（block/viewport/allow）：**判定不做**——速度收益≈0（首屏大头是不可拦的 JS），
+  价值只在隐身与"需要时放行"；属可选功能，将来确有需要再按需加。
 
 ## 11. 等待机制：从「预测时长」改成「等事件」（2026-09-21 已实施）
 
