@@ -859,3 +859,28 @@ D.12 里「页面级工具够不到发布按钮」的说法**已解决**，而�
 > ② 该评论下的 79 字回复；
 > ③ 对「青史拾页」评论的通知点赞 + 64 字回复。
 > 这些是评论/通知而非独立笔记，如需清理要在对应笔记页删除，MCP 本身没有删除评论的工具。
+
+### D.14 只读补测六项（2026-09-21）—— 全部通过，并新增两条代码级隐患
+
+| # | 项 | 实测 | 结论 |
+|:--|:--|:--|:--|
+| 1 | `search_feeds` **筛选是否真生效** | 打开 `.filter-panel` 后点「最新」：`综合` 失去 active、`最新` 拿到 active；结果**整批更换**（首 5 个 feed id 由 `6a8557dc…/6a51c488…` 变为 `6ab05bfc…/6ab027fe…`） | ✅ 生效。且「最新」有 2 个重复 `div.tags`，**只有 1 个通过 `elementFromPoint` 命中校验** —— 再次印证 `findFilterOption` 必须逐个复核 |
+| 2 | `search_feeds` **翻页** | 滚动 `.search-layout-wrapper` 到底：`search.feeds` **22 → 44**，该容器 scrollHeight **2140 → 3312**（DOM 卡片仍约 30，回收复用） | ✅ 懒加载成立 |
+| 3 | `list_notifications` **tab 切换 + 续页** | 切「赞和收藏」：`notification.activeTabKey` **0 → 1**、条目 **5 → 20**、内容换成「赞了你的笔记/收藏了你的笔记」；再滚窗口到底：条目 **20 → 40**、`body.scrollHeight` **2158 → 4140** | ✅ 两项都成立 |
+| 4 | `get_note_detail` **「展开 N 条回复」** | 元素级 click 首个 `.show-more`（文本「展开 36 条回复」）：`.comment-item` **19 → 24**、`.comment-item-sub` **9 → 14**，按钮文案变为**「展开更多回复」**（一次加载 5 条） | ✅ 成立 |
+| 5 | `get_note_detail` **读到底（多轮滚动）** | 连滚 3 轮：`.comment-item` 24 → 39 → 49 → **59**，`.note-scroller` scrollHeight 3694 → 5892 → 7268 → **8604**；**无 `.end-container` 到底标记** | ✅ 增长成立、速率约 +10~15 条/轮；「共 219 条」需 **15+ 轮**，印证代码 500 轮 / 9 分钟预算的形状。未跑到真到底（省资源） |
+| 6 | `user_profile` **收藏/点赞 tab 提取** | 点「收藏」后 `user.activeTab.query` 由 **`note` → `fav`**、label「收藏」、卡片 19 张；代码 `parseUserProfileState` 在 `snap.Query != "" && snap.Query != "note"` 时 fail-closed | ✅ 线上确实会出现非 `note` 的 query 值，**代码的 fail-closed 防线前提真实存在**，不会把收藏/点赞混进主页笔记 |
+
+#### 新增代码级隐患（交给 MCP 实跑确认，不在本轮改代码）
+
+1. **搜索页有第二个滚动容器**：搜索页 `body` 不滚动，结果在 `.search-layout-wrapper` 内，同一页面还有 AI 侧栏的 `.ai-chat-scroll-body`（sh 2768/ch 636）。
+   代码的分页用的是滚轮滚动（`page.Actor().Mouse.Scroll(0, 700)`）—— 若指针不在结果容器上，滚轮可能落到别的容器，表现为「翻页不生效」。
+2. **通知页是窗口级滚动**（`HTML` sh 2158/ch 836），与搜索页不同；代码对通知续页也是滚轮滚动，机制上吻合，但两类页面滚动目标不一致这一点值得在实跑时盯一下。
+
+#### 过程记录：重页面导航会卡死（又一例证）
+
+补测期间出现：同一会话里 `https://example.com` **秒开**，而
+`/search_result?keyword=…` 的**新鲜导航连续两次 20s 超时**、`CDP Runtime.evaluate` 也两次 20s 超时；
+`/explore` 与 `/notification` 则正常。最后改走 **UI 路径**（点搜索框 → 输入 → 回车，即代码的 P0 路径）才进到搜索页。
+这与附录 C 的结论一致：**重页面的单次导航/求值可能远超 20s**，Pi 上只会更糟 —— 代码里已有的 eval 预算与
+renderer 死亡熔断是必需项，不能放宽。
