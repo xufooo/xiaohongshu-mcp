@@ -38,6 +38,27 @@ type SearchPageResult struct {
 	AIChat *AIChatReply `json:"ai_chat,omitempty"`
 }
 
+// modelTypeNote 笔记条目的 modelType 取值。
+const modelTypeNote = "note"
+
+// onlyNotes 滤掉非笔记条目。
+//
+// 站点列表里混着直播卡片（live_v2）与搜索热词（hot_query）：它们没有 noteCard，
+// 取出来标题为空、也没有可用 id，对调用方是纯噪音（表现为 displayTitle 为空）。
+//
+// 判据用 modelType 而非 noteCard.type：图文与视频笔记的 modelType 同为 note，
+// 差异体现在 noteCard.type（normal / video），按 modelType 过滤不会误伤视频笔记。
+// 来源：上游 #776 的真机走查（搜「露营」，23 条里 5 条非笔记）。
+func onlyNotes(feeds []Feed) []Feed {
+	notes := make([]Feed, 0, len(feeds))
+	for _, feed := range feeds {
+		if feed.ModelType == modelTypeNote {
+			notes = append(notes, feed)
+		}
+	}
+	return notes
+}
+
 // NoteCard 表示笔记卡片信息
 type NoteCard struct {
 	Type         string       `json:"type"`
