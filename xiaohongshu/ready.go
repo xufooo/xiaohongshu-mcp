@@ -116,10 +116,14 @@ func WaitForXHSReady(page *hrod.Page, opts XHSReadyOptions) error {
 		opts.Timeout = 60 * time.Second
 	}
 
+	started := time.Now()
+	defer func() { observeWait("ready:"+string(opts.Kind), time.Since(started)) }()
+
 	deadline := time.Now().Add(opts.Timeout)
 	var last xhsReadyProbe
 	var lastErr error
 	var stability xhsReadyStability
+	// pollMin 现在表示「DOM 变化后静默多久再探测」，pollMax 是「页面完全不动时的最长等待」。
 	pollMin, pollMax := xhsReadyPollRange(opts.Kind)
 
 	for {
@@ -153,8 +157,10 @@ func WaitForXHSReady(page *hrod.Page, opts XHSReadyOptions) error {
 			}
 			break
 		}
-		if err := page.SleepRandom(pollMin, pollMax); err != nil {
-			return err
+		// 不再按固定间隔空转：等页面自己安静下来（或最多 pollMax）再探测。
+		if err := waitForPageSignal(page.Rod.GetContext(), page, pollMin, pollMax); err != nil {
+			lastErr = fmt.Errorf("等待页面变化信号失败: %w", err)
+			stability.Observe(time.Now(), false)
 		}
 	}
 

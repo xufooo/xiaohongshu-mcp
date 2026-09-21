@@ -285,6 +285,8 @@ func captureSearchResultsBaseline(ctx context.Context, page *hrod.Page, counter 
 }
 
 func waitForSearchResults(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, keyword string, baseline searchResultsBaseline) error {
+	waitStarted := time.Now()
+	defer func() { observeWait("search_results", time.Since(waitStarted)) }()
 	deadline := time.Now().Add(searchResultsWaitTimeout)
 	var last searchResultsKeywordProbe
 	var lastErr error

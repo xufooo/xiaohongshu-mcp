@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestScrollYIsSingleSource 阅读位置只能由 xhsScrollYJS 里的 scrollY() 读，
@@ -41,5 +42,36 @@ func TestScrollYIsSingleSource(t *testing.T) {
 					file, i+1, strings.TrimSpace(line))
 			}
 		}
+	}
+}
+
+// TestWaitStatsRegistry 等待观测量：按 kind 累加次数/累计/最大值。
+func TestWaitStatsRegistry(t *testing.T) {
+	observeWait("test:kind", 120*time.Millisecond)
+	observeWait("test:kind", 80*time.Millisecond)
+	snapshot := WaitStatsSnapshot()
+	stat, ok := snapshot["test:kind"]
+	if !ok {
+		t.Fatal("应记录 test:kind")
+	}
+	if stat.Count != 2 || stat.TotalMs != 200 || stat.MaxMs != 120 {
+		t.Fatalf("观测值错误: %+v", stat)
+	}
+	// 快照是拷贝：改它不影响内部状态
+	stat.Count = 99
+	if WaitStatsSnapshot()["test:kind"].Count != 2 {
+		t.Fatal("快照必须是拷贝")
+	}
+}
+
+// TestPageSignalJSShape 页面内等待信号必须靠 MutationObserver + resolve，不得用轮询定时器空转。
+func TestPageSignalJSShape(t *testing.T) {
+	for _, want := range []string{"new MutationObserver", "observer.observe", "resolve(reason)", "finished"} {
+		if !strings.Contains(xhsPageSignalJS, want) {
+			t.Fatalf("等待信号片段缺少 %q", want)
+		}
+	}
+	if strings.Contains(xhsPageSignalJS, "setInterval") {
+		t.Fatal("不应使用 setInterval 轮询")
 	}
 }
