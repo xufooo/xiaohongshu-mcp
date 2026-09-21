@@ -658,11 +658,9 @@ func waitReplyItemsChanged(ctx context.Context, page *hrod.Page, parentIndex, be
 }
 
 type showMoreButtonSnapshot struct {
-	Text        string  `json:"text"`
-	X           float64 `json:"x"`
-	Y           float64 `json:"y"`
-	Count       int     `json:"count"`
-	ParentIndex int     `json:"parentIndex"`
+	Text        string `json:"text"`
+	Count       int    `json:"count"`
+	ParentIndex int    `json:"parentIndex"`
 }
 
 // canClickReplies 判定本轮是否允许继续点击"展开子评论"按钮。
@@ -724,6 +722,8 @@ func clickMoreReplies(ctx context.Context, page *hrod.Page, maxRepliesThreshold 
 func nextShowMoreButton(ctx context.Context, page *hrod.Page, maxRepliesThreshold int) (*showMoreButtonSnapshot, error) {
 	result, err := evalQuick(ctx, page, `(maxRepliesThreshold) => {
 		const clean = (value) => (value || "").replace(/\s+/g, " ").trim();
+		// 清除上一轮的标记：点击改用元素级（rod 会按点击当刻的盒子重新定位）。
+		document.querySelectorAll('[data-xhs-mcp-show-more]').forEach((el) => el.removeAttribute('data-xhs-mcp-show-more'));
 		// reply_limit=-1：一个子评论都不展开（跳过所有展开按钮）。
 		if (maxRepliesThreshold === -1) return "";
 		const scroller = document.querySelector(".note-scroller");
@@ -757,13 +757,8 @@ func nextShowMoreButton(ctx context.Context, page *hrod.Page, maxRepliesThreshol
 				}
 			}
 			if (rect.width <= 0 || rect.height <= 0) continue;
-			return JSON.stringify({
-				text,
-				x: rect.left + rect.width / 2,
-				y: rect.top + rect.height / 2,
-				count,
-				parentIndex,
-			});
+			btn.setAttribute("data-xhs-mcp-show-more", "1");
+			return JSON.stringify({ text, count, parentIndex });
 		}
 		return "";
 	}`, maxRepliesThreshold)
@@ -780,9 +775,17 @@ func nextShowMoreButton(ctx context.Context, page *hrod.Page, maxRepliesThreshol
 	return &button, nil
 }
 
-// clickShowMoreButton 按坐标真实点击展开按钮（pre 验证过的点击方式）。
+// clickShowMoreButton 元素级点击展开按钮：由 rod 在点击当刻读取元素盒子，
+// 不再缓存坐标（视口每次启动都可能不同，缓存坐标会随滚动/懒加载失效）。
 func clickShowMoreButton(page *hrod.Page, button *showMoreButtonSnapshot) error {
-	return page.ClickPoint(proto.Point{X: button.X, Y: button.Y})
+	if button == nil {
+		return fmt.Errorf("展开按钮快照为空")
+	}
+	el, err := page.Element(`[data-xhs-mcp-show-more="1"]`)
+	if err != nil {
+		return fmt.Errorf("定位展开按钮失败: %w", err)
+	}
+	return el.Click(proto.InputMouseButtonLeft, 1)
 }
 
 func scrollToCommentsArea(ctx context.Context, page *hrod.Page) error {

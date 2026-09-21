@@ -48,11 +48,12 @@ func (a *NoteOpenAction) OpenFromCards(ctx context.Context, counter *evalTimeout
 	if err := page.SleepRandom(600*time.Millisecond, 1800*time.Millisecond); err != nil {
 		return err
 	}
-	point, err := feedCardClickPoint(anchor)
-	if err != nil {
+	// 命中校验仍在 JS 里做（elementFromPoint 必须命中 anchor 或其子节点），
+	// 但点击交给元素级点击：rod 在点击当刻重新读取元素盒子，不再按坐标点。
+	if err := validateFeedCardClickPoint(anchor); err != nil {
 		return err
 	}
-	if err := page.ClickPoint(point); err != nil {
+	if err := anchor.Click(proto.InputMouseButtonLeft, 1); err != nil {
 		return fmt.Errorf("点击目标 anchor 失败: %w", err)
 	}
 	if err := waitFeedDetailVisible(ctx, page, counter, feedID); err != nil {
@@ -107,12 +108,8 @@ func findFeedCardAnchor(ctx context.Context, page *hrod.Page, counter *evalTimeo
 	return anchors[index], nil
 }
 
-type feedCardPoint struct {
-	X float64 `json:"x"`
-	Y float64 `json:"y"`
-}
-
-func feedCardClickPoint(anchor *hrod.Element) (proto.Point, error) {
+// validateFeedCardClickPoint 在点击前确认 anchor 可见且其中心点真的命中自己（或其子节点）。
+func validateFeedCardClickPoint(anchor *hrod.Element) error {
 	result, err := anchor.Eval(`() => {
 		const a = this, r = a.getBoundingClientRect(), s = getComputedStyle(a);
 		const c = a.isConnected;
@@ -135,25 +132,19 @@ func feedCardClickPoint(anchor *hrod.Element) (proto.Point, error) {
 		return JSON.stringify({x, y});
 	}`)
 	if err != nil {
-		return proto.Point{}, fmt.Errorf("读取目标 anchor 点击坐标失败: %w", err)
+		return fmt.Errorf("校验目标 anchor 可点击性失败: %w", err)
 	}
 	if result == nil || result.Value.Str() == "" {
-		return proto.Point{}, fmt.Errorf("目标 anchor 当前不可原生点击")
+		return fmt.Errorf("目标 anchor 当前不可点击")
 	}
 
 	var diag struct {
 		FailureReason string `json:"failure_reason"`
 	}
 	if err := json.Unmarshal([]byte(result.Value.Str()), &diag); err == nil && diag.FailureReason != "" {
-		return proto.Point{}, fmt.Errorf("目标 anchor 当前不可原生点击: %s", result.Value.Str())
+		return fmt.Errorf("目标 anchor 当前不可点击: %s", result.Value.Str())
 	}
-
-	var point feedCardPoint
-	if err := json.Unmarshal([]byte(result.Value.Str()), &point); err != nil {
-		return proto.Point{}, fmt.Errorf("解析目标 anchor 点击坐标失败: %w", err)
-	}
-
-	return proto.Point{X: point.X, Y: point.Y}, nil
+	return nil
 }
 
 const (

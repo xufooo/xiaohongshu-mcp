@@ -13,22 +13,6 @@ import (
 	hrod "github.com/xpzouying/xiaohongshu-mcp/humanize/rod"
 )
 
-const xhsProbeVisibleJS = `
-			const visible = (el) => {
-				if (!el || !el.isConnected) return false;
-				if (typeof el.checkVisibility === "function") {
-					return el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
-				}
-				const rect = el.getBoundingClientRect();
-				const style = window.getComputedStyle(el);
-				return style.display !== "none" &&
-					style.visibility !== "hidden" &&
-					Number(style.opacity || "1") > 0 &&
-					rect.width > 1 &&
-					rect.height > 1;
-			};
-`
-
 const xhsProbeFeedMatchJS = `
 			const detailURLMatchesFeedID = (rawURL) => {
 				if (!feedID) return false;
@@ -60,7 +44,7 @@ const xhsProbeCollectionJS = `
 			};
 			const visibleCount = (selector) => {
 				try {
-					return Array.from(document.querySelectorAll(selector)).filter(visible).length;
+					return Array.from(document.querySelectorAll(selector)).filter((el) => visibleWithSize(el, 1)).length;
 				} catch (_) {
 					return 0;
 				}
@@ -99,7 +83,7 @@ const xhsSearchInputReadyJS = `
 			const candidates = Array.from(document.querySelectorAll(selector));
 			return candidates.some(el => {
 				if (!el || !el.isConnected) return false;
-				if (!visible(el)) return false;
+				if (!visibleWithSize(el, 1)) return false;
 				if (el.disabled || el.readOnly) return false;
 				const r = el.getBoundingClientRect();
 				if (r.top >= window.innerHeight || r.bottom <= 0 ||
@@ -143,8 +127,8 @@ func currentDetailProbeExpression(probeJS, feedID, detailSelector string) (strin
 }
 
 func probeCurrentFeedDetail(ctx context.Context, page *hrod.Page, feedID string) (currentFeedDetailProbe, error) {
-	probeJS := `(feedID, detailSelector) => {` + xhsProbeVisibleJS + xhsProbeFeedMatchJS + `
-			const visibleDetails = Array.from(document.querySelectorAll(detailSelector)).filter(visible);
+	probeJS := `(feedID, detailSelector) => {` + xhsVisibleJS + xhsProbeFeedMatchJS + `
+			const visibleDetails = Array.from(document.querySelectorAll(detailSelector)).filter((el) => visibleWithSize(el, 1));
 			const visibleMatchedDetails = visibleDetails.filter(elementMatchesFeedID);
 			const stateMap = window.__INITIAL_STATE__?.note?.noteDetailMap;
 			return JSON.stringify({

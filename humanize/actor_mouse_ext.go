@@ -194,11 +194,6 @@ func (m *Mouse) Move(target Point) error {
 	}, true)
 }
 
-// MovePoint moves to a viewport-relative point.
-func (m *Mouse) MovePoint(target Point) error {
-	return m.moveTo(target, true)
-}
-
 // moveTo performs the actual cursor movement without any extra scrolling.
 func (m *Mouse) moveTo(target Point, scrollingAllowed bool) error {
 	if debugMouse {
@@ -408,26 +403,6 @@ func (m *Mouse) ClickNoScroll(el *rod.Element) error {
 		return errors.New("最终点击落点不再命中目标")
 	}
 
-	if err := m.dispatchMouseButton(proto.InputDispatchMouseEventTypeMousePressed, proto.InputMouseButtonLeft, 1); err != nil {
-		return err
-	}
-	if err := sleepWithContext(m.ctx, randDuration(40*time.Millisecond, 120*time.Millisecond)); err != nil {
-		return err
-	}
-	if err := m.dispatchMouseButton(proto.InputDispatchMouseEventTypeMouseReleased, proto.InputMouseButtonLeft, 1); err != nil {
-		return err
-	}
-	return nil
-}
-
-// ClickPoint moves to a viewport-relative point and clicks there.
-func (m *Mouse) ClickPoint(target Point) error {
-	if err := m.moveTo(target, false); err != nil {
-		return err
-	}
-	if err := sleepWithContext(m.ctx, randDuration(80*time.Millisecond, 350*time.Millisecond)); err != nil {
-		return err
-	}
 	if err := m.dispatchMouseButton(proto.InputDispatchMouseEventTypeMousePressed, proto.InputMouseButtonLeft, 1); err != nil {
 		return err
 	}

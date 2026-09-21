@@ -196,7 +196,7 @@ func xhsReadyProbeSelectorArgs() []interface{} {
 // probeXHSReady 按 kind 缩小范围的 scoped probe：只计算当前 kind 需要的信号，
 // 公共字段（URL/title/readyState/scrollY/app/risk）始终计算。
 func probeXHSReady(page *hrod.Page, kind XHSReadyKind, feedID string) (xhsReadyProbe, error) {
-	probeJS := `(kind, feedID, searchInputSelector, searchResultSelector, feedCardSelector, detailSelector, commentBoxSelector, likeButtonSelector, searchInputInFeedsSelector, notificationPageSelector, notificationTabSelector) => {` + xhsProbeVisibleJS + xhsProbeFeedMatchJS + xhsProbeCollectionJS + xhsProbeRiskJS() + xhsSearchInputReadyJS + `
+	probeJS := `(kind, feedID, searchInputSelector, searchResultSelector, feedCardSelector, detailSelector, commentBoxSelector, likeButtonSelector, searchInputInFeedsSelector, notificationPageSelector, notificationTabSelector) => {` + xhsVisibleJS + xhsProbeFeedMatchJS + xhsProbeCollectionJS + xhsProbeRiskJS() + xhsSearchInputReadyJS + `
 		const state = window.__INITIAL_STATE__ || {};
 		const detailURLMatched = detailURLMatchesFeedID(location.href);
 		const text = (document.body?.innerText || "").replace(/\s+/g, " ").slice(0, 1500);
@@ -226,7 +226,7 @@ func probeXHSReady(page *hrod.Page, kind XHSReadyKind, feedID string) (xhsReadyP
 				? unwrap(detailMap[feedID])
 				: null;
 			const detailCount = count(detailSelector);
-			const visibleDetails = Array.from(document.querySelectorAll(detailSelector)).filter(visible);
+			const visibleDetails = Array.from(document.querySelectorAll(detailSelector)).filter((el) => visibleWithSize(el, 1));
 			const visibleDetailMatched = Boolean(feedID && visibleDetails.some(elementMatchesFeedID));
 			out.detail_count = detailCount;
 			out.visible_detail_count = visibleDetails.length;
@@ -270,7 +270,7 @@ func decodeXHSReadyProbe(obj *proto.RuntimeRemoteObject, err error) (xhsReadyPro
 
 // probeXHSReadyFull 完整 probe：查询全部页面选择器并汇总状态，供推断页面种类使用。
 func probeXHSReadyFull(page *hrod.Page, feedID string) (xhsReadyProbe, error) {
-	probeJS := `(feedID, searchInputSelector, searchResultSelector, feedCardSelector, detailSelector, commentBoxSelector, likeButtonSelector, searchInputInFeedsSelector, notificationPageSelector, notificationTabSelector) => {` + xhsProbeVisibleJS + xhsProbeFeedMatchJS + xhsProbeCollectionJS + xhsProbeRiskJS() + xhsSearchInputReadyJS + `
+	probeJS := `(feedID, searchInputSelector, searchResultSelector, feedCardSelector, detailSelector, commentBoxSelector, likeButtonSelector, searchInputInFeedsSelector, notificationPageSelector, notificationTabSelector) => {` + xhsVisibleJS + xhsProbeFeedMatchJS + xhsProbeCollectionJS + xhsProbeRiskJS() + xhsSearchInputReadyJS + `
 		const state = window.__INITIAL_STATE__ || {};
 		const homeFeeds = unwrap(state.feed?.feeds);
 		const searchFeeds = unwrap(state.search?.feeds);
@@ -279,7 +279,7 @@ func probeXHSReadyFull(page *hrod.Page, feedID string) (xhsReadyProbe, error) {
 			? unwrap(detailMap[feedID])
 			: null;
 		const detailURLMatched = detailURLMatchesFeedID(location.href);
-		const visibleDetails = Array.from(document.querySelectorAll(detailSelector)).filter(visible);
+		const visibleDetails = Array.from(document.querySelectorAll(detailSelector)).filter((el) => visibleWithSize(el, 1));
 		const visibleDetailMatched = Boolean(feedID && visibleDetails.some(elementMatchesFeedID));
 		const profileData = unwrap(state.user?.userPageData);
 		const detailCount = count(detailSelector);
