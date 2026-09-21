@@ -18,10 +18,8 @@ type FeedsListAction struct {
 func NewFeedsListAction(page *hrod.Page) (*FeedsListAction, error) {
 	pp := page.Timeout(60 * time.Second)
 
-	if err := pp.Navigate("https://www.xiaohongshu.com"); err != nil {
-		return nil, fmt.Errorf("navigate to home failed: %w", err)
-	}
-	if err := WaitForXHSReady(pp, XHSReadyOptions{Kind: XHSReadyHome, Timeout: 60 * time.Second}); err != nil {
+	// 已在首页且就绪时跳过重复导航。
+	if err := EnsureReadyOn(pp, HomeURL, XHSReadyHome, 60*time.Second); err != nil {
 		return nil, err
 	}
 

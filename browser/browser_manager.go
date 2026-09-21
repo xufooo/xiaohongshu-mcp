@@ -18,7 +18,20 @@ const (
 	defaultStartupTimeout   = 120 * time.Second
 	operationAcquireTimeout = 5 * time.Second
 	lifecycleAcquireTimeout = 30 * time.Second
+
+	// defaultWarmPageTTL 是热页面保留时长。保留页面能省掉「新建 page」和
+	// 「连续两次调用指向同一 URL 时的重复整页加载」（例如 check_login_status → start_page）。
+	// 但实测一个已加载小红书 SPA 的页面 PSS ≈ +500MB（桌面口径），
+	// 在 1GB 的 Pi 上不能常驻，所以只保留一个很短的时间窗。
+	defaultWarmPageTTL = 30 * time.Second
 )
+
+// WithWarmPageTTL 设置热页面保留时长，<=0 表示每次 Release 立即关闭页面。
+func WithWarmPageTTL(ttl time.Duration) ManagerOption {
+	return func(m *Manager) {
+		m.warmPageTTL = ttl
+	}
+}
 
 // BusyError reports that the single browser is currently owned by another operation.
 type BusyError struct {
@@ -79,6 +92,11 @@ type Manager struct {
 	idleTimer   *time.Timer
 	idleVersion uint64
 
+	warmPage      *hrod.Page
+	warmPageAt    time.Time
+	warmPageTimer *time.Timer
+	warmPageTTL   time.Duration
+
 	sessionIdleGrace time.Duration
 }
 
@@ -113,6 +131,7 @@ func NewManager(factory BrowserFactory, options ...ManagerOption) *Manager {
 		token:            make(chan struct{}, 1),
 		idleTimeout:      5 * time.Minute,
 		sessionIdleGrace: time.Minute,
+		warmPageTTL:      defaultWarmPageTTL,
 	}
 	for _, option := range options {
 		option(m)
@@ -159,14 +178,101 @@ func (m *Manager) AcquireFor(ctx context.Context, owner string) (*hrod.Page, err
 			continue
 		}
 
-		page, err := newPage(b)
-		if err != nil {
-			m.discardBrowser(b)
-			m.releaseToken()
-			return nil, err
+		page := m.takeWarmPage(b)
+		if page == nil {
+			page, err = newPage(b)
+			if err != nil {
+				m.discardBrowser(b)
+				m.releaseToken()
+				return nil, err
+			}
 		}
 		return page, nil
 	}
+}
+
+// takeWarmPage 取出可复用的热页面；取不到（无缓存/已过期/不可用）返回 nil。
+func (m *Manager) takeWarmPage(b *hrod.Browser) *hrod.Page {
+	m.mu.Lock()
+	page, parkedAt, ttl := m.warmPage, m.warmPageAt, m.warmPageTTL
+	m.warmPage, m.warmPageAt = nil, time.Time{}
+	if m.warmPageTimer != nil {
+		m.warmPageTimer.Stop()
+		m.warmPageTimer = nil
+	}
+	m.mu.Unlock()
+	if page == nil {
+		return nil
+	}
+	if !warmPageReusable(page, b, parkedAt, time.Now(), ttl) {
+		_ = page.Close()
+		return nil
+	}
+	logrus.Debug("reuse warm page")
+	return page
+}
+
+// warmPageReusable 判断缓存的热页面是否还能复用：未过期、属于当前浏览器实例、CDP 仍然可用。
+func warmPageReusable(page *hrod.Page, b *hrod.Browser, parkedAt, now time.Time, ttl time.Duration) bool {
+	if page == nil || ttl <= 0 {
+		return false
+	}
+	if now.Sub(parkedAt) > ttl {
+		return false
+	}
+	if b != nil && page.Browser() != b {
+		return false
+	}
+	if page.Rod == nil {
+		return false
+	}
+	_, err := page.Rod.Info()
+	return err == nil
+}
+
+// parkWarmPage 把页面放进热页面缓存，到期自动关闭。返回 false 表示调用方应直接关闭它。
+func (m *Manager) parkWarmPage(page *hrod.Page) bool {
+	m.mu.Lock()
+	if m.closed || m.resetting || m.warmPageTTL <= 0 {
+		m.mu.Unlock()
+		return false
+	}
+	previous := m.warmPage
+	if m.warmPageTimer != nil {
+		m.warmPageTimer.Stop()
+	}
+	ttl := m.warmPageTTL
+	m.warmPage = page
+	m.warmPageAt = time.Now()
+	m.warmPageTimer = time.AfterFunc(ttl, func() { m.expireWarmPage(page) })
+	m.mu.Unlock()
+
+	if previous != nil {
+		_ = previous.Close()
+	}
+	return true
+}
+
+func (m *Manager) expireWarmPage(page *hrod.Page) {
+	m.mu.Lock()
+	if m.warmPage != page {
+		m.mu.Unlock()
+		return
+	}
+	m.warmPage, m.warmPageAt, m.warmPageTimer = nil, time.Time{}, nil
+	m.mu.Unlock()
+	_ = page.Close()
+}
+
+// clearWarmPageLocked 丢弃热页面缓存并返回需要关闭的页面，调用方持锁。
+func (m *Manager) clearWarmPageLocked() *hrod.Page {
+	page := m.warmPage
+	m.warmPage, m.warmPageAt = nil, time.Time{}
+	if m.warmPageTimer != nil {
+		m.warmPageTimer.Stop()
+		m.warmPageTimer = nil
+	}
+	return page
 }
 
 // UpdateOwner updates the visible owner for the operation currently holding the browser.
@@ -180,9 +286,10 @@ func (m *Manager) UpdateOwner(owner string) {
 	m.mu.Unlock()
 }
 
-// Release 关闭本次页面并归还独占权，浏览器保持常驻。
+// Release 归还独占权，浏览器保持常驻。
+// 页面进入热页面缓存（到期自动关闭），取不到缓存的下一次 Acquire 会新建页面。
 func (m *Manager) Release(page *hrod.Page) {
-	if page != nil {
+	if page != nil && !m.parkWarmPage(page) {
 		ctx, cancel := context.WithTimeout(context.Background(), pageCloseTimeout)
 		err := page.Context(ctx).Close()
 		cancel()
@@ -224,6 +331,7 @@ func (m *Manager) Reset(ctx context.Context) error {
 	m.resetting = true
 	m.resetDone = resetDone
 	m.cancelIdleCloseLocked()
+	warmPage := m.clearWarmPageLocked()
 	b := m.browser
 	m.browser = nil
 	if m.starting != nil {
@@ -238,6 +346,11 @@ func (m *Manager) Reset(ctx context.Context) error {
 	m.startErr = nil
 	m.mu.Unlock()
 	m.wg.Wait()
+
+	// 热页面属于旧浏览器实例，随浏览器一起关闭。
+	if warmPage != nil {
+		_ = warmPage.Close()
+	}
 
 	var closeErr error
 	if b != nil {
@@ -385,8 +498,12 @@ func (m *Manager) discardBrowser(target *hrod.Browser) {
 	if m.browser == target {
 		m.browser = nil
 	}
+	warmPage := m.clearWarmPageLocked()
 	m.cancelIdleCloseLocked()
 	m.mu.Unlock()
+	if warmPage != nil {
+		_ = warmPage.Close()
+	}
 	_ = target.Close()
 }
 
