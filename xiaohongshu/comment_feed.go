@@ -305,6 +305,54 @@ func commentActionName(action string) string {
 // 每轮一次 Eval 返回 .comment-item 数量、atEnd、commentID 匹配索引、userID 匹配索引数组；
 // commentID 唯一定位优先，userID 只接受唯一匹配（多匹配直接报歧义，禁止选择第一条）。
 // 未找到时才执行物理滚动；ctx 取消、到底或连续停滞停止。
+// expandVisibleRepliesJS 在**当前视口内**挑一个「展开 N 条回复」按钮并打标记。
+//
+// 为什么单独一份、而不复用 nextShowMoreButton：
+//   - 查找评论时要边滚边找，绝不能把页面滚回去——nextShowMoreButton 会把按钮
+//     scrollIntoView，顶部残留的按钮每轮都会把页面拽回去，和向下滚动来回打架；
+//   - 也不能按回复数阈值跳过：漏掉一个大楼层就等于漏掉目标评论。
+//
+// 因此这里只做两件事：只挑视口内的、只打标记（点击交给 Go 侧元素级 ClickNoScroll）。
+const expandVisibleRepliesJS = `() => {
+	const clean = (value) => (value || "").replace(/\s+/g, " ").trim();
+	document.querySelectorAll('[data-xhs-mcp-show-more]').forEach((el) => el.removeAttribute('data-xhs-mcp-show-more'));
+	const parents = Array.from(document.querySelectorAll(".parent-comment"));
+	for (const parent of parents) {
+		const buttons = parent.querySelectorAll(":scope > .children-comments .show-more, :scope > .reply-container .show-more");
+		for (const btn of buttons) {
+			const text = clean(btn.innerText || btn.textContent);
+			if (!text || !text.includes("展开") || text.includes("收起")) continue;
+			const rect = btn.getBoundingClientRect();
+			if (rect.width <= 0 || rect.height <= 0) continue;
+			// 只挑视口内的：视口外的一律不动，避免把页面拽回去。
+			if (rect.top < 0 || rect.bottom > window.innerHeight) continue;
+			btn.setAttribute("data-xhs-mcp-show-more", "1");
+			return text.slice(0, 40);
+		}
+	}
+	return "";
+}`
+
+// expandVisibleReplies 展开视口内的一个楼中楼按钮；返回是否点开了一个。
+// 元素级点击、不滚动（滚动由查找循环自己控制）。
+func expandVisibleReplies(ctx context.Context, page *hrod.Page) (bool, error) {
+	result, err := evalQuick(ctx, page, expandVisibleRepliesJS)
+	if err != nil {
+		return false, err
+	}
+	if result == nil || strings.TrimSpace(result.Value.Str()) == "" {
+		return false, nil
+	}
+	button, err := page.Element(`[data-xhs-mcp-show-more="1"]`)
+	if err != nil {
+		return false, fmt.Errorf("定位展开回复按钮失败: %w", err)
+	}
+	if err := button.ClickNoScroll(); err != nil {
+		return false, fmt.Errorf("展开回复失败: %w", err)
+	}
+	return true, nil
+}
+
 func findCommentElement(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, commentID, userID string) (*hrod.Element, bool, error) {
 	logrus.Infof("开始查找评论 - commentID: %s, userID: %s", commentID, userID)
 
@@ -317,6 +365,10 @@ func findCommentElement(ctx context.Context, page *hrod.Page, counter *evalTimeo
 	}
 
 	scrolled := false
+	// 连续只展开不下滚的轮数上限：防止一个几百条回复的大楼层把查找预算吃光，
+	// 让后面的评论根本没机会加载（对齐上游 #764 的 maxExpandRounds）。
+	const maxExpandRounds = 5
+	expandRounds := 0
 	const maxStagnant = 10
 	lastCount := -1
 	stagnantChecks := 0
@@ -388,6 +440,23 @@ func findCommentElement(ctx context.Context, page *hrod.Page, counter *evalTimeo
 				// 未匹配，继续滚动
 			default:
 				return nil, scrolled, fmt.Errorf("userID %s 匹配到 %d 条评论，存在歧义，禁止选择第一条", userID, len(state.UserIndices))
+			}
+		}
+
+		// 二级评论默认折叠在「展开 N 条回复」后面，不展开就永远找不到
+		// （comment_id 完全正确也只会得到"未找到评论"）。所以每轮查不到就先展开
+		// 视口内的楼中楼并立刻复查，再考虑下滚。
+		if expandRounds < maxExpandRounds {
+			expanded, expandErr := expandVisibleReplies(ctx, page)
+			if expandErr != nil {
+				return nil, scrolled, expandErr
+			}
+			if expanded {
+				expandRounds++
+				if err := sleepForCommentStep(page, 200*time.Millisecond, 500*time.Millisecond); err != nil {
+					return nil, scrolled, err
+				}
+				continue
 			}
 		}
 

@@ -31,6 +31,10 @@ func setupRoutes(appServer *AppServer) *gin.Engine {
 		},
 		&mcp.StreamableHTTPOptions{
 			JSONResponse: true, // 支持 JSON 响应
+			// Stateless：传输层不维护会话（不校验 Mcp-Session-Id），客户端可以跳过
+			// initialize 握手、单次 POST 直接调用工具。我们的状态都在工具参数里
+			// （session_id 自己管理），传输层无状态更省资源、接入也更简单。
+			Stateless: true,
 		},
 	)
 	router.Any("/mcp", gin.WrapH(mcpHandler))

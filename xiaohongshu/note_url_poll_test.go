@@ -3,6 +3,7 @@ package xiaohongshu
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -49,5 +50,26 @@ func TestNoteURLPollAcceptsNoteURLAfterRedirect(t *testing.T) {
 	}
 	if got.NoteID != "5f4d8e7b00000000010001a2" {
 		t.Fatalf("noteID = %q", got.NoteID)
+	}
+}
+
+// 查找评论时展开楼中楼的判据（对齐上游 #764）：只挑视口内、不滚动、忽略"收起"。
+func TestExpandVisibleRepliesJSShape(t *testing.T) {
+	for _, want := range []string{
+		`.parent-comment`,
+		`children-comments .show-more`,
+		`reply-container .show-more`,
+		`text.includes("展开")`,
+		`text.includes("收起")`,
+		`rect.top < 0 || rect.bottom > window.innerHeight`,
+		`setAttribute("data-xhs-mcp-show-more", "1")`,
+	} {
+		if !strings.Contains(expandVisibleRepliesJS, want) {
+			t.Fatalf("展开楼中楼的探针缺少 %q", want)
+		}
+	}
+	// 查找场景绝不能把页面滚回去（那是 nextShowMoreButton 的行为，会和向下查找打架）。
+	if strings.Contains(expandVisibleRepliesJS, "scrollIntoView") || strings.Contains(expandVisibleRepliesJS, "scrollBy") {
+		t.Fatal("查找评论时展开楼中楼不得滚动页面")
 	}
 }

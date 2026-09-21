@@ -42,11 +42,16 @@
 | `085da32` #776 | 搜索与列表只返回笔记（滤掉 `live_v2`/`hot_query`） | **缺**（无 `onlyNotes`） | ✅ **已融入**：`onlyNotes` 放在两处「JSON → []Feed」解码边界（`readHomeFeedsFromState`、`extractSearchFeedSources`），比上游的两处调用点更彻底，DOM/state 两路与 session/legacy 全部覆盖；视频笔记按 `modelType` 不误伤，已加测试 |
 | `0033dc7` #775 | 取二维码不再堆积浏览器实例（同一时刻只留一个待扫码会话，新的取消旧的） | 改前我们更差：第二次调用直接 `browser busy: owner=login_qrcode_wait`，且 4 分钟内所有工具被饿死 | ✅ **已融入且更优**：`loginQrcodeSession` 登记 + `Manager.Detach`（页面专用、归还独占权）。实测：首次 7.0s 出码，第 2/3 次 **0.2s/0.3s 复用同一张码**，期间 `check_login_status` 正常返回（不再 busy），3 次调用始终 1 个浏览器实例。上游是"取消重建、重新出码"，我们复用同一张码且不阻塞其他工具 |
 | `2a57ab4` #792 | publish 正文输入框改轮询定位，不再 panic | 我们更差：正文只给 5s 单次查找；标题/上传输入继承页面的 300s（真失败拖 5 分钟） | ✅ **已融入且更优**（`e9ec2be`）：统一 `publishControlMountBudget = 30s` + `waitPublishControl`（rod 自带重试退避，命中零开销，失败抛「选择器+预算+已等时长」）。**不采用**上游的 `contentElemSelectors` 多选择器列表 —— 那是我们刻意删掉的投机分支 |
-| `d680e83` #752 | 笔记详情返回视频信息 | **缺** | ⏳ 可选（看是否需要视频类笔记的字段） |
-| `9315948` #771 | go-sdk 升级 v1.4.0 + 开启 Stateless | go-sdk **已是 v1.4.0**；`Stateless` 选项未开 | ⏳ 可选（Stateless 影响 MCP 会话语义，需评估与我们的流式 HTTP 用法） |
-| `aa93e0a`/`af95a53` #764/#770 | 回复楼中楼、评论区短时也展开 | 命名不同（`expandNearbyReplies`/`clickButtonsWithRetry` 缺），我们有 `clickMoreReplies` | ⏳ 需**行为对比**后再定：可能部分等价、部分缺失 |
-| `a007e5a`/`058e7b3`/`4082976`/`cbcaec5`/`9b2a861`/`98d65a4`/`a5bb5b8` #759/#754/#746/#745/#751/#748/#778 | 交互原语收敛、裸鼠标调用收口、输入改 CDP 插入、评论滚动改真实滚轮、评论查找边界、reply panic 保护、写操作补足停留 | 我们的 `humanize` 结构与上游不同（我们有 actor/`humanize/rod` 包装），部分能力已有 | ⏳ 逐个**行为对比**：确认"上游修的问题我们是否存在"，存在才融入 |
-
+| `d680e83` #752 | 笔记详情返回视频信息 | 我们有 `NoteCard.Video`（参与 `fillMissingFeedFields` 合并，**不能删**），但 `openedNoteFeedDetail` 构造详情时不填 video | ❌ **不融入**：属新功能（无调用方需求）。上游是把整个 video 流结构映射出来（+112 行），我们详情是 DOM 优先，补它属于新增能力而非修缺陷 |
+| `9315948` #771 | go-sdk 升级 v1.4.0 + 开启 Stateless | go-sdk 已是 v1.4.0 | ✅ **已融入**：`StreamableHTTPOptions{Stateless: true}`。实测：原有客户端照常（`check_login_status` 1.4s、`start_page` 5.0s），且**不 initialize、不带 session 头的裸 POST 也能直接调工具**（HTTP 200 + JSON-RPC 结果，响应无 `Mcp-Session-Id`）。传输层无状态 → Pi 上少一份会话账本 |
+| `af95a53` #770 | 评论区较短时也展开楼中楼 | 我们的加载循环 break 后固定走收尾 `clickMoreReplies`（`feed_detail.go` 主循环 + 收尾两段），不存在"判定加载完成排在展开之前"的顺序问题 | ✅ **无需融入**（结构不同，已在源码核对） |
+| `9b2a861` #751 `aa93e0a` #764 | 先查后判；**查找评论时展开楼中楼** | `findCommentElement` 循环首个动作就是匹配 Eval（先查后判已等价）；但**查找过程不会展开折叠的楼中楼**——comment_id 正确也会滚到底报"未找到" | ✅ **已融入 #764**：新增 `expandVisibleReplies`（只挑**视口内**的 `.parent-comment > .children-comments/.reply-container .show-more`，**不滚动**、不按回复数阈值跳过，元素级 `ClickNoScroll`），查找循环里"查不到 → 先展开 → 立刻复查"，并加 `maxExpandRounds=5` 防止大楼层吃光预算。5 例合成页面验证（视口内选中 / 视口上下与"收起"不选 / 大楼层不按数量跳过）+ 形态测试 |
+| `cbcaec5` #745 | 评论滚动改用真实滚轮 | 上游修的是 `dispatchEvent(WheelEvent)`（合成事件**根本不滚动**）；我们用的是容器 `scrollBy`（真实滚动），评论分批加载实测正常 | ✅ **不适用**（我们的做法不是它修的那个 bug） |
+| `98d65a4` #748 | reply 工具补 panic 保护 | 22 个工具 / 22 处 `withPanicRecovery`，无遗漏 | ✅ **已有等价** |
+| `a5bb5b8` #778 | 写操作确认后补足停留 | `like/favorite` 后 2–5s；通知点赞 400–800ms；通知回复 300–600ms / 500–1200ms | ✅ **已有等价** |
+| `058e7b3` #754 | 收口裸鼠标调用 | 只有 `page.Actor().Mouse.Scroll`（我们 humanize 的 API），无裸 rod 鼠标调用 | ✅ **已有等价** |
+| `a007e5a` #759 | 点击补按下停留与落点抖动 | `ClickWithOptions` 按下→释放间隔 40–120ms，移动带随机偏移 | ✅ **已有等价** |
+| `4082976` #746 | 输入改 CDP InsertText | 我们逐键/合成事件输入，功能实测正常（标题/正文都成功写入） | ⏳ **只看速度**：InsertText 省的是长文本的往返次数，属"引入新成本/收益"判断项；只读路径量不到，**待真机量测后再定** |
 ### 2.3 架构绑定 / 不适用
 
 | 上游提交 | 原因 |
