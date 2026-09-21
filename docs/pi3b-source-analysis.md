@@ -412,3 +412,59 @@ Cloak 模式下代码显式用了 `NoDefaultDevice()`（`third_party/headless_br
 
 > 数据解读提醒：这台机器 load 5.2 时 `start_page` 27s、load 较低时 6.4s、这次 9.1s。
 > 同一份代码同一页面差 4 倍，就是"不能用固定时长判断机器"的一手证据；报数字时必须带上当时负载。
+
+## 14. 本地发布实测发现的三个真 bug（2026-09-21，真实账号，仅自己可见测试笔记）
+
+起因：验证统一等待引擎时，所有者要求「发一篇仅自己可见的笔记，先不删」。这一跑把发布链路上
+**三个既有 bug** 全暴露了出来——在修掉它们之前，`publish_content` 在 CloakBrowser 下根本发不出去。
+
+### 14.1 closed shadow root 的命中判定（已修，提交 `6328359`）
+
+两处命中判据都是 `hit === this || this.contains(hit)`。`document.elementFromPoint` 对 shadow 内部节点
+会**重定向到宿主**，closed shadow root 更是只能拿到宿主（发布按钮 `xhs-publish-btn` 内部按钮拿到的命中就是宿主），
+于是 shadow 里的按钮永远判"被遮挡 / 落点不命中目标"。
+
+改法：`humanize/hit_target.go` 的 `HitTargetJS` 作为**单一来源**判据（自身 → 子孙 → 所在 shadow root 的宿主），
+可点击性探针、ScrollIntoView 的 centerHit、点击落点终校验三处共用。
+
+### 14.2 滚轮打在"容器中心"而不是目标上（已修）
+
+一手读数（真实失败页面）：容器 `.publish-page` 可见区中心 (494, 261.5) 处命中的是一个 `IMG`
+且**不在该容器子树里** → 滚轮落不到本容器上 → `scrollTop` 不变 → 报 "scroll made no progress"。
+
+改法：探针里先算**滚轮落点**——优先目标自身中心并夹进容器可见区，逐个校验命中元素的祖先链里
+是否包含本容器（祖先链要跨 shadow 边界）；Go 侧用这个点去 `moveTo` + `Scroll`。
+
+### 14.3 被浮层/固定条盖住时只有"继续滚动"一条路（已修）
+
+同一页面：标题输入框中心被 `DIV.d-popover`（z-index 999，内含 `feature-guide`
+"图片可以编辑啦，快来试试吧"）**完整盖住**。原实现只会继续滚动，而浮层跟着字段走 → 空转到
+"element did not become visible after maximum scroll attempts"（错误信息本身也误导）。
+
+实测澄清（都很关键）：
+- 该引导浮层**不会自己消失**：等 9s、按 Escape 都无效（`.feature-guide__close` 才是有效控件，
+  `aria-label="关闭新功能引导"`；另一个 `feature-guide__btn`（我知道了）落在视口外 y=509，而视口只有 459 高）。
+- 底部 **sticky 发布条 `XHS-PUBLISH-BTN`** 盖住正文/可见范围控件时，**滚动才是正解**（浮层跟着走，固定条不跟）。
+
+所以按遮挡物性质分流（`humanize/actor_mouse_ext.go` + `humanize/cover_dialog.go`）：
+1. 遮挡物是对话框/浮层（`role=dialog` / `d-popover` / `d-modal`）→ 等它让开，等不到就**点它自己的关闭控件**
+   （JS 标记 + 元素级点击，不猜坐标；只挑视口内可见的那个）；
+2. 遮挡物是页面自身的固定条 → 保留原来的"按覆盖物位置滚动"数学，把目标挪出来。
+
+### 14.4 验收（本机，真实账号，`XHS_LOW_RESOURCE=1`）
+
+| 环境 | 修前 | 修后 |
+|:--|:--|:--|
+| stock Chrome 153 | `点击发布按钮失败: 元素不可点击: obscured`（closed shadow root） | **发布成功**（`/publish/success`），`publish_success` 505ms / 2 探测 |
+| CloakBrowser 146（Pi 用的就是它） | `输入标题失败: scroll made no progress` → 修完滚动点后 `element did not become visible` | **发布成功**（`isError=false`，`Status:发布完成`，42s 全链路） |
+
+回归：`go test ./...` 全绿；本机测量电池 `start_page` 6.9s / `search_feeds` 9.3s / **`open_note` 6.0s** /
+`get_note_detail` 0.2s 全部成功——说明滚轮落点改动没有弄坏卡片滚动+点击这条路径。
+
+### 14.5 遗留
+
+- **短链打开笔记未做端到端验证**：`open_note` 的 `share_url` 支持 xhslink 短链，但
+  `strictValidateHTTPSURL` 要求 **https**，而小红书分享文案里的短链是 `http://xhslink.com/...`
+  （也常见不带 scheme 直接粘 `xhslink.com/...`）——这两种都会被拒。需要一个真实短链才能验通顺路径。
+- 创建页正常文本里含"无权限访问"会被风控关键词误报（12:14 那次 `permission_denied`）。
+- 一次 `ready:publish` 探针阻塞 297s（未复现）。

@@ -3,6 +3,7 @@ package humanize
 import (
 	"context"
 	"math"
+	"strings"
 	"testing"
 	"time"
 
@@ -173,4 +174,25 @@ func TestPointerSettle_HasSufficientFloor(t *testing.T) {
 
 	assert.GreaterOrEqual(t, dist.sample(-5), 200*time.Millisecond,
 		"极端偏小的采样也应被 clamp 到 200ms 以上")
+}
+
+// TestCoverDismissJSShape 钉住"关掉盖住目标的浮层"的判据：
+// 只挑**视口内可见**的关闭控件（实测引导浮层的"我知道了"落在视口外 y=509/视口高 459），
+// 且优先用 aria-label 明确写着"关闭"的那个。
+func TestCoverDismissJSShape(t *testing.T) {
+	for _, want := range []string{
+		`[aria-label*="关闭"]`,
+		"inViewport",
+		"b.bottom <= innerHeight",
+		`removeAttribute("data-xhs-mcp-cover-close")`,
+		`setAttribute("data-xhs-mcp-cover-close", "1")`,
+	} {
+		if !strings.Contains(coverDismissJS, want) {
+			t.Fatalf("关闭浮层的探针缺少 %q", want)
+		}
+	}
+	// aria-label 必须排在泛化的 [class*=close] 之前，否则会点到无关的隐藏 ×。
+	if strings.Index(coverDismissJS, "aria-label") > strings.Index(coverDismissJS, `[class*="close"]`) {
+		t.Fatal("关闭控件优先级不对：应先按 aria-label 找")
+	}
 }

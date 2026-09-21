@@ -418,6 +418,47 @@ func (m *Mouse) ClickNoScroll(el *rod.Element) error {
 }
 
 // Scroll scrolls by deltaY (and optionally deltaX) in human-like increments.
+// maxCoverWaitAttempts 是"目标可见但被浮层盖住"时等待浮层让开的次数上限
+// （每次 200-400ms，约 6-9s；期间按 Escape 尝试关闭引导浮层）。
+const maxCoverWaitAttempts = 24
+
+// waitCoverCleared 等覆盖在目标上的浮层让开：
+// 先等它自己消失，等不到就按 Escape（关掉引导/气泡的通用做法，比乱点安全），
+// 一直不让开就明确报出遮挡物是谁——比原来"did not become visible"这种误导性错误可诊断得多。
+// stillCovered 返回 (是否仍被遮挡, 当前遮挡物描述)。
+func (m *Mouse) waitCoverCleared(target *rod.Element, cover string, stillCovered func() (bool, string)) (bool, error) {
+	for attempt := 0; attempt < maxCoverWaitAttempts; attempt++ {
+		// 浮层不会自己消失时，点它自己的关闭控件（实测小红书"新功能引导"就是这种：
+		// 等 9s、按 Escape 全都无效，点 aria-label=关闭 的 × 才有效）。
+		if attempt == 2 || attempt == 8 {
+			if clicked, desc, err := m.dismissCoverDialog(target); err != nil {
+				if clicked && desc != "" {
+					cover = desc
+				}
+			}
+		}
+		if err := sleepWithContext(m.ctx, randDuration(200*time.Millisecond, 400*time.Millisecond)); err != nil {
+			return false, err
+		}
+		if attempt == 4 {
+			if err := m.boundPage().Keyboard.Press(input.Escape); err != nil {
+				return false, err
+			}
+		}
+		covered, current := stillCovered()
+		if !covered {
+			return true, nil
+		}
+		if current != "" {
+			cover = current
+		}
+	}
+	if cover == "" {
+		cover = "未知浮层"
+	}
+	return false, fmt.Errorf("目标被浮层遮挡且未自行消失: %s", cover)
+}
+
 func (m *Mouse) Scroll(deltaX, deltaY float64) error {
 	if deltaY == 0 && deltaX == 0 {
 		return nil
@@ -456,7 +497,10 @@ func (m *Mouse) ScrollIntoView(el *rod.Element) error {
 	type probe struct {
 		found                         bool
 		target, visible               rect
+		wheel                         struct{ x, y float64 }
 		centerHit                     bool
+		cover                         string
+		coverIsDialog                 bool
 		hitRect                       rect
 		scrollTop, scrollHeight       float64
 		clientHeight                  float64
@@ -472,7 +516,23 @@ func (m *Mouse) ScrollIntoView(el *rod.Element) error {
 			const centerY = (r.top + r.bottom) / 2;
 			const hit = document.elementFromPoint(centerX, centerY);
 			const centerHit = hitTargets(this, hit);
+			// 被遮挡时回报遮挡物是谁：调用方要靠它决定"等它消失"还是报错，
+			// 而不是盲目滚动（实测发布页被 feature-guide 浮层盖住时滚动毫无用处）。
+			const cover = hit && !centerHit
+				? (hit.tagName || "") + "." + String(hit.className || "").replace(/\s+/g, " ").slice(0, 60)
+				: "";
 			const hitRect = hit && !centerHit ? hit.getBoundingClientRect() : null;
+			// 遮挡物是"对话框/浮层"还是"页面自身的固定条"（如底部 sticky 发布条）？
+			// 前者点它的关闭控件才有效，后者只能靠滚动把目标挪出来——处理方式完全不同。
+			let coverIsDialog = false;
+			if (hit && !centerHit) {
+				let n = hit;
+				while (n && n !== document.body) {
+					const cls = String(n.className || "");
+					if ((n.getAttribute && n.getAttribute("role") === "dialog") || cls.indexOf("d-popover") >= 0 || cls.indexOf("d-modal") >= 0) { coverIsDialog = true; break; }
+					n = n.parentElement;
+				}
+			}
 			let parent = this.parentElement;
 			while (parent) {
 				const style = getComputedStyle(parent);
@@ -486,11 +546,33 @@ func (m *Mouse) ScrollIntoView(el *rod.Element) error {
 					const top = Math.max(0, rawTop);
 					const right = Math.min(window.innerWidth, rawRight);
 					const bottom = Math.min(window.innerHeight, rawBottom);
-					return {found: true, target, visible: {left, top, right, bottom}, centerHit, hitRect, scrollTop: parent.scrollTop, scrollHeight: parent.scrollHeight, clientHeight: parent.clientHeight, viewportWidth: window.innerWidth, viewportHeight: window.innerHeight};
+					// 滚轮要打在**这个容器自己身上**：容器可见区的中心常常被别的层盖住
+			// （实测发布页中心命中的是一个 IMG，且不在容器子树里），滚轮打在那里
+			// 不会滚动本容器 → 之前报 "scroll made no progress"。
+			// 候选点优先目标的中心，逐个检查命中元素的祖先链里有没有本容器；
+			// 祖先链要跨 shadow 边界（getRootNode().host），否则 shadow 内的命中会被误判。
+			const wheelAt = (cands) => {
+				for (const c of cands) {
+					const x = Math.min(Math.max(c.x, left + 1), right - 1);
+					const y = Math.min(Math.max(c.y, top + 1), bottom - 1);
+					let node = document.elementFromPoint(x, y);
+					while (node) {
+						if (node === parent) return { x, y };
+						node = node.parentElement || (node.getRootNode && node.getRootNode().host) || null;
+					}
+				}
+				return { x: (left + right) / 2, y: (top + bottom) / 2 };
+			};
+			const wheel = wheelAt([
+				{ x: (target.left + target.right) / 2, y: (target.top + target.bottom) / 2 },
+				{ x: (left + right) / 2, y: (top + bottom) / 2 },
+				{ x: left + 16, y: top + 16 },
+			]);
+			return {found: true, target, visible: {left, top, right, bottom}, wheel, centerHit, cover, coverIsDialog, hitRect, scrollTop: parent.scrollTop, scrollHeight: parent.scrollHeight, clientHeight: parent.clientHeight, viewportWidth: window.innerWidth, viewportHeight: window.innerHeight};
 				}
 				parent = parent.parentElement;
 			}
-			return {found: false, target, centerHit, hitRect, viewportWidth: window.innerWidth, viewportHeight: window.innerHeight};
+			return {found: false, target, centerHit, cover, coverIsDialog, hitRect, viewportWidth: window.innerWidth, viewportHeight: window.innerHeight};
 		}`)
 		if err != nil {
 			return probe{}, err
@@ -502,10 +584,20 @@ func (m *Mouse) ScrollIntoView(el *rod.Element) error {
 		readRect := func(value gson.JSON) rect {
 			return rect{left: value.Get("left").Num(), top: value.Get("top").Num(), right: value.Get("right").Num(), bottom: value.Get("bottom").Num()}
 		}
-		result := probe{found: value.Get("found").Bool(), target: readRect(value.Get("target")), centerHit: value.Get("centerHit").Bool(), viewportWidth: value.Get("viewportWidth").Num(), viewportHeight: value.Get("viewportHeight").Num()}
-		result.hitRect = readRect(value.Get("hitRect"))
+		result := probe{
+			found:          value.Get("found").Bool(),
+			hitRect:        readRect(value.Get("hitRect")),
+			target:         readRect(value.Get("target")),
+			centerHit:      value.Get("centerHit").Bool(),
+			cover:          value.Get("cover").Str(),
+			coverIsDialog:  value.Get("coverIsDialog").Bool(),
+			viewportWidth:  value.Get("viewportWidth").Num(),
+			viewportHeight: value.Get("viewportHeight").Num(),
+		}
 		if result.found {
 			result.visible = readRect(value.Get("visible"))
+			result.wheel.x = value.Get("wheel").Get("x").Num()
+			result.wheel.y = value.Get("wheel").Get("y").Num()
 			result.scrollTop = value.Get("scrollTop").Num()
 			result.scrollHeight = value.Get("scrollHeight").Num()
 			result.clientHeight = value.Get("clientHeight").Num()
@@ -602,6 +694,25 @@ func (m *Mouse) ScrollIntoView(el *rod.Element) error {
 		}
 		var deltaY float64
 		if centerVisible && !before.centerHit {
+			if before.coverIsDialog {
+				// 对话框/引导浮层盖住目标：滚动改变不了遮挡（浮层跟着字段走），
+				// 等它让开、等不到就点它自己的关闭控件（实测小红书"新功能引导"）。
+				if _, err := m.waitCoverCleared(el, before.cover, func() (bool, string) {
+					next, probeErr := readProbe()
+					if probeErr != nil || !next.found {
+						return true, before.cover
+					}
+					cx := (next.target.left + next.target.right) / 2
+					cy := (next.target.top + next.target.bottom) / 2
+					inside := cx >= next.visible.left && cx <= next.visible.right && cy >= next.visible.top && cy <= next.visible.bottom
+					return inside && !next.centerHit, next.cover
+				}); err != nil {
+					return err
+				}
+				continue
+			}
+			// 非对话框遮挡（实测发布页底部 sticky 发布条）：滚动才是解法——
+			// 按覆盖物的位置把目标挪到它上面/下面去。
 			invalidHitRect := before.hitRect.right-before.hitRect.left <= 0 || before.hitRect.bottom-before.hitRect.top <= 0
 			fullHeightHit := before.hitRect.top <= before.visible.top+boundaryTolerance && before.hitRect.bottom >= before.visible.bottom-boundaryTolerance
 			if invalidHitRect || fullHeightHit {
@@ -627,7 +738,8 @@ func (m *Mouse) ScrollIntoView(el *rod.Element) error {
 		if before.scrollTop <= 0 && deltaY < 0 || before.scrollTop >= before.scrollHeight-before.clientHeight-1 && deltaY > 0 {
 			return errors.New("scroll container reached its boundary")
 		}
-		wheelPoint := Point{X: (before.visible.left + before.visible.right) / 2, Y: (before.visible.top + before.visible.bottom) / 2}
+		// 滚轮打在探针算出的点上（优先目标自身，保证落点在本容器内）。
+		wheelPoint := Point{X: before.wheel.x, Y: before.wheel.y}
 		if err := m.moveTo(wheelPoint, false); err != nil {
 			return err
 		}
