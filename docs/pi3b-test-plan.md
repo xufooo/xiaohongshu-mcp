@@ -884,3 +884,27 @@ D.12 里「页面级工具够不到发布按钮」的说法**已解决**，而�
 `/explore` 与 `/notification` 则正常。最后改走 **UI 路径**（点搜索框 → 输入 → 回车，即代码的 P0 路径）才进到搜索页。
 这与附录 C 的结论一致：**重页面的单次导航/求值可能远超 20s**，Pi 上只会更糟 —— 代码里已有的 eval 预算与
 renderer 死亡熔断是必需项，不能放宽。
+
+### D.15 session 四件套（`start_page` / `get_page_state` / `close_page` / `go_back`）—— 等价站点行为全部验证
+
+各自的关键判据先读代码确认（[源码]），再在真实页面按同一判据实测（[实测]）：
+
+| 工具 | 代码判据 | 实测 | 结论 |
+|:--|:--|:--|:--|
+| `start_page` | 建会话时一次 eval 记录 `{url, scroll_y}`，`scroll_y = window.scrollY \|\| document.scrollingElement.scrollTop` | `/explore` 上读取正常（`url` + `scrollY`）；`window.scrollTo(0,1200)` 后 `scrollY` 0 → **1200**，`scrollingElement.scrollTop` 同步 | ✅ 状态读取有效 |
+| `get_page_state` | `probeXHSReadyFull`：URL、可见详情数（`VisibleDetailCount`）、按 URL 推断页面种类 | 信息流：`detailVisible = 0`；点卡片进详情后：**4**（mask=1）；URL 形态 `…/explore` 与 `…/explore/<id>?xsec_token=…` 可区分 | ✅ 字段有意义；⚠️ 见下方 `scroll_y` 缺陷 |
+| `go_back` | `history.back()` 后轮询 `historyTargetReady`：`fromDetail`（后退前 `VisibleDetailCount>0`）时要求 **详情数归零 + 目标页就绪**；预算 `browseSessionBackTimeout` | 点卡片后：URL `…/explore/6aa7abe6…?xsec_token=…`、`detailVisible=4`、mask=1；`history.back()` 后 **约 1.8s**：URL 回 `/explore`、`detailVisible=0`、mask=0 | ✅ 判据在线上成立，15s 预算充裕 |
+| `close_page` | 关闭页面并释放浏览器（`close()` + `Release(page)`，令牌归还） | 关闭该标签页后，浏览器**立即可开新页**并正常渲染 | ✅ 无残留/锁定 |
+
+#### 新发现的代码级缺陷：`get_page_state` 的 `scroll_y` 在「内部滚动容器」页面上恒为 0
+
+`refreshPageState` 取的是 `window.scrollY || document.scrollingElement.scrollTop`，但**这两个页面都不靠窗口滚动**：
+
+| 页面 | 窗口指标 | 真实滚动发生在 |
+|:--|:--|:--|
+| 搜索结果页 `/search_result_ai` | `document.body.scrollHeight == innerHeight == 836`，`window.scrollTo(0, bottom)` 后 `scrollY` 仍 **0** | `.search-layout-wrapper`（实测 scrollTop 0 → 1420，scrollHeight 2140 → 3312） |
+| 笔记详情页 | 窗口同样不可滚 | `.note-scroller`（实测 scrollTop 0 → **2335**，scrollHeight 2969） |
+
+**后果**：`get_page_state` 报的 `scroll_y` 在这两类页面上**恒为 0**，与真实阅读/滚动位置不符。
+若后续有基于 `scroll_y` 的判断（例如「已滚动到评论区」），在搜索页/详情页上会失效。
+最小修法：一次 eval 里同时读「最内层可滚容器的 scrollTop」或按页面种类指定容器（详情页取 `.note-scroller`、搜索页取 `.search-layout-wrapper`），并保留窗口值作为兜底。
