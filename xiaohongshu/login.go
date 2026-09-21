@@ -88,20 +88,48 @@ func (a *LoginAction) CurrentUser(ctx context.Context) (*CurrentUser, error) {
 	return &user, nil
 }
 
+// loginSurfaceWaitTimeout 是「已登录」或「登录弹窗」二者之一的等待上限。
+const loginSurfaceWaitTimeout = 8 * time.Second
+
+// waitForLoginSurface 轮询到「已登录」或「登录二维码」任一出现即返回，
+// 替代原先无条件的 Sleep(3s)：快时几百毫秒返回，慢时最多等 loginSurfaceWaitTimeout，
+// 不再出现「3 秒不够就误判」的竞态。
+func waitForLoginSurface(page *hrod.Page) (loggedIn bool, err error) {
+	deadline := time.Now().Add(loginSurfaceWaitTimeout)
+	for {
+		exists, _, hasErr := page.Has(loginReadySelector)
+		if hasErr != nil {
+			return false, hasErr
+		}
+		if exists {
+			return true, nil
+		}
+		if has, _, qrErr := page.Has(loginQRCodeSelector); qrErr == nil && has {
+			return false, nil
+		}
+		if !time.Now().Before(deadline) {
+			return false, nil
+		}
+		if err := page.Sleep(200 * time.Millisecond); err != nil {
+			return false, err
+		}
+	}
+}
+
 func (a *LoginAction) Login(ctx context.Context) error {
 	// 导航到小红书首页，这会触发二维码弹窗
 	pp := a.page.Context(ctx)
-	if err := pp.Navigate("https://www.xiaohongshu.com/explore"); err != nil {
-		return errors.Wrap(err, "navigate to explore")
+	// 已在发现页不重复整页导航（热页面复用后，重复调用扫码工具会命中这里）。
+	if !onExplorePage(pp) {
+		if err := pp.Navigate(ExploreURL); err != nil {
+			return errors.Wrap(err, "navigate to explore")
+		}
 	}
-
-	// 等待一小段时间让页面完全加载
-	if err := pp.Sleep(3 * time.Second); err != nil {
+	loggedIn, err := waitForLoginSurface(pp)
+	if err != nil {
 		return err
 	}
-
-	// 检查是否已经登录
-	if exists, _, _ := pp.Has(loginReadySelector); exists {
+	if loggedIn {
 		// 已经登录，直接返回
 		return nil
 	}
@@ -127,17 +155,16 @@ func (a *LoginAction) Login(ctx context.Context) error {
 func (a *LoginAction) FetchQrcodeImage(ctx context.Context) (string, bool, error) {
 	// 导航到小红书首页，这会触发二维码弹窗
 	pp := a.page.Context(ctx)
-	if err := pp.Navigate("https://www.xiaohongshu.com/explore"); err != nil {
-		return "", false, errors.Wrap(err, "navigate to explore")
+	if !onExplorePage(pp) {
+		if err := pp.Navigate(ExploreURL); err != nil {
+			return "", false, errors.Wrap(err, "navigate to explore")
+		}
 	}
-
-	// 等待一小段时间让页面完全加载
-	if err := pp.Sleep(3 * time.Second); err != nil {
+	loggedIn, err := waitForLoginSurface(pp)
+	if err != nil {
 		return "", false, err
 	}
-
-	// 检查是否已经登录
-	if exists, _, _ := pp.Has(loginReadySelector); exists {
+	if loggedIn {
 		return "", true, nil
 	}
 
