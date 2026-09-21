@@ -1012,3 +1012,30 @@ renderer 死亡熔断是必需项，不能放宽。
 | `window.chrome` | object | **undefined** |
 | UA | 含 `HeadlessChrome` | 含 `HeadlessChrome` |
 | 真实 `/explore` PSS | 632.7 MB / 9 进程 | **45.8 MB / 1 进程** |
+
+### D.18 真机标定脚本（`scripts/pi-calibrate.sh`，2026-09-21）
+
+代码侧优化已经做完一批，但在 Pi 上的收益全部是 `[推断]`。这个脚本把「有没有生效」变成可读的数字，
+**只依赖 bash + curl + grep + /proc**（板上不需要装 node/python）：
+
+```bash
+PORT=18160 BROWSER_BIN=/usr/bin/chromium \
+  ./scripts/pi-calibrate.sh /usr/local/bin/xiaohongshu-mcp
+```
+
+它自拉起服务、跑完自关，输出七段：
+
+| 段 | 量什么 | 判据 |
+|:--|:--|:--|
+| 1 | 服务起到 MCP 可用 | — |
+| 2 | 生效配置自述：低资源档 / profile 是否持久 / 拦截模式条数 | arm64 上应有低资源档与拦截；若出现「缓存目录不可写」则冷启动缓存不生效 |
+| 3 | `start_page` 冷启动耗时 + `feed_card_count` + 风险/未登录提示 | 与桌面口径对比，看放大倍数 |
+| 4 | 浏览器进程树 RSS / **PSS**（比例分摊，推荐口径） | Pi 3B 只有 1GB，PSS 是硬约束 |
+| 5 | `get_page_state.browser`：`pages_created` / `warm_page_reused` / `navigation_skipped` / `blocked_url_patterns` / `profile_persistent` / `idle_timeout_seconds` | 用来确认热页面复用与跳导航**真的命中**（不是只写在代码里） |
+| 6 | 连续两次 `start_page` 后 `navigation_skipped` 是否增加 | 增加=省掉了一次整页加载 |
+| 7 | 浏览器空闲关闭汇总（`pages_created` / `warm_page_reused`） | — |
+
+**本机（x86 桌面）自测结果**：脚本可跑通，未登录路径会明确提示先扫码登录；
+在桌面口径下同一页面 PSS 约 **825 MB / 10 进程**（这个数只是校准脚本本身是否工作，不代表 Pi）。
+
+> 登录态下才能跑完第 5/6 段：先 `get_login_qrcode` → 手机扫码 → `check_login_status`，再重跑。
