@@ -12,15 +12,16 @@ import (
 const (
 	SelectorSearchInputInFeeds        = `#search-input-in-feeds`
 	SelectorSearchInputInSearchResult = `#search-input`
-	SelectorSearchInput               = SelectorSearchInputInFeeds + `, ` + SelectorSearchInputInSearchResult + `, #search-input-ai, input[placeholder*="搜索"]` // 兜底：匹配 placeholder 含"搜索"的输入框
-	SelectorMarkedSearchInput         = `[data-xhs-mcp-search-input="1"]`
-	SelectorSelectedSearchInput       = `[data-xhs-mcp-search-input="selected"]:not([aria-hidden="true"])`
-	SelectorSearchButton              = `.search-icon, .search-btn, button[type="submit"]`
-	SelectorSearchResult              = `.feeds-container, .note-list, .search-layout, div[data-v-]`
-	SelectorFeedCard                  = `section.note-item, .note-item, .feeds-container section, .note-list section`
-	SelectorFeedDetailReady           = `.note-detail-mask, .note-container, .interact-container, .comments-container`
-	SelectorCommentBox                = `div.input-box div.content-edit p.content-input`
-	SelectorCommentSubmitButton       = `.btn.submit`
+	// /search_result_ai 的搜索框（UI 搜索落点，2026-09 实测唯一可见）
+	SelectorSearchInputInAISearchResult = `#search-input-ai`
+	// 三路由并集；调用方通常应按路由取上面某个精确 ID（decideSearchPage）
+	SelectorSearchInput         = SelectorSearchInputInFeeds + `, ` + SelectorSearchInputInSearchResult + `, ` + SelectorSearchInputInAISearchResult
+	SelectorSelectedSearchInput = `[data-xhs-mcp-search-input="selected"]:not([aria-hidden="true"])`
+	SelectorSearchResult        = `.feeds-container, .note-list, .search-layout`
+	SelectorFeedCard            = `section.note-item`
+	SelectorFeedDetailReady     = `.note-detail-mask, .note-container, .interact-container, .comments-container`
+	SelectorCommentBox          = `div.input-box div.content-edit p.content-input`
+	SelectorCommentSubmitButton = `.btn.submit`
 
 	// 通知页选择器
 	SelectorNotificationEntry       = `a[href="/notification"]`                               // 侧栏通知入口
@@ -34,7 +35,7 @@ const (
 	SelectorNotificationLikeButton  = `.action-like`                                          // 点赞按钮(仅 mentions)
 	SelectorNotificationLikeUse     = `.action-like svg use`                                  // 点赞状态 svg use
 	SelectorNotificationReplyInput  = `textarea.comment-input`                                // 回复输入框
-	SelectorNotificationReplySubmit = `.comment-wrapper .submit, .input-buttons .submit`      // 发送按钮：线上实测为 .comment-wrapper .submit（文本「发送」）；旧版 .input-buttons .submit 已命中 0，保留兜底
+	SelectorNotificationReplySubmit = `.comment-wrapper .submit`                              // 发送按钮（线上实测唯一命中；文本必须为「发送」）
 )
 
 type SelectorSpec struct {
