@@ -184,3 +184,43 @@ Cloak 模式下代码显式用了 `NoDefaultDevice()`（`third_party/headless_br
 1. **逻辑正确性优先**：先补齐/跑通现有测试（当前 worktree 的 P0 改动需先过 CI）。
 2. **精简**：§8.1 的删除 + §8.2 的合并 + §8.3 的单源化。
 3. **效率/复用**：再动 §5 的 P1（互动就地操作）与 P3（页面复用）。
+
+## 9. 「下一步工具」指引的单源化（2026-09-21 已实施）
+
+### 9.1 问题（改前的三套并存指引）
+
+同一件事（下一步该调什么）在三个地方各写一份，互相矛盾 [源码]：
+
+| 通道 | 改前形态 | 缺口 |
+|:--|:--|:--|
+| 错误响应 | `next_step.tool`（错误文本子串匹配）+ per-call-site fallback | 无参数；工具名靠猜 |
+| 成功响应 | 8 张手写静态工具表（`afterOpenTools` 等） | 与真实状态无关，会推荐当前状态不允许的工具 |
+| `get_page_state` | `recommended_action`(动词) + `actions[]` + `current.next_hint`(长散文菜单) | 三份指引竞争；动词枚举不指名工具 |
+
+### 9.2 Jev 裁决（第四轮，`jev-latest`，5 问全部高置信）
+
+| 问题 | 裁决 | 置信度 | 概率（次优项） |
+|:--|:--|--:|:--|
+| 指引结构 | **单一 typed `next_step{tool,args,reason,hint}`** | **1.0** | keep_verbs 0 / tool_name_only 0 |
+| 工具列表来源 | **只由实时会话状态推导（删静态表）** | **1.0** | state+static 0 / static 0 |
+| 错误是否带参数 | **带服务端已知的参数** | 0.98 | tool+hint 0.01 |
+| 散文菜单 `next_hint` | **删** | 0.99 | shrink 0.01 |
+| 静态表与状态冲突时 | **状态优先，且失败要指名正确工具** | **1.0** | union 0 / static 0 |
+
+### 9.3 实施结果
+
+| 项 | 改动 |
+|:--|:--|
+| 类型 | 新增 `NextStep{tool,args,reason,hint}`（错误/成功共用，MCP 层不再自定义结构） |
+| 解析器 | 4 个函数（`availableActionsLocked` / `semanticActionsLocked` / `recommendedActionLocked` / `nextHintLocked`）合并为 `guidanceLocked` |
+| 重复键 | 删 `current.next_hint` / `current.available_tools` / `current.results_count`；`available_actions` → `available_tools` |
+| 成本 | `SessionGuidance` 纯内存（加锁读状态），**不额外探测页面** → Pi 上零额外开销 |
+| 状态优先 | 未就绪只给 `get_page_state`/`close_page`；mismatch 禁用全部详情工具；不再推荐刚调用过的工具；回复过的通知条目清 `Actionable` |
+| 动词枚举 | `start_page.recommended_action`（continue/wait/retry/recreate）删除，改为指名工具 + 参数；失败时先读登录态再给指引 |
+| 关键词表 | `RiskKindFromText` 抽成单源，页面探测与「失败后调什么」共用 |
+
+### 9.4 尚未做（下一步）
+
+1. 登录态下的成功路径实测（需扫码或放入 `cookies.json`）—— 见测试文档 D.16 [未见]。
+2. 本次只统一了**会话类**工具；非会话工具（`publish_*` / `user_profile`）的失败仍返回裸文本，
+   它们不属于会话指引闭环，若无精确的下一步就先不动（避免投机指引）。

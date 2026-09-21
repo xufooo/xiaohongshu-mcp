@@ -908,3 +908,57 @@ renderer 死亡熔断是必需项，不能放宽。
 **后果**：`get_page_state` 报的 `scroll_y` 在这两类页面上**恒为 0**，与真实阅读/滚动位置不符。
 若后续有基于 `scroll_y` 的判断（例如「已滚动到评论区」），在搜索页/详情页上会失效。
 最小修法：一次 eval 里同时读「最内层可滚容器的 scrollTop」或按页面种类指定容器（详情页取 `.note-scroller`、搜索页取 `.search-layout-wrapper`），并保留窗口值作为兜底。
+
+### D.16 「下一步工具」指引重构（2026-09-21，单元测试 + 本机服务实测）
+
+**背景**：调用方经常调错下一个工具。改前有三套并存的指引，互相矛盾：
+
+| 位置 | 改前 | 问题 |
+|:--|:--|:--|
+| 错误响应 | `next_step.tool`（由错误文本子串匹配得到） | 不给参数；工具名靠猜 |
+| 成功响应 | 手写的静态 `available_tools`（每个处理函数一份，共 8 张表） | 与真实页面状态无关，会推荐当前状态不允许的工具 |
+| `get_page_state` | `recommended_action`（动词枚举） + `actions[]` 菜单 + `current.next_hint` 长散文菜单 | 三份指引互相竞争；`start_page` 只给 `continue｜wait｜retry｜recreate`，既不指名工具也不给参数 |
+
+**改法**（jev 裁决：单一 typed `next_step` 1.0、状态单一来源 1.0、带已知参数 0.98、删散文菜单 0.99、状态优先且失败要响亮 1.0）：
+
+- 新增统一结构 `NextStep{tool, args, reason, hint}`，**错误响应与成功响应共用**；
+  成功响应统一为 `{data, next_step, available_tools}`。
+- 会话内唯一解析器 `guidanceLocked`（合并原先 4 个解析函数），
+  删除 `current.next_hint` / `current.available_tools` / `current.results_count` 重复键，
+  `available_actions` 统一成 `available_tools`。
+- 指引由**会话已跟踪的状态**推导，纯内存、不额外探测页面（Pi 上不增加开销）；
+  刚调用过的工具不再被推荐（读完评论改推 `go_back`）。
+- 页面未就绪只暴露 `get_page_state`/`close_page`；session 与页面不一致时禁用全部详情工具。
+- `start_page` 的动词枚举删除，失败时先读登录态再给精确指引。
+
+**状态矩阵（单元测试，9 例全通过）**：
+
+| 会话状态 | `next_step.tool` | `args` | 允许的工具（节选） |
+|:--|:--|:--|:--|
+| 首页、无结果 | `search_feeds` | `session_id` | + `list_feeds` / `get_unread_count` / `list_notifications` |
+| 有未读搜索结果 | `open_note` | `session_id` + `result_ref` | + `search_feeds` |
+| 全部结果已读 | `open_note` | `result_ref`（回退到 0） | + `search_feeds` |
+| 已打开并读取 | `get_note_detail` | `session_id` | + `like_feed`/`favorite_feed`/`comment_feed`/`reply_comment_in_feed`/`go_back` |
+| 刚读完评论（排除 get_note_detail） | `go_back` | `session_id` | 同上 |
+| 打开但未读完 | `go_back` | `session_id` | 仅 `go_back` |
+| 通知页有可写条目 | `reply_notification` | `session_id` + `notification_ref` | + `like_notification` |
+| 通知页无可写条目 | `list_notifications` | `session_id` + `tab=mentions` | 不含 `like/reply_notification` |
+| 页面未就绪 | `get_page_state` | `session_id` | 仅 `get_page_state`/`close_page` |
+| session 与页面不一致 | `open_note`（无结果时 `search_feeds`） | `session_id`(+`result_ref`) | 不含任何详情工具 |
+
+**实机验证（本机服务 + MCP Streamable HTTP `/mcp`）**：
+
+| 调用 | 响应 `next_step` | 结论 |
+|:--|:--|:--|
+| `start_page`（本地 profile 未登录） | `{tool: get_login_qrcode, reason: 探索页已加载但处于未登录状态}` | ✅ 改前是**裸文本、无任何指引**；且风险词表会把登录页的「获取验证码」误判为验证码风险，故改为先读登录态 |
+| `close_page` / `get_page_state` / `like_feed`（不存在的 session_id） | `{tool: start_page}` | ✅ 三处都不再是裸文本 |
+| 缺 `session_id` 的 `list_feeds` | SDK 返回 `invalid params: required: missing properties: ["session_id"]` | ✅ 必填参数由 schema 兜住，`next_step` 负责 schema 管不了的**状态类**错误 |
+
+**防漂移测试**：`TestNextStepArgsMatchToolSchemas` 用反射取 MCP 参数结构体的 json tag 作为合法键空间，
+再扫描源码里所有 `NextStepArgs(map[string]any{...})` 的键；该测试当场发现并修掉了自造的
+`get_note_detail` 非法参数 `load_comments`（真实 schema 里只有 `session_id`/`max_items`/`cursor`/
+`click_more_replies`/`reply_limit`/`scroll_speed`）。
+
+**未完成项（需要所有者动作）**：登录态下的成功路径指引（`search_feeds` → `open_note(result_ref)` →
+`get_note_detail` → `close_page`）尚未在本机服务上跑通 —— 本机 Chrome profile 未登录，
+需要用手机扫码（`get_login_qrcode`）或在服务侧放入 `cookies.json` 后才能补齐这一条 [未见]。
