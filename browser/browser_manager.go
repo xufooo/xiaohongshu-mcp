@@ -569,10 +569,6 @@ func (m *Manager) cancelIdleCloseLocked() {
 	}
 }
 
-func (m *Manager) lock(ctx context.Context) error {
-	return m.lockForOwner(ctx, "browser_operation")
-}
-
 func (m *Manager) lockForOwner(ctx context.Context, owner string) error {
 	return m.lockForOwnerWithTimeout(ctx, owner, operationAcquireTimeout)
 }

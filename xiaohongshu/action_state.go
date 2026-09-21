@@ -149,18 +149,6 @@ func (s *ActionStateStore) RecordRead(feedID string, duration time.Duration) err
 	})
 }
 
-func (s *ActionStateStore) RecordFeedScroll(feedID string, count int) error {
-	if count <= 0 {
-		count = 1
-	}
-	return s.update(func(state *ActionState) {
-		if state.LastOpenedFeedID == feedID {
-			state.FeedScrollCount += count
-			state.LastReadAt = time.Now()
-		}
-	})
-}
-
 // RecordReadStage 单次 update 同时更新阅读时长、正文滚动次数与 LastReadAt，用于 Read 结束时一次性落盘。
 func (s *ActionStateStore) RecordReadStage(feedID string, duration time.Duration, scrollCount int) error {
 	if scrollCount <= 0 {
