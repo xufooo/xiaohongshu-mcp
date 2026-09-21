@@ -444,13 +444,7 @@ func (s *AppServer) handleListFeeds(ctx context.Context, args ListFeedsArgs) *MC
 	}
 	result, err := s.xiaohongshuService.SessionListFeeds(ctx, args.SessionID, args.Cursor, args.MaxItems)
 	if err != nil {
-		return &MCPToolResult{
-			Content: []MCPContent{{
-				Type: "text",
-				Text: "获取Feeds列表失败: " + err.Error(),
-			}},
-			IsError: true,
-		}
+		return sessionMCPErrorFromErr("获取Feeds列表失败", err, sessionNextStepState(args.SessionID))
 	}
 
 	// 成功后直接包上 available_tools，避免序列化往返
@@ -572,10 +566,7 @@ func (s *AppServer) handleCreateBrowseSession(ctx context.Context, args CreateBr
 	logrus.Info("MCP: 创建页面会话 (start_page)")
 	info, err := s.xiaohongshuService.CreateBrowseSession(ctx, args.ForceRecreate)
 	if err != nil {
-		return &MCPToolResult{
-			Content: []MCPContent{{Type: "text", Text: "创建页面会话失败 (start_page): " + err.Error()}},
-			IsError: true,
-		}
+		return s.startPageErrorResult(ctx, err)
 	}
 	return s.startPageToolResult(ctx, info)
 }
@@ -915,6 +906,56 @@ func (s *AppServer) sessionToolResult(sessionID, calledTool string, value any) *
 		next = *guidance.NextStep
 	}
 	return toolResultWithStep(value, next, guidance.AvailableTools)
+}
+
+// startPageErrorResult 把 start_page 的失败翻译成下一步工具：
+// 页面已加载但就绪判定失败时先读登录态（同页读取，不额外导航），未登录就直接引导扫码。
+func (s *AppServer) startPageErrorResult(ctx context.Context, err error) *MCPToolResult {
+	message := "创建页面会话失败 (start_page): " + err.Error()
+	if strings.Contains(err.Error(), "等待探索页就绪失败") {
+		if status, statusErr := s.xiaohongshuService.CheckLoginStatus(ctx); statusErr == nil && !status.IsLoggedIn {
+			return sessionMCPErrorResult(message, xiaohongshu.NextStep{
+				Tool:   "get_login_qrcode",
+				Reason: "探索页已加载但处于未登录状态",
+				Hint:   "先 get_login_qrcode 扫码登录，登录成功后再 start_page",
+			})
+		}
+	}
+	return sessionMCPErrorResult(message, startPageNextStep(err))
+}
+
+// startPageNextStep 用风险关键词表（与页面探测同一份）决定重建会话还是需要人工处理。
+func startPageNextStep(err error) xiaohongshu.NextStep {
+	text := ""
+	if err != nil {
+		text = err.Error()
+	}
+	switch xiaohongshu.RiskKindFromText(text) {
+	case xiaohongshu.RiskLoginExpired:
+		return xiaohongshu.NextStep{
+			Tool:   "get_login_qrcode",
+			Reason: "页面提示登录状态失效",
+			Hint:   "先 get_login_qrcode 扫码登录，登录成功后再 start_page",
+		}
+	case xiaohongshu.RiskCaptcha, xiaohongshu.RiskSliderChallenge:
+		return xiaohongshu.NextStep{
+			Tool:   "start_page",
+			Reason: "页面出现验证码或滑块验证",
+			Hint:   "需要人工在浏览器窗口完成验证，完成后再重新 start_page",
+		}
+	case xiaohongshu.RiskAccessAnomaly:
+		return xiaohongshu.NextStep{
+			Tool:   "start_page",
+			Reason: "访问异常或操作频繁",
+			Hint:   "先等待一段时间再重新 start_page，不要连续重试",
+		}
+	}
+	return xiaohongshu.NextStep{
+		Tool:   "start_page",
+		Args:   xiaohongshu.NextStepArgs(map[string]any{"force_recreate": true}),
+		Reason: "会话创建失败",
+		Hint:   "用 force_recreate=true 重建会话；若页面仍是登录页，先 get_login_qrcode",
+	}
 }
 
 // startPageToolResult 拿到会话就按会话状态给指引；没拿到会话只能重新调 start_page。
