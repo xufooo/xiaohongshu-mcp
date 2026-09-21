@@ -47,9 +47,10 @@ type riskProbe struct {
 	Reason      string   `json:"reason"`
 }
 
-func ClassifyRisk(page *hrod.Page) (RiskSignal, error) {
-	now := time.Now()
-	obj, err := page.Eval(`() => {` + xhsVisibleJS + `
+// classifyRiskJS 是页面级风险分类的探针（var 而非 const：规则数组是运行时生成的）：规则数组由 riskRuleGroups 生成（唯一来源），
+// 不再内联一份自己的清单——曾经页面侧多出 permission_denied 组且含"仅自己可见"，
+// 于是"发布仅自己可见的笔记"必然被误判成风控。
+var classifyRiskJS = `() => {` + xhsVisibleJS + `
 		const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim();
 		const bodyText = normalize(document.body?.innerText || "").slice(0, 2000);
 		const title = normalize(document.title || "");
@@ -68,45 +69,7 @@ func ClassifyRisk(page *hrod.Page) (RiskSignal, error) {
 				return false;
 			}
 		};
-		const rules = [
-			{
-				kind: "login_expired",
-				reason: "登录状态失效",
-				keywords: ["登录已过期", "登录失效", "请先登录", "请登录", "扫码登录"],
-				dom: [".login-container", ".login-qrcode", ".qrcode-img", "[class*='login-container']", "[class*='login-mask']"]
-			},
-			{
-				kind: "slider_challenge",
-				reason: "滑块验证",
-				// 通用 slider class 也会出现在正常页面组件中，不能单独作为风控证据。
-				keywords: ["滑块"],
-				dom: []
-			},
-			{
-				kind: "captcha",
-				reason: "验证码或安全验证",
-				keywords: ["验证码", "安全验证", "请验证", "人机验证"],
-				dom: [".captcha", "[class*='captcha']", "iframe[src*='captcha']"]
-			},
-			{
-				kind: "access_anomaly",
-				reason: "访问异常或操作频繁",
-				keywords: ["操作频繁", "访问太频繁", "账号异常"],
-				dom: []
-			},
-			{
-				kind: "note_not_found",
-				reason: "笔记不存在或已删除",
-				keywords: ["笔记不存在", "内容不存在", "该笔记已被删除", "当前内容无法展示", "无法查看该笔记"],
-				dom: []
-			},
-			{
-				kind: "permission_denied",
-				reason: "无权限访问",
-				keywords: ["无权限", "暂无权限", "没有权限", "权限不足", "作者已设置", "仅自己可见"],
-				dom: []
-			}
-		];
+		const rules = ` + riskRulesJSList() + `;
 		for (const rule of rules) {
 			const matchedText = findText(rule.keywords);
 			const matchedDOM = (rule.dom || []).find(hasDOM) || "";
@@ -127,7 +90,11 @@ func ClassifyRisk(page *hrod.Page) (RiskSignal, error) {
 			body_text: bodyText,
 			kind: "none",
 		});
-	}`)
+	}`
+
+func ClassifyRisk(page *hrod.Page) (RiskSignal, error) {
+	now := time.Now()
+	obj, err := page.Eval(classifyRiskJS)
 	if err != nil {
 		return RiskSignal{}, err
 	}
@@ -175,22 +142,60 @@ func riskSignalFromReadyProbe(probe xhsReadyProbe) RiskSignal {
 	return signal
 }
 
-// riskKeywordGroups 是文本风控关键词的唯一来源：
-// Go 侧分类、页面内 JS 探针、写操作失败判定都从这里取，避免多份副本各自漂移。
-// 顺序即优先级（如「滑块验证」先命中滑块，再考虑验证码）。
-var riskKeywordGroups = []struct {
+// riskRuleGroup 是一条页面级风险规则。
+type riskRuleGroup struct {
 	Kind     RiskKind
+	Reason   string
 	Keywords []string
-}{
-	{RiskLoginExpired, []string{"登录已过期", "登录失效", "请先登录", "请登录", "扫码登录"}},
-	{RiskSliderChallenge, []string{"滑块"}},
-	{RiskCaptcha, []string{"验证码", "安全验证", "请验证", "人机验证"}},
-	{RiskAccessAnomaly, []string{"操作频繁", "访问太频繁", "账号异常"}},
+	DOM      []string
+}
+
+// riskRuleGroups 是页面级风险规则的**唯一来源**：
+// 页面探针（classifyRiskJS 的规则数组）、文本探针（riskKeywordsJSList）、
+// Go 侧文本分类（RiskKindFromText）都从这里生成，避免两份清单各自漂移。
+// 顺序即优先级（如「滑块验证」先命中滑块，再考虑验证码）。
+//
+// 注意：**不要把用户能正常选择的可见性/设置文案放进来**。
+// 「仅自己可见」曾经在 permission_denied 组里，导致发布私有笔记必然被误判成风控。
+var riskRuleGroups = []riskRuleGroup{
+	{
+		Kind:     RiskLoginExpired,
+		Reason:   "登录状态失效",
+		Keywords: []string{"登录已过期", "登录失效", "请先登录", "请登录", "扫码登录"},
+		DOM:      []string{".login-container", ".login-qrcode", ".qrcode-img", "[class*='login-container']", "[class*='login-mask']"},
+	},
+	{
+		Kind:   RiskSliderChallenge,
+		Reason: "滑块验证",
+		// 通用 slider class 也会出现在正常页面组件中，不能单独作为风控证据。
+		Keywords: []string{"滑块"},
+	},
+	{
+		Kind:     RiskCaptcha,
+		Reason:   "验证码或安全验证",
+		Keywords: []string{"验证码", "安全验证", "请验证", "人机验证"},
+		DOM:      []string{".captcha", "[class*='captcha']", "iframe[src*='captcha']"},
+	},
+	{
+		Kind:     RiskAccessAnomaly,
+		Reason:   "访问异常或操作频繁",
+		Keywords: []string{"操作频繁", "访问太频繁", "账号异常"},
+	},
+	{
+		Kind:     RiskNoteNotFound,
+		Reason:   "笔记不存在或已删除",
+		Keywords: []string{"笔记不存在", "内容不存在", "该笔记已被删除", "当前内容无法展示", "无法查看该笔记"},
+	},
+	{
+		Kind:     RiskPermissionDenied,
+		Reason:   "无权限访问",
+		Keywords: []string{"无权限", "暂无权限", "没有权限", "权限不足", "作者已设置"},
+	},
 }
 
 // RiskKindFromText 用风险关键词表把页面文本分类成 RiskKind。
 func RiskKindFromText(text string) RiskKind {
-	for _, group := range riskKeywordGroups {
+	for _, group := range riskRuleGroups {
 		for _, keyword := range group.Keywords {
 			if strings.Contains(text, keyword) {
 				return group.Kind
@@ -202,11 +207,31 @@ func RiskKindFromText(text string) RiskKind {
 
 // riskKeywordsJSList 生成页面内探针用的关键词 JSON 数组（与 Go 侧判定同源）。
 func riskKeywordsJSList() string {
-	all := make([]string, 0, 16)
-	for _, group := range riskKeywordGroups {
+	all := make([]string, 0, 24)
+	for _, group := range riskRuleGroups {
 		all = append(all, group.Keywords...)
 	}
 	data, _ := json.Marshal(all) // []string 不会序列化失败
+	return string(data)
+}
+
+// riskRulesJSList 生成页面探针用的规则 JSON 数组（kind/reason/keywords/dom 同源）。
+func riskRulesJSList() string {
+	type jsRule struct {
+		Kind     string   `json:"kind"`
+		Reason   string   `json:"reason"`
+		Keywords []string `json:"keywords"`
+		DOM      []string `json:"dom"`
+	}
+	rules := make([]jsRule, 0, len(riskRuleGroups))
+	for _, group := range riskRuleGroups {
+		dom := group.DOM
+		if dom == nil {
+			dom = []string{}
+		}
+		rules = append(rules, jsRule{Kind: string(group.Kind), Reason: group.Reason, Keywords: group.Keywords, DOM: dom})
+	}
+	data, _ := json.Marshal(rules) // 结构固定，不会序列化失败
 	return string(data)
 }
 

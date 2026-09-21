@@ -279,3 +279,40 @@ func TestRiskKeywordsSingleSource(t *testing.T) {
 		}
 	}
 }
+
+// 我们自己能选择的可见性文案不能当风控词：
+// 「仅自己可见」曾在 permission_denied 组里，导致发布私有笔记必然被判 permission_denied。
+func TestRiskRulesExcludeVisibilityLabels(t *testing.T) {
+	if got := RiskKindFromText("仅自己可见"); got != RiskNone {
+		t.Fatalf("「仅自己可见」是正常可见性设置，不应判为风控, got %v", got)
+	}
+	if got := RiskKindFromText("发布设置：公开可见 / 仅自己可见 / 仅互关好友可见"); got != RiskNone {
+		t.Fatalf("可见性选项文案不应判为风控, got %v", got)
+	}
+	if strings.Contains(riskKeywordsJSList(), "仅自己可见") || strings.Contains(riskRulesJSList(), "仅自己可见") {
+		t.Fatal("两份风险清单里都不应出现「仅自己可见」")
+	}
+	// 真·无权限仍然要判出来。
+	if got := RiskKindFromText("无权限访问该笔记"); got != RiskPermissionDenied {
+		t.Fatalf("无权限应判 permission_denied, got %v", got)
+	}
+	if got := RiskKindFromText("该笔记已被删除"); got != RiskNoteNotFound {
+		t.Fatalf("已删除应判 note_not_found, got %v", got)
+	}
+}
+
+// 页面探针的规则数组必须来自唯一来源（riskRuleGroups），不能自己内联一份。
+func TestRiskRulesSingleSource(t *testing.T) {
+	rules := riskRulesJSList()
+	for _, want := range []string{"login_expired", "slider_challenge", "captcha", "access_anomaly", "note_not_found", "permission_denied"} {
+		if !strings.Contains(rules, want) {
+			t.Fatalf("规则数组缺少 %s: %s", want, rules)
+		}
+	}
+	if !strings.Contains(classifyRiskJS, rules) {
+		t.Fatal("页面探针的规则数组必须由 riskRulesJSList 内联生成")
+	}
+	if !strings.Contains(riskKeywordsJSList(), "验证码") {
+		t.Fatal("文本探针关键词也应来自同一张表")
+	}
+}
