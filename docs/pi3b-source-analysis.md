@@ -483,3 +483,41 @@ Cloak 模式下代码显式用了 `NoDefaultDevice()`（`third_party/headless_br
      （顺带确认：App 分享落地在 `/discovery/item/`，该形式 `parseOfficialNoteURL` 已支持。）
 - 附带观察：无效短链要等到 60s 才报错（`sample=invalid_url`）——URL 稳定且明显不是笔记页时
   其实可以更早失败，属可优化项。
+## 15. 修掉风控误报，并把两份风险清单并成一份（2026-09-21）
+
+### 15.1 现象与根因（源码确认）
+
+发布流程里出现过 `detected XHS risk kind=permission_denied recoverable=false cooldown=0s reason=无权限访问`，
+而页面文本看起来完全正常。根因不是"无权限访问"字样本身：
+
+- `permission_denied` 组的关键词里有 **`仅自己可见`**——那正是我们自己给测试笔记设置的可见性；
+- 也就是说：**发布一篇"仅自己可见"的笔记，必然被判一次 permission_denied**，
+  污染 action-state / rate-limiter 的风险记录。
+
+### 15.2 更根本的问题：两份清单
+
+- `ClassifyRisk`（`xiaohongshu/risk.go`）内联了一份自己的 JS 规则数组，**6 组**；
+- 页面文本探针 `xhsProbeRiskJS` 走的是 `riskKeywordGroups`，**4 组**。
+
+两份清单里，多出来的 `permission_denied` / `note_not_found` 只存在于 JS 那一份——
+所以那个误报词在 Go 侧"看不见"，单一来源的口号当时并没有真正落实。漂移的机会就在这里。
+
+### 15.3 改法
+
+1. **唯一来源** `riskRuleGroups`（kind/reason/keywords/dom 一张表）：
+   - `ClassifyRisk` 的规则数组由 `riskRulesJSList()` 生成（`classifyRiskJS` 由 const 改 var，因为要运行时生成）；
+   - 文本探针 `riskKeywordsJSList()`、Go 侧分类 `RiskKindFromText` 都从这张表取。
+2. **删掉误报词**：`仅自己可见` 从 `permission_denied` 组移除（并在表上写明"不要把用户能正常选择的可见性/设置文案放进来"）。
+   `无权限/暂无权限/没有权限/权限不足/作者已设置` 保留。
+
+### 15.4 验证（都不是"看起来对"）
+
+- 单测：`RiskKindFromText("仅自己可见") == RiskNone`、可见性选项整句 == RiskNone；
+  两份清单里都不含该词；`无权限访问该笔记` 仍判 `permission_denied`、`该笔记已被删除` 仍判 `note_not_found`。
+- **真实浏览器执行**：把运行时生成的探针 JS 落盘，用 harness 在真实页面里 `eval` 并调用——
+  `executed:true`、正常页返回 `kind:"none"`、6 组规则齐全、JS 里已无 `仅自己可见`。
+
+### 15.5 教训
+
+"单一来源"必须在**每一处消费点**都成立才叫单一来源；只在 Go 侧合并、而页面探针另留一份，
+等于把漂移藏在了看不见的那一半里。

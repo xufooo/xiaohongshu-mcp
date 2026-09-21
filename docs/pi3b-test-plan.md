@@ -1039,3 +1039,37 @@ PORT=18160 BROWSER_BIN=/usr/bin/chromium \
 在桌面口径下同一页面 PSS 约 **825 MB / 10 进程**（这个数只是校准脚本本身是否工作，不代表 Pi）。
 
 > 登录态下才能跑完第 5/6 段：先 `get_login_qrcode` → 手机扫码 → `check_login_status`，再重跑。
+
+
+### D.19 发布链路与分享链接的端到端验收（2026-09-21，真实账号 + CloakBrowser/stock Chrome）
+
+**发布（`publish_content`，可见性=仅自己可见）**
+
+| 步骤 | 修前 | 修后（实测） |
+|:--|:--|:--|
+| stock Chrome 153 | `点击发布按钮失败: 元素不可点击: obscured`（closed shadow root 命中重定向） | **发布成功**：`/publish/success`，`publish_success` 505ms / 2 探测 |
+| CloakBrowser 146（Pi 用的就是它） | `输入标题失败: scroll made no progress` → 修滚动点后 `element did not become visible` | **发布成功**：`isError=false`、`Status:发布完成`，全链路 42s |
+
+修的三处（均在 `humanize/`）：closed shadow root 的命中判据单一来源；滚轮改打在目标自身（夹进容器可见区）；
+被遮挡时按遮挡物性质分流——对话框/引导浮层→等它让开、等不到就点它自己的关闭控件；页面自身固定条（底部 sticky 发布条）→保留按覆盖物位置滚动。
+
+**分享链接打开笔记（验收口径 = 提取链接并打开，短链那次 302 与长链同过程）**
+
+| 输入 | 实测 |
+|:--|:--|
+| 搜索结果打开《西安团建｜9个宝藏露营地合集✨》 | 7.3s，`isError=false` |
+| 该页真实长链（164 字符含 `xsec_token`）作 `share_url` | **4.9s，打开同一篇，标题一致** |
+| **整句分享文案**（含中文 + emoji）作 `share_url` | **3.1s，提取链接后打开同一篇，标题一致** |
+| `http://xhslink.com/...` / `xhslink.com/...` / `https://...` | 三种写法均通过校验并进入导航 |
+| `https://evil.com/...` / 文案里没有链接 | 0.9s / 0.1s 内被拒 |
+
+两类修复：`normalizeShareURLScheme`（只补/升级 scheme，host 白名单等严格校验保留）+
+`extractShareURL`（从整句分享文案里取链接）。
+
+**未验**：真实 `xhslink` 短链那一次 302 之后的落地页。一手证据表明**网页端不产生短链**：
+PC 分享面板只有「复制图片 / 复制笔记链接」；移动端 UA 下提示「打开App查看更多 / 点击右上角分享给好友」，
+整页 HTML 里 0 处 `xhslink`。短链是 App 专有形态（所有者确认"提取链接打开就行，过程一样"）。
+
+**风险误报（D.19 附带）**：`permission_denied` 组曾含 `仅自己可见`——我们自己的测试可见性，
+导致每次发布私有笔记必然被判一次风控。已删除该词，并把页面规则与 Go 侧分类并成唯一来源
+（详见 `pi3b-source-analysis.md` §15）。
