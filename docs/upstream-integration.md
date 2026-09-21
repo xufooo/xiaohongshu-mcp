@@ -40,7 +40,7 @@
 | 上游提交 | 内容 | 我们的状态 | 处理 |
 |:--|:--|:--|:--|
 | `085da32` #776 | 搜索与列表只返回笔记（滤掉 `live_v2`/`hot_query`） | **缺**（无 `onlyNotes`） | ✅ **已融入**：`onlyNotes` 放在两处「JSON → []Feed」解码边界（`readHomeFeedsFromState`、`extractSearchFeedSources`），比上游的两处调用点更彻底，DOM/state 两路与 session/legacy 全部覆盖；视频笔记按 `modelType` 不误伤，已加测试 |
-| `0033dc7` #775 | 取二维码不再堆积浏览器实例（同一时刻只留一个待扫码会话，新的取消旧的） | **缺**（我们实测第二次调用返回 `browser busy: owner=login_qrcode_wait`；上游实测连调三次进程 8→16→24） | ⏳ 待融入，**需按我们的架构重新设计**：上游用 `login_session.go` 的会话登记 + 序号；我们有 `browser.Manager` 的 owner/token，应改用 manager 语义实现（例如待扫码会话登记在 manager 层，新请求取消旧会话），不是照搬文件 |
+| `0033dc7` #775 | 取二维码不再堆积浏览器实例（同一时刻只留一个待扫码会话，新的取消旧的） | 改前我们更差：第二次调用直接 `browser busy: owner=login_qrcode_wait`，且 4 分钟内所有工具被饿死 | ✅ **已融入且更优**：`loginQrcodeSession` 登记 + `Manager.Detach`（页面专用、归还独占权）。实测：首次 7.0s 出码，第 2/3 次 **0.2s/0.3s 复用同一张码**，期间 `check_login_status` 正常返回（不再 busy），3 次调用始终 1 个浏览器实例。上游是"取消重建、重新出码"，我们复用同一张码且不阻塞其他工具 |
 | `2a57ab4` #792 | publish 正文输入框改轮询定位，不再 panic | **部分**：我们的 `getContentElement` 是**单次** 5s 查找，失败即报错（不 panic，但慢机/慢挂载时会误失败） | ⏳ 待融入：改为有界轮询（Pi 上编辑器挂载更慢，收益明确） |
 | `d680e83` #752 | 笔记详情返回视频信息 | **缺** | ⏳ 可选（看是否需要视频类笔记的字段） |
 | `9315948` #771 | go-sdk 升级 v1.4.0 + 开启 Stateless | go-sdk **已是 v1.4.0**；`Stateless` 选项未开 | ⏳ 可选（Stateless 影响 MCP 会话语义，需评估与我们的流式 HTTP 用法） |

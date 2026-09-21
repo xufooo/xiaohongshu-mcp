@@ -42,6 +42,12 @@ type XiaohongshuService struct {
 	cursorGuardMu    sync.Mutex
 	cursorGuardMap   map[string]*cursorGuardEntry
 
+	// 待扫码会话：同一时刻只保留一个，重复调用复用同一张二维码。
+	// 页面专用（Detach 保留句柄、归还独占权），因此扫码等待期间不会把
+	// 其他工具饿死在 browser busy 上。
+	loginQRMu sync.Mutex
+	loginQR   *loginQrcodeSession
+
 	// 身份指纹采集节流：同一浏览器 + 同一 profile 下指纹不会变，
 	// 每次取页都采集一次只是白白多一次 CDP Eval（树莓派上是实打实的开销）。
 	identityMu            sync.Mutex
@@ -619,6 +625,8 @@ type UserProfileResponse struct {
 
 // DeleteCookies 删除 cookies 文件，用于登录重置
 func (s *XiaohongshuService) DeleteCookies(ctx context.Context) error {
+	// 先结束待扫码会话：否则它的专用页面还在轮询登录态，删除 cookies 后又会被写回。
+	s.cancelPendingLoginQrcode()
 	if err := s.browserManager.Reset(ctx); err != nil {
 		return err
 	}
@@ -677,66 +685,125 @@ func (s *XiaohongshuService) CheckLoginStatus(ctx context.Context) (*LoginStatus
 }
 
 // GetLoginQrcode 获取登录的扫码二维码
+// loginQrcodeSession 是一次待扫码会话：二维码 + 有效期 + 专用页面。
+type loginQrcodeSession struct {
+	img       string
+	expiresAt time.Time
+	page      *hrod.Page
+	cancel    context.CancelFunc
+}
+
+// loginQrcodeTimeout 是二维码有效期（与站点一致）。
+const loginQrcodeTimeout = 4 * time.Minute
+
+// liveLoginQrcode 返回仍在有效期内的待扫码会话（无则 nil）。
+func (s *XiaohongshuService) liveLoginQrcode(now time.Time) *loginQrcodeSession {
+	s.loginQRMu.Lock()
+	defer s.loginQRMu.Unlock()
+	if s.loginQR == nil || !now.Before(s.loginQR.expiresAt) {
+		return nil
+	}
+	return s.loginQR
+}
+
+// takeLoginQrcode 取走并清空会话；只有仍指向同一个会话时才清空，
+// 避免过期的旧 goroutine 误清新会话。
+func (s *XiaohongshuService) takeLoginQrcode(session *loginQrcodeSession) bool {
+	s.loginQRMu.Lock()
+	defer s.loginQRMu.Unlock()
+	if s.loginQR == nil || (session != nil && s.loginQR != session) {
+		return false
+	}
+	s.loginQR = nil
+	return true
+}
+
+// cancelPendingLoginQrcode 结束当前待扫码会话（delete_cookies / 服务关闭时调用）。
+func (s *XiaohongshuService) cancelPendingLoginQrcode() {
+	s.loginQRMu.Lock()
+	session := s.loginQR
+	s.loginQR = nil
+	s.loginQRMu.Unlock()
+	if session != nil && session.cancel != nil {
+		session.cancel()
+	}
+}
+
 func (s *XiaohongshuService) GetLoginQrcode(ctx context.Context) (*LoginQrcodeResponse, error) {
+	// 已有未过期的待扫码会话：直接复用同一张二维码。
+	// 不重新导航、不重新取码，也不占用浏览器独占权 —— 上游是"新的取消旧的、
+	// 重新出码"，我们有页面管理器，可以做到复用。
+	if session := s.liveLoginQrcode(time.Now()); session != nil {
+		return &LoginQrcodeResponse{
+			Timeout:    time.Until(session.expiresAt).Round(time.Second).String(),
+			Img:        session.img,
+			IsLoggedIn: false,
+		}, nil
+	}
+
 	page, err := s.acquirePageFor(ctx, "login_qrcode")
 	if err != nil {
 		return nil, err
 	}
 
-	releaseInCaller := true
-	var releaseOnce sync.Once
-	release := func() {
-		releaseOnce.Do(func() {
-			s.browserManager.Release(page)
-		})
+	loginAction := xiaohongshu.NewLogin(page)
+	img, loggedIn, err := loginAction.FetchQrcodeImage(ctx)
+	if err != nil {
+		s.browserManager.Release(page)
+		return nil, err
 	}
+	if loggedIn {
+		s.browserManager.Release(page)
+		return &LoginQrcodeResponse{Timeout: "0s", IsLoggedIn: true}, nil
+	}
+
+	// 待扫码：页面交给会话专用（Detach 归还独占权，其他工具改用别的页面），
+	// 后台在该页内轮询登录态，命中即保存 cookies 并结束会话。
+	waitCtx, cancel := context.WithTimeout(context.Background(), loginQrcodeTimeout)
+	session := &loginQrcodeSession{
+		img:       img,
+		expiresAt: time.Now().Add(loginQrcodeTimeout),
+		page:      page,
+		cancel:    cancel,
+	}
+	s.loginQRMu.Lock()
+	s.loginQR = session
+	s.loginQRMu.Unlock()
+	s.browserManager.Detach(page)
+	go s.waitLoginQrcode(waitCtx, session)
+
+	return &LoginQrcodeResponse{
+		Timeout: loginQrcodeTimeout.String(),
+		Img:     img,
+	}, nil
+}
+
+// waitLoginQrcode 在专用登录页内等待扫码完成；结束（登录成功或超时）后关闭该页。
+func (s *XiaohongshuService) waitLoginQrcode(ctx context.Context, session *loginQrcodeSession) {
 	defer func() {
-		if releaseInCaller {
-			release()
+		if recovered := recover(); recovered != nil {
+			logrus.Errorf("login qrcode wait panicked: %v", recovered)
+		}
+	}()
+	defer func() {
+		// 只清理自己的会话：若期间已有新会话，不动它。
+		s.takeLoginQrcode(session)
+		if session.page != nil {
+			closeCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			_ = session.page.Context(closeCtx).Close()
+			cancel()
 		}
 	}()
 
-	loginAction := xiaohongshu.NewLogin(page)
-
-	img, loggedIn, err := loginAction.FetchQrcodeImage(ctx)
-	if err != nil {
-		return nil, err
+	if !xiaohongshu.NewLogin(session.page).WaitForLogin(ctx) {
+		logrus.Warn("等待扫码登录超时，待扫码会话已结束")
+		return
 	}
-
-	timeout := 4 * time.Minute
-
-	if !loggedIn {
-		releaseInCaller = false
-		s.browserManager.UpdateOwner("login_qrcode_wait")
-		go func() {
-			defer release()
-			defer func() {
-				if recovered := recover(); recovered != nil {
-					logrus.Errorf("login qrcode wait panicked: %v", recovered)
-				}
-			}()
-
-			ctxTimeout, cancel := context.WithTimeout(context.Background(), timeout)
-			defer cancel()
-
-			if loginAction.WaitForLogin(ctxTimeout) {
-				if er := saveCookies(page); er != nil {
-					logrus.Errorf("failed to save cookies: %v", er)
-				}
-			}
-		}()
+	if err := saveCookies(session.page); err != nil {
+		logrus.Errorf("failed to save cookies: %v", err)
+		return
 	}
-
-	return &LoginQrcodeResponse{
-		Timeout: func() string {
-			if loggedIn {
-				return "0s"
-			}
-			return timeout.String()
-		}(),
-		Img:        img,
-		IsLoggedIn: loggedIn,
-	}, nil
+	logrus.Info("扫码登录成功，已保存 cookies")
 }
 
 // PublishContent 发布内容
@@ -1795,6 +1862,7 @@ func (s *XiaohongshuService) withBrowserPage(ctx context.Context, fn func(*hrod.
 
 // Close 关闭常驻浏览器。
 func (s *XiaohongshuService) Close(ctx context.Context) error {
+	s.cancelPendingLoginQrcode()
 	if s.browseSessions != nil {
 		s.browseSessions.CloseAll()
 	}
