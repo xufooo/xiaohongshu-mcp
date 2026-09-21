@@ -446,3 +446,56 @@ func TestLoginFlowNextStep(t *testing.T) {
 		t.Fatal("空 next_step 不应追加内容块")
 	}
 }
+
+// TestLoginQrcodeSessionReuse 待扫码会话的复用与清理语义：
+// 有效期内重复调用复用同一张二维码；过期后不再复用；旧 goroutine 不得清新会话。
+func TestLoginQrcodeSessionReuse(t *testing.T) {
+	service := &XiaohongshuService{}
+	now := time.Now()
+
+	if got := service.liveLoginQrcode(now); got != nil {
+		t.Fatal("无会话时应返回 nil")
+	}
+
+	session := &loginQrcodeSession{img: "data:image/png;base64,AAA", expiresAt: now.Add(time.Minute)}
+	service.loginQRMu.Lock()
+	service.loginQR = session
+	service.loginQRMu.Unlock()
+
+	if got := service.liveLoginQrcode(now); got != session {
+		t.Fatal("有效期内应返回同一会话")
+	}
+	if got := service.liveLoginQrcode(session.expiresAt.Add(time.Second)); got != nil {
+		t.Fatal("过期后不应返回会话")
+	}
+
+	// GetLoginQrcode 在有效期内必须直接复用（不触碰浏览器）
+	resp, err := service.GetLoginQrcode(context.Background())
+	if err != nil {
+		t.Fatalf("复用分支不应报错: %v", err)
+	}
+	if resp.Img != session.img {
+		t.Fatalf("应复用同一张二维码, got %q", resp.Img)
+	}
+	if resp.Timeout == "" || resp.Timeout == loginQrcodeTimeout.String() {
+		t.Fatalf("复用时应返回剩余有效期, got %q", resp.Timeout)
+	}
+
+	// 旧 goroutine 清理：会话已被换成新的，就不得清空
+	fresh := &loginQrcodeSession{img: "new", expiresAt: now.Add(time.Minute)}
+	service.loginQRMu.Lock()
+	service.loginQR = fresh
+	service.loginQRMu.Unlock()
+	if service.takeLoginQrcode(session) {
+		t.Fatal("旧会话不得清掉新会话")
+	}
+	if service.liveLoginQrcode(now) != fresh {
+		t.Fatal("新会话应仍在")
+	}
+	if !service.takeLoginQrcode(fresh) {
+		t.Fatal("同一会话应可清理")
+	}
+	if service.liveLoginQrcode(now) != nil {
+		t.Fatal("清理后不应残留会话")
+	}
+}

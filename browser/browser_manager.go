@@ -275,6 +275,25 @@ func (m *Manager) clearWarmPageLocked() *hrod.Page {
 	return page
 }
 
+// Detach 归还独占权但保留页面句柄：页面既不关闭也不进入热页面缓存，
+// 调用方继续独占使用，用完自行关闭。
+//
+// 用于「待扫码会话」这类需要在页内持续轮询、但又不该占着浏览器独占权
+// 把其他工具饿死的场景（否则 4 分钟内所有调用都只能拿到 browser busy）。
+func (m *Manager) Detach(page *hrod.Page) {
+	if page == nil {
+		m.releaseToken()
+		return
+	}
+	m.mu.Lock()
+	owner := m.owner
+	configuredIdleTimeout := m.idleTimeout
+	sessionGrace := m.sessionIdleGrace
+	m.mu.Unlock()
+	m.scheduleIdleCloseAfter(idleCloseDelay(owner, configuredIdleTimeout, sessionGrace))
+	m.releaseToken()
+}
+
 // UpdateOwner updates the visible owner for the operation currently holding the browser.
 func (m *Manager) UpdateOwner(owner string) {
 	if owner == "" {
