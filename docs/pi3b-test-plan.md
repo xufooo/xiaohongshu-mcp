@@ -799,3 +799,22 @@ DIV.filter-panel                     ← hover「筛选」后异步挂载
 |:--|:--|
 | DOM class 判定点赞 | 取消赞后 `.like-wrapper` **仍是 `like-active`**；已收藏时 `.collect-wrapper` **仍是裸 `collect-wrapper`**（无 active 类）→ class 与状态无关，必须读数据层 `interactInfo` |
 | 通知点赞状态 | 通知行的状态**确实**由 `.action-like svg use` 的 href 表达（点后 → `#liked`）→ 这里读 svg href 是对的（与 `parseNotificationLikeHref` 一致） |
+
+### D.12 发布链路（`publish_content`）—— 除最后一击外全部实测
+
+在 `creator.xiaohongshu.com/publish/publish?source=official`（已登录）逐段实测：
+
+| 步骤 | 代码依赖（[源码]） | 实测（[实测]） | 结论 |
+|:--|:--|:--|:--|
+| 进发布页 | `urlOfPublic` | 页面可达、页头为当前账号 | ✅ |
+| 切「上传图文」tab | `div.creator-tab` + `getTabElement`（可见性 + 精确文本 + `elementFromPoint` 遮挡判定） | 线上 **9 个** `.creator-tab`，其中「上传图文」有 3 个：一个 `left:-9999px`、一个 `opacity:1e-05`、一个真实（无 inline style）；前两个被代码**显式检查**跳过（源码里确实写了这两个字符串）；真实那个 `elementFromPoint` 命中 `SPAN.title`，但它是 tab 的**后代** → `this.contains(target)` 成立 → `blocked=false` → 正常点击 | ✅ 抗重复节点设计正确 |
+| 新增 tab | — | 线上多了「发播客」tab（代码不认识）；因按**精确文本**匹配，无影响 | ℹ️ |
+| 上传图片 | 首张 `.upload-input`、后续 `input[type="file"]`；等 `.img-preview-area .pr` 计数 | `input.upload-input`（accept `.jpg,.jpeg,.png,.webp`）注入文件后 **`.img-preview-area .pr`=1**、预览为 blob URL | ✅ |
+| 标题 | `div.d-input input` | 命中，placeholder「填写标题会有更多赞哦」，写入 12 字成功 | ✅ |
+| **正文编辑器** | 第 1 路 `div.ql-editor`；兜底 `findTextboxByPlaceholder`（找 `p[data-placeholder*="输入正文描述"]` → 向上找 `role="textbox"`） | **`div.ql-editor` 已不存在**（Quill 换成 **TipTap ProseMirror**：`DIV.tiptap.ProseMirror[contenteditable=true][role=textbox]`，空态占位 `data-placeholder="输入正文描述，真诚有价值的分享予人温暖"`）→ 第 1 路失效，但兜底**一层就命中** `role="textbox"` 的编辑器 | ⚠️→✅ 兜底有效；`div.ql-editor` 属可清理的死路径 |
+| 可见范围 | `div.permission-card-wrapper div.d-select-content` → `div.d-options-wrapper div.d-grid-item div.custom-option` | 全部命中；选项为 公开可见 / **仅自己可见** / 仅互关好友可见 / 只给谁看 / 不给谁看；成功切到**仅自己可见** | ✅ |
+| 发布按钮 | `xhs-publish-btn` + `findPublishButton`（读 `is-publish`/`submit-disabled`）→ `clickPublishWidget`：`ShadowRoot()` 穿透 **closed shadow root** 后 `ElementR("button","发布")` | `xhs-publish-btn` 存在，`submit-disabled="false"`、`is-publish="true"`；但宿主**无 light DOM 子节点、`shadowRoot` 为 null（closed）** → 页面 JS 与无障碍树都看不到内部按钮，坐标点击宿主不触发 | ⛔ **无法用页面级工具完成/验证最后一击** |
+
+**结论**：发布链路从「进页 → 切 tab → 传图 → 标题 → 正文（含新编辑器的兜底）→ 可见范围」全部实测通过；
+代码用 CDP 穿透 closed shadow root 点发布按钮的写法**只能由 MCP 自己执行**（页面 JS 够不到），
+因此这一击需要由 MCP 实跑（或在真机验收时执行）来闭环。
