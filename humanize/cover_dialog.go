@@ -1,8 +1,8 @@
 package humanize
 
 import (
+	"errors"
 	"fmt"
-	"time"
 
 	"github.com/go-rod/rod"
 )
@@ -41,30 +41,20 @@ const coverDismissJS = `() => {
 	return "";
 }`
 
-// dismissCoverDialog 关掉盖住目标元素的浮层：优先点浮层自己的关闭控件。
-// 返回 (是否点到了控件, 关闭控件描述, 错误)。
-func (m *Mouse) dismissCoverDialog(target *rod.Element) (bool, string, error) {
+// dismissCoverDialog 关掉盖住目标元素的浮层：点它自己的关闭控件（元素级点击，不猜坐标）。
+// 找不到关闭控件就直接报错——不等待、不按 Escape、不换策略。
+func (m *Mouse) dismissCoverDialog(target *rod.Element) error {
 	page := m.boundPage()
 	obj, err := target.Context(m.ctx).Eval(coverDismissJS)
 	if err != nil {
-		return false, "", err
+		return err
 	}
-	if obj == nil {
-		return false, "", nil
-	}
-	desc := obj.Value.Str()
-	if desc == "" {
-		return false, "", nil
+	if obj == nil || obj.Value.Str() == "" {
+		return errors.New("浮层没有可用的关闭控件")
 	}
 	button, err := page.Element("[data-xhs-mcp-cover-close]")
-	if err != nil || button == nil {
-		return false, desc, fmt.Errorf("定位浮层关闭控件失败: %w", err)
+	if err != nil {
+		return fmt.Errorf("定位浮层关闭控件失败: %w", err)
 	}
-	if err := m.ClickNoScroll(button); err != nil {
-		return false, desc, err
-	}
-	if err := sleepWithContext(m.ctx, randDuration(200*time.Millisecond, 400*time.Millisecond)); err != nil {
-		return false, desc, err
-	}
-	return true, desc, nil
+	return m.ClickNoScroll(button)
 }
