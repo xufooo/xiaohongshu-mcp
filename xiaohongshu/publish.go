@@ -109,16 +109,7 @@ func removePopCover(page *hrod.Page) {
 		}
 	}
 
-	// 兜底：点击一下空位置吧
-	clickEmptyPosition(page)
-}
-
-func clickEmptyPosition(page *hrod.Page) {
-	x := 380 + rand.Intn(100)
-	y := 20 + rand.Intn(60)
-	if err := page.ClickPoint(proto.Point{X: float64(x), Y: float64(y)}); err != nil {
-		logrus.Warnf("点击空白位置失败: %v", err)
-	}
+	// 只移除有名字的遮挡元素；移除后仍被遮挡时由调用方明确报错，不做猜测性点击。
 }
 
 func clickPublishTab(page *hrod.Page, tabname string) error {
@@ -376,9 +367,10 @@ func submitPublish(ctx context.Context, page *hrod.Page, title, content string, 
 	return waitPublishSuccess(page, 15*time.Second)
 }
 
+// publishButton 新版发布控件（xhs-publish-btn）：内部按钮在 closed shadow root 里，
+// 只能由 clickPublishWidget 经 CDP 穿透后点击。
 type publishButton struct {
-	elem     *hrod.Element
-	isWidget bool
+	elem *hrod.Element
 }
 
 func clickPublishButton(page *hrod.Page) error {
@@ -386,15 +378,7 @@ func clickPublishButton(page *hrod.Page) error {
 	if err != nil {
 		return err
 	}
-
-	if btn.isWidget {
-		return clickPublishWidget(page, btn.elem)
-	}
-
-	if err := btn.elem.Click(proto.InputMouseButtonLeft, 1); err != nil {
-		return errors.Wrap(err, "点击发布按钮失败")
-	}
-	return nil
+	return clickPublishWidget(page, btn.elem)
 }
 
 // waitPublishSuccess 轮询等待发布成功：小红书发布成功后会跳转离开发布表单页
@@ -471,41 +455,10 @@ func findPublishButton(page *hrod.Page) (*publishButton, string, error) {
 			return nil, "", errors.Wrap(err, "读取新版发布按钮 submit-disabled 属性失败")
 		}
 		if submitDisabled != nil && *submitDisabled == "true" {
-			return &publishButton{elem: widget, isWidget: true}, "新版发布按钮不可点击", nil
+			return &publishButton{elem: widget}, "新版发布按钮不可点击", nil
 		}
 
-		return &publishButton{elem: widget, isWidget: true}, "", nil
-	}
-
-	oldButtons, err := page.Elements(".publish-page-publish-btn button.bg-red")
-	if err != nil {
-		return nil, "", errors.Wrap(err, "查找旧版发布按钮失败")
-	}
-
-	for _, oldButton := range oldButtons {
-		if !isElementVisible(oldButton) {
-			continue
-		}
-
-		if disabled, err := oldButton.Attribute("disabled"); err != nil {
-			return nil, "", errors.Wrap(err, "读取旧版发布按钮 disabled 属性失败")
-		} else if disabled != nil {
-			return &publishButton{elem: oldButton}, "旧版发布按钮 disabled", nil
-		}
-
-		if ariaDisabled, err := oldButton.Attribute("aria-disabled"); err != nil {
-			return nil, "", errors.Wrap(err, "读取旧版发布按钮 aria-disabled 属性失败")
-		} else if ariaDisabled != nil && *ariaDisabled == "true" {
-			return &publishButton{elem: oldButton}, "旧版发布按钮 aria-disabled=true", nil
-		}
-
-		if cls, err := oldButton.Attribute("class"); err != nil {
-			return nil, "", errors.Wrap(err, "读取旧版发布按钮 class 属性失败")
-		} else if cls != nil && hasExactClass(*cls, "disabled") {
-			return &publishButton{elem: oldButton}, "旧版发布按钮包含 disabled class", nil
-		}
-
-		return &publishButton{elem: oldButton}, "", nil
+		return &publishButton{elem: widget}, "", nil
 	}
 
 	return nil, "", nil
@@ -594,23 +547,12 @@ func makeMaxLengthError(elemText string) error {
 	return errors.Errorf("当前输入长度为%s，最大长度为%s", currLen, maxLen)
 }
 
-// 查找内容输入框，兼容当前编辑器和 placeholder 兜底结构。
+// getContentElement 返回正文编辑器：线上即 TipTap ProseMirror（2026-09 实测）。
 func getContentElement(page *hrod.Page) (*hrod.Element, bool) {
-	// 线上编辑器为 TipTap ProseMirror（2026-09 实测；Quill 的 div.ql-editor 已不存在）。
-	// 先试现役结构，再退回旧结构，最后 placeholder 兜底。
 	if editor, err := page.Timeout(5 * time.Second).Element("div.tiptap.ProseMirror"); err == nil && editor != nil {
 		return editor, true
 	}
-	if editor, err := page.Timeout(5 * time.Second).Element("div.ql-editor"); err == nil && editor != nil {
-		return editor, true
-	}
-
-	foundElement, err := findTextboxByPlaceholder(page.Timeout(5 * time.Second).Rod)
-	if err == nil && foundElement != nil {
-		return hrod.NewElement(foundElement, page.Actor()), true
-	}
-
-	slog.Warn("no content element found by any method", "error", err)
+	slog.Warn("no content element found")
 	return nil, false
 }
 
@@ -701,67 +643,6 @@ func inputTag(contentElem *hrod.Element, tag string) error {
 
 	if err := contentElem.Sleep(500 * time.Millisecond); err != nil { // 等待标签处理完成
 		return errors.Wrap(err, "等待标签处理时请求已取消")
-	}
-	return nil
-}
-
-func findTextboxByPlaceholder(page *rod.Page) (*rod.Element, error) {
-	elements, err := page.Elements("p")
-	if err != nil {
-		return nil, errors.Wrap(err, "find p elements")
-	}
-	if elements == nil {
-		return nil, errors.New("no p elements found")
-	}
-
-	// 查找包含指定placeholder的元素
-	placeholderElem := findPlaceholderElement(elements, "输入正文描述")
-	if placeholderElem == nil {
-		return nil, errors.New("no placeholder element found")
-	}
-
-	// 向上查找textbox父元素
-	textboxElem := findTextboxParent(placeholderElem)
-	if textboxElem == nil {
-		return nil, errors.New("no textbox parent found")
-	}
-
-	return textboxElem, nil
-}
-
-func findPlaceholderElement(elements rod.Elements, searchText string) *rod.Element {
-	for _, elem := range elements {
-		placeholder, err := elem.Attribute("data-placeholder")
-		if err != nil || placeholder == nil {
-			continue
-		}
-
-		if strings.Contains(*placeholder, searchText) {
-			return elem
-		}
-	}
-	return nil
-}
-
-func findTextboxParent(elem *rod.Element) *rod.Element {
-	currentElem := elem
-	for i := 0; i < 5; i++ {
-		parent, err := currentElem.Parent()
-		if err != nil {
-			break
-		}
-
-		role, err := parent.Attribute("role")
-		if err != nil || role == nil {
-			currentElem = parent
-			continue
-		}
-
-		if *role == "textbox" {
-			return parent
-		}
-
-		currentElem = parent
 	}
 	return nil
 }
