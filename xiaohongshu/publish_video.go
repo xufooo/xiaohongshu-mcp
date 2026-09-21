@@ -107,9 +107,9 @@ func submitPublishVideo(ctx context.Context, page *hrod.Page, title, content str
 	humanize.Delay(ctx, humanize.AfterType)
 
 	// 正文 + 标签
-	contentElem, ok := getContentElement(page)
-	if !ok {
-		return errors.New("没有找到内容输入框")
+	contentElem, err := waitPublishControl(page, "div.tiptap.ProseMirror")
+	if err != nil {
+		return err
 	}
 	if err := contentElem.Input(content); err != nil {
 		return errors.Wrap(err, "输入正文失败")

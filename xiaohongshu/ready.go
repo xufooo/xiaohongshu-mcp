@@ -196,7 +196,7 @@ func xhsReadyProbeSelectorArgs() []interface{} {
 // probeXHSReady 按 kind 缩小范围的 scoped probe：只计算当前 kind 需要的信号，
 // 公共字段（URL/title/readyState/scrollY/app/risk）始终计算。
 func probeXHSReady(page *hrod.Page, kind XHSReadyKind, feedID string) (xhsReadyProbe, error) {
-	probeJS := `(kind, feedID, searchInputSelector, searchResultSelector, feedCardSelector, detailSelector, commentBoxSelector, likeButtonSelector, searchInputInFeedsSelector, notificationPageSelector, notificationTabSelector) => {` + xhsVisibleJS + xhsProbeFeedMatchJS + xhsProbeCollectionJS + xhsProbeRiskJS() + xhsSearchInputReadyJS + `
+	probeJS := `(kind, feedID, searchInputSelector, searchResultSelector, feedCardSelector, detailSelector, commentBoxSelector, likeButtonSelector, searchInputInFeedsSelector, notificationPageSelector, notificationTabSelector) => {` + xhsVisibleJS + xhsScrollYJS + xhsProbeFeedMatchJS + xhsProbeCollectionJS + xhsProbeRiskJS() + xhsSearchInputReadyJS + `
 		const state = window.__INITIAL_STATE__ || {};
 		const detailURLMatched = detailURLMatchesFeedID(location.href);
 		const text = (document.body?.innerText || "").replace(/\s+/g, " ").slice(0, 1500);
@@ -205,7 +205,7 @@ func probeXHSReady(page *hrod.Page, kind XHSReadyKind, feedID string) (xhsReadyP
 			url: location.href.slice(0, 300),
 			title: document.title.slice(0, 120),
 			ready_state: document.readyState,
-			scroll_y: Math.round(window.scrollY || document.scrollingElement?.scrollTop || 0),
+			scroll_y: scrollY(),
 			app_count: count("#app"),
 			risk_text: riskText.slice(0, 180),
 		};
@@ -270,7 +270,7 @@ func decodeXHSReadyProbe(obj *proto.RuntimeRemoteObject, err error) (xhsReadyPro
 
 // probeXHSReadyFull 完整 probe：查询全部页面选择器并汇总状态，供推断页面种类使用。
 func probeXHSReadyFull(page *hrod.Page, feedID string) (xhsReadyProbe, error) {
-	probeJS := `(feedID, searchInputSelector, searchResultSelector, feedCardSelector, detailSelector, commentBoxSelector, likeButtonSelector, searchInputInFeedsSelector, notificationPageSelector, notificationTabSelector) => {` + xhsVisibleJS + xhsProbeFeedMatchJS + xhsProbeCollectionJS + xhsProbeRiskJS() + xhsSearchInputReadyJS + `
+	probeJS := `(feedID, searchInputSelector, searchResultSelector, feedCardSelector, detailSelector, commentBoxSelector, likeButtonSelector, searchInputInFeedsSelector, notificationPageSelector, notificationTabSelector) => {` + xhsVisibleJS + xhsScrollYJS + xhsProbeFeedMatchJS + xhsProbeCollectionJS + xhsProbeRiskJS() + xhsSearchInputReadyJS + `
 		const state = window.__INITIAL_STATE__ || {};
 		const homeFeeds = unwrap(state.feed?.feeds);
 		const searchFeeds = unwrap(state.search?.feeds);
@@ -299,7 +299,7 @@ func probeXHSReadyFull(page *hrod.Page, feedID string) (xhsReadyProbe, error) {
 			url: location.href.slice(0, 300),
 			title: document.title.slice(0, 120),
 			ready_state: document.readyState,
-			scroll_y: Math.round(window.scrollY || document.scrollingElement?.scrollTop || 0),
+			scroll_y: scrollY(),
 			app_count: count("#app"),
 			feed_card_count: count(feedCardSelector),
 			search_input_count: visibleCount(searchInputSelector),

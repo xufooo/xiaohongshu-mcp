@@ -2,6 +2,7 @@ package xiaohongshu
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"math/rand"
 	"os"
@@ -230,7 +231,7 @@ func uploadImages(page *hrod.Page, imagesPaths []string) error {
 			selector = ".upload-input"
 		}
 
-		uploadInput, err := page.Element(selector)
+		uploadInput, err := waitPublishControl(page, selector)
 		if err != nil {
 			return errors.Wrapf(err, "查找上传输入框失败(第%d张)", i+1)
 		}
@@ -288,9 +289,9 @@ func waitForUploadComplete(page *hrod.Page, expectedCount int) error {
 }
 
 func submitPublish(ctx context.Context, page *hrod.Page, title, content string, tags []string, scheduleTime *time.Time, isOriginal bool, visibility string, products []string) error {
-	titleElem, err := page.Element("div.d-input input")
+	titleElem, err := waitPublishControl(page, "div.d-input input")
 	if err != nil {
-		return errors.Wrap(err, "查找标题输入框失败")
+		return err
 	}
 	if err := titleElem.Input(title); err != nil {
 		return errors.Wrap(err, "输入标题失败")
@@ -308,9 +309,10 @@ func submitPublish(ctx context.Context, page *hrod.Page, title, content string, 
 
 	humanize.Delay(ctx, humanize.AfterType)
 
-	contentElem, ok := getContentElement(page)
-	if !ok {
-		return errors.New("没有找到内容输入框")
+	// 线上正文编辑器即 TipTap ProseMirror（2026-09 实测）。
+	contentElem, err := waitPublishControl(page, "div.tiptap.ProseMirror")
+	if err != nil {
+		return err
 	}
 	if err := contentElem.Input(content); err != nil {
 		return errors.Wrap(err, "输入正文失败")
@@ -546,13 +548,27 @@ func makeMaxLengthError(elemText string) error {
 	return errors.Errorf("当前输入长度为%s，最大长度为%s", currLen, maxLen)
 }
 
-// getContentElement 返回正文编辑器：线上即 TipTap ProseMirror（2026-09 实测）。
-func getContentElement(page *hrod.Page) (*hrod.Element, bool) {
-	if editor, err := page.Timeout(5 * time.Second).Element("div.tiptap.ProseMirror"); err == nil && editor != nil {
-		return editor, true
+// publishControlMountBudget 是发布页控件（标题/正文/上传输入）的挂载等待预算。
+//
+// 发布页是整页导航后的 SPA，控件由前端异步挂载；Pi 上首帧慢，原先正文编辑器
+// 只给 5s 会误失败，而标题/上传输入直接继承页面的 300s 预算，真失败要拖满
+// 5 分钟才报错。统一为 30s：rod 自身带重试与退避，命中即返回（热路径 0 额外
+// 开销），失败则快速抛出带选择器与已等时长的错误。
+const publishControlMountBudget = 30 * time.Second
+
+// waitPublishControl 在预算内等待发布页控件出现，返回元素或带上下文的错误。
+// 每个控件只用一个线上实测命中的精确选择器，不做选择器兜底。
+func waitPublishControl(page *hrod.Page, selector string) (*hrod.Element, error) {
+	start := time.Now()
+	elem, err := page.Timeout(publishControlMountBudget).Element(selector)
+	if err == nil && elem != nil {
+		return elem, nil
 	}
-	slog.Warn("no content element found")
-	return nil, false
+	waited := time.Since(start).Round(time.Millisecond)
+	if err == nil {
+		return nil, fmt.Errorf("等待发布页控件 %s 超时(预算 %s，已等 %s)", selector, publishControlMountBudget, waited)
+	}
+	return nil, fmt.Errorf("等待发布页控件 %s 失败(预算 %s，已等 %s): %w", selector, publishControlMountBudget, waited, err)
 }
 
 func inputTags(contentElem *hrod.Element, tags []string) error {
