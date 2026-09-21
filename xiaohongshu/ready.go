@@ -15,24 +15,34 @@ import (
 type XHSReadyKind string
 
 const (
-	XHSReadyHome        XHSReadyKind = "home"
-	XHSReadyHomeSearch  XHSReadyKind = "home_search"
-	XHSReadySearch      XHSReadyKind = "search"
-	XHSReadyDetail      XHSReadyKind = "detail"
-	XHSReadyProfile     XHSReadyKind = "profile"
-	XHSReadyPublish     XHSReadyKind = "publish"
-	XHSReadyCommentBox  XHSReadyKind = "comment_box"
+	XHSReadyHome         XHSReadyKind = "home"
+	XHSReadyHomeSearch   XHSReadyKind = "home_search"
+	XHSReadySearch       XHSReadyKind = "search"
+	XHSReadyDetail       XHSReadyKind = "detail"
+	XHSReadyProfile      XHSReadyKind = "profile"
+	XHSReadyPublish      XHSReadyKind = "publish"
+	XHSReadyCommentBox   XHSReadyKind = "comment_box"
 	XHSReadyNotification XHSReadyKind = "notification"
 )
 
+// XHSReadyOptions.Timeout 语义：
+//   - 0  = 用该类等待的失败上限（宽松，只用来兜底）——推荐；
+//   - >0 = 硬上限（仅用于「这一步必须很快」的场景，例如一次快速探测）。
+//
+// 超时只是**失败兜底**，不参与"该等多久"：等待由事件决定
+// （DOM 变化 / 网络在途请求），机器慢只是等得久，不会被判超时。
 type XHSReadyOptions struct {
-	Kind           XHSReadyKind
-	FeedID         string
-	Timeout        time.Duration
+	Kind             XHSReadyKind
+	FeedID           string
+	Timeout          time.Duration
 	SelectorWatchdog *SelectorWatchdog // 非必填，有则 probe 相关选择器
 }
 
 const (
+	// readyStallBudget 是"页面多久没动静就算卡住"的判定线。
+	// 它量的不是"预计要等多久"，而是"完全没有生命迹象"的持续时间，
+	// 所以与机器快慢无关：慢机器只是慢，它的 DOM / 网络依然在动。
+	readyStallBudget       = 45 * time.Second
 	homeSearchStableWindow = 3 * time.Second
 	defaultReadyPollMin    = 300 * time.Millisecond
 	defaultReadyPollMax    = 500 * time.Millisecond
@@ -78,30 +88,30 @@ func xhsReadyDecision(kind XHSReadyKind, st *xhsReadyStability, now time.Time, r
 }
 
 type xhsReadyProbe struct {
-	URL                string `json:"url"`
-	Title              string `json:"title"`
-	ReadyState         string `json:"ready_state"`
-	ScrollY            int    `json:"scroll_y"`
-	AppCount           int    `json:"app_count"`
-	FeedCardCount      int    `json:"feed_card_count"`
-	SearchInputCount   int    `json:"search_input_count"`
-	SearchResultCount  int    `json:"search_result_count"`
-	DetailCount        int    `json:"detail_count"`
-	VisibleDetailCount int    `json:"visible_detail_count"`
-	CommentBoxCount    int    `json:"comment_box_count"`
-	LikeButtonCount    int    `json:"like_button_count"`
-	HomeFeedCount      int    `json:"home_feed_count"`
-	SearchFeedCount    int    `json:"search_feed_count"`
-	ProfileState       bool   `json:"profile_state"`
-	DetailState        bool   `json:"detail_state"`
-	DetailFeedMatched  bool   `json:"detail_feed_matched"`
-	DetailURLMatched      bool   `json:"detail_url_matched"`
-	PublishSignalCount    int    `json:"publish_signal_count"`
-	SearchInputInFeedsReady bool `json:"search_input_in_feeds_ready"`
-	NotificationPageCount int    `json:"notification_page_count"`
-	NotificationTabCount  int    `json:"notification_tab_count"`
-	StateFragment         string `json:"state_fragment,omitempty"`
-	RiskText              string `json:"risk_text,omitempty"`
+	URL                     string `json:"url"`
+	Title                   string `json:"title"`
+	ReadyState              string `json:"ready_state"`
+	ScrollY                 int    `json:"scroll_y"`
+	AppCount                int    `json:"app_count"`
+	FeedCardCount           int    `json:"feed_card_count"`
+	SearchInputCount        int    `json:"search_input_count"`
+	SearchResultCount       int    `json:"search_result_count"`
+	DetailCount             int    `json:"detail_count"`
+	VisibleDetailCount      int    `json:"visible_detail_count"`
+	CommentBoxCount         int    `json:"comment_box_count"`
+	LikeButtonCount         int    `json:"like_button_count"`
+	HomeFeedCount           int    `json:"home_feed_count"`
+	SearchFeedCount         int    `json:"search_feed_count"`
+	ProfileState            bool   `json:"profile_state"`
+	DetailState             bool   `json:"detail_state"`
+	DetailFeedMatched       bool   `json:"detail_feed_matched"`
+	DetailURLMatched        bool   `json:"detail_url_matched"`
+	PublishSignalCount      int    `json:"publish_signal_count"`
+	SearchInputInFeedsReady bool   `json:"search_input_in_feeds_ready"`
+	NotificationPageCount   int    `json:"notification_page_count"`
+	NotificationTabCount    int    `json:"notification_tab_count"`
+	StateFragment           string `json:"state_fragment,omitempty"`
+	RiskText                string `json:"risk_text,omitempty"`
 }
 
 // WaitForXHSReady 等待页面就绪，按 kind 判断条件。
@@ -113,16 +123,25 @@ func WaitForXHSReady(page *hrod.Page, opts XHSReadyOptions) error {
 		opts.Kind = XHSReadyHome
 	}
 	if opts.Timeout <= 0 {
-		opts.Timeout = 60 * time.Second
+		// 未显式指定上限时用该类等待的失败上限：它只回答"多久还没成就别等了"，取值刻意宽松。
+		if ceiling, ok := waitCeilingForKind("ready:" + string(opts.Kind)); ok {
+			opts.Timeout = ceiling
+		} else {
+			opts.Timeout = 60 * time.Second
+		}
 	}
 
 	started := time.Now()
-	defer func() { observeWait("ready:"+string(opts.Kind), time.Since(started)) }()
+	probes := 0
+	defer func() { observeWaitWithProbes("ready:"+string(opts.Kind), time.Since(started), probes) }()
 
 	deadline := time.Now().Add(opts.Timeout)
 	var last xhsReadyProbe
 	var lastErr error
 	var stability xhsReadyStability
+	// 最后一次「看到页面有动静」的时刻：DOM 变了、网络有事件、或探测结果变了都算。
+	// 一直没动静说明页面卡住了——这才是该报错的时候，而不是"等够 N 秒"。
+	lastProgressAt := time.Now()
 	// pollMin 现在表示「DOM 变化后静默多久再探测」，pollMax 是「页面完全不动时的最长等待」。
 	pollMin, pollMax := xhsReadyPollRange(opts.Kind)
 
@@ -131,12 +150,19 @@ func WaitForXHSReady(page *hrod.Page, opts XHSReadyOptions) error {
 			return err
 		}
 
+		probes++
+		probeStarted := time.Now()
 		probe, err := probeXHSReady(page, opts.Kind, opts.FeedID)
+		// 探测成本入观测：慢机器上探测更贵，信号窗随之放宽（见 pageSignalWindow）。
+		observeWait("probe:"+string(opts.Kind), time.Since(probeStarted))
 		if err != nil {
 			lastErr = err
 			stability.Observe(time.Now(), false)
 		} else {
 			lastErr = nil
+			if probe != last {
+				lastProgressAt = time.Now()
+			}
 			last = probe
 			if probe.RiskText != "" {
 				return fmt.Errorf("页面出现风险信号: %s; %s", probe.RiskText, formatXHSReadyProbe(probe))
@@ -157,10 +183,27 @@ func WaitForXHSReady(page *hrod.Page, opts XHSReadyOptions) error {
 			}
 			break
 		}
-		// 不再按固定间隔空转：等页面自己安静下来（或最多 pollMax）再探测。
-		if err := waitForPageSignal(page.Rod.GetContext(), page, pollMin, pollMax); err != nil {
+		// 页面长时间毫无动静就不是"慢"，是卡住了：早报错，别耗到失败上限。
+		if time.Since(lastProgressAt) >= readyStallBudget {
+			return fmt.Errorf("页面停止推进（%s 内无 DOM 变化、无网络事件、探测结果不变）: %s",
+				readyStallBudget, formatXHSReadyProbe(last))
+		}
+
+		// 页面还活着吗：探测结果变了、DOM 动了、或数据请求在进出，都算"有进展"。
+		// 慢机器只是慢，它的 DOM / 网络依然在动；一直毫无动静才是卡死。
+		if activity := networkOf(page); activity.lastEvent().After(lastProgressAt) {
+			lastProgressAt = time.Now()
+		}
+
+		// 网络已经安静，就等页面自己把 DOM 画稳（或最多 pollMax）再探测。
+		// settle/max 由本机实测的探测成本给自己定节奏，而不是写死毫秒。
+		settle, maxWait := pageSignalWindow(opts.Kind, pollMin, pollMax)
+		signal, err := waitForPageSignal(page.Rod.GetContext(), page, settle, maxWait)
+		if err != nil {
 			lastErr = fmt.Errorf("等待页面变化信号失败: %w", err)
 			stability.Observe(time.Now(), false)
+		} else if signal.Mutations > 0 {
+			lastProgressAt = time.Now()
 		}
 	}
 

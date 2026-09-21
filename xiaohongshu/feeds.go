@@ -19,7 +19,7 @@ func NewFeedsListAction(page *hrod.Page) (*FeedsListAction, error) {
 	pp := page.Timeout(60 * time.Second)
 
 	// 已在首页且就绪时跳过重复导航。
-	if err := EnsureReadyOn(pp, HomeURL, XHSReadyHome, 60*time.Second); err != nil {
+	if err := EnsureReadyOn(pp, HomeURL, XHSReadyHome, 0); err != nil { // 0 = 自适应预算
 		return nil, err
 	}
 

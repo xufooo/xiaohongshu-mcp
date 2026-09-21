@@ -1184,7 +1184,8 @@ func (s *XiaohongshuService) CreateBrowseSession(ctx context.Context, forceRecre
 	}
 
 	// 热页面已经就绪在发现页时跳过重复导航（Pi 上一次整页加载是分钟级成本）。
-	if err := xiaohongshu.EnsureReadyOn(page, xiaohongshu.ExploreURL, xiaohongshu.XHSReadyHomeSearch, 120*time.Second); err != nil {
+	// 0 = 自适应预算（按本机观测收敛），不再写死 120s：Pi 3B 与 x86 的合理值差一个数量级。
+	if err := xiaohongshu.EnsureReadyOn(page, xiaohongshu.ExploreURL, xiaohongshu.XHSReadyHomeSearch, 0); err != nil {
 		s.browserManager.Release(page)
 		return nil, fmt.Errorf("等待探索页就绪失败: %w", err)
 	}
@@ -1798,6 +1799,8 @@ func (s *XiaohongshuService) acquirePageFor(ctx context.Context, owner string) (
 	if err := s.checkFixedIdentity(page); err != nil {
 		logrus.Warnf("browser identity check skipped: %v", err)
 	}
+	// 页面创建即挂上网络事件观察：等待就绪时要靠它判断「机器还在取数据」。
+	xiaohongshu.WatchPageNetwork(page)
 	return page, nil
 }
 

@@ -64,7 +64,7 @@ func NewPublishImageAction(page *hrod.Page) (*PublishAction, error) {
 }
 
 func waitForPublishPageReady(page *hrod.Page) error {
-	if err := WaitForXHSReady(page, XHSReadyOptions{Kind: XHSReadyPublish, Timeout: 60 * time.Second}); err != nil {
+	if err := WaitForXHSReady(page, XHSReadyOptions{Kind: XHSReadyPublish}); err != nil { // 自适应预算
 		return errors.Wrap(err, "等待发布页面就绪失败")
 	}
 	return nil
