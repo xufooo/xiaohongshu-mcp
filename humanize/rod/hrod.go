@@ -533,8 +533,10 @@ type interactableSnapshot struct {
 	HitWidth          float64 `json:"hitWidth,omitempty"`
 	HitHeight         float64 `json:"hitHeight,omitempty"`
 	TargetContainsHit bool    `json:"targetContainsHit"`
-	URL               string  `json:"url,omitempty"`
-	Title             string  `json:"title,omitempty"`
+	// TargetShadowHost 表示"命中被重定向到了本元素的 shadow 宿主"，即 shadow 内节点没被遮挡。
+	TargetShadowHost bool   `json:"targetShadowHost,omitempty"`
+	URL              string `json:"url,omitempty"`
+	Title            string `json:"title,omitempty"`
 }
 
 // WaitInteractable 等待元素进入可点击状态。页面频繁重排时会重新测量，避免点到旧位置。
@@ -599,8 +601,10 @@ func (el *Element) waitInteractable(timeout time.Duration, scroll bool) error {
 	return fmt.Errorf("等待元素可点击超时: visible=%v clickable=%v stable=false reason=%s%s", last.Visible, last.Clickable, last.Reason, last.evidenceString())
 }
 
-func (el *Element) interactableSnapshot() (interactableSnapshot, error) {
-	result, err := el.Eval(`() => {
+// interactableSnapshotJS 读取元素的可点击性现场。
+// 单独成常量便于测试钉住语义（尤其 shadow 宿主的命中重定向，见下）。
+const interactableSnapshotJS = `() => {
+		` + humanize.HitTargetJS + `
 		const rect = this.getBoundingClientRect();
 		const style = window.getComputedStyle(this);
 		const connected = this.isConnected;
@@ -614,7 +618,10 @@ func (el *Element) interactableSnapshot() (interactableSnapshot, error) {
 		const x = Math.min(Math.max(rect.left + rect.width / 2, 1), window.innerWidth - 1);
 		const y = Math.min(Math.max(rect.top + rect.height / 2, 1), window.innerHeight - 1);
 		const hit = visible ? document.elementFromPoint(x, y) : null;
-		const clickable = visible && hit && (hit === this || this.contains(hit));
+		// 命中判据与其它地方共用：shadow 内部元素的命中会被重定向到宿主
+		// （closed shadow root 例如发布页 xhs-publish-btn），见 humanize/hit_target.go。
+		const hitInShadowHost = !!(hit && hitTargets(this, hit) && !(hit === this || this.contains(hit)));
+		const clickable = visible && hit && hitTargets(this, hit);
 		let reason = "";
 		if (!connected) reason = "detached";
 		else if (!visible) reason = "not_visible";
@@ -646,11 +653,15 @@ func (el *Element) interactableSnapshot() (interactableSnapshot, error) {
 			r.hitWidth = hitRect ? hitRect.width : 0;
 			r.hitHeight = hitRect ? hitRect.height : 0;
 			r.targetContainsHit = hit ? (hit === this || this.contains(hit)) : false;
+			r.targetShadowHost = hitInShadowHost;
 			r.url = location.origin + location.pathname;
 			r.title = sanitize(document.title || "", 120);
 		}
 		return JSON.stringify(r);
-	}`)
+	}`
+
+func (el *Element) interactableSnapshot() (interactableSnapshot, error) {
+	result, err := el.Eval(interactableSnapshotJS)
 	if err != nil {
 		return interactableSnapshot{}, err
 	}

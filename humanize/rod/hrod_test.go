@@ -2,6 +2,7 @@ package hrod
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -72,5 +73,24 @@ func TestElementSharesActor(t *testing.T) {
 	}
 	if el.Actor() != actor {
 		t.Fatal("Actor() 应返回构造时的 actor")
+	}
+}
+
+// TestInteractableSnapshotShadowHost 钉住"命中被重定向到 shadow 宿主"这条判定：
+// 发布页的 xhs-publish-btn 用 closed shadow root，elementFromPoint 只会返回宿主，
+// 但目标在 shadow 内部，`this.contains(hit)` 永远为 false —— 少了这条就会一直判 obscured。
+// 判据本体在 humanize.HitTargetJS（单一来源），这里同时检查它被拼进了可点击性探针。
+func TestInteractableSnapshotShadowHost(t *testing.T) {
+	for _, want := range []string{
+		"hitTargets(this, hit)",
+		"hitInShadowHost",
+		"r.targetShadowHost = hitInShadowHost",
+	} {
+		if !strings.Contains(interactableSnapshotJS, want) {
+			t.Fatalf("可点击性探针缺少 %q", want)
+		}
+	}
+	if !strings.Contains(interactableSnapshotJS, humanize.HitTargetJS) {
+		t.Fatal("可点击性探针没有拼入共用命中判据")
 	}
 }
