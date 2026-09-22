@@ -89,7 +89,6 @@ var waitCeilings = map[string]time.Duration{
 	"ready:profile":     180 * time.Second,
 	"ready:publish":     300 * time.Second,
 	"ready:comment_box": 120 * time.Second,
-	"ready:login":       120 * time.Second,
 	"search_results":    120 * time.Second,
 	"publish_success":   180 * time.Second,
 	"ai_summary":        180 * time.Second,

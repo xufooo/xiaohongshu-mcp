@@ -83,11 +83,7 @@ func (a *LoginAction) CurrentUser(ctx context.Context) (*CurrentUser, error) {
 }
 
 func (a *LoginAction) CheckLoginStatus(ctx context.Context) (bool, error) {
-	pp := a.page.Context(ctx)
-	if err := EnsureReadyOn(pp, ExploreURL, XHSReadyLogin, 0); err != nil {
-		return false, err
-	}
-	exists, _, err := pp.Has(loginReadySelector)
+	exists, _, err := a.page.Context(ctx).Has(loginReadySelector)
 	if err != nil {
 		return false, err
 	}

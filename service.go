@@ -647,9 +647,6 @@ func (s *XiaohongshuService) DeleteCookies(ctx context.Context) error {
 }
 
 func (s *XiaohongshuService) CheckLoginStatus(ctx context.Context) (*LoginStatusResponse, error) {
-	loginCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
-	defer cancel()
-
 	var page *hrod.Page
 	newPage := false
 	if pending := s.liveLoginQrcode(); pending != nil {
@@ -657,7 +654,7 @@ func (s *XiaohongshuService) CheckLoginStatus(ctx context.Context) (*LoginStatus
 	}
 	if page == nil {
 		var err error
-		page, newPage, err = s.acquirePageForSource(loginCtx, "check_login_status")
+		page, newPage, err = s.acquirePageForSource(ctx, "check_login_status")
 		if err != nil {
 			return nil, err
 		}
@@ -666,12 +663,13 @@ func (s *XiaohongshuService) CheckLoginStatus(ctx context.Context) (*LoginStatus
 
 	loginAction := xiaohongshu.NewLogin(page.Context(ctx))
 
-	var isLoggedIn bool
-	err := runReadyWithColdStartRecovery(loginCtx, newPage, false, func(readyCtx context.Context) error {
-		var checkErr error
-		isLoggedIn, checkErr = loginAction.CheckLoginStatus(readyCtx)
-		return checkErr
+	err := runReadyWithColdStartRecovery(ctx, newPage, false, func(readyCtx context.Context) error {
+		return xiaohongshu.EnsureReadyOn(page.Context(readyCtx), xiaohongshu.ExploreURL, xiaohongshu.XHSReadyHomeSearch, 0)
 	})
+	if err != nil {
+		return nil, err
+	}
+	isLoggedIn, err := loginAction.CheckLoginStatus(ctx)
 	if err != nil {
 		return nil, err
 	}
