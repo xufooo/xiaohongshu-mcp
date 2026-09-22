@@ -878,7 +878,7 @@ func (s *XiaohongshuService) GetLoginQrcode(ctx context.Context) (*LoginQrcodeRe
 	}
 
 	waitCtx, cancel := context.WithTimeout(context.Background(), loginQrcodeTimeout)
-	session := &loginQrcodeSession{
+	session = &loginQrcodeSession{
 		img:       img,
 		expiresAt: time.Now().Add(loginQrcodeTimeout),
 		page:      page,
