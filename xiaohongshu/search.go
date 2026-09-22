@@ -297,6 +297,9 @@ func waitForSearchInputState(ctx context.Context, page *hrod.Page, counter *eval
 			lastErr = nil
 			last = state
 			ready := state.Found && state.Focused
+			if !requireEmpty && !checkValue && state.Empty {
+				ready = state.Found
+			}
 			if requireEmpty {
 				ready = ready && state.Empty
 			}
