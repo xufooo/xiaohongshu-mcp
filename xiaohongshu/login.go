@@ -254,7 +254,6 @@ func (a *LoginAction) CurrentQrcodeImage(ctx context.Context) (string, bool, boo
 const currentQrcodeProbeScript = `() => { const qr=document.querySelector(".login-container .qrcode-img"), text=document.body?document.body.innerText:"", expired=/二维码\s*(?:已)?(?:过期|失效)|刷新二维码|点击刷新(?:二维码)?/.test(text); if(!qr)return JSON.stringify({present:false,visible:false,expired}); const style=window.getComputedStyle(qr),rect=qr.getBoundingClientRect(),visible=qr.isConnected&&style.display!=="none"&&style.visibility!=="hidden"&&style.visibility!=="collapse"&&Number(style.opacity||"1")>0&&rect.width>0&&rect.height>0&&qr.getClientRects().length>0; return JSON.stringify({present:true,visible,expired,src:qr.getAttribute("src")||""}); }`
 
 func (a *LoginAction) WaitForLogin(ctx context.Context) (bool, error) {
-	pp := a.page.Context(ctx)
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
