@@ -84,14 +84,14 @@ func (a *LoginAction) CurrentUser(ctx context.Context) (*CurrentUser, error) {
 
 func (a *LoginAction) CheckLoginStatus(ctx context.Context) (bool, error) {
 	pp := a.page.Context(ctx)
-
-	// 已在发现页时跳过重复导航：Pi 上一次全页加载是分钟级成本。
-	if !onExplorePage(pp) {
-		if err := pp.Navigate("https://www.xiaohongshu.com/explore"); err != nil {
-			return false, errors.Wrap(err, "navigate to explore")
-		}
+	if err := EnsureReadyOn(pp, ExploreURL, XHSReadyLogin, 0); err != nil {
+		return false, err
 	}
-	return waitForLoginSurface(ctx, pp)
+	exists, _, err := pp.Has(loginReadySelector)
+	if err != nil {
+		return false, err
+	}
+	return exists, nil
 }
 
 // waitForLoginSurface 轮询到"已登录"或"登录面（登录遮罩/二维码）出现"任一成立即返回。

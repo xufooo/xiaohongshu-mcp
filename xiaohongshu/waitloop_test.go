@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 )
 
 // 致命错误（风控信号 / 渲染器已死）必须立刻结束等待，不能被当成"再等等"。
@@ -48,6 +49,9 @@ func TestWaitPollRangeSingleSource(t *testing.T) {
 		if min != defaultReadyPollMin || max != defaultReadyPollMax {
 			t.Fatalf("%s 节奏 = %v/%v", kind, min, max)
 		}
+	}
+	if ceiling, ok := waitCeilingForKind("ready:" + string(XHSReadyLogin)); !ok || ceiling != 120*time.Second {
+		t.Fatalf("login ready ceiling = %v, want 120s", ceiling)
 	}
 }
 
