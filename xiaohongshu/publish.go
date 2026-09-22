@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -398,9 +399,9 @@ func waitPublishSuccess(page *hrod.Page) error {
 			lastURL = info.URL
 			return info.URL, publishLeftForm(info.URL), nil
 		},
-		OnReady: func() { slog.Info("发布成功，已跳转离开发布页", "url", lastURL) },
+		OnReady: func() { slog.Info("发布成功，已跳转离开发布页", "url", safePublishURL(lastURL)) },
 		OnExhausted: func() error {
-			return errors.Errorf("发布未确认成功：点击发布后未跳转离开发布页（可能校验未过或被拦截）: url=%s", lastURL)
+			return errors.Errorf("发布未确认成功：点击发布后未跳转离开发布页（可能校验未过或被拦截）: url=%s", safePublishURL(lastURL))
 		},
 	})
 }
@@ -409,6 +410,14 @@ func waitPublishSuccess(page *hrod.Page) error {
 // 独立成函数是为了能被测试钉住（发布链路不便反复真跑）。
 func publishLeftForm(rawURL string) bool {
 	return rawURL != "" && !strings.Contains(rawURL, "/publish/publish")
+}
+
+func safePublishURL(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "[redacted]"
+	}
+	return (&url.URL{Scheme: u.Scheme, Host: u.Host, Path: u.Path}).String()
 }
 
 // waitForPublishButtonClickable 等待新版 xhs-publish-btn 或旧版 button.bg-red 可点击。

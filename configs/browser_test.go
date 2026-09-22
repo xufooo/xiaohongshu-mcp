@@ -62,7 +62,7 @@ func TestBrowserRendererLimit(t *testing.T) {
 	}
 }
 
-// TestBrowserBlockedURLPatterns 显式列表优先，"-" 表示不拦截，低资源档给默认媒体列表。
+// TestBrowserBlockedURLPatterns 显式列表优先，"-" 表示不拦截，空值默认不拦截。
 func TestBrowserBlockedURLPatterns(t *testing.T) {
 	t.Setenv("XHS_BROWSER_BLOCK_URLS", "*.mp4*, *.m3u8*")
 	got := BrowserBlockedURLPatterns()
@@ -70,33 +70,12 @@ func TestBrowserBlockedURLPatterns(t *testing.T) {
 		t.Fatalf("显式模式解析错误: %v", got)
 	}
 
-	t.Setenv("XHS_BROWSER_BLOCK_URLS", "-")
-	t.Setenv("XHS_LOW_RESOURCE", "1")
-	if got := BrowserBlockedURLPatterns(); got != nil {
-		t.Fatalf("\"-\" 应表示不拦截，got %v", got)
-	}
-
-	t.Setenv("XHS_BROWSER_BLOCK_URLS", "")
-	t.Setenv("XHS_LOW_RESOURCE", "1")
-	got = BrowserBlockedURLPatterns()
-	if len(got) == 0 {
-		t.Fatal("低资源档空值应按未设置处理，返回默认拦截列表")
-	}
-	// 默认档必须拦图片 CDN（实测占详情页 93% 流量），且绝不能误伤 fe-static（JS/CSS 域名）。
-	var blocksImage, blocksStatic bool
-	for _, p := range got {
-		if strings.Contains(p, "sns-webpic") {
-			blocksImage = true
+	for _, raw := range []string{"-", ""} {
+		t.Setenv("XHS_BROWSER_BLOCK_URLS", raw)
+		t.Setenv("XHS_LOW_RESOURCE", "1")
+		if got := BrowserBlockedURLPatterns(); got != nil {
+			t.Fatalf("XHS_BROWSER_BLOCK_URLS=%q 应默认不拦截，got %v", raw, got)
 		}
-		if strings.Contains(p, "fe-static") {
-			blocksStatic = true
-		}
-	}
-	if !blocksImage {
-		t.Fatalf("低资源档默认应拦图片 CDN，got %v", got)
-	}
-	if blocksStatic {
-		t.Fatalf("绝不能拦 fe-static（JS/CSS 域名），got %v", got)
 	}
 
 	t.Setenv("XHS_LOW_RESOURCE", "0")

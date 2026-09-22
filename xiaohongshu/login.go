@@ -198,18 +198,8 @@ func (a *LoginAction) CurrentQrcodeImage(ctx context.Context) (string, bool, boo
 	if loggedIn {
 		return "", true, false, nil
 	}
-	res, err := evalJSDirect(ctx, a.page, currentQrcodeProbeScript)
+	probe, err := probeCurrentQrcode(ctx, a.page)
 	if err != nil {
-		return "", false, false, err
-	}
-	if res == nil || res.Value.String() == "" {
-		return "", false, false, errors.New("probe qrcode returned no value")
-	}
-	var probe struct {
-		Present, Visible, Expired bool
-		Src                       string
-	}
-	if err := json.Unmarshal([]byte(res.Value.String()), &probe); err != nil {
 		return "", false, false, err
 	}
 	if probe.Expired || !probe.Present || !probe.Visible || strings.TrimSpace(probe.Src) == "" {
@@ -218,9 +208,31 @@ func (a *LoginAction) CurrentQrcodeImage(ctx context.Context) (string, bool, boo
 	return probe.Src, false, false, nil
 }
 
+type qrcodeProbe struct {
+	Present, Visible, Expired bool
+	Src                       string
+}
+
+func probeCurrentQrcode(ctx context.Context, page *hrod.Page) (qrcodeProbe, error) {
+	res, err := evalJSDirect(ctx, page, currentQrcodeProbeScript)
+	if err != nil {
+		return qrcodeProbe{}, err
+	}
+	if res == nil || res.Value.String() == "" {
+		return qrcodeProbe{}, errors.New("probe qrcode returned no value")
+	}
+	var probe qrcodeProbe
+	if err := json.Unmarshal([]byte(res.Value.String()), &probe); err != nil {
+		return qrcodeProbe{}, err
+	}
+	return probe, nil
+}
+
 const currentQrcodeProbeScript = `() => { const qr=document.querySelector(".login-container .qrcode-img"), text=document.body?document.body.innerText:"", expired=/二维码\s*(?:已)?(?:过期|失效)|刷新二维码|点击刷新(?:二维码)?/.test(text); if(!qr)return JSON.stringify({present:false,visible:false,expired}); const style=window.getComputedStyle(qr),rect=qr.getBoundingClientRect(),visible=qr.isConnected&&style.display!=="none"&&style.visibility!=="hidden"&&style.visibility!=="collapse"&&Number(style.opacity||"1")>0&&rect.width>0&&rect.height>0&&qr.getClientRects().length>0; return JSON.stringify({present:true,visible,expired,src:qr.getAttribute("src")||""}); }`
 
-// WaitForLogin 等扫码完成：只看侧栏登录入口出现（与上游一致）。
+var errQrcodeExpired = errors.New("login qrcode expired")
+
+// WaitForLogin 等扫码完成：看侧栏登录入口，同时识别二维码过期/消失。
 func (a *LoginAction) WaitForLogin(ctx context.Context) (bool, error) {
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
@@ -236,6 +248,13 @@ func (a *LoginAction) WaitForLogin(ctx context.Context) (bool, error) {
 			}
 			if exists {
 				return true, nil
+			}
+			probe, err := probeCurrentQrcode(ctx, a.page)
+			if err != nil {
+				return false, err
+			}
+			if probe.Expired || !probe.Present || !probe.Visible {
+				return false, errQrcodeExpired
 			}
 		}
 	}

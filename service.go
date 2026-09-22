@@ -647,23 +647,21 @@ func (s *XiaohongshuService) DeleteCookies(ctx context.Context) error {
 }
 
 func (s *XiaohongshuService) CheckLoginStatus(ctx context.Context) (*LoginStatusResponse, error) {
-	var page *hrod.Page
-	newPage := false
-	if pending := s.liveLoginQrcode(); pending != nil {
-		page = pending.page
+	// 待扫码期间二维码 worker 独占浏览器和页面；这里不能导航或读取同一页面。
+	// 返回保守的未登录状态，避免 CheckLoginStatus 与扫码轮询竞争页面。
+	if s.liveLoginQrcode() != nil {
+		return &LoginStatusResponse{IsLoggedIn: false}, nil
 	}
-	if page == nil {
-		var err error
-		page, newPage, err = s.acquirePageForSource(ctx, "check_login_status")
-		if err != nil {
-			return nil, err
-		}
-		defer s.browserManager.Release(page)
+
+	page, newPage, err := s.acquirePageForSource(ctx, "check_login_status")
+	if err != nil {
+		return nil, err
 	}
+	defer s.browserManager.Release(page)
 
 	loginAction := xiaohongshu.NewLogin(page.Context(ctx))
 
-	err := runReadyWithColdStartRecovery(ctx, newPage, false, func(readyCtx context.Context) error {
+	err = runReadyWithColdStartRecovery(ctx, newPage, false, func(readyCtx context.Context) error {
 		return xiaohongshu.EnsureReadyOn(page.Context(readyCtx), xiaohongshu.ExploreURL, xiaohongshu.XHSReadyHomeSearch, 0)
 	}, func(waitCtx context.Context) error {
 		return xiaohongshu.WaitForXHSReady(page.Context(waitCtx), xiaohongshu.XHSReadyOptions{
@@ -844,17 +842,8 @@ func (s *XiaohongshuService) GetLoginQrcode(ctx context.Context) (*LoginQrcodeRe
 		return nil, errors.New("login qrcode lifecycle is stopping; retry")
 	}
 	if session != nil {
-		img, loggedIn, expired, err := xiaohongshu.NewLogin(session.page).CurrentQrcodeImage(ctx)
-		if err != nil {
-			return nil, err
-		}
-		if loggedIn {
-			if !s.currentLoginQrcode(session) {
-				return nil, errors.New("login qrcode session changed; retry")
-			}
-			return &LoginQrcodeResponse{Timeout: "0s", IsLoggedIn: true}, nil
-		}
-		if expired {
+		remaining := time.Until(session.expiresAt).Round(time.Second)
+		if remaining <= 0 {
 			if s.takeLoginQrcode(session) && session.cancel != nil {
 				session.cancel()
 			}
@@ -863,11 +852,7 @@ func (s *XiaohongshuService) GetLoginQrcode(ctx context.Context) (*LoginQrcodeRe
 		if !s.currentLoginQrcode(session) {
 			return nil, errors.New("login qrcode session changed; retry")
 		}
-		remaining := time.Until(session.expiresAt).Round(time.Second)
-		if remaining < 0 {
-			remaining = 0
-		}
-		return &LoginQrcodeResponse{Timeout: remaining.String(), Img: img, IsLoggedIn: false}, nil
+		return &LoginQrcodeResponse{Timeout: remaining.String(), Img: session.img, IsLoggedIn: false}, nil
 	}
 
 	page, err := s.acquirePageFor(ctx, "login_qrcode")
@@ -907,7 +892,6 @@ func (s *XiaohongshuService) GetLoginQrcode(ctx context.Context) (*LoginQrcodeRe
 	}
 	s.loginQR = session
 	s.loginQRMu.Unlock()
-	s.browserManager.Detach(page)
 	go s.waitLoginQrcode(waitCtx, session)
 
 	return &LoginQrcodeResponse{
@@ -925,7 +909,7 @@ func (s *XiaohongshuService) waitLoginQrcode(ctx context.Context, session *login
 	defer func() {
 		defer close(session.done)
 		s.takeLoginQrcode(session)
-		if err := closeDetachedPage(func(closeCtx context.Context) error { return session.page.Context(closeCtx).Close() }); err != nil {
+		if err := s.browserManager.ReleaseAndClose(session.page); err != nil {
 			session.cleanupErr = errLoginQrcodeCleanup
 			logrus.Warn("login qrcode page cleanup failed")
 		}
