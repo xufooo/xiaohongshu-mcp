@@ -675,12 +675,15 @@ func (s *XiaohongshuService) CheckLoginStatus(ctx context.Context) (*LoginStatus
 	}
 
 	if isLoggedIn {
+		// 用户名/ID 只是展示字段：登录判定来自侧栏入口这个 DOM。
+		// 页面状态还没水合时读不到，不能因此把整次"查登录态"变成失败。
 		user, err := loginAction.CurrentUser(ctx)
 		if err != nil {
-			return nil, err
+			logrus.Warnf("读取登录用户信息失败（不影响登录判定）: %v", err)
+		} else {
+			response.Username = user.Nickname
+			response.UserID = user.UserID
 		}
-		response.Username = user.Nickname
-		response.UserID = user.UserID
 	}
 
 	return response, nil

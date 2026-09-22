@@ -408,8 +408,13 @@ func setBrowserCookies(browser *rod.Browser, cookies []*proto.NetworkCookie) (er
 			err = fmt.Errorf("set cookies: %v", recovered)
 		}
 	}()
+	// 没有可注入的 cookie 时**什么都不做**。
+	// 不能写成 browser.SetCookies(nil)：rod 把 nil 实现成 Storage.clearCookies（rod@v0.116.2 browser.go:489），
+	// 而 cookies.json 在只有 seed、还没存过 cookie 时就是空数组（cookies.write 写 "[]"），
+	// 于是每次启动都会把持久 profile 里已有的登录态清空 —— 表现就是"扫过码也登不进去"。
+	// 真正的登出在 service.DeleteCookies 里做（它同时删掉整个 profile 目录），不依赖这里清空。
 	if len(cookies) == 0 {
-		return browser.SetCookies(nil)
+		return nil
 	}
 	return browser.SetCookies(proto.CookiesToParams(cookies))
 }
