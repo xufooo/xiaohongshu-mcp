@@ -193,3 +193,13 @@ func TestWithBlockedURLsDefensiveCopy(t *testing.T) {
 		t.Fatalf("空列表应表示不拦截，got %v", cfg2.BlockedURLs)
 	}
 }
+
+// 空 cookie 列表必须"什么都不做"。
+// 旧实现走 browser.SetCookies(nil)，而 rod 把 nil 实现成 Storage.clearCookies，
+// 于是空 cookies.json（只有 seed、还没存过 cookie）会在每次启动清空持久 profile 的登录态。
+// 这里故意传 nil browser：只要函数还去碰 browser 就会 panic，被 recover 成 error 暴露出来。
+func TestSetBrowserCookiesEmptyListIsNoOp(t *testing.T) {
+	if err := setBrowserCookies(nil, nil); err != nil {
+		t.Fatalf("空 cookie 列表不应产生任何浏览器调用: %v", err)
+	}
+}
