@@ -254,6 +254,13 @@ func (s *SearchAction) searchByUI(ctx context.Context, page *hrod.Page, counter 
 	if _, err := waitForSearchInputState(ctx, page, counter, searchSelector, keyword, false, true, false); err != nil {
 		return fmt.Errorf("确认搜索关键词失败: %w", err)
 	}
+	input, err = waitForSearchInput(ctx, page, counter, searchInputWaitTimeout, searchSelector)
+	if err != nil {
+		return fmt.Errorf("重新获取搜索框失败: %w", err)
+	}
+	if err := input.Rod.Focus(); err != nil {
+		return fmt.Errorf("聚焦搜索框失败: %w", err)
+	}
 
 	if err := page.Actor().Keyboard.Press(rodinput.Enter); err != nil {
 		return fmt.Errorf("提交搜索失败: %w", err)
@@ -297,14 +304,14 @@ func waitForSearchInputState(ctx context.Context, page *hrod.Page, counter *eval
 			lastErr = nil
 			last = state
 			ready := state.Found && state.Focused
-			if !requireEmpty && !checkValue && state.Empty {
-				ready = state.Found
-			}
-			if requireEmpty {
-				ready = ready && state.Empty
-			}
 			if checkValue {
-				ready = ready && state.Value == expectedValue
+				ready = state.Found && state.Value == expectedValue
+			} else {
+				if requireEmpty {
+					ready = ready && state.Empty
+				} else if state.Empty {
+					ready = state.Found
+				}
 			}
 			if returnOnFocusedNonEmpty && state.Found && state.Focused && !state.Empty {
 				ready = true
