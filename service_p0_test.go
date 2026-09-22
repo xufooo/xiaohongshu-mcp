@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"reflect"
@@ -57,6 +58,165 @@ func TestHandleSessionOperationErrorKeepsOrdinarySession(t *testing.T) {
 		t.Fatalf("普通业务错误应保留 session: %v", err)
 	}
 	session.Close()
+}
+
+func TestCookieSaveGateRetriesAfterFailureAndRedactsError(t *testing.T) {
+	var gate cookieSaveGate
+	calls := 0
+	if err := gate.run(func() error {
+		calls++
+		return fmt.Errorf("cookie-value-secret-token")
+	}); err != errCookieSaveFailed {
+		t.Fatalf("首次保存错误 = %v, 期望稳定阶段错误", err)
+	}
+	if err := gate.run(func() error {
+		calls++
+		return nil
+	}); err != nil {
+		t.Fatalf("失败后第二次保存应成功: %v", err)
+	}
+	if strings.Contains(errCookieSaveFailed.Error(), "secret") {
+		t.Fatal("保存错误泄露了敏感值")
+	}
+	if calls != 2 {
+		t.Fatalf("保存调用次数 = %d, 期望失败后允许第二次", calls)
+	}
+	if err := gate.run(func() error {
+		calls++
+		return fmt.Errorf("should-not-run")
+	}); err != nil || calls != 2 {
+		t.Fatalf("成功落盘后不应重复保存: err=%v calls=%d", err, calls)
+	}
+}
+
+func TestCookieSaveGateSingleFlightAndSingleSuccess(t *testing.T) {
+	var gate cookieSaveGate
+	started := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- gate.run(func() error {
+			close(started)
+			<-release
+			return nil
+		})
+	}()
+	<-started
+	if err := gate.run(func() error { return nil }); err != errCookieSaveInProgress {
+		t.Fatalf("并发保存错误 = %v, 期望 in-progress", err)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("首个保存失败: %v", err)
+	}
+	called := false
+	if err := gate.run(func() error {
+		called = true
+		return nil
+	}); err != nil || called {
+		t.Fatalf("成功后不应再次落盘: err=%v called=%v", err, called)
+	}
+}
+
+func TestCancelPendingLoginQrcodeWaitsForWorkerExit(t *testing.T) {
+	service := &XiaohongshuService{}
+	done := make(chan struct{})
+	canceled := make(chan struct{})
+	session := &loginQrcodeSession{
+		cancel: func() { close(canceled) },
+		done:   done,
+	}
+	service.loginQR = session
+
+	result := make(chan error, 1)
+	go func() { result <- service.cancelPendingLoginQrcode(context.Background()) }()
+	<-canceled
+	select {
+	case err := <-result:
+		t.Fatalf("worker 尚未退出就返回: %v", err)
+	default:
+	}
+	close(done)
+	if err := <-result; err != nil {
+		t.Fatalf("等待 worker 退出失败: %v", err)
+	}
+	if service.liveLoginQrcode() != nil {
+		t.Fatal("取消后不应残留 pending session")
+	}
+}
+
+func TestCloseDetachedPageUsesIndependentContext(t *testing.T) {
+	for _, wantWorkerErr := range []error{context.Canceled, context.DeadlineExceeded} {
+		t.Run(wantWorkerErr.Error(), func(t *testing.T) {
+			workerCtx, cancel := context.WithCancel(context.Background())
+			cancel()
+			if wantWorkerErr == context.DeadlineExceeded {
+				workerCtx, cancel = context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+				cancel()
+			}
+			errClose := errors.New("secret close detail")
+			err := closeDetachedPage(func(cleanupCtx context.Context) error {
+				if workerCtx.Err() != wantWorkerErr {
+					t.Fatalf("worker context 状态错误: %v", workerCtx.Err())
+				}
+				if cleanupCtx.Err() != nil {
+					t.Fatalf("清理 context 不应继承 worker 取消: %v", cleanupCtx.Err())
+				}
+				deadline, ok := cleanupCtx.Deadline()
+				if !ok || time.Until(deadline) <= 0 || time.Until(deadline) > 2*time.Second {
+					t.Fatalf("清理 context 应有约 2s deadline: %v", deadline)
+				}
+				return errClose
+			})
+			if err != errClose {
+				t.Fatalf("应保留 Close 失败供调用方处理: %v", err)
+			}
+		})
+	}
+}
+
+func TestWaitLoginQrcodeDoneReportsCleanupFailure(t *testing.T) {
+	done := make(chan struct{})
+	session := &loginQrcodeSession{done: done, cleanupErr: errLoginQrcodeCleanup}
+	service := &XiaohongshuService{loginQR: session}
+	close(done)
+	err := service.cancelPendingLoginQrcode(context.Background())
+	if err != errLoginQrcodeCleanup {
+		t.Fatalf("等待方应收到清理失败: %v", err)
+	}
+	if strings.Contains(err.Error(), "secret") {
+		t.Fatal("清理错误不应泄露底层敏感详情")
+	}
+}
+
+func TestCancelPendingLoginQrcodeInvalidatesGeneration(t *testing.T) {
+	service := &XiaohongshuService{}
+	session := &loginQrcodeSession{generation: 0}
+	service.loginQR = session
+	if !service.currentLoginQrcode(session) {
+		t.Fatal("当前代 pending session 应有效")
+	}
+	if err := service.cancelPendingLoginQrcode(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if service.currentLoginQrcode(session) || service.loginQRGeneration == session.generation || service.currentLoginQrcodeGeneration(session.generation) {
+		t.Fatal("取消后旧代不应继续有效")
+	}
+}
+
+func TestLoginQrcodeGenerationRejectsConcurrentAndClosedPublish(t *testing.T) {
+	service := &XiaohongshuService{loginQRGeneration: 1}
+	first := service.loginQRGeneration
+	service.loginQRGeneration++
+	second := service.loginQRGeneration
+	service.loginQR = &loginQrcodeSession{generation: first}
+	if service.currentLoginQrcodeGeneration(first) || service.currentLoginQrcode(service.loginQR) {
+		t.Fatal("并发创建的旧代不得发布")
+	}
+	service.loginQRBlocked = true
+	if service.currentLoginQrcodeGeneration(second) {
+		t.Fatal("关闭期间当前代也不得发布")
+	}
 }
 
 func TestBuildBrowseSessionReuseResultRejectsUnextendedTTL(t *testing.T) {
@@ -447,13 +607,13 @@ func TestLoginFlowNextStep(t *testing.T) {
 	}
 }
 
-// TestLoginQrcodeSessionReuse 待扫码会话的复用与清理语义：
-// 有效期内重复调用复用同一张二维码；过期后不再复用；旧 goroutine 不得清新会话。
+// TestLoginQrcodeSessionReuse 待扫码会话句柄的复用与清理语义：
+// 本地 TTL 不直接判定页面有效性；旧 goroutine 不得清新会话。
 func TestLoginQrcodeSessionReuse(t *testing.T) {
 	service := &XiaohongshuService{}
 	now := time.Now()
 
-	if got := service.liveLoginQrcode(now); got != nil {
+	if got := service.liveLoginQrcode(); got != nil {
 		t.Fatal("无会话时应返回 nil")
 	}
 
@@ -462,23 +622,15 @@ func TestLoginQrcodeSessionReuse(t *testing.T) {
 	service.loginQR = session
 	service.loginQRMu.Unlock()
 
-	if got := service.liveLoginQrcode(now); got != session {
+	if got := service.liveLoginQrcode(); got != session {
 		t.Fatal("有效期内应返回同一会话")
 	}
-	if got := service.liveLoginQrcode(session.expiresAt.Add(time.Second)); got != nil {
-		t.Fatal("过期后不应返回会话")
-	}
 
-	// GetLoginQrcode 在有效期内必须直接复用（不触碰浏览器）
-	resp, err := service.GetLoginQrcode(context.Background())
-	if err != nil {
-		t.Fatalf("复用分支不应报错: %v", err)
-	}
-	if resp.Img != session.img {
-		t.Fatalf("应复用同一张二维码, got %q", resp.Img)
-	}
-	if resp.Timeout == "" || resp.Timeout == loginQrcodeTimeout.String() {
-		t.Fatalf("复用时应返回剩余有效期, got %q", resp.Timeout)
+	// liveLoginQrcode 只做并发安全的句柄读取；页面上的二维码/登录态由
+	// CurrentQrcodeImage 在真实 page 上判断，不能用 nil page 走复用路径。
+	session.expiresAt = now.Add(-time.Minute)
+	if got := service.liveLoginQrcode(); got != session {
+		t.Fatal("本地 TTL 过期不应伪装成页面状态并直接丢弃会话")
 	}
 
 	// 旧 goroutine 清理：会话已被换成新的，就不得清空
@@ -489,13 +641,13 @@ func TestLoginQrcodeSessionReuse(t *testing.T) {
 	if service.takeLoginQrcode(session) {
 		t.Fatal("旧会话不得清掉新会话")
 	}
-	if service.liveLoginQrcode(now) != fresh {
+	if service.liveLoginQrcode() != fresh {
 		t.Fatal("新会话应仍在")
 	}
 	if !service.takeLoginQrcode(fresh) {
 		t.Fatal("同一会话应可清理")
 	}
-	if service.liveLoginQrcode(now) != nil {
+	if service.liveLoginQrcode() != nil {
 		t.Fatal("清理后不应残留会话")
 	}
 }

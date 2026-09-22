@@ -42,22 +42,19 @@ type XiaohongshuService struct {
 	cursorGuardMu    sync.Mutex
 	cursorGuardMap   map[string]*cursorGuardEntry
 
-	// 待扫码会话：同一时刻只保留一个，重复调用复用同一张二维码。
-	// 页面专用（Detach 保留句柄、归还独占权），因此扫码等待期间不会把
-	// 其他工具饿死在 browser busy 上。
-	loginQRMu sync.Mutex
-	loginQR   *loginQrcodeSession
+	loginQRMu         sync.Mutex
+	loginQR           *loginQrcodeSession
+	loginQRGeneration uint64
+	loginQRBlocked    bool
 
-	// 身份指纹采集节流：同一浏览器 + 同一 profile 下指纹不会变，
-	// 每次取页都采集一次只是白白多一次 CDP Eval（树莓派上是实打实的开销）。
 	identityMu            sync.Mutex
 	identityCheckedAt     time.Time
 	identityCheckInterval time.Duration
 
 	createSessionMu sync.Mutex
+	loginCookieSave cookieSaveGate
 }
 
-// NewXiaohongshuService 创建小红书服务实例
 func NewXiaohongshuService() (*XiaohongshuService, error) {
 	actionState, err := xiaohongshu.DefaultActionStateStore(
 		configs.Username,
@@ -432,7 +429,6 @@ func stopReadNetworkCapture(capture *xiaohongshu.NetworkCapture) []xiaohongshu.N
 	return capture.Stop()
 }
 
-// PublishRequest 发布请求
 type PublishRequest struct {
 	Title        string   `json:"title" binding:"required"`
 	Content      string   `json:"content" binding:"required"`
@@ -445,21 +441,18 @@ type PublishRequest struct {
 	ConfirmToken string   `json:"confirm_token,omitempty"`
 }
 
-// LoginStatusResponse 登录状态响应
 type LoginStatusResponse struct {
 	IsLoggedIn bool   `json:"is_logged_in"`
 	Username   string `json:"username,omitempty"` // 当前登录账号的昵称
 	UserID     string `json:"user_id,omitempty"`  // 用户唯一标识（个人主页 URL 中的 ID）
 }
 
-// LoginQrcodeResponse 登录扫码二维码
 type LoginQrcodeResponse struct {
 	Timeout    string `json:"timeout"`
 	IsLoggedIn bool   `json:"is_logged_in"`
 	Img        string `json:"img,omitempty"`
 }
 
-// PublishResponse 发布响应
 type PublishResponse struct {
 	Title   string `json:"title"`
 	Content string `json:"content"`
@@ -467,7 +460,6 @@ type PublishResponse struct {
 	Status  string `json:"status"`
 }
 
-// PublishVideoRequest 发布视频请求（仅支持本地单个视频文件）
 type PublishVideoRequest struct {
 	Title        string   `json:"title" binding:"required"`
 	Content      string   `json:"content" binding:"required"`
@@ -479,7 +471,6 @@ type PublishVideoRequest struct {
 	ConfirmToken string   `json:"confirm_token,omitempty"`
 }
 
-// PublishVideoResponse 发布视频响应
 type PublishVideoResponse struct {
 	Title   string `json:"title"`
 	Content string `json:"content"`
@@ -487,7 +478,6 @@ type PublishVideoResponse struct {
 	Status  string `json:"status"`
 }
 
-// FeedsListResponse Feeds列表响应
 type FeedsListResponse struct {
 	Feeds     []xiaohongshu.Feed                `json:"feeds"`
 	AIChat    *xiaohongshu.AIChatReply          `json:"ai_chat,omitempty"`
@@ -616,18 +606,21 @@ func feedQueryKey(kind, keyword string, filters []xiaohongshu.FilterOption) (str
 	return kind + ":" + strings.TrimSpace(keyword) + ":" + string(data), nil
 }
 
-// UserProfileResponse 用户主页响应
 type UserProfileResponse struct {
 	UserBasicInfo xiaohongshu.UserBasicInfo      `json:"userBasicInfo"`
 	Interactions  []xiaohongshu.UserInteractions `json:"interactions"`
 	Feeds         []xiaohongshu.Feed             `json:"feeds"`
 }
 
-// DeleteCookies 删除 cookies 文件，用于登录重置
 func (s *XiaohongshuService) DeleteCookies(ctx context.Context) error {
-	// 先结束待扫码会话：否则它的专用页面还在轮询登录态，删除 cookies 后又会被写回。
-	s.cancelPendingLoginQrcode()
+	defer s.resumeLoginQrcode()
+	if err := s.stopLoginWork(ctx); err != nil {
+		return err
+	}
 	if err := s.browserManager.Reset(ctx); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if profileDir := configs.GetProfileDir(); profileDir != "" {
@@ -635,12 +628,16 @@ func (s *XiaohongshuService) DeleteCookies(ctx context.Context) error {
 			return fmt.Errorf("删除浏览器 profile 失败: %w", err)
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	cookiePath := cookies.GetCookiesFilePath()
 	cookieLoader := cookies.NewLoadCookie(cookiePath)
 	if err := cookieLoader.DeleteCookies(); err != nil {
 		return err
 	}
+	s.loginCookieSave.reset()
 	if s.actionState != nil {
 		if err := s.actionState.ClearIdentity(); err != nil {
 			logrus.Warnf("clear browser identity metadata failed: %v", err)
@@ -649,16 +646,22 @@ func (s *XiaohongshuService) DeleteCookies(ctx context.Context) error {
 	return nil
 }
 
-// CheckLoginStatus 检查登录状态
 func (s *XiaohongshuService) CheckLoginStatus(ctx context.Context) (*LoginStatusResponse, error) {
 	loginCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
 
-	page, err := s.acquirePageFor(loginCtx, "check_login_status")
-	if err != nil {
-		return nil, err
+	var page *hrod.Page
+	if pending := s.liveLoginQrcode(); pending != nil {
+		page = pending.page
 	}
-	defer s.browserManager.Release(page)
+	if page == nil {
+		var err error
+		page, err = s.acquirePageFor(loginCtx, "check_login_status")
+		if err != nil {
+			return nil, err
+		}
+		defer s.browserManager.Release(page)
+	}
 
 	loginAction := xiaohongshu.NewLogin(page.Context(ctx))
 
@@ -671,43 +674,117 @@ func (s *XiaohongshuService) CheckLoginStatus(ctx context.Context) (*LoginStatus
 		IsLoggedIn: isLoggedIn,
 	}
 
-	// 已登录时从当前页读取真实账号信息；读不到只记 warn，不影响状态返回。
 	if isLoggedIn {
-		if user, err := loginAction.CurrentUser(ctx); err != nil {
-			logrus.Warnf("failed to get current user info: %v", err)
-		} else {
-			response.Username = user.Nickname
-			response.UserID = user.UserID
+		user, err := loginAction.CurrentUser(ctx)
+		if err != nil {
+			return nil, err
 		}
+		response.Username = user.Nickname
+		response.UserID = user.UserID
 	}
 
 	return response, nil
 }
 
-// GetLoginQrcode 获取登录的扫码二维码
-// loginQrcodeSession 是一次待扫码会话：二维码 + 有效期 + 专用页面。
 type loginQrcodeSession struct {
-	img       string
-	expiresAt time.Time
-	page      *hrod.Page
-	cancel    context.CancelFunc
+	img string; expiresAt time.Time; page *hrod.Page
+	cancel context.CancelFunc; done chan struct{}
+	generation uint64; cleanupErr error
 }
 
-// loginQrcodeTimeout 是二维码有效期（与站点一致）。
-const loginQrcodeTimeout = 4 * time.Minute
+var errCookieSaveInProgress, errCookieSaveFailed = errors.New("cookie save already in progress"), errors.New("cookie save stage failed")
+var errLoginQrcodeCleanup = errors.New("login qrcode page cleanup failed")
+type cookieSaveGate struct {
+	mu sync.Mutex; done chan struct{}
+	succeeded bool
+}
 
-// liveLoginQrcode 返回仍在有效期内的待扫码会话（无则 nil）。
-func (s *XiaohongshuService) liveLoginQrcode(now time.Time) *loginQrcodeSession {
-	s.loginQRMu.Lock()
-	defer s.loginQRMu.Unlock()
-	if s.loginQR == nil || !now.Before(s.loginQR.expiresAt) {
+func (g *cookieSaveGate) run(save func() error) error {
+	g.mu.Lock()
+	if g.succeeded {
+		g.mu.Unlock()
 		return nil
 	}
+	if g.done != nil {
+		g.mu.Unlock()
+		return errCookieSaveInProgress
+	}
+	done := make(chan struct{})
+	g.done = done
+	g.mu.Unlock()
+	err := save()
+	g.mu.Lock()
+	g.done = nil
+	if err == nil {
+		g.succeeded = true
+	}
+	close(done)
+	g.mu.Unlock()
+	if err != nil {
+		return errCookieSaveFailed
+	}
+	return nil
+}
+
+func waitDone(ctx context.Context, done <-chan struct{}) error {
+	if done == nil { return nil }
+	select { case <-done: return nil; case <-ctx.Done(): return ctx.Err() }
+}
+
+func closeDetachedPage(closePage func(context.Context) error) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second); defer cancel()
+	return closePage(ctx)
+}
+
+func (s *XiaohongshuService) stopLoginWork(ctx context.Context) error {
+	if err := s.cancelPendingLoginQrcode(ctx); err != nil {
+		return err
+	}
+	return s.loginCookieSave.wait(ctx)
+}
+
+func (g *cookieSaveGate) wait(ctx context.Context) error {
+	g.mu.Lock(); done := g.done; g.mu.Unlock()
+	return waitDone(ctx, done)
+}
+func (g *cookieSaveGate) reset() {
+	g.mu.Lock(); g.succeeded = false; g.mu.Unlock()
+}
+func (s *XiaohongshuService) saveAuthenticatedCookies(ctx context.Context, session *loginQrcodeSession) error {
+	if !s.currentLoginQrcode(session) {
+		return errCookieSaveFailed
+	}
+	if _, err := xiaohongshu.NewLogin(session.page).CurrentUser(ctx); err != nil {
+		return errCookieSaveFailed
+	}
+	return s.loginCookieSave.run(func() error {
+		if !s.currentLoginQrcode(session) {
+			return errCookieSaveFailed
+		}
+		return saveCookies(ctx, session.page)
+	})
+}
+
+const loginQrcodeTimeout = 4 * time.Minute
+
+func (s *XiaohongshuService) liveLoginQrcode() *loginQrcodeSession {
+	s.loginQRMu.Lock()
+	defer s.loginQRMu.Unlock()
 	return s.loginQR
 }
 
-// takeLoginQrcode 取走并清空会话；只有仍指向同一个会话时才清空，
-// 避免过期的旧 goroutine 误清新会话。
+func (s *XiaohongshuService) currentLoginQrcode(session *loginQrcodeSession) bool {
+	s.loginQRMu.Lock()
+	defer s.loginQRMu.Unlock()
+	return session != nil && s.loginQR == session && s.loginQRGeneration == session.generation
+}
+
+func (s *XiaohongshuService) currentLoginQrcodeGeneration(generation uint64) bool {
+	s.loginQRMu.Lock()
+	defer s.loginQRMu.Unlock()
+	return !s.loginQRBlocked && s.loginQRGeneration == generation
+}
+
 func (s *XiaohongshuService) takeLoginQrcode(session *loginQrcodeSession) bool {
 	s.loginQRMu.Lock()
 	defer s.loginQRMu.Unlock()
@@ -715,30 +792,70 @@ func (s *XiaohongshuService) takeLoginQrcode(session *loginQrcodeSession) bool {
 		return false
 	}
 	s.loginQR = nil
+	s.loginQRGeneration++
 	return true
 }
 
-// cancelPendingLoginQrcode 结束当前待扫码会话（delete_cookies / 服务关闭时调用）。
-func (s *XiaohongshuService) cancelPendingLoginQrcode() {
+func (s *XiaohongshuService) cancelPendingLoginQrcode(ctx context.Context) error {
 	s.loginQRMu.Lock()
+	s.loginQRGeneration++
+	s.loginQRBlocked = true
 	session := s.loginQR
 	s.loginQR = nil
 	s.loginQRMu.Unlock()
-	if session != nil && session.cancel != nil {
+	if session == nil {
+		return nil
+	}
+	if session.cancel != nil {
 		session.cancel()
 	}
+	if err := waitDone(ctx, session.done); err != nil { return err }
+	return session.cleanupErr
+}
+
+func (s *XiaohongshuService) resumeLoginQrcode() {
+	s.loginQRMu.Lock()
+	s.loginQRBlocked = false
+	s.loginQRMu.Unlock()
 }
 
 func (s *XiaohongshuService) GetLoginQrcode(ctx context.Context) (*LoginQrcodeResponse, error) {
-	// 已有未过期的待扫码会话：直接复用同一张二维码。
-	// 不重新导航、不重新取码，也不占用浏览器独占权 —— 上游是"新的取消旧的、
-	// 重新出码"，我们有页面管理器，可以做到复用。
-	if session := s.liveLoginQrcode(time.Now()); session != nil {
-		return &LoginQrcodeResponse{
-			Timeout:    time.Until(session.expiresAt).Round(time.Second).String(),
-			Img:        session.img,
-			IsLoggedIn: false,
-		}, nil
+	s.loginQRMu.Lock()
+	session := s.loginQR
+	if session == nil {
+		s.loginQRGeneration++
+	}
+	generation := s.loginQRGeneration
+	blocked := s.loginQRBlocked
+	s.loginQRMu.Unlock()
+	if blocked {
+		return nil, errors.New("login qrcode lifecycle is stopping; retry")
+	}
+	if session != nil {
+		img, loggedIn, expired, err := xiaohongshu.NewLogin(session.page).CurrentQrcodeImage(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if loggedIn {
+			if !s.currentLoginQrcode(session) {
+				return nil, errors.New("login qrcode session changed; retry")
+			}
+			return &LoginQrcodeResponse{Timeout: "0s", IsLoggedIn: true}, nil
+		}
+		if expired {
+			if s.takeLoginQrcode(session) && session.cancel != nil {
+				session.cancel()
+			}
+			return nil, errors.New("login qrcode expired; retry")
+		}
+		if !s.currentLoginQrcode(session) {
+			return nil, errors.New("login qrcode session changed; retry")
+		}
+		remaining := time.Until(session.expiresAt).Round(time.Second)
+		if remaining < 0 {
+			remaining = 0
+		}
+		return &LoginQrcodeResponse{Timeout: remaining.String(), Img: img, IsLoggedIn: false}, nil
 	}
 
 	page, err := s.acquirePageFor(ctx, "login_qrcode")
@@ -754,19 +871,28 @@ func (s *XiaohongshuService) GetLoginQrcode(ctx context.Context) (*LoginQrcodeRe
 	}
 	if loggedIn {
 		s.browserManager.Release(page)
+		if !s.currentLoginQrcodeGeneration(generation) {
+			return nil, errors.New("login qrcode session changed; retry")
+		}
 		return &LoginQrcodeResponse{Timeout: "0s", IsLoggedIn: true}, nil
 	}
 
-	// 待扫码：页面交给会话专用（Detach 归还独占权，其他工具改用别的页面），
-	// 后台在该页内轮询登录态，命中即保存 cookies 并结束会话。
 	waitCtx, cancel := context.WithTimeout(context.Background(), loginQrcodeTimeout)
 	session := &loginQrcodeSession{
 		img:       img,
 		expiresAt: time.Now().Add(loginQrcodeTimeout),
 		page:      page,
 		cancel:    cancel,
+		done:      make(chan struct{}),
+		generation: generation,
 	}
 	s.loginQRMu.Lock()
+	if s.loginQRBlocked || s.loginQRGeneration != generation || s.loginQR != nil {
+		s.loginQRMu.Unlock()
+		cancel()
+		s.browserManager.Release(page)
+		return nil, errors.New("login qrcode session changed; retry")
+	}
 	s.loginQR = session
 	s.loginQRMu.Unlock()
 	s.browserManager.Detach(page)
@@ -778,7 +904,6 @@ func (s *XiaohongshuService) GetLoginQrcode(ctx context.Context) (*LoginQrcodeRe
 	}, nil
 }
 
-// waitLoginQrcode 在专用登录页内等待扫码完成；结束（登录成功或超时）后关闭该页。
 func (s *XiaohongshuService) waitLoginQrcode(ctx context.Context, session *loginQrcodeSession) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
@@ -786,24 +911,35 @@ func (s *XiaohongshuService) waitLoginQrcode(ctx context.Context, session *login
 		}
 	}()
 	defer func() {
-		// 只清理自己的会话：若期间已有新会话，不动它。
+		defer close(session.done)
 		s.takeLoginQrcode(session)
-		if session.page != nil {
-			closeCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			_ = session.page.Context(closeCtx).Close()
-			cancel()
+		if err := closeDetachedPage(func(closeCtx context.Context) error { return session.page.Context(closeCtx).Close() }); err != nil {
+			session.cleanupErr = errLoginQrcodeCleanup
+			logrus.Warn("login qrcode page cleanup failed")
 		}
 	}()
 
-	if !xiaohongshu.NewLogin(session.page).WaitForLogin(ctx) {
+	loggedIn, err := xiaohongshu.NewLogin(session.page).WaitForLogin(ctx)
+	if err != nil {
+		if ctx.Err() == nil { logrus.Warnf("等待扫码登录失败，待扫码会话已结束: %v", err) }
+		return
+	}
+	if !loggedIn {
 		logrus.Warn("等待扫码登录超时，待扫码会话已结束")
 		return
 	}
-	if err := saveCookies(session.page); err != nil {
-		logrus.Errorf("failed to save cookies: %v", err)
-		return
+	for attempt := 1; attempt <= 3; attempt++ {
+		if err := s.saveAuthenticatedCookies(ctx, session); err == nil {
+			logrus.Info("扫码登录成功，已保存 cookies")
+			return
+		}
+		if attempt < 3 {
+			if err := session.page.Context(ctx).Sleep(500 * time.Millisecond); err != nil {
+				return
+			}
+		}
 	}
-	logrus.Info("扫码登录成功，已保存 cookies")
+	logrus.Warn("扫码登录成功，但保存 cookies 阶段失败")
 }
 
 // PublishContent 发布内容
@@ -1717,8 +1853,11 @@ func newBrowser(ctx context.Context) (*hrod.Browser, error) {
 	)
 }
 
-func saveCookies(page *hrod.Page) error {
-	cks, err := page.Rod.Browser().GetCookies()
+func saveCookies(ctx context.Context, page *hrod.Page) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	cks, err := page.Context(ctx).Rod.Browser().Context(ctx).GetCookies()
 	if err != nil {
 		return err
 	}
@@ -1727,9 +1866,15 @@ func saveCookies(page *hrod.Page) error {
 	if err != nil {
 		return err
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	cookieLoader := cookies.NewLoadCookie(cookies.GetCookiesFilePath())
-	return cookieLoader.SaveCookies(data)
+	if err := cookieLoader.SaveCookies(data); err != nil {
+		return err
+	}
+	return ctx.Err()
 }
 
 func (s *XiaohongshuService) recordRiskFromPage(page *hrod.Page, sourceErr error) {
@@ -1881,7 +2026,6 @@ func capIdentityValue(value string) string {
 	return value[:77] + "..."
 }
 
-// withBrowserPage 执行需要浏览器页面的操作的通用函数
 func (s *XiaohongshuService) withBrowserPage(ctx context.Context, fn func(*hrod.Page) error) error {
 	page, err := s.acquirePageFor(ctx, "my_profile")
 	if err != nil {
@@ -1892,9 +2036,10 @@ func (s *XiaohongshuService) withBrowserPage(ctx context.Context, fn func(*hrod.
 	return fn(page)
 }
 
-// Close 关闭常驻浏览器。
 func (s *XiaohongshuService) Close(ctx context.Context) error {
-	s.cancelPendingLoginQrcode()
+	if err := s.stopLoginWork(ctx); err != nil {
+		return err
+	}
 	if s.browseSessions != nil {
 		s.browseSessions.CloseAll()
 	}
