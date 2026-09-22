@@ -168,6 +168,10 @@ type guidanceQuery struct {
 	Ready       bool
 	Mismatch    bool
 	ExcludeTool string
+	// Continue 是"刚完成的那次分页调用还有下一页"这个事实翻译成的下一步（同一个工具 + 新的 cursor）。
+	// 它不受 ExcludeTool 约束：续页是推进，不是原地重复调用同一个工具 —— 这正是
+	// "评论读到第 50 条时下一步被推成 go_back"的根因。页面未就绪或状态不一致时不采用它。
+	Continue *NextStep
 }
 
 // BrowseSessionGuidance 是「当前状态下能调用什么」的唯一出口：
@@ -2628,10 +2632,11 @@ type AISummaryResponse struct {
 	Length    int    `json:"length"`
 }
 
-func (s *BrowseSession) Guidance(excludeTool string) BrowseSessionGuidance {
+// Guidance 推导当前状态下的下一步；cont 非 nil 表示"刚完成的那次分页调用还有下一页"。
+func (s *BrowseSession) Guidance(excludeTool string, cont *NextStep) BrowseSessionGuidance {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.guidanceLocked(guidanceQuery{Ready: true, ExcludeTool: excludeTool}, s.semanticResultsLocked())
+	return s.guidanceLocked(guidanceQuery{Ready: true, ExcludeTool: excludeTool, Continue: cont}, s.semanticResultsLocked())
 }
 
 // guidanceLocked 由会话已跟踪的状态推导「当前能调用什么」，不读页面。
@@ -2641,6 +2646,7 @@ func (s *BrowseSession) guidanceLocked(query guidanceQuery, results []BrowseSess
 	case query.Mismatch:
 		return s.mismatchGuidanceLocked(query, results)
 	case s.notification.active:
+		// 通知页的下一步是"处理条目"（回复/点赞），比继续翻页更有价值，所以这里不采用 Continue。
 		return s.notificationGuidanceLocked(query)
 	case !query.Ready:
 		// 页面就绪探测未通过时只允许确认状态或关闭，不诱导调用必然失败的详情工具。
@@ -2719,6 +2725,11 @@ func (s *BrowseSession) guidanceLocked(query guidanceQuery, results []BrowseSess
 	}
 	if next == nil {
 		next = searchStep
+	}
+	if query.Continue != nil {
+		// 续页优先于"状态推导出来的下一步（含 go_back 这类兜底）"：刚做完的那次分页调用明确说还有下一页。
+		// 不等同于重复调用：带上新 cursor 才前进，所以不受 ExcludeTool 排除。
+		return BrowseSessionGuidance{AvailableTools: available, Actions: actions, NextStep: query.Continue}
 	}
 	return BrowseSessionGuidance{AvailableTools: available, Actions: actions, NextStep: nextStepFrom(query.ExcludeTool, next, searchStep)}
 }

@@ -757,7 +757,7 @@ func (s *AppServer) handleSessionDetail(ctx context.Context, args SessionDetailA
 		if err != nil {
 			return sessionMCPErrorFromErr("分批加载评论失败", err, sessionNextStepOpenNote())
 		}
-		return s.sessionToolResult(args.SessionID, "get_note_detail", result)
+		return s.sessionToolResultPaged(args.SessionID, "get_note_detail", result, commentContinueStep(args, maxItems, config, result))
 	}
 
 	detail, err := s.xiaohongshuService.SessionDetail(ctx, args.SessionID, false, 0)
@@ -930,12 +930,54 @@ func appendNextStep(contents []MCPContent, next xiaohongshu.NextStep) []MCPConte
 // sessionToolResult 输出 {data, next_step, available_tools}；
 // next_step 由会话已跟踪的状态推导（纯内存，不探测页面），所以不会推荐当前状态不允许的工具。
 func (s *AppServer) sessionToolResult(sessionID, calledTool string, value any) *MCPToolResult {
-	guidance := s.xiaohongshuService.SessionGuidance(sessionID, calledTool)
+	return s.sessionToolResultPaged(sessionID, calledTool, value, nil)
+}
+
+// sessionToolResultPaged 同上，但 cont 非 nil 时把"还有下一页"作为下一步（同一个工具 + 新 cursor）。
+func (s *AppServer) sessionToolResultPaged(sessionID, calledTool string, value any, cont *xiaohongshu.NextStep) *MCPToolResult {
+	guidance := s.xiaohongshuService.SessionGuidance(sessionID, calledTool, cont)
 	next := xiaohongshu.NextStep{}
 	if guidance.NextStep != nil {
 		next = *guidance.NextStep
 	}
 	return toolResultWithStep(value, next, guidance.AvailableTools)
+}
+
+// continueStep 把"这一批还有下一页"翻译成下一步：同一个工具 + 同样的参数 + 新的 cursor。
+// 只有调用方确认还有下一页（评论看 complete=false，列表看 has_more=true）且 cursor 非空时才给；
+// 否则返回 nil，下一步仍由会话状态推导。
+func continueStep(tool string, args map[string]any, cursor, reason string) *xiaohongshu.NextStep {
+	cursor = strings.TrimSpace(cursor)
+	if cursor == "" {
+		return nil
+	}
+	args["cursor"] = cursor
+	return &xiaohongshu.NextStep{
+		Tool:   tool,
+		Args:   xiaohongshu.NextStepArgs(args),
+		Reason: reason,
+		Hint:   "带上返回的 cursor 再调用同一个工具，直到读完（评论 complete=true、列表 has_more=false）；参数要和本批保持一致",
+	}
+}
+
+// commentContinueStep 判断这一批评论是否还没读完：complete=false 且有 cursor 就继续读同一篇笔记的下一批。
+// 参数按本批**真正生效**的值回填（含从 cursor scope 继承来的值），否则续页会因参数不一致报 scope mismatch。
+func commentContinueStep(args SessionDetailArgs, maxItems int, config xiaohongshu.CommentLoadConfig, result *FeedDetailResponse) *xiaohongshu.NextStep {
+	detail, ok := result.Data.(*xiaohongshu.FeedDetailResponse)
+	if !ok || detail == nil || detail.Comments.Complete {
+		return nil
+	}
+	reason := "评论还没读完（complete=false），继续读下一批"
+	if detail.Comments.IncompleteReason != "" {
+		reason = "评论还没读完（complete=false，" + detail.Comments.IncompleteReason + "），继续读下一批"
+	}
+	return continueStep("get_note_detail", map[string]any{
+		"session_id":         args.SessionID,
+		"max_items":          maxItems,
+		"click_more_replies": config.ClickMoreReplies,
+		"reply_limit":        config.MaxRepliesThreshold,
+		"scroll_speed":       config.ScrollSpeed,
+	}, detail.Comments.Cursor, reason)
 }
 
 // handleSessionAISummary 读取当前搜索页的 AI 总结。

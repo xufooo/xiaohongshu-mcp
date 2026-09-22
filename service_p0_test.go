@@ -651,3 +651,49 @@ func TestLoginQrcodeSessionReuse(t *testing.T) {
 		t.Fatal("清理后不应残留会话")
 	}
 }
+
+// TestCommentContinueStep 覆盖「评论没读完 → 下一步继续读同一批」的接线：
+// complete=false 且有 cursor 时必须给出同一个工具 + 新 cursor + 本批真正生效的参数；
+// 读完 / cursor 为空 / payload 类型不符时都不给（返回 nil，交给状态推导）。
+func TestCommentContinueStep(t *testing.T) {
+	args := SessionDetailArgs{SessionID: "s-1"}
+	config := xiaohongshu.DefaultCommentLoadConfig()
+	config.ClickMoreReplies = true
+	config.MaxRepliesThreshold = 0 // 0=全部展开子评论，必须原样回填
+	config.ScrollSpeed = "fast"
+	payload := func(complete bool, cursor, reason string) *FeedDetailResponse {
+		return &FeedDetailResponse{FeedID: "f-1", Data: &xiaohongshu.FeedDetailResponse{
+			Comments: xiaohongshu.CommentList{Complete: complete, Cursor: cursor, IncompleteReason: reason},
+		}}
+	}
+
+	got := commentContinueStep(args, 50, config, payload(false, "cc_next", "more_comments_available"))
+	if got == nil {
+		t.Fatal("complete=false 且有 cursor 时必须给出续页下一步")
+	}
+	if got.Tool != "get_note_detail" {
+		t.Fatalf("next_step.tool = %q, 期望 get_note_detail", got.Tool)
+	}
+	if got.Args["cursor"] != "cc_next" {
+		t.Fatalf("next_step.args[cursor] = %v, 期望 cc_next", got.Args["cursor"])
+	}
+	if got.Args["session_id"] != "s-1" || got.Args["max_items"] != 50 {
+		t.Fatalf("必须回填 session_id/max_items: %v", got.Args)
+	}
+	if got.Args["click_more_replies"] != true || got.Args["reply_limit"] != 0 || got.Args["scroll_speed"] != "fast" {
+		t.Fatalf("必须回填本批生效的展开参数（reply_limit=0 表示全部展开）: %v", got.Args)
+	}
+	if !strings.Contains(got.Reason, "more_comments_available") {
+		t.Fatalf("reason 应带上 incomplete_reason: %q", got.Reason)
+	}
+
+	if got := commentContinueStep(args, 50, config, payload(true, "cc_next", "")); got != nil {
+		t.Fatalf("complete=true 时不得再续页: %+v", got)
+	}
+	if got := commentContinueStep(args, 50, config, payload(false, "", "more_comments_available")); got != nil {
+		t.Fatalf("cursor 为空时不得续页: %+v", got)
+	}
+	if got := commentContinueStep(args, 50, config, &FeedDetailResponse{Data: "not-a-detail"}); got != nil {
+		t.Fatalf("payload 类型不符时不得猜: %+v", got)
+	}
+}

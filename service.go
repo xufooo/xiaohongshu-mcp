@@ -1480,12 +1480,13 @@ func (s *XiaohongshuService) browserRuntimeStats() *xiaohongshu.BrowserRuntimeSt
 
 // SessionGuidance 只读会话已跟踪的状态给出「下一步该调用哪个工具」，不做页面探测。
 // 用于成功响应：操作能返回，就说明页面可用、状态可信；excludeTool 是刚调用过的工具，不再重复推荐。
-func (s *XiaohongshuService) SessionGuidance(id, excludeTool string) xiaohongshu.BrowseSessionGuidance {
+// cont 非 nil 表示"刚完成的那次分页调用还有下一页"（同一个工具 + 新 cursor），优先于状态推导。
+func (s *XiaohongshuService) SessionGuidance(id, excludeTool string, cont *xiaohongshu.NextStep) xiaohongshu.BrowseSessionGuidance {
 	session, err := s.browseSessions.Get(id)
 	if err != nil {
 		return xiaohongshu.BrowseSessionGuidance{}
 	}
-	return session.Guidance(excludeTool)
+	return session.Guidance(excludeTool, cont)
 }
 
 // SessionListFeeds 在 session 浏览器中获取首页 Feeds 列表
