@@ -424,7 +424,7 @@ func TestOpenNoteAtomicCommit(t *testing.T) {
 	if !strings.Contains(session.timeline[0].Note, "ref-1") {
 		t.Fatalf("result_ref timeline detail 应包含 ref-1: %s", session.timeline[0].Note)
 	}
-	stageTools := strings.Join(session.Guidance("").AvailableTools, ",")
+	stageTools := strings.Join(session.Guidance("", nil).AvailableTools, ",")
 	for _, tool := range []string{"get_note_detail", "like_feed", "favorite_feed", "comment_feed", "reply_comment_in_feed"} {
 		if !strings.Contains(stageTools, tool) {
 			t.Fatalf("原子提交应暴露工具 %s: %s", tool, stageTools)
@@ -653,7 +653,7 @@ func TestMismatchActionsExcludeDetailTools(t *testing.T) {
 		nextResultIndex: 2,
 	}
 	results := session.semanticResultsLocked()
-	guidance := session.Guidance("")
+	guidance := session.Guidance("", nil)
 	mismatch := session.guidanceLocked(guidanceQuery{Ready: true, Mismatch: true}, results)
 	if guidance.NextStep == nil || mismatch.NextStep == nil {
 		t.Fatal("指引必须给出 next_step")
@@ -2641,6 +2641,70 @@ func TestGuidanceMatrixAcrossSessionStates(t *testing.T) {
 	}
 }
 
+// TestGuidancePrefersPaginationContinuationOverDeadEnd 覆盖「评论没读完却被推成 go_back」的回归：
+// Continue 非 nil 时必须原样采用（同一个工具 + 新 cursor）——续页是推进，不受 ExcludeTool 排除；
+// 但页面未就绪、状态不一致、通知页都不采用它。
+func TestGuidancePrefersPaginationContinuationOverDeadEnd(t *testing.T) {
+	continuation := &NextStep{
+		Tool:   "get_note_detail",
+		Args:   NextStepArgs(map[string]any{"session_id": "s-cont", "cursor": "cc_next", "max_items": 50}),
+		Reason: "评论还没读完（complete=false），继续读下一批",
+	}
+	readSession := func() *BrowseSession {
+		return &BrowseSession{id: "s-cont", opened: true, read: true, currentFeedID: "feed-0"}
+	}
+	hasTool := func(list []string, tool string) bool {
+		for _, item := range list {
+			if item == tool {
+				return true
+			}
+		}
+		return false
+	}
+
+	t.Run("没读完就继续读同一个工具", func(t *testing.T) {
+		guidance := readSession().guidanceLocked(guidanceQuery{Ready: true, ExcludeTool: "get_note_detail", Continue: continuation}, nil)
+		if guidance.NextStep == nil || guidance.NextStep.Tool != "get_note_detail" {
+			t.Fatalf("next_step.tool = %v, 期望 get_note_detail", guidance.NextStep)
+		}
+		if got := guidance.NextStep.Args["cursor"]; got != "cc_next" {
+			t.Fatalf("next_step.args[cursor] = %v, 期望 cc_next", got)
+		}
+		if !hasTool(guidance.AvailableTools, "get_note_detail") {
+			t.Fatalf("available_tools 应包含 get_note_detail: %v", guidance.AvailableTools)
+		}
+	})
+
+	t.Run("没有续页信息时仍是 go_back", func(t *testing.T) {
+		guidance := readSession().guidanceLocked(guidanceQuery{Ready: true, ExcludeTool: "get_note_detail"}, nil)
+		if guidance.NextStep == nil || guidance.NextStep.Tool != "go_back" {
+			t.Fatalf("next_step.tool = %v, 期望 go_back", guidance.NextStep)
+		}
+	})
+
+	t.Run("页面未就绪不续页", func(t *testing.T) {
+		guidance := readSession().guidanceLocked(guidanceQuery{Ready: false, Continue: continuation}, nil)
+		if guidance.NextStep == nil || guidance.NextStep.Tool != "get_page_state" {
+			t.Fatalf("next_step.tool = %v, 期望 get_page_state", guidance.NextStep)
+		}
+	})
+
+	t.Run("状态不一致不续页", func(t *testing.T) {
+		guidance := readSession().guidanceLocked(guidanceQuery{Ready: false, Mismatch: true, Continue: continuation}, nil)
+		if guidance.NextStep == nil || guidance.NextStep.Tool == "get_note_detail" {
+			t.Fatalf("状态不一致时不得续页: %v", guidance.NextStep)
+		}
+	})
+
+	t.Run("通知页优先处理条目而不是续页", func(t *testing.T) {
+		session := &BrowseSession{id: "s-notif", notification: browseNotificationState{active: true}}
+		guidance := session.guidanceLocked(guidanceQuery{Ready: true, Continue: continuation}, nil)
+		if guidance.NextStep == nil || guidance.NextStep.Tool == "get_note_detail" {
+			t.Fatalf("通知页不应被续页覆盖: %v", guidance.NextStep)
+		}
+	})
+}
+
 // TestReplyNotificationClearsActionableForGuidance 回复过的通知条目不再进入 next_step，
 // 否则调用方会被指引回同一条通知重复回复。
 func TestReplyNotificationClearsActionableForGuidance(t *testing.T) {
@@ -2678,11 +2742,11 @@ func TestGuidanceNeverRecommendsTheToolJustCalled(t *testing.T) {
 		id: "s-exclude", results: map[string]Feed{"0": {ID: "feed-0"}}, nextResultIndex: 1,
 		opened: true, read: true, currentFeedID: "feed-0",
 	}
-	first := session.Guidance("")
+	first := session.Guidance("", nil)
 	if first.NextStep == nil || first.NextStep.Tool != "get_note_detail" {
 		t.Fatalf("默认应推荐继续读评论: %+v", first.NextStep)
 	}
-	after := session.Guidance("get_note_detail")
+	after := session.Guidance("get_note_detail", nil)
 	if after.NextStep == nil || after.NextStep.Tool != "go_back" {
 		t.Fatalf("刚读完评论后应改推 go_back: %+v", after.NextStep)
 	}
@@ -2691,7 +2755,7 @@ func TestGuidanceNeverRecommendsTheToolJustCalled(t *testing.T) {
 	}
 
 	searched := &BrowseSession{id: "s-exclude2"}
-	repeat := searched.Guidance("search_feeds")
+	repeat := searched.Guidance("search_feeds", nil)
 	if repeat.NextStep == nil || repeat.NextStep.Tool != "search_feeds" {
 		t.Fatalf("无结果时没有别的候选，仍应推荐 search_feeds: %+v", repeat.NextStep)
 	}
