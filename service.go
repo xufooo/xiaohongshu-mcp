@@ -651,12 +651,13 @@ func (s *XiaohongshuService) CheckLoginStatus(ctx context.Context) (*LoginStatus
 	defer cancel()
 
 	var page *hrod.Page
+	newPage := false
 	if pending := s.liveLoginQrcode(); pending != nil {
 		page = pending.page
 	}
 	if page == nil {
 		var err error
-		page, err = s.acquirePageFor(loginCtx, "check_login_status")
+		page, newPage, err = s.acquirePageForSource(loginCtx, "check_login_status")
 		if err != nil {
 			return nil, err
 		}
@@ -665,7 +666,12 @@ func (s *XiaohongshuService) CheckLoginStatus(ctx context.Context) (*LoginStatus
 
 	loginAction := xiaohongshu.NewLogin(page.Context(ctx))
 
-	isLoggedIn, err := loginAction.CheckLoginStatus(loginCtx)
+	var isLoggedIn bool
+	err := runReadyWithColdStartRecovery(loginCtx, newPage, false, func(readyCtx context.Context) error {
+		var checkErr error
+		isLoggedIn, checkErr = loginAction.CheckLoginStatus(readyCtx)
+		return checkErr
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -1324,12 +1330,9 @@ func (s *XiaohongshuService) CreateBrowseSession(ctx context.Context, forceRecre
 
 	// 热页面已经就绪在发现页时跳过重复导航（Pi 上一次整页加载是分钟级成本）。
 	// 0 = 自适应预算（按本机观测收敛），不再写死 120s：Pi 3B 与 x86 的合理值差一个数量级。
-	err = xiaohongshu.EnsureReadyOn(page.Context(ctx), xiaohongshu.ExploreURL, xiaohongshu.XHSReadyHomeSearch, 0)
-	if err != nil && !forceRecreate && newPage && ctx.Err() == nil && strings.Contains(err.Error(), "页面停止推进") && errors.Is(err, context.DeadlineExceeded) {
-		retryCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
-		defer cancel()
-		err = xiaohongshu.EnsureReadyOn(page.Context(retryCtx), xiaohongshu.ExploreURL, xiaohongshu.XHSReadyHomeSearch, 0)
-	}
+	err = runReadyWithColdStartRecovery(ctx, newPage, forceRecreate, func(readyCtx context.Context) error {
+		return xiaohongshu.EnsureReadyOn(page.Context(readyCtx), xiaohongshu.ExploreURL, xiaohongshu.XHSReadyHomeSearch, 0)
+	})
 	if err != nil {
 		s.browserManager.Release(page)
 		return nil, fmt.Errorf("等待探索页就绪失败: %w", err)
@@ -1349,6 +1352,17 @@ func (s *XiaohongshuService) CreateBrowseSession(ctx context.Context, forceRecre
 			Ready:   true,
 		},
 	}, nil
+}
+
+func runReadyWithColdStartRecovery(ctx context.Context, newPage, forceRecreate bool, ready func(context.Context) error) error {
+	err := ready(ctx)
+	if err == nil || forceRecreate || !newPage || ctx.Err() != nil ||
+		!strings.Contains(err.Error(), "页面停止推进") || !errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	retryCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
+	defer cancel()
+	return ready(retryCtx)
 }
 
 func (s *XiaohongshuService) tryReuseSession(ctx context.Context) *xiaohongshu.CreateBrowseSessionResult {
