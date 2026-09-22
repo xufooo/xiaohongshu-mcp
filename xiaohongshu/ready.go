@@ -23,7 +23,6 @@ const (
 	XHSReadyPublish      XHSReadyKind = "publish"
 	XHSReadyCommentBox   XHSReadyKind = "comment_box"
 	XHSReadyNotification XHSReadyKind = "notification"
-	XHSReadyLogin        XHSReadyKind = "login"
 )
 
 // XHSReadyOptions.Timeout 语义：
@@ -113,9 +112,6 @@ type xhsReadyProbe struct {
 	SearchInputInFeedsReady bool   `json:"search_input_in_feeds_ready"`
 	NotificationPageCount   int    `json:"notification_page_count"`
 	NotificationTabCount    int    `json:"notification_tab_count"`
-	LoginReadyCount         int    `json:"login_ready_count"`
-	LoginMaskCount          int    `json:"login_mask_count"`
-	LoginQRCodeCount        int    `json:"login_qrcode_count"`
 	StateFragment           string `json:"state_fragment,omitempty"`
 	RiskText                string `json:"risk_text,omitempty"`
 }
@@ -203,16 +199,13 @@ func xhsReadyProbeSelectorArgs() []interface{} {
 		SelectorSearchInput,
 		SelectorNotificationPage,
 		SelectorNotificationTab,
-		loginReadySelector,
-		loginMaskSelector,
-		loginQRCodeSelector,
 	}
 }
 
 // probeXHSReady 按 kind 缩小范围的 scoped probe：只计算当前 kind 需要的信号，
 // 公共字段（URL/title/readyState/scrollY/app/risk）始终计算。
 func probeXHSReady(page *hrod.Page, kind XHSReadyKind, feedID string) (xhsReadyProbe, error) {
-	probeJS := `(kind, feedID, searchInputSelector, searchResultSelector, feedCardSelector, detailSelector, commentBoxSelector, likeButtonSelector, searchInputInFeedsSelector, notificationPageSelector, notificationTabSelector, loginReadySelector, loginMaskSelector, loginQRCodeSelector) => {` + xhsVisibleJS + xhsScrollYJS + xhsProbeFeedMatchJS + xhsProbeCollectionJS + xhsProbeRiskJS() + xhsSearchInputReadyJS + `
+	probeJS := `(kind, feedID, searchInputSelector, searchResultSelector, feedCardSelector, detailSelector, commentBoxSelector, likeButtonSelector, searchInputInFeedsSelector, notificationPageSelector, notificationTabSelector) => {` + xhsVisibleJS + xhsScrollYJS + xhsProbeFeedMatchJS + xhsProbeCollectionJS + xhsProbeRiskJS() + xhsSearchInputReadyJS + `
 		const state = window.__INITIAL_STATE__ || {};
 		const detailURLMatched = detailURLMatchesFeedID(location.href);
 		const text = (document.body?.innerText || "").replace(/\s+/g, " ").slice(0, 1500);
@@ -260,10 +253,6 @@ func probeXHSReady(page *hrod.Page, kind XHSReadyKind, feedID string) (xhsReadyP
 		} else if (kind === "notification") {
 			out.notification_page_count = count(notificationPageSelector);
 			out.notification_tab_count = count(notificationTabSelector);
-		} else if (kind === "login") {
-			out.login_ready_count = visibleCount(loginReadySelector);
-			out.login_mask_count = visibleCount(loginMaskSelector);
-			out.login_qrcode_count = visibleCount(loginQRCodeSelector);
 		}
 		return JSON.stringify(out);
 	}`
@@ -290,7 +279,7 @@ func decodeXHSReadyProbe(obj *proto.RuntimeRemoteObject, err error) (xhsReadyPro
 
 // probeXHSReadyFull 完整 probe：查询全部页面选择器并汇总状态，供推断页面种类使用。
 func probeXHSReadyFull(page *hrod.Page, feedID string) (xhsReadyProbe, error) {
-	probeJS := `(feedID, searchInputSelector, searchResultSelector, feedCardSelector, detailSelector, commentBoxSelector, likeButtonSelector, searchInputInFeedsSelector, notificationPageSelector, notificationTabSelector, loginReadySelector, loginMaskSelector, loginQRCodeSelector) => {` + xhsVisibleJS + xhsScrollYJS + xhsProbeFeedMatchJS + xhsProbeCollectionJS + xhsProbeRiskJS() + xhsSearchInputReadyJS + `
+	probeJS := `(feedID, searchInputSelector, searchResultSelector, feedCardSelector, detailSelector, commentBoxSelector, likeButtonSelector, searchInputInFeedsSelector, notificationPageSelector, notificationTabSelector) => {` + xhsVisibleJS + xhsScrollYJS + xhsProbeFeedMatchJS + xhsProbeCollectionJS + xhsProbeRiskJS() + xhsSearchInputReadyJS + `
 		const state = window.__INITIAL_STATE__ || {};
 		const homeFeeds = unwrap(state.feed?.feeds);
 		const searchFeeds = unwrap(state.search?.feeds);
@@ -386,8 +375,6 @@ func isXHSReady(probe xhsReadyProbe, kind XHSReadyKind, feedID string, allowURLF
 	case XHSReadyNotification:
 		// URL fallback 与首个判断等价：都要 page 且 3 个 tab，直接返回。
 		return probe.NotificationPageCount > 0 && probe.NotificationTabCount >= 3
-	case XHSReadyLogin:
-		return probe.LoginReadyCount > 0 || probe.LoginMaskCount > 0 || probe.LoginQRCodeCount > 0
 	default:
 		return probe.AppCount > 0
 	}

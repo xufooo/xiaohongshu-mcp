@@ -23,8 +23,8 @@ func TestHomeSearchReadyRequiresInputSignal(t *testing.T) {
 
 func TestXHSReadyProbeSelectorArgsWiring(t *testing.T) {
 	args := xhsReadyProbeSelectorArgs()
-	if len(args) != 12 {
-		t.Fatalf("selector args 长度应为 12，实际 %d", len(args))
+	if len(args) != 9 {
+		t.Fatalf("selector args 长度应为 9，实际 %d", len(args))
 	}
 	if args[0] != SelectorSearchInput {
 		t.Fatalf("args[0] searchInputSelector 应为 SelectorSearchInput，实际 %v", args[0])
@@ -58,24 +58,6 @@ func TestXHSReadyProbeSelectorArgsWiring(t *testing.T) {
 	}
 	if args[8] != SelectorNotificationTab {
 		t.Fatalf("args[8] 应为 SelectorNotificationTab，实际 %v", args[8])
-	}
-	if args[9] != loginReadySelector || args[10] != loginMaskSelector || args[11] != loginQRCodeSelector {
-		t.Fatalf("login selectors wiring 异常: %v", args[9:])
-	}
-}
-
-func TestLoginReadyAcceptsEitherLoginSurface(t *testing.T) {
-	for name, probe := range map[string]xhsReadyProbe{
-		"authenticated": {LoginReadyCount: 1},
-		"guest_mask":    {LoginMaskCount: 1},
-		"qrcode":        {LoginQRCodeCount: 1},
-	} {
-		if !isXHSReady(probe, XHSReadyLogin, "", false) {
-			t.Fatalf("%s 登录面应判定 ready", name)
-		}
-	}
-	if isXHSReady(xhsReadyProbe{}, XHSReadyLogin, "", false) {
-		t.Fatal("没有登录入口、遮罩或二维码时不应判定 ready")
 	}
 }
 
