@@ -152,23 +152,33 @@ func (m *Manager) Acquire(ctx context.Context) (*hrod.Page, error) {
 
 // AcquireFor 获取独占页面并记录当前拥有者。
 func (m *Manager) AcquireFor(ctx context.Context, owner string) (*hrod.Page, error) {
+	page, _, err := m.acquireFor(ctx, owner)
+	return page, err
+}
+
+// AcquireForWithSource additionally reports whether a new page was created.
+func (m *Manager) AcquireForWithSource(ctx context.Context, owner string) (*hrod.Page, bool, error) {
+	return m.acquireFor(ctx, owner)
+}
+
+func (m *Manager) acquireFor(ctx context.Context, owner string) (*hrod.Page, bool, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	for {
 		b, err := m.getBrowser(ctx)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		if err := m.lockForOwner(ctx, owner); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 
 		m.mu.Lock()
 		if m.closed {
 			m.mu.Unlock()
 			m.releaseToken()
-			return nil, errors.New("browser manager is closing")
+			return nil, false, errors.New("browser manager is closing")
 		}
 		if m.browser != b {
 			m.mu.Unlock()
@@ -186,17 +196,16 @@ func (m *Manager) AcquireFor(ctx context.Context, owner string) (*hrod.Page, err
 		page := m.takeWarmPage(b)
 		if page != nil {
 			atomic.AddInt64(&m.warmPageReused, 1)
+			return page, false, nil
 		}
-		if page == nil {
-			atomic.AddInt64(&m.pagesCreated, 1)
-			page, err = newPage(b)
-			if err != nil {
-				m.discardBrowser(b)
-				m.releaseToken()
-				return nil, err
-			}
+		atomic.AddInt64(&m.pagesCreated, 1)
+		page, err = newPage(b)
+		if err != nil {
+			m.discardBrowser(b)
+			m.releaseToken()
+			return nil, false, err
 		}
-		return page, nil
+		return page, true, nil
 	}
 }
 

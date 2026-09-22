@@ -1317,14 +1317,20 @@ func (s *XiaohongshuService) CreateBrowseSession(ctx context.Context, forceRecre
 
 	s.browseSessions.CloseAll()
 
-	page, err := s.acquirePageFor(ctx, "session")
+	page, newPage, err := s.acquirePageForSource(ctx, "session")
 	if err != nil {
 		return nil, err
 	}
 
 	// 热页面已经就绪在发现页时跳过重复导航（Pi 上一次整页加载是分钟级成本）。
 	// 0 = 自适应预算（按本机观测收敛），不再写死 120s：Pi 3B 与 x86 的合理值差一个数量级。
-	if err := xiaohongshu.EnsureReadyOn(page, xiaohongshu.ExploreURL, xiaohongshu.XHSReadyHomeSearch, 0); err != nil {
+	err = xiaohongshu.EnsureReadyOn(page.Context(ctx), xiaohongshu.ExploreURL, xiaohongshu.XHSReadyHomeSearch, 0)
+	if err != nil && !forceRecreate && newPage && ctx.Err() == nil && strings.Contains(err.Error(), "页面停止推进") && errors.Is(err, context.DeadlineExceeded) {
+		retryCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
+		defer cancel()
+		err = xiaohongshu.EnsureReadyOn(page.Context(retryCtx), xiaohongshu.ExploreURL, xiaohongshu.XHSReadyHomeSearch, 0)
+	}
+	if err != nil {
 		s.browserManager.Release(page)
 		return nil, fmt.Errorf("等待探索页就绪失败: %w", err)
 	}
@@ -1955,14 +1961,19 @@ func formatRiskReason(signal xiaohongshu.RiskSignal) string {
 }
 
 func (s *XiaohongshuService) acquirePageFor(ctx context.Context, owner string) (*hrod.Page, error) {
-	page, err := s.browserManager.AcquireFor(ctx, owner)
+	page, _, err := s.acquirePageForSource(ctx, owner)
+	return page, err
+}
+
+func (s *XiaohongshuService) acquirePageForSource(ctx context.Context, owner string) (*hrod.Page, bool, error) {
+	page, newPage, err := s.browserManager.AcquireForWithSource(ctx, owner)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if err := s.checkFixedIdentity(page); err != nil {
 		logrus.Warnf("browser identity check skipped: %v", err)
 	}
-	return page, nil
+	return page, newPage, nil
 }
 
 // identityProbeDue 判断是否该重新采集身份指纹；interval<=0 表示每次都采集。

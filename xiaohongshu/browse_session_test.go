@@ -2651,7 +2651,7 @@ func TestGuidancePrefersPaginationContinuationOverDeadEnd(t *testing.T) {
 		Reason: "评论还没读完（complete=false），继续读下一批",
 	}
 	readSession := func() *BrowseSession {
-		return &BrowseSession{id: "s-cont", opened: true, read: true, currentFeedID: "feed-0"}
+		return &BrowseSession{id: "s-cont", opened: true, read: true, commentsComplete: true, currentFeedID: "feed-0"}
 	}
 	hasTool := func(list []string, tool string) bool {
 		for _, item := range list {
@@ -2679,6 +2679,9 @@ func TestGuidancePrefersPaginationContinuationOverDeadEnd(t *testing.T) {
 		guidance := readSession().guidanceLocked(guidanceQuery{Ready: true, ExcludeTool: "get_note_detail"}, nil)
 		if guidance.NextStep == nil || guidance.NextStep.Tool != "go_back" {
 			t.Fatalf("next_step.tool = %v, 期望 go_back", guidance.NextStep)
+		}
+		if guidance.NextStep.Reason != "评论已全部读取，可返回列表" {
+			t.Fatalf("next_step.reason = %q, 期望完成态文案", guidance.NextStep.Reason)
 		}
 	})
 

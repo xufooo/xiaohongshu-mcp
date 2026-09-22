@@ -280,6 +280,7 @@ type BrowseSession struct {
 	currentXsecToken  string
 	opened            bool
 	read              bool
+	commentsComplete  bool
 	closed            bool
 	expiresAt         time.Time
 	timeline          []BrowseSessionEvent
@@ -587,6 +588,7 @@ func (s *BrowseSession) ListFeedsBatch(ctx context.Context, cursor *FeedCursor, 
 		s.currentXsecToken = ""
 		s.opened = false
 		s.read = false
+		s.commentsComplete = false
 		s.initialCommentIDs = nil
 		s.results, s.nextResultIndex = replaceSessionResults(feeds)
 		s.resetNotificationSurfaceLocked()
@@ -682,6 +684,7 @@ func (s *BrowseSession) searchBatch(ctx context.Context, keyword string, filters
 		s.currentXsecToken = ""
 		s.opened = false
 		s.read = false
+		s.commentsComplete = false
 		s.results, s.nextResultIndex = replaceSessionResults(feeds)
 		s.resetNotificationSurfaceLocked()
 		s.searchKeyword = keyword
@@ -939,6 +942,7 @@ func (s *BrowseSession) commitOpenedNote(feed Feed, sourceURL, resultRef string,
 	s.currentXsecToken = feed.XsecToken
 	s.opened = true
 	s.read = true
+	s.commentsComplete = false
 	s.seenNotes[feed.ID] = true
 	s.initialCommentIDs = append([]string(nil), initialCommentIDs...)
 	s.openedNoteContent = cloneOpenedNoteContent(content)
@@ -1157,7 +1161,16 @@ func (s *BrowseSession) detailCommentsBatchLifecycle(
 		scrolled := outcome.nextCursor != nil && outcome.nextCursor.Round > inputRound
 		_ = s.state.RecordCommentDwell(feedID, time.Since(dwellStart), scrolled)
 	}
-	return s.completeDetailCommentsBatch(opCtx, page, counter, feedID, cursor, maxItems, config, outcome)
+	detail, nextCursor, hasMore, err = s.completeDetailCommentsBatch(opCtx, page, counter, feedID, cursor, maxItems, config, outcome)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	if detail != nil && detail.Comments.Complete {
+		s.mu.Lock()
+		s.commentsComplete = true
+		s.mu.Unlock()
+	}
+	return detail, nextCursor, hasMore, nil
 }
 
 func commentLoadDeadline(ctx context.Context) time.Time {
@@ -1563,6 +1576,7 @@ func (s *BrowseSession) Back(ctx context.Context) (err error) {
 	s.currentXsecToken = ""
 	s.opened = false
 	s.read = false
+	s.commentsComplete = false
 	s.resetNotificationSurfaceLocked()
 	s.recordTimelineLocked("back", feedID, "ok", time.Now(), "history.back()")
 	s.mu.Unlock()
@@ -2674,11 +2688,17 @@ func (s *BrowseSession) guidanceLocked(query guidanceQuery, results []BrowseSess
 		{Ref: "get_page_state", Tool: "get_page_state", Label: "查看当前页面会话状态"},
 		{Ref: "search_feeds", Tool: "search_feeds", Label: "搜索笔记"},
 	}
+	backReason := "笔记已打开但内容尚未读取完成"
+	backHint := "go_back 返回列表后重新 open_note"
+	if s.commentsComplete {
+		backReason = "评论已全部读取，可返回列表"
+		backHint = "go_back 返回列表后继续浏览其他笔记"
+	}
 	backStep := &NextStep{
 		Tool:   "go_back",
 		Args:   NextStepArgs(map[string]any{"session_id": s.id}),
-		Reason: "笔记已打开但内容尚未读取完成",
-		Hint:   "go_back 返回列表后重新 open_note",
+		Reason: backReason,
+		Hint:   backHint,
 	}
 	var next *NextStep
 
