@@ -365,6 +365,28 @@ func (m *Manager) Release(page *hrod.Page) {
 	m.releaseToken()
 }
 
+// ReleaseAndClose 关闭独占页面并归还浏览器独占权。
+// 与 Release 不同，它不会把已关闭页面放入热页面缓存。
+func (m *Manager) ReleaseAndClose(page *hrod.Page) error {
+	var closeErr error
+	if page != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), pageCloseTimeout)
+		closeErr = page.Context(ctx).Close()
+		cancel()
+		if closeErr != nil {
+			m.discardBrowser(page.Browser())
+		}
+	}
+	m.mu.Lock()
+	owner := m.owner
+	configuredIdleTimeout := m.idleTimeout
+	sessionGrace := m.sessionIdleGrace
+	m.mu.Unlock()
+	m.scheduleIdleCloseAfter(idleCloseDelay(owner, configuredIdleTimeout, sessionGrace))
+	m.releaseToken()
+	return closeErr
+}
+
 // idleCloseDelay 选择页面释放后的浏览器空闲关闭延迟。
 // session owner 使用 sessionGrace 上限（sessionGrace<=0 时跟随 configured），
 // 普通 owner 保留配置值；配置小于等于零表示不自动关闭，原样返回。

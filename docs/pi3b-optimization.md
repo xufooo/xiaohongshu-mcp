@@ -12,7 +12,7 @@
 | 项 | 改动 | 依据等级 |
 |:--|:--|:--|
 | Chromium 低资源档（arm/arm64 默认开） | V8 old space 192MB、renderer 上限 2、关扩展/组件更新/默认浏览器检查、激进缓存回收、静音 | 本机 x86 实测（方向性）+ 代码确认 |
-| 逐页资源拦截 | `Network.setBlockedURLs`，低资源档默认拦**图片 CDN**（`sns-webpic/sns-img/sns-avatar`）与视频分片 | 真实页面实测：图片占详情页 93% 流量，拦后提取面不变 |
+| 逐页资源拦截 | `Network.setBlockedURLs`，通过 `XHS_BROWSER_BLOCK_URLS` 显式开启图片/媒体拦截 | 真实页面实测：图片占详情页 93% 流量；默认不拦，避免改变平台可见资源画像 |
 | Go 堆软上限 | `XHS_GO_MEMLIMIT`，低资源档默认 128MiB；`XHS_GOGC` 可选 | 代码确认 |
 | 图片下载流式化 | 不再 `io.ReadAll` 整张图（原上限 50MiB），只读 307 字节头部判类型 | 代码确认 |
 | 限流状态写放大 | 裁剪无变化不写盘；落盘改紧凑 JSON | 代码确认 |
@@ -189,8 +189,7 @@ GET /health 200
   在 `Page()` 里对新建 target 调一次 `proto.NetworkSetBlockedURLs{Urls: ...}`；
   失败只 `Warn`，不影响建页。
 - `configs.BrowserBlockedURLPatterns()`：`XHS_BROWSER_BLOCK_URLS`（逗号分隔，`-` 表示不拦）优先；
-  未设置且处于低资源档时返回默认列表：`*sns-webpic*.xhscdn.com/*`、`*sns-img*.xhscdn.com/*`、
-  `*sns-avatar*.xhscdn.com/*` + 视频分片（依据见 §2.4；**不含** `fe-static`）。
+  未设置时返回空列表。需要性能实验时显式配置图片/头像/视频模式，且**不含** `fe-static`。
 - 实测结论：**不需要先 `Network.enable`**（探针里 `setBlockedURLsWithoutEnable: "ok"`），
   因此没有引入 Network 域的事件流开销。
 

@@ -114,7 +114,7 @@ gh run view <run-id> --log-failed
 | T1-1 | `TestLowResourceProfileExplicit` | `configs/browser_test.go` | `XHS_LOW_RESOURCE=1` 开；`0/false/off/no` 全关（压过架构默认） |
 | T1-2 | `TestBrowserJSHeapMB` | `configs/browser_test.go` | 显式值优先；`0`/非法值回落；低资源档 192；非低资源档 256 |
 | T1-2 | `TestBrowserRendererLimit` | `configs/browser_test.go` | 默认 2；显式覆盖；负数回落 2 |
-| T1-4 | `TestBrowserBlockedURLPatterns` | `configs/browser_test.go` | 显式逗号列表（含空格）；`-` = 不拦截；空值按未设置；非低资源档返回 nil；**默认档必须含 `sns-webpic` 且不得含 `fe-static`** |
+| T1-4 | `TestBrowserBlockedURLPatterns` | `configs/browser_test.go` | 显式逗号列表（含空格）生效；`-` 和空值均不拦截；低资源档空值也返回 nil |
 | T1-8 | `TestIdentityCheckInterval` | `configs/browser_test.go` | 默认 10m；`0` = 每次；`90s` 解析；非法/负值回落 |
 | T1-5 | `TestParseByteSize` | `configs/runtime_test.go` | `128MiB`/`128MB`/`1GiB`/`512KiB`/纯字节/`64B` 正确；空串与 `abc` 报错 |
 | T1-3 | `TestApplyLowMemoryLauncherProfile` | `third_party/headless_browser/headless_browser_test.go` | 5 个固定 flag 在位；`js-flags=--max-old-space-size=192`；`renderer-process-limit=2`；**断言 `disable-gpu`/`disable-software-rasterizer` 不在默认档** |
@@ -408,7 +408,7 @@ git checkout fixup-test     # 本地
 重渲染 + 再次图片解码。所以省资源的顺序是：
 
 1. **别加载不需要的东西** —— 图片占内容页 93~100% 的流量与解码开销；
-   低资源档已默认拦图片 CDN（`392f600`），`XHS_BROWSER_BLOCK_URLS=-` 可放行。
+   低资源档当前默认不拦媒体；需要性能实验时显式设置 `XHS_BROWSER_BLOCK_URLS`，`-` 可明确放行。
 2. **别做注定失败的探测** —— 单次 eval 最长 20s 才被判死；代码里已有的
    5s/2s eval 预算、`confirmRendererAlive` 双探针、`isConfirmedRendererDead` 熔断
    正是为这种卡死准备的，不要放宽。

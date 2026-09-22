@@ -199,31 +199,9 @@ func BrowserRendererLimit() int {
 	return 2
 }
 
-// lowResourceBlockedURLPatterns 低资源档默认拦截的资源。
-//
-// 一手实测（2026-09-20，真实小红书笔记详情页，见 docs/pi3b-optimization.md §2.4）：
-//   - 该页 1.69MiB 流量里 1.54MiB（93%）是 sns-webpic 图片（34 张）；
-//   - 把全部 <img> 换成占位后，DOM 节点数、正文、评论数、点赞按钮、评论框、
-//     滚动容器完全不变 → 文本/评论/互动提取不依赖像素；
-//   - 笔记图片 URL 来自页面数据层 __INITIAL_STATE__.note.noteDetailMap[].note.imageList，
-//     与图片请求是否成功无关 → 图片 URL 提取也不受影响；
-//   - 该页没有任何字体与视频请求，所以不拦字体（避免无收益的改动）。
-//
-// 注意：绝不能拦 fe-static.xhscdn.com（它同时提供 JS/CSS）。
-var lowResourceBlockedURLPatterns = []string{
-	"*sns-webpic*.xhscdn.com/*", // 笔记图片（最大头）
-	"*sns-img*.xhscdn.com/*",    // 图片 CDN 的另一种域名形态
-	"*sns-avatar*.xhscdn.com/*", // 头像：单张很小但请求次数多，Pi 上每次都要 TLS+解码
-	"*.mp4*",                    // 视频笔记
-	"*.m3u8*",
-	"*.m4s*",
-	"*.mpd*",
-	"*.flv*",
-}
-
 // BrowserBlockedURLPatterns 返回逐页拦截的 URL 模式。
 // XHS_BROWSER_BLOCK_URLS 逗号分隔且**优先**（设为 "-" 表示不拦截任何资源，
-// 空值按"未设置"处理）；未设置时低资源档返回默认媒体拦截列表，其他平台返回空。
+// 空值按"未设置"处理）；未设置时不拦截资源，低资源媒体拦截需显式配置。
 func BrowserBlockedURLPatterns() []string {
 	raw := strings.TrimSpace(os.Getenv("XHS_BROWSER_BLOCK_URLS"))
 	if raw == "-" {
@@ -238,10 +216,7 @@ func BrowserBlockedURLPatterns() []string {
 		}
 		return patterns
 	}
-	if !LowResourceProfile() {
-		return nil
-	}
-	return append([]string(nil), lowResourceBlockedURLPatterns...)
+	return nil
 }
 
 // defaultIdentityCheckInterval 身份指纹采集的默认节流间隔。

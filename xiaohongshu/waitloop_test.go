@@ -66,3 +66,16 @@ func TestPublishLeftForm(t *testing.T) {
 		}
 	}
 }
+
+func TestSafePublishURLRedactsSensitiveParts(t *testing.T) {
+	cases := map[string]string{
+		"https://creator.xiaohongshu.com/explore/abc?token=secret#top": "https://creator.xiaohongshu.com/explore/abc",
+		"https://user:pass@creator.xiaohongshu.com/publish/success":       "https://creator.xiaohongshu.com/publish/success",
+		"not a url":                                                     "[redacted]",
+	}
+	for rawURL, want := range cases {
+		if got := safePublishURL(rawURL); got != want {
+			t.Fatalf("safePublishURL(%q) = %q, 期望 %q", rawURL, got, want)
+		}
+	}
+}
