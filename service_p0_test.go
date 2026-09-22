@@ -18,23 +18,24 @@ import (
 func TestRunReadyWithColdStartRecoveryRetriesOnlyNarrowStall(t *testing.T) {
 	stall := fmt.Errorf("页面停止推进: %w", context.DeadlineExceeded)
 	tests := []struct {
-		name       string
-		newPage    bool
-		force      bool
-		cancel     bool
-		first      error
-		second     error
-		wantCalls  int
-		wantResult error
+		name            string
+		newPage         bool
+		force           bool
+		cancel          bool
+		first           error
+		second          error
+		wantReadyCalls  int
+		wantWaitCalls   int
+		wantResult      error
 	}{
-		{name: "cold stall", newPage: true, first: stall, wantCalls: 2},
-		{name: "ordinary error", newPage: true, first: errors.New("navigate failed"), wantCalls: 1, wantResult: errors.New("navigate failed")},
-		{name: "stall text only", newPage: true, first: errors.New("页面停止推进"), wantCalls: 1, wantResult: errors.New("页面停止推进")},
-		{name: "deadline only", newPage: true, first: context.DeadlineExceeded, wantCalls: 1, wantResult: context.DeadlineExceeded},
-		{name: "warm page", first: stall, wantCalls: 1, wantResult: stall},
-		{name: "force recreate", newPage: true, force: true, first: stall, wantCalls: 1, wantResult: stall},
-		{name: "caller canceled", newPage: true, cancel: true, first: stall, wantCalls: 1, wantResult: stall},
-		{name: "retry failure propagates", newPage: true, first: stall, second: errors.New("retry failed"), wantCalls: 2, wantResult: errors.New("retry failed")},
+		{name: "cold stall", newPage: true, first: stall, wantReadyCalls: 1, wantWaitCalls: 1},
+		{name: "ordinary error", newPage: true, first: errors.New("navigate failed"), wantReadyCalls: 1, wantResult: errors.New("navigate failed")},
+		{name: "stall text only", newPage: true, first: errors.New("页面停止推进"), wantReadyCalls: 1, wantResult: errors.New("页面停止推进")},
+		{name: "deadline only", newPage: true, first: context.DeadlineExceeded, wantReadyCalls: 1, wantResult: context.DeadlineExceeded},
+		{name: "warm page", first: stall, wantReadyCalls: 1, wantResult: stall},
+		{name: "force recreate", newPage: true, force: true, first: stall, wantReadyCalls: 1, wantResult: stall},
+		{name: "caller canceled", newPage: true, cancel: true, first: stall, wantReadyCalls: 1, wantResult: stall},
+		{name: "retry failure propagates", newPage: true, first: stall, second: errors.New("retry failed"), wantReadyCalls: 1, wantWaitCalls: 1, wantResult: errors.New("retry failed")},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -43,16 +44,23 @@ func TestRunReadyWithColdStartRecoveryRetriesOnlyNarrowStall(t *testing.T) {
 			if tt.cancel {
 				cancel()
 			}
-			calls := 0
-			got := runReadyWithColdStartRecovery(ctx, tt.newPage, tt.force, func(context.Context) error {
-				calls++
-				if calls == 1 {
+			readyCalls := 0
+			waitCalls := 0
+			got := runReadyWithColdStartRecovery(ctx, tt.newPage, tt.force,
+				func(context.Context) error {
+					readyCalls++
 					return tt.first
-				}
-				return tt.second
-			})
-			if calls != tt.wantCalls {
-				t.Fatalf("ready 调用次数 = %d, want %d", calls, tt.wantCalls)
+				},
+				func(context.Context) error {
+					waitCalls++
+					return tt.second
+				},
+			)
+			if readyCalls != tt.wantReadyCalls {
+				t.Fatalf("ready 调用次数 = %d, want %d", readyCalls, tt.wantReadyCalls)
+			}
+			if waitCalls != tt.wantWaitCalls {
+				t.Fatalf("wait-only 调用次数 = %d, want %d", waitCalls, tt.wantWaitCalls)
 			}
 			if (got == nil) != (tt.wantResult == nil) || (got != nil && got.Error() != tt.wantResult.Error()) {
 				t.Fatalf("结果 = %v, want %v", got, tt.wantResult)

@@ -665,6 +665,11 @@ func (s *XiaohongshuService) CheckLoginStatus(ctx context.Context) (*LoginStatus
 
 	err := runReadyWithColdStartRecovery(ctx, newPage, false, func(readyCtx context.Context) error {
 		return xiaohongshu.EnsureReadyOn(page.Context(readyCtx), xiaohongshu.ExploreURL, xiaohongshu.XHSReadyHomeSearch, 0)
+	}, func(waitCtx context.Context) error {
+		return xiaohongshu.WaitForXHSReady(page.Context(waitCtx), xiaohongshu.XHSReadyOptions{
+			Kind:    xiaohongshu.XHSReadyHomeSearch,
+			Timeout: 0,
+		})
 	})
 	if err != nil {
 		return nil, err
@@ -1330,6 +1335,11 @@ func (s *XiaohongshuService) CreateBrowseSession(ctx context.Context, forceRecre
 	// 0 = 自适应预算（按本机观测收敛），不再写死 120s：Pi 3B 与 x86 的合理值差一个数量级。
 	err = runReadyWithColdStartRecovery(ctx, newPage, forceRecreate, func(readyCtx context.Context) error {
 		return xiaohongshu.EnsureReadyOn(page.Context(readyCtx), xiaohongshu.ExploreURL, xiaohongshu.XHSReadyHomeSearch, 0)
+	}, func(waitCtx context.Context) error {
+		return xiaohongshu.WaitForXHSReady(page.Context(waitCtx), xiaohongshu.XHSReadyOptions{
+			Kind:    xiaohongshu.XHSReadyHomeSearch,
+			Timeout: 0,
+		})
 	})
 	if err != nil {
 		s.browserManager.Release(page)
@@ -1352,7 +1362,7 @@ func (s *XiaohongshuService) CreateBrowseSession(ctx context.Context, forceRecre
 	}, nil
 }
 
-func runReadyWithColdStartRecovery(ctx context.Context, newPage, forceRecreate bool, ready func(context.Context) error) error {
+func runReadyWithColdStartRecovery(ctx context.Context, newPage, forceRecreate bool, ready, waitReady func(context.Context) error) error {
 	err := ready(ctx)
 	if err == nil || forceRecreate || !newPage || ctx.Err() != nil ||
 		!strings.Contains(err.Error(), "页面停止推进") || !errors.Is(err, context.DeadlineExceeded) {
@@ -1360,7 +1370,7 @@ func runReadyWithColdStartRecovery(ctx context.Context, newPage, forceRecreate b
 	}
 	retryCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
-	return ready(retryCtx)
+	return waitReady(retryCtx)
 }
 
 func (s *XiaohongshuService) tryReuseSession(ctx context.Context) *xiaohongshu.CreateBrowseSessionResult {
