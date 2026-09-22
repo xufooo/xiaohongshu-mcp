@@ -241,19 +241,18 @@ func (s *SearchAction) searchByUI(ctx context.Context, page *hrod.Page, counter 
 			return fmt.Errorf("点击搜索框失败: %w", err)
 		}
 	}
-	// Vue 控制的输入框需要先 JS 清空再键入，否则旧词残留
-	if _, err := evalJS(ctx, counter, page, `() => {
-		const el = document.activeElement;
-		if (el) { el.select(); document.execCommand('delete', false); }
-	}`); err != nil {
+	baseline, err := captureSearchResultsBaseline(ctx, page, counter)
+	if err != nil {
+		return fmt.Errorf("捕获搜索结果基线失败: %w", err)
+	}
+	if err := ensureSearchInputCleared(ctx, page, counter, searchSelector); err != nil {
 		return fmt.Errorf("清空搜索框失败: %w", err)
 	}
 	if err := input.Input(keyword); err != nil {
 		return fmt.Errorf("输入关键词失败: %w", err)
 	}
-	baseline, err := captureSearchResultsBaseline(ctx, page, counter)
-	if err != nil {
-		return fmt.Errorf("捕获搜索结果基线失败: %w", err)
+	if _, err := waitForSearchInputState(ctx, page, counter, searchSelector, keyword, false, true, false); err != nil {
+		return fmt.Errorf("确认搜索关键词失败: %w", err)
 	}
 
 	if err := page.Actor().Keyboard.Press(rodinput.Enter); err != nil {
@@ -267,20 +266,152 @@ func (s *SearchAction) searchByUI(ctx context.Context, page *hrod.Page, counter 
 	return nil
 }
 
+type searchInputState struct {
+	Found   bool   `json:"found"`
+	Focused bool   `json:"focused"`
+	Empty   bool   `json:"empty"`
+	Value   string `json:"value"`
+}
+
 type searchResultsBaseline struct {
 	StateSignature string
 	DOMSignature   string
 }
 
-func captureSearchResultsBaseline(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter) (searchResultsBaseline, error) {
-	probe, err := probeSearchResultsKeyword(ctx, page, counter, "")
+func waitForSearchInputState(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, selector, expectedValue string, requireEmpty, checkValue, returnOnFocusedNonEmpty bool) (searchInputState, error) {
+	var last searchInputState
+	var lastErr error
+	err := waitForCondition(waitRound{
+		Kind:    "search_input",
+		Page:    page,
+		Ceiling: searchInputWaitTimeout,
+		Probe: func() (string, bool, error) {
+			state, err := probeSearchInputState(ctx, page, counter, selector)
+			if err != nil {
+				lastErr = err
+				if isEvalTimeout(err) && !IsFatalRendererError(err) {
+					return "", false, err
+				}
+				return "", false, fatalWait(err)
+			}
+			lastErr = nil
+			last = state
+			ready := state.Found && state.Focused
+			if requireEmpty {
+				ready = ready && state.Empty
+			}
+			if checkValue {
+				ready = ready && state.Value == expectedValue
+			}
+			if returnOnFocusedNonEmpty && state.Found && state.Focused && !state.Empty {
+				ready = true
+			}
+			return fmt.Sprintf("%t|%t|%t|%d", state.Found, state.Focused, state.Empty, len(state.Value)), ready, nil
+		},
+		OnExhausted: func() error {
+			if lastErr != nil {
+				return lastErr
+			}
+			return fmt.Errorf("搜索框状态未满足: selector=%q found=%v focused=%v empty=%v", selector, last.Found, last.Focused, last.Empty)
+		},
+	})
+	return last, err
+}
+
+func probeSearchInputState(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, selector string) (searchInputState, error) {
+	obj, err := evalJS(ctx, counter, page, `(selector) => {
+		const el = document.querySelector(selector);
+		if (!el || !el.isConnected) return JSON.stringify({found: false});
+		const value = "value" in el ? String(el.value ?? "") : String(el.textContent ?? "");
+		return JSON.stringify({
+			found: true,
+			focused: el === document.activeElement,
+			empty: value === "",
+			value,
+		});
+	}`, selector)
 	if err != nil {
-		return searchResultsBaseline{}, err
+		return searchInputState{}, err
 	}
-	return searchResultsBaseline{
-		StateSignature: probe.StateSignature,
-		DOMSignature:   probe.DOMSignature,
-	}, nil
+	if obj == nil {
+		return searchInputState{}, fmt.Errorf("搜索框状态探测无返回")
+	}
+	var state searchInputState
+	if err := json.Unmarshal([]byte(obj.Value.Str()), &state); err != nil {
+		return searchInputState{}, fmt.Errorf("解析搜索框状态失败: %w", err)
+	}
+	return state, nil
+}
+
+func clearSearchInput(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, selector string) error {
+	_, err := evalJS(ctx, counter, page, `(selector) => {
+		const el = document.querySelector(selector);
+		if (!el || !el.isConnected || el !== document.activeElement) return false;
+		const value = "value" in el ? String(el.value ?? "") : String(el.textContent ?? "");
+		if (value === "") return true;
+		el.select();
+		document.execCommand("delete", false);
+		return true;
+	}`, selector)
+	return err
+}
+
+func ensureSearchInputCleared(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, selector string) error {
+	state, err := waitForSearchInputState(ctx, page, counter, selector, "", false, false, false)
+	if err != nil {
+		return err
+	}
+	if state.Empty {
+		return nil
+	}
+
+	for attempt := 0; attempt < 2; attempt++ {
+		clearErr := clearSearchInput(ctx, page, counter, selector)
+		if clearErr != nil && !isEvalTimeout(clearErr) {
+			return clearErr
+		}
+		state, confirmErr := waitForSearchInputState(ctx, page, counter, selector, "", true, false, true)
+		if confirmErr == nil && state.Empty {
+			return nil
+		}
+		if !state.Found || !state.Focused || state.Empty || attempt == 1 {
+			if confirmErr != nil {
+				return confirmErr
+			}
+			return fmt.Errorf("搜索框清空未生效: selector=%q", selector)
+		}
+	}
+	return fmt.Errorf("搜索框清空未生效: selector=%q", selector)
+}
+
+func captureSearchResultsBaseline(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter) (searchResultsBaseline, error) {
+	var baseline searchResultsBaseline
+	var lastErr error
+	err := waitForCondition(waitRound{
+		Kind:    "search_results",
+		Page:    page,
+		Ceiling: func() time.Duration { ceiling, _ := waitCeilingForKind("search_results"); return ceiling }(),
+		Probe: func() (string, bool, error) {
+			probe, err := probeSearchResultsKeyword(ctx, page, counter, "")
+			if err != nil {
+				lastErr = err
+				if isEvalTimeout(err) && !IsFatalRendererError(err) {
+					return "", false, err
+				}
+				return "", false, fatalWait(err)
+			}
+			lastErr = nil
+			baseline = searchResultsBaseline{StateSignature: probe.StateSignature, DOMSignature: probe.DOMSignature}
+			return probe.StateSignature + "|" + probe.DOMSignature, true, nil
+		},
+		OnExhausted: func() error {
+			if lastErr != nil {
+				return lastErr
+			}
+			return fmt.Errorf("搜索结果基线未就绪")
+		},
+	})
+	return baseline, err
 }
 
 // waitForSearchResults 等搜索结果真正落到「关键词对应的那批数据」。
