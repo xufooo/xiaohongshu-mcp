@@ -12,16 +12,27 @@ import (
 	hrod "github.com/xpzouying/xiaohongshu-mcp/humanize/rod"
 )
 
+const detailIdentityConflictMarker = "__identity_conflict__"
+
 // interactStateJS 是唯一的互动状态来源：按 feedID 精确读取
 // __INITIAL_STATE__.note.noteDetailMap[feedID].note.interactInfo。
 // map、目标 key、interactInfo 或任一布尔字段缺失时返回 null（unknown，fail-closed）。
 const interactStateJS = `
-	const noteDetailMap = window.__INITIAL_STATE__?.note?.noteDetailMap;
+	const rootCount = uniqueDetailRootCount();
+	if (rootCount === 0) return null;
+	const noteDetailMap = stateNoteDetailMap();
 	if (!feedID || !noteDetailMap ||
 		!Object.prototype.hasOwnProperty.call(noteDetailMap, feedID)) {
-		return null;
+		return "__identity_conflict__";
 	}
-	const interactInfo = noteDetailMap[feedID]?.note?.interactInfo;
+	if (activeNoteId() !== feedID || targetStateNoteId(noteDetailMap, feedID) !== feedID ||
+		rootCount !== 1 || !detailURLMatchesFeedID(location.href) || !uniqueDetailRoot() ||
+		!detailRootContentMatched(feedID)) {
+		return "__identity_conflict__";
+	}
+	const detail = unwrapActiveValue(noteDetailMap[feedID]);
+	const note = unwrapActiveValue(detail?.note ?? detail);
+	const interactInfo = unwrapActiveValue(note?.interactInfo);
 	if (!interactInfo ||
 		typeof interactInfo.liked !== "boolean" ||
 		typeof interactInfo.collected !== "boolean") {
@@ -42,7 +53,7 @@ const domCleanJS = `
 const domNoteHelpersJS = `
 	const pickText = (selectors) => {
 		for (const selector of selectors) {
-			const el = document.querySelector(selector);
+			const el = targetRoot.querySelector(selector);
 			const text = clean(el?.innerText || el?.textContent);
 			if (text) return text;
 		}
@@ -50,7 +61,7 @@ const domNoteHelpersJS = `
 	};
 	const pickAttr = (selectors, attr) => {
 		for (const selector of selectors) {
-			const el = document.querySelector(selector);
+			const el = targetRoot.querySelector(selector);
 			const value = el?.getAttribute(attr) || "";
 			if (value) return value;
 		}
@@ -58,7 +69,7 @@ const domNoteHelpersJS = `
 	};
 	const countNear = (selectors) => {
 		for (const selector of selectors) {
-			const el = document.querySelector(selector);
+			const el = targetRoot.querySelector(selector);
 			if (!el) continue;
 			const text = clean(el.innerText || el.textContent || el.parentElement?.innerText);
 			const match = text.match(/([\d.万wWkK]+)/);
@@ -70,7 +81,10 @@ const domNoteHelpersJS = `
 
 // domCommentExtractorJS 定义 extractComments(feedID)，内容逐字符源自三处相同评论遍历逻辑。
 const domCommentExtractorJS = `
-	const extractComments = (feedID) => Array.from(document.querySelectorAll(".parent-comment")).map((parent) => {
+	const extractComments = (feedID) => {
+		const root = uniqueDetailRoot();
+		if (!root) return [];
+		return Array.from(root.querySelectorAll(".parent-comment")).map((parent) => {
 		const top = parent.querySelector(":scope > .comment-item") || parent;
 		const content = clean(top.querySelector(".content, .note-text, [class*='content']")?.innerText || top.innerText);
 		const user = clean(top.querySelector(".author-wrapper .name, .name, .nickname, [class*='name']")?.innerText);
@@ -100,6 +114,7 @@ const domCommentExtractorJS = `
 			showTags: []
 		};
 	}).filter((comment) => comment.content);
+	};
 `
 
 // OpenedNoteSnapshot 是打开笔记后的一次 DOM 快照：正文、图片、数据层互动状态和当前首屏评论。
@@ -136,21 +151,25 @@ func finishOpenedNoteSnapshotAttempt(ctx context.Context, counter *evalTimeoutCo
 }
 
 func extractOpenedNoteFieldsFromDOM(ctx context.Context, page *hrod.Page, feedID string) (OpenedNoteContent, error) {
-	result, err := evalJSDirect(ctx, page, `(feedID) => {` + domCleanJS + domNoteHelpersJS + `
+	result, err := evalJSDirect(ctx, page, `(feedID) => {` + xhsVisibleJS + xhsProbeFeedMatchJS + domCleanJS + domNoteHelpersJS + `
+		if (uniqueDetailRootCount() === 0) return "";
+		const targetRoot = uniqueDetailRoot();
+		if (!targetRoot || !detailRootMatched(feedID)) return "__identity_conflict__";
 		const title = pickText(["#detail-title", ".note-content .title", ".title", "[class*='title']"]);
 		const desc = pickText(["#detail-desc", ".note-content .desc", ".note-text", ".desc", "[class*='desc']"]);
 		const author = pickText([".author .name", ".author-wrapper .name", ".user .name", ".nickname", "[class*='author'] [class*='name']"]);
 		const avatar = pickAttr([".author img", ".user img", ".avatar img", "img.avatar"], "src");
-		const images = Array.from(document.querySelectorAll(".swiper img, .note-content img, .media-container img"))
+		const images = Array.from(targetRoot.querySelectorAll(".swiper img, .note-content img, .media-container img"))
 			.map((img) => ({ width: img.naturalWidth || 0, height: img.naturalHeight || 0, urlDefault: img.src || "", urlPre: img.src || "" }))
 			.filter((img) => img.urlDefault);
 		const interact = (() => {` + interactStateJS + `})();
+		if (interact === "__identity_conflict__") return "__identity_conflict__";
 		if (!interact) return "";
 		return JSON.stringify({
 			note_id: feedID,
 			title,
 			desc,
-			type: document.querySelector("video") ? "video" : "normal",
+			type: targetRoot.querySelector("video") ? "video" : "normal",
 			user: { nickname: author, nickName: author, avatar },
 			interactInfo: {
 				liked: interact.liked,
@@ -169,6 +188,9 @@ func extractOpenedNoteFieldsFromDOM(ctx context.Context, page *hrod.Page, feedID
 		}
 		return OpenedNoteContent{}, fmt.Errorf("提取打开笔记快照失败: DOM Eval%s: %w", kind, err)
 	}
+	if result != nil && strings.TrimSpace(result.Value.Str()) == detailIdentityConflictMarker {
+		return OpenedNoteContent{}, ErrDetailIdentityConflict
+	}
 	if result == nil || strings.TrimSpace(result.Value.Str()) == "" {
 		return OpenedNoteContent{}, fmt.Errorf("DOM快照返回为空: %w", errors.ErrNoFeedDetail)
 	}
@@ -181,7 +203,9 @@ func extractOpenedNoteFieldsFromDOM(ctx context.Context, page *hrod.Page, feedID
 }
 
 func extractOpenedNoteCommentsFromDOM(ctx context.Context, page *hrod.Page, feedID string) ([]Comment, error) {
-	result, err := evalJSDirect(ctx, page, `(feedID) => {` + domCleanJS + domCommentExtractorJS + `
+	result, err := evalJSDirect(ctx, page, `(feedID) => {` + xhsVisibleJS + xhsProbeFeedMatchJS + domCleanJS + domCommentExtractorJS + `
+		if (uniqueDetailRootCount() === 0) return "";
+		if (!detailRootMatched(feedID)) return "__identity_conflict__";
 		return JSON.stringify(extractComments(feedID));
 	}`, feedID)
 	if err != nil {
@@ -190,6 +214,9 @@ func extractOpenedNoteCommentsFromDOM(ctx context.Context, page *hrod.Page, feed
 			kind = "超时"
 		}
 		return nil, fmt.Errorf("提取打开笔记快照失败: DOM Eval%s: %w", kind, err)
+	}
+	if result != nil && strings.TrimSpace(result.Value.Str()) == detailIdentityConflictMarker {
+		return nil, ErrDetailIdentityConflict
 	}
 	if result == nil || strings.TrimSpace(result.Value.Str()) == "" {
 		return nil, fmt.Errorf("DOM快照返回为空: %w", errors.ErrNoFeedDetail)
@@ -350,15 +377,19 @@ func extractSearchFeedSources(ctx context.Context, page *hrod.Page, counter *eva
 
 // ExtractFeedDetailFromDOM 从当前详情页可见 DOM 提取笔记、作者、评论和互动状态。
 func ExtractFeedDetailFromDOM(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, feedID string) (*FeedDetailResponse, error) {
-	result, err := evalJS(ctx, counter, page, `(feedID) => {` + domCleanJS + domNoteHelpersJS + domCommentExtractorJS + `
+	result, err := evalJS(ctx, counter, page, `(feedID) => {` + xhsVisibleJS + xhsProbeFeedMatchJS + domCleanJS + domNoteHelpersJS + domCommentExtractorJS + `
+		if (uniqueDetailRootCount() === 0) return "";
+		const targetRoot = uniqueDetailRoot();
+		if (!targetRoot || !detailRootMatched(feedID)) return "__identity_conflict__";
 		const interact = (() => {` + interactStateJS + `})();
+		if (interact === "__identity_conflict__") return "__identity_conflict__";
 		if (!interact) return "";
 
 		const title = pickText(["#detail-title", ".note-content .title", ".title", "[class*='title']"]);
 		const desc = pickText(["#detail-desc", ".note-content .desc", ".note-text", ".desc", "[class*='desc']"]);
 		const author = pickText([".author .name", ".author-wrapper .name", ".user .name", ".nickname", "[class*='author'] [class*='name']"]);
 		const avatar = pickAttr([".author img", ".user img", ".avatar img", "img.avatar"], "src");
-		const images = Array.from(document.querySelectorAll(".swiper img, .note-content img, .media-container img"))
+		const images = Array.from(targetRoot.querySelectorAll(".swiper img, .note-content img, .media-container img"))
 			.map((img) => ({ width: img.naturalWidth || 0, height: img.naturalHeight || 0, urlDefault: img.src || "", urlPre: img.src || "" }))
 			.filter((img) => img.urlDefault);
 		const comments = extractComments(feedID);
@@ -369,7 +400,7 @@ func ExtractFeedDetailFromDOM(ctx context.Context, page *hrod.Page, counter *eva
 				xsecToken: (() => { try { return new URL(location.href).searchParams.get("xsec_token") || ""; } catch (_) { return ""; } })(),
 				title,
 				desc,
-				type: document.querySelector("video") ? "video" : "normal",
+				type: targetRoot.querySelector("video") ? "video" : "normal",
 				user: { nickname: author, nickName: author, avatar },
 				interactInfo: {
 					liked: interact.liked,
@@ -387,6 +418,9 @@ func ExtractFeedDetailFromDOM(ctx context.Context, page *hrod.Page, counter *eva
 	}`, feedID)
 	if err != nil {
 		return nil, fmt.Errorf("提取 DOM Feed 详情失败: %w", err)
+	}
+	if result != nil && strings.TrimSpace(result.Value.Str()) == detailIdentityConflictMarker {
+		return nil, ErrDetailIdentityConflict
 	}
 	if result == nil || strings.TrimSpace(result.Value.Str()) == "" {
 		return nil, errors.ErrNoFeedDetail
@@ -421,15 +455,18 @@ func extractCommentsPageWithProgressFromDOM(ctx context.Context, page *hrod.Page
 	result, err := page.Context(ctx).Eval(`(feedID) => {
 		const phaseMarker = "__xhsCommentPaginationPhase";
 		window[phaseMarker] = "";
-		window[phaseMarker] = "dom-query";` + domCleanJS + domCommentExtractorJS + `
+		window[phaseMarker] = "dom-query";` + xhsVisibleJS + xhsProbeFeedMatchJS + domCleanJS + domCommentExtractorJS + `
+		if (uniqueDetailRootCount() === 0) { window[phaseMarker] = ""; return ""; }
+		if (!detailRootMatched(feedID)) { window[phaseMarker] = ""; return "__identity_conflict__"; }
+		const targetRoot = uniqueDetailRoot();
 		window[phaseMarker] = "full-scan";
 		const comments = extractComments(feedID);
 		window[phaseMarker] = "dom-query";
-		const totalText = (document.querySelector(".comments-container .total") ||
-			document.querySelector(".comment-total") || document.querySelector(".total"))?.innerText || "";
+		const totalText = (targetRoot.querySelector(".comments-container .total") ||
+			targetRoot.querySelector(".comment-total") || targetRoot.querySelector(".total"))?.innerText || "";
 		const totalMatch = totalText.match(/共\s*(\d+)\s*条评论/);
-		const endText = document.querySelector(".end-container")?.textContent || "";
-		const noCommentsText = document.querySelector(".no-comments-text")?.textContent || "";
+		const endText = targetRoot.querySelector(".end-container")?.textContent || "";
+		const noCommentsText = targetRoot.querySelector(".no-comments-text")?.textContent || "";
 		window[phaseMarker] = "stringify";
 		const serialized = JSON.stringify({
 			comments,
@@ -463,6 +500,9 @@ func extractCommentsPageWithProgressFromDOM(ctx context.Context, page *hrod.Page
 		}
 		return commentPageDOMSnapshot{}, fmt.Errorf("提取分页 DOM 评论失败: %w", err)
 	}
+	if result != nil && strings.TrimSpace(result.Value.Str()) == detailIdentityConflictMarker {
+		return commentPageDOMSnapshot{}, ErrDetailIdentityConflict
+	}
 	if result == nil || strings.TrimSpace(result.Value.Str()) == "" {
 		return commentPageDOMSnapshot{}, errors.ErrNoFeedDetail
 	}
@@ -475,13 +515,16 @@ func extractCommentsPageWithProgressFromDOM(ctx context.Context, page *hrod.Page
 }
 
 func extractCommentsWithProgressFromDOM(ctx context.Context, page *hrod.Page, feedID string) (commentsDOMSnapshot, error) {
-	result, err := evalJSNoCounter(ctx, page, `(feedID) => {` + domCleanJS + domCommentExtractorJS + `
+	result, err := evalJSNoCounter(ctx, page, `(feedID) => {` + xhsVisibleJS + xhsProbeFeedMatchJS + domCleanJS + domCommentExtractorJS + `
+		if (uniqueDetailRootCount() === 0) return "";
+		if (!detailRootMatched(feedID)) return "__identity_conflict__";
+		const targetRoot = uniqueDetailRoot();
 		const comments = extractComments(feedID);
-		const totalText = (document.querySelector(".comments-container .total") ||
-			document.querySelector(".comment-total") || document.querySelector(".total"))?.innerText || "";
+		const totalText = (targetRoot.querySelector(".comments-container .total") ||
+			targetRoot.querySelector(".comment-total") || targetRoot.querySelector(".total"))?.innerText || "";
 		const totalMatch = totalText.match(/共\s*(\d+)\s*条评论/);
-		const endText = document.querySelector(".end-container")?.textContent || "";
-		const noCommentsText = document.querySelector(".no-comments-text")?.textContent || "";
+		const endText = targetRoot.querySelector(".end-container")?.textContent || "";
+		const noCommentsText = targetRoot.querySelector(".no-comments-text")?.textContent || "";
 		return JSON.stringify({
 			comments,
 			progress: {
@@ -493,6 +536,9 @@ func extractCommentsWithProgressFromDOM(ctx context.Context, page *hrod.Page, fe
 	}`, feedID)
 	if err != nil {
 		return commentsDOMSnapshot{}, fmt.Errorf("提取 DOM 评论失败: %w", err)
+	}
+	if result != nil && strings.TrimSpace(result.Value.Str()) == detailIdentityConflictMarker {
+		return commentsDOMSnapshot{}, ErrDetailIdentityConflict
 	}
 	if result == nil || strings.TrimSpace(result.Value.Str()) == "" {
 		return commentsDOMSnapshot{}, errors.ErrNoFeedDetail
@@ -507,13 +553,17 @@ func extractCommentsWithProgressFromDOM(ctx context.Context, page *hrod.Page, fe
 
 // ExtractInteractStateFromDOM 复用唯一的数据层互动状态片段读取点赞/收藏状态。
 func ExtractInteractStateFromDOM(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, feedID string) (bool, bool, error) {
-	result, err := evalJS(ctx, counter, page, `(feedID) => {
+	result, err := evalJS(ctx, counter, page, `(feedID) => {` + xhsVisibleJS + xhsProbeFeedMatchJS + `
 		const interact = (() => {` + interactStateJS + `})();
+		if (interact === "__identity_conflict__") return "__identity_conflict__";
 		if (!interact) return "";
 		return JSON.stringify(interact);
 	}`, feedID)
 	if err != nil {
 		return false, false, err
+	}
+	if result != nil && strings.TrimSpace(result.Value.Str()) == detailIdentityConflictMarker {
+		return false, false, ErrDetailIdentityConflict
 	}
 	if result == nil || strings.TrimSpace(result.Value.Str()) == "" {
 		return false, false, errors.ErrNoFeedDetail

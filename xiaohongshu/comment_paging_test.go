@@ -5,6 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -150,10 +155,14 @@ func newCommentPagingPage(t *testing.T, client *commentPagingCDPClient) *hrod.Pa
 	client.callFunctionObjectIDs = nil
 	client.callFunctionArguments = nil
 	client.targetCalls = 0
-	return &hrod.Page{Rod: page}
+	return (&hrod.Page{Rod: page}).Context(context.Background())
 }
 
 const realCommentPagingHTML = `<!doctype html>
+<div class="note-detail-mask" style="display:none"><div class="note-container"><div class="note-content"><div id="detail-title">Stale Other Title</div></div></div></div>
+<div class="note-detail-mask"><div class="note-container" id="noteContainer">
+<div class="note-content"><div id="detail-title">Test Note Title</div><div class="author-wrapper"><span class="name">note author</span><a href="/user/profile/user-1">author</a></div><div id="detail-desc">state description text with more DOM content</div><div class="swiper"><img src="https://example.com/img1.jpg"></div></div>
+<div class="interact-container"></div>
 <div class="comments-container"><span class="total">共 7 条评论</span></div>
 <div class="parent-comment" data-id="parent-1">
   <div class="comment-item" id="parent-1">
@@ -164,7 +173,7 @@ const realCommentPagingHTML = `<!doctype html>
   <div class="reply-container"><div class="list-container">
     <div class="comment-item" id="reply-1">
       <div class="content">reply 1</div>
-      <div class="author-wrapper"><span class="name">reply user 1</span></div>
+      <div class="author-wrapper"><span class="name">reply user 1</span><a href="/user/profile/decoy-user">decoy</a></div>
       <div class="interactions"><span class="like">1</span></div>
     </div>
     <div class="comment-item" id="reply-1"><div class="content">duplicate reply</div></div>
@@ -184,7 +193,9 @@ const realCommentPagingHTML = `<!doctype html>
   </div></div>
 </div>
 <div class="end-container">THE END</div>
+</div></div>
 <script>
+window.__INITIAL_STATE__ = {note: {currentNoteId: "feed-1", noteDetailMap: {"feed-1": {note: {noteId: "feed-1", title: "Test Note Title", desc: "state description text", user: {userId: "user-1"}, interactInfo: {liked: false, collected: false, commentCount: "7"}, imageList: [{urlDefault: "https://example.com/img1.jpg"}]}}}}};
 window.authorLikeReads = 0;
 for (const element of document.querySelectorAll(".author-wrapper .name, .interactions .like")) {
   const value = element.textContent;
@@ -226,6 +237,78 @@ func newRealCommentPagingPage(t *testing.T) *hrod.Page {
 		t.Fatalf("设置真实 DOM fixture: %v", err)
 	}
 	return &hrod.Page{Rod: page}
+}
+
+func newOfficialURLCommentPagingPage(t *testing.T, feedID string) *hrod.Page {
+	t.Helper()
+	bin, hasBrowser := launcher.LookPath()
+	if !hasBrowser {
+		t.Skip("未找到 Chrome/Chromium，跳过官方 URL 分页 fixture")
+	}
+	origin := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(realCommentPagingHTML))
+	}))
+	t.Cleanup(origin.Close)
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodConnect {
+			http.Error(w, "CONNECT required", http.StatusMethodNotAllowed)
+			return
+		}
+		client, rw, err := http.NewResponseController(w).Hijack()
+		if err != nil {
+			return
+		}
+		upstream, err := net.Dial("tcp", origin.Listener.Addr().String())
+		if err != nil {
+			_, _ = rw.WriteString("HTTP/1.1 502 Bad Gateway\r\n\r\n")
+			_ = rw.Flush()
+			_ = client.Close()
+			return
+		}
+		_, _ = rw.WriteString("HTTP/1.1 200 Connection Established\r\n\r\n")
+		if rw.Flush() != nil {
+			_ = client.Close()
+			_ = upstream.Close()
+			return
+		}
+		go func() {
+			_, _ = io.Copy(upstream, client)
+			_ = upstream.Close()
+		}()
+		_, _ = io.Copy(client, upstream)
+		_ = client.Close()
+		_ = upstream.Close()
+	}))
+	t.Cleanup(proxy.Close)
+	proxyAddr := strings.TrimPrefix(proxy.URL, "http://")
+	browserLauncher := launcher.New().Bin(bin).Headless(true).NoSandbox(true).
+		Set("proxy-server", proxyAddr).
+		Set("ignore-certificate-errors")
+	controlURL, err := browserLauncher.Launch()
+	if err != nil {
+		t.Fatalf("启动真实测试浏览器: %v", err)
+	}
+	browser := rod.New().ControlURL(controlURL)
+	if err := browser.Connect(); err != nil {
+		browserLauncher.Kill()
+		t.Fatalf("连接真实测试浏览器: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = browser.Close()
+		browserLauncher.Kill()
+	})
+	page, err := browser.Page(proto.TargetCreateTarget{})
+	if err != nil {
+		t.Fatalf("创建真实测试页面: %v", err)
+	}
+	if err := page.Navigate("https://www.xiaohongshu.com/explore/" + feedID); err != nil {
+		t.Fatalf("导航官方 URL fixture: %v", err)
+	}
+	if err := page.WaitLoad(); err != nil {
+		t.Fatalf("等待官方 URL fixture 加载: %v", err)
+	}
+	return (&hrod.Page{Rod: page}).Context(context.Background())
 }
 
 func commentPageRuntimeResponse(t *testing.T, snapshot commentPageDOMSnapshot) []byte {
@@ -325,21 +408,34 @@ func assertCommentPagingMainCalls(t *testing.T, client *commentPagingCDPClient, 
 	}
 }
 
+func commentIdentityProbeResponse() []byte {
+	value, _ := json.Marshal(map[string]any{
+		"url":                           "https://www.xiaohongshu.com/explore/feed-1",
+		"url_matched":                   true,
+		"visible_detail_count":          1,
+		"visible_matched_detail_count":  1,
+		"state_matched":                 true,
+	})
+	return []byte(`{"result":{"type":"string","value":` + strconv.Quote(string(value)) + `}}`)
+}
+
 func TestRecoverCommentBatchSession(t *testing.T) {
 	tests := []struct {
 		name, wantErr, wantDetail string
 		targetResponses          [][]byte
 		targetErrs               []error
 		targetCalls              int
+		probeResponses           [][]byte
+		wantRuntime              int
 	}{
-		{"success", "", "", [][]byte{commentPageTargetInfoResponse("https://www.xiaohongshu.com/explore/feed-1?x=1#comments")}, nil, 1},
-		{"first failure then success", "", "", [][]byte{commentPageTargetInfoResponse("https://www.xiaohongshu.com/explore"), commentPageTargetInfoResponse("https://www.xiaohongshu.com/discovery/item/feed-1?x=1#comments")}, nil, 2},
-		{"two failures", "无法确认 feed", "second target failure", nil, []error{errors.New("first target failure"), errors.New("second target failure")}, 2},
-		{"feed mismatch", "不匹配", "", [][]byte{commentPageTargetInfoResponse("https://www.xiaohongshu.com/explore/other-feed")}, nil, 1},
+		{"success", "", "", [][]byte{commentPageTargetInfoResponse("https://www.xiaohongshu.com/explore/feed-1?x=1#comments")}, nil, 1, [][]byte{commentIdentityProbeResponse()}, 1},
+		{"first failure then success", "", "", [][]byte{commentPageTargetInfoResponse("https://www.xiaohongshu.com/explore"), commentPageTargetInfoResponse("https://www.xiaohongshu.com/discovery/item/feed-1?x=1#comments")}, nil, 2, [][]byte{commentIdentityProbeResponse()}, 1},
+		{"two failures", "无法确认 feed", "second target failure", nil, []error{errors.New("first target failure"), errors.New("second target failure")}, 2, nil, 0},
+		{"feed mismatch", "不匹配", "", [][]byte{commentPageTargetInfoResponse("https://www.xiaohongshu.com/explore/other-feed")}, nil, 1, nil, 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			client := &commentPagingCDPClient{targetResponses: tt.targetResponses, targetErrs: tt.targetErrs}
+			client := &commentPagingCDPClient{targetResponses: tt.targetResponses, targetErrs: tt.targetErrs, runtimeResponses: tt.probeResponses}
 			err := runRecoverCommentBatchSession(t, context.Background(), client, "feed-1")
 			if tt.wantErr == "" {
 				if err != nil {
@@ -351,7 +447,9 @@ func TestRecoverCommentBatchSession(t *testing.T) {
 			if tt.wantDetail != "" && (err == nil || !strings.Contains(err.Error(), tt.wantDetail)) {
 				t.Fatalf("恢复确认错误详情错误: %v", err)
 			}
-			assertCommentPagingCalls(t, client, tt.targetCalls)
+			if client.targetCalls != tt.targetCalls || client.runtimeCalls != tt.wantRuntime {
+				t.Fatalf("CDP 调用次数错误: target=%d runtime=%d, 期望 target=%d runtime=%d", client.targetCalls, client.runtimeCalls, tt.targetCalls, tt.wantRuntime)
+			}
 		})
 	}
 }
@@ -687,8 +785,57 @@ func TestLoadCommentsBatchLimitZeroUsesSameSnapshotForProgress(t *testing.T) {
 	assertCommentPagingMainCalls(t, client, 2, "feed-1")
 }
 
-func TestExtractCommentsPageExecutesPaginationJS(t *testing.T) {
+func TestExtractCommentsPageIdentityBinding(t *testing.T) {
 	page := newRealCommentPagingPage(t)
+	evalIdentity := func(fid, check string) string {
+		t.Helper()
+		expression := `(` + `(feedID) => {` + xhsVisibleJS + xhsProbeFeedMatchJS + `const fid = feedID;` + check + `}` + `)(` + strconv.Quote(fid) + `)`
+		result, err := page.Rod.Eval(expression)
+		if err != nil || result == nil {
+			t.Fatalf("身份绑定探针执行失败: %v", err)
+		}
+		return result.Value.Str()
+	}
+	if got := evalIdentity("feed-1", `return String(!!uniqueDetailRoot() && detailRootContentMatched(fid));`); got != "true" {
+		t.Fatalf("可见 root 与 state 内容应绑定成功（隐藏陈旧 root 不得干扰）: %s", got)
+	}
+	if got := evalIdentity("other-feed", `return String(detailRootContentMatched(fid));`); got != "false" {
+		t.Fatalf("他笔记 ID 不得通过内容绑定: %s", got)
+	}
+	if _, err := extractCommentsPageWithProgressFromDOM(context.Background(), page, "feed-1"); !errors.Is(err, ErrDetailIdentityConflict) {
+		t.Fatalf("root 与 state 有效但 URL 未绑定时必须身份冲突: %v", err)
+	}
+	if _, err := page.Rod.Eval(`() => {
+		const pick = (sel) => Array.from(document.querySelectorAll(sel)).find((el) => el.getBoundingClientRect().width > 0 && el.getBoundingClientRect().height > 0);
+		pick("#detail-title").textContent = "Tampered";
+	}`); err != nil {
+		t.Fatalf("篡改标题失败: %v", err)
+	}
+	if got := evalIdentity("feed-1", `return String(detailRootContentMatched(fid));`); got != "false" {
+		t.Fatalf("标题不一致必须绑定失败: %s", got)
+	}
+	if _, err := page.Rod.Eval(`() => {
+		const pick = (sel) => Array.from(document.querySelectorAll(sel)).find((el) => el.getBoundingClientRect().width > 0 && el.getBoundingClientRect().height > 0);
+		pick("#detail-title").textContent = "Test Note Title";
+		const author = pick('.note-content a[href*="/user/profile/"]');
+		if (author) author.remove();
+	}`); err != nil {
+		t.Fatalf("移除头部作者链接失败: %v", err)
+	}
+	if got := evalIdentity("feed-1", `return String(detailRootContentMatched(fid));`); got != "false" {
+		t.Fatalf("头部作者缺失时评论区 decoy 链接不得顶替: %s", got)
+	}
+	result, err := page.Rod.Eval(`() => String(window.authorLikeReads)`)
+	if err != nil || result == nil {
+		t.Fatalf("读取 author/like 访问计数: %v", err)
+	}
+	if got := result.Value.Str(); got != "0" {
+		t.Fatalf("拒绝路径不得遍历评论作者/点赞: reads=%s", got)
+	}
+}
+
+func TestExtractCommentsPageExecutesPaginationJS(t *testing.T) {
+	page := newOfficialURLCommentPagingPage(t, "feed-1")
 	if _, err := page.Rod.Eval(`() => {
 		const phaseMarker = "__xhsCommentPaginationPhase";
 		let current = "";
@@ -696,53 +843,171 @@ func TestExtractCommentsPageExecutesPaginationJS(t *testing.T) {
 		let probed = false;
 		Object.defineProperty(window, phaseMarker, {
 			configurable: true,
-			get() {
-				probed = true;
-				return current;
-			},
-			set(value) {
-				current = value;
-				if (value === "completed") completed = true;
-			},
+			get() { probed = true; return current; },
+			set(value) { current = value; if (value === "completed") completed = true; },
 		});
 		window.__xhsCommentPaginationPhaseState = () => [completed, current, probed].join("|");
 	}`); err != nil {
 		t.Fatalf("安装分页阶段测试 accessor: %v", err)
 	}
-	readAuthorLikeReads := func() string {
-		result, err := page.Rod.Eval(`() => String(window.authorLikeReads)`)
-		if err != nil || result == nil {
-			t.Fatalf("读取 author/like 访问计数: %v", err)
-		}
-		return result.Value.Str()
-	}
-
 	snapshot, err := extractCommentsPageWithProgressFromDOM(context.Background(), page, "feed-1")
 	if err != nil {
 		t.Fatalf("真实分页 JS 执行失败: %v", err)
 	}
-	phaseStateResult, err := page.Rod.Eval(`() => window.__xhsCommentPaginationPhaseState()`)
-	if err != nil || phaseStateResult == nil {
-		t.Fatalf("读取分页阶段测试状态: %v", err)
-	}
-	if got := phaseStateResult.Value.Str(); got != "true||false" {
-		t.Fatalf("成功路径阶段 marker 状态错误: %s", got)
+	phase, err := page.Rod.Eval(`() => window.__xhsCommentPaginationPhaseState()`)
+	if err != nil || phase == nil || phase.Value.Str() != "true||false" {
+		t.Fatalf("成功路径阶段 marker 状态错误: result=%v err=%v", phase, err)
 	}
 	if len(snapshot.Comments) != 1 || snapshot.Comments[0].ID != "parent-1" {
-		t.Fatalf("完整父评论快照错误: %+v", snapshot.Comments)
+		t.Fatalf("父评论快照错误: %+v", snapshot.Comments)
 	}
 	parent := snapshot.Comments[0]
-	if parent.SubCommentCount != "6" || len(parent.SubComments) != 6 || snapshot.Progress.Total != 7 {
-		t.Fatalf("完整子评论快照或 progress 错误: %+v", snapshot)
-	}
 	wantIDs := []string{"reply-1", "reply-1", "", "reply-seen", "reply-2", "reply-3"}
+	if parent.SubCommentCount != "6" || len(parent.SubComments) != len(wantIDs) || snapshot.Progress.Total != 7 {
+		t.Fatalf("DOM 子评论快照或评论总数错误: snapshot=%+v", snapshot)
+	}
 	for i, want := range wantIDs {
 		if parent.SubComments[i].ID != want {
 			t.Fatalf("子评论快照顺序错误: index=%d got=%q want=%q", i, parent.SubComments[i].ID, want)
 		}
+		if parent.SubComments[i].Content == "" {
+			t.Fatalf("空内容子评论不应进入 DOM 快照: %+v", parent.SubComments[i])
+		}
 	}
-	if got := readAuthorLikeReads(); got != "8" {
-		t.Fatalf("完整快照未物化全部作者/点赞: reads=%s", got)
+	reads, err := page.Rod.Eval(`() => String(window.authorLikeReads)`)
+	if err != nil || reads == nil || reads.Value.Str() != "8" {
+		t.Fatalf("完整快照未物化全部作者/点赞: value=%v err=%v", reads, err)
+	}
+}
+
+func TestExtractCommentsPageOfficialURLCoverage(t *testing.T) {
+	page := newOfficialURLCommentPagingPage(t, "feed-1")
+	runCheck := func(fid, check string) string {
+		t.Helper()
+		expression := `(` + `(feedID) => {` + xhsVisibleJS + xhsProbeFeedMatchJS + `const fid = feedID;` + check + `}` + `)(` + strconv.Quote(fid) + `)`
+		result, err := page.Rod.Eval(expression)
+		if err != nil || result == nil {
+			t.Fatalf("生产身份判定执行失败: %v", err)
+		}
+		return result.Value.Str()
+	}
+	mutate := func(js string) {
+		t.Helper()
+		if _, err := page.Rod.Eval(`() => {` + js + `}`); err != nil {
+			t.Fatalf("篡改 fixture 失败: %v", err)
+		}
+	}
+	expectConflict := func(reason string) {
+		t.Helper()
+		if _, err := extractCommentsPageWithProgressFromDOM(context.Background(), page, "feed-1"); !errors.Is(err, ErrDetailIdentityConflict) {
+			t.Fatalf("%s后必须身份冲突: %v", reason, err)
+		}
+	}
+	snapshot, err := extractCommentsPageWithProgressFromDOM(context.Background(), page, "feed-1")
+	if err != nil {
+		t.Fatalf("官方 URL 正向分页提取失败: %v", err)
+	}
+	if len(snapshot.Comments) != 1 || snapshot.Comments[0].ID != "parent-1" {
+		t.Fatalf("正向评论快照错误: %+v", snapshot.Comments)
+	}
+	parent := snapshot.Comments[0]
+	wantIDs := []string{"reply-1", "reply-1", "", "reply-seen", "reply-2", "reply-3"}
+	if parent.SubCommentCount != "6" || len(parent.SubComments) != len(wantIDs) {
+		t.Fatalf("正向子评论快照错误: %+v", parent.SubComments)
+	}
+	for i, wantID := range wantIDs {
+		if parent.SubComments[i].ID != wantID || parent.SubComments[i].Content == "" {
+			t.Fatalf("正向子评论顺序或内容错误: index=%d comment=%+v", i, parent.SubComments[i])
+		}
+	}
+	if snapshot.Progress.Total != 7 || !snapshot.Progress.AtEnd || snapshot.Progress.NoComments {
+		t.Fatalf("正向进度错误: %+v", snapshot.Progress)
+	}
+	mutate(`const root = Array.from(document.querySelectorAll(".note-detail-mask")).find((el) => {
+		const rect = el.getBoundingClientRect();
+		return rect.width > 0 && rect.height > 0;
+	});
+	root.querySelector("#detail-title").textContent = "";
+	window.__INITIAL_STATE__.note.noteDetailMap["feed-1"].note.title = "";`)
+	if got := runCheck("feed-1", `return String(detailRootMatched(fid));`); got != "true" {
+		t.Fatalf("无标题笔记仍应通过其他身份字段确认: %s", got)
+	}
+	mutate(`const root = Array.from(document.querySelectorAll(".note-detail-mask")).find((el) => {
+		const rect = el.getBoundingClientRect();
+		return rect.width > 0 && rect.height > 0;
+	});
+	root.querySelector("#detail-title").textContent = "Test Note Title";
+	window.__INITIAL_STATE__.note.noteDetailMap["feed-1"].note.title = "Test Note Title";`)
+	mutate(`window.__INITIAL_STATE__.note.currentNoteId = "other-feed";`)
+	if _, _, err := ExtractInteractStateFromDOM(context.Background(), page, &evalTimeoutCounter{}, "feed-1"); !errors.Is(err, ErrDetailIdentityConflict) {
+		t.Fatalf("互动身份冲突必须传播专用错误: %v", err)
+	}
+	mutate(`window.__INITIAL_STATE__.note.currentNoteId = "feed-1";`)
+	mutate(`window.__originalInitialState = window.__INITIAL_STATE__;
+	const originalNote = window.__originalInitialState.note;
+	window.__INITIAL_STATE__ = {__v_isReadonly: true, __v_raw: {note: {
+		currentNoteId: {__v_isRef: true, value: {_value: "feed-1"}},
+		noteDetailMap: {__v_isRef: true, value: {__v_isReactive: true, __v_raw: {_value: originalNote.noteDetailMap}}}
+	}}};`)
+	if got := runCheck("feed-1", `return String(detailRootMatched(fid));`); got != "true" {
+		t.Fatalf("Vue ref/reactive/raw wrappers 不应阻断 exact-key 详情匹配: %s", got)
+	}
+	mutate(`window.__INITIAL_STATE__ = window.__originalInitialState; delete window.__originalInitialState;`)
+	mutate(`window.__pickVisible = (sel) => Array.from(document.querySelectorAll(sel)).find((el) => el.getBoundingClientRect().width > 0 && el.getBoundingClientRect().height > 0);
+	window.__INITIAL_STATE__.note.noteDetailMap["other-feed"] = {note: JSON.parse(JSON.stringify(window.__INITIAL_STATE__.note.noteDetailMap["feed-1"].note))};`)
+	if got := runCheck("other-feed", `return String(detailRootContentMatched(fid));`); got != "true" {
+		t.Fatalf("同内容 other-feed 条目应通过内容绑定: %s", got)
+	}
+	if _, err := extractCommentsPageWithProgressFromDOM(context.Background(), page, "other-feed"); !errors.Is(err, ErrDetailIdentityConflict) {
+		t.Fatalf("内容相同但 URL 未绑定时必须身份冲突: %v", err)
+	}
+	mutate(`__pickVisible("#detail-title").textContent = "Stale Other Title";
+	__pickVisible('.note-content a[href*="/user/profile/"]').href = "/user/profile/other-user";
+	__pickVisible("#detail-desc").textContent = "foreign description";
+	__pickVisible(".swiper img").src = "https://example.com/foreign.jpg";`)
+	expectConflict("陈旧 root 内容")
+	mutate(`__pickVisible("#detail-title").textContent = "Test Note Title";
+	__pickVisible('.note-content a[href*="/user/profile/"]').href = "/user/profile/user-1";
+	__pickVisible("#detail-desc").textContent = "state description text with more DOM content";
+	__pickVisible(".swiper img").src = "https://example.com/img1.jpg";
+	window.__INITIAL_STATE__.note.noteDetailMap["feed-1"].note.imageList.push({urlDefault: "https://example.com/img2.jpg"});`)
+	if got := runCheck("feed-1", `return String(detailRootContentMatched(fid));`); got != "true" {
+		t.Fatalf("DOM 已渲染 state 图片子集时仍应确认详情身份: %s", got)
+	}
+	mutate(`window.__INITIAL_STATE__.note.noteDetailMap["feed-1"].note.imageList.pop();
+	__pickVisible(".swiper img").src = "https://example.com/foreign.jpg";`)
+	expectConflict("外来媒体图片")
+	mutate(`__pickVisible(".swiper img").src = "https://example.com/img1.jpg";
+	const trap = document.createElement('div');
+	trap.className = 'parent-comment';
+	trap.innerHTML = '<a href="/user/profile/user-1">trap</a>';
+	__pickVisible('.note-content').appendChild(trap);
+	__pickVisible('.note-content a[href*="/user/profile/"]').remove();`)
+	expectConflict("评论区同作者诱饵")
+}
+
+func TestReadyDetailAllowsStateReadDuringDOMHydration(t *testing.T) {
+	page := newOfficialURLCommentPagingPage(t, "feed-1")
+	if _, err := page.Rod.Eval(`() => {
+		const root = Array.from(document.querySelectorAll(".note-detail-mask")).find((el) => el.getBoundingClientRect().width > 0);
+		root.querySelector("#detail-title").textContent = "loading";
+		root.querySelector("#detail-desc").textContent = "";
+		root.querySelector('.author-wrapper a[href*="/user/profile/"]').remove();
+	}`); err != nil {
+		t.Fatalf("构造 DOM hydration 阶段: %v", err)
+	}
+	if err := WaitForXHSReady(page.Context(context.Background()), XHSReadyOptions{Kind: XHSReadyDetail, FeedID: "feed-1"}); err != nil {
+		t.Fatalf("精确 URL/state 已就绪时，早期 ready 不应要求 DOM 内容已完成: %v", err)
+	}
+	state, err := readFeedDetailStateOnce(context.Background(), page, &evalTimeoutCounter{}, "feed-1")
+	if err != nil {
+		t.Fatalf("既有 state 提取路径应能读取尚未完成的 DOM: %v", err)
+	}
+	if state.Note.NoteID != "feed-1" || state.Note.Title != "Test Note Title" || len(state.Note.ImageList) != 1 {
+		t.Fatalf("state snapshot 未保留 target/title/image: %+v", state.Note)
+	}
+	if err := assertOpenTargetIdentity(context.Background(), &evalTimeoutCounter{}, page, "feed-1"); !errors.Is(err, ErrDetailIdentityConflict) {
+		t.Fatalf("最终身份校验仍应拒绝未匹配的 DOM root: %v", err)
 	}
 }
 
@@ -761,6 +1026,7 @@ func TestCommentPagingOutcomeCarriesProgressToCompletion(t *testing.T) {
 					Progress: commentProgress{Total: 1, AtEnd: true},
 				}),
 			},
+			runtimeResponses: [][]byte{commentIdentityProbeResponse()},
 		}
 		page := newCommentPagingPage(t, client)
 		input := &CommentCursor{FeedID: "feed-1", Round: 1}
@@ -793,8 +1059,8 @@ func TestCommentPagingOutcomeCarriesProgressToCompletion(t *testing.T) {
 			response.Comments.TotalItems != 1 || response.Comments.SeenCount != 1 {
 			t.Fatalf("终批响应错误: response=%+v next=%+v hasMore=%v", response, next, hasMore)
 		}
-		if client.runtimeCalls != runtimeCallsBeforeCompletion {
-			t.Fatalf("completion 不应重复执行 progress DOM Eval: before=%d after=%d", runtimeCallsBeforeCompletion, client.runtimeCalls)
+		if client.runtimeCalls != runtimeCallsBeforeCompletion+1 {
+			t.Fatalf("completion 除一次身份复核 probe 外不应重复执行 progress DOM Eval: before=%d after=%d", runtimeCallsBeforeCompletion, client.runtimeCalls)
 		}
 	})
 
@@ -824,4 +1090,15 @@ func TestCommentPagingOutcomeCarriesProgressToCompletion(t *testing.T) {
 			t.Fatalf("取消后不应再次执行 progress DOM Eval: %d", client.runtimeCalls)
 		}
 	})
+}
+
+func TestBatchCursorFeedMismatchRejected(t *testing.T) {
+	action := &FeedDetailAction{}
+	detail, cursor, hasMore, err := action.GetFeedDetailCommentsBatch(context.Background(), "feed-1", "token", &CommentCursor{FeedID: "other-feed"}, 20, DefaultCommentLoadConfig())
+	if err == nil || !strings.Contains(err.Error(), "不一致") {
+		t.Fatalf("cursor 与请求 ID 不一致必须拒绝: %v", err)
+	}
+	if detail != nil || cursor != nil || hasMore {
+		t.Fatal("拒绝时不得发布 data/cursor")
+	}
 }

@@ -230,18 +230,16 @@ func probeXHSReady(page *hrod.Page, kind XHSReadyKind, feedID string) (xhsReadyP
 			out.search_result_count = count(searchResultSelector);
 			out.feed_card_count = count(feedCardSelector);
 		} else if (kind === "detail" || kind === "comment_box") {
-			const detailMap = unwrap(state.note?.noteDetailMap);
-			const detail = feedID && detailMap && Object.prototype.hasOwnProperty.call(detailMap, feedID)
-				? unwrap(detailMap[feedID])
-				: null;
+			const detailMapRaw = stateNoteDetailMap();
+			const hasTarget = Boolean(feedID && detailMapRaw && Object.prototype.hasOwnProperty.call(detailMapRaw, feedID) && activeNoteId() === feedID && targetStateNoteId(detailMapRaw, feedID) === feedID);
+			const rootCount = uniqueDetailRootCount();
+			const rootMatched = Boolean(feedID && detailURLMatched && hasTarget);
 			const detailCount = count(detailSelector);
-			const visibleDetails = Array.from(document.querySelectorAll(detailSelector)).filter((el) => visibleWithSize(el, 1));
-			const visibleDetailMatched = Boolean(feedID && visibleDetails.some(elementMatchesFeedID));
 			out.detail_count = detailCount;
-			out.visible_detail_count = visibleDetails.length;
+			out.visible_detail_count = rootCount;
 			out.detail_url_matched = detailURLMatched;
-			out.detail_state = feedID ? Boolean(detail) : sizeOf(detailMap) > 0;
-			out.detail_feed_matched = feedID ? ((detailURLMatched && visibleDetails.length > 0) || visibleDetailMatched) : detailCount > 0;
+			out.detail_state = feedID ? hasTarget : sizeOf(detailMapRaw) > 0;
+			out.detail_feed_matched = feedID ? rootMatched : detailCount > 0;
 			out.like_button_count = visibleCount(likeButtonSelector);
 			if (kind === "comment_box") {
 				out.comment_box_count = visibleCount(commentBoxSelector);
@@ -283,13 +281,11 @@ func probeXHSReadyFull(page *hrod.Page, feedID string) (xhsReadyProbe, error) {
 		const state = window.__INITIAL_STATE__ || {};
 		const homeFeeds = unwrap(state.feed?.feeds);
 		const searchFeeds = unwrap(state.search?.feeds);
-		const detailMap = unwrap(state.note?.noteDetailMap);
-		const detail = feedID && detailMap && Object.prototype.hasOwnProperty.call(detailMap, feedID)
-			? unwrap(detailMap[feedID])
-			: null;
+		const detailMapRaw = stateNoteDetailMap();
 		const detailURLMatched = detailURLMatchesFeedID(location.href);
-		const visibleDetails = Array.from(document.querySelectorAll(detailSelector)).filter((el) => visibleWithSize(el, 1));
-		const visibleDetailMatched = Boolean(feedID && visibleDetails.some(elementMatchesFeedID));
+		const hasTarget = Boolean(feedID && detailMapRaw && Object.prototype.hasOwnProperty.call(detailMapRaw, feedID) && activeNoteId() === feedID && targetStateNoteId(detailMapRaw, feedID) === feedID);
+		const rootCount = uniqueDetailRootCount();
+		const rootMatched = Boolean(feedID && detailURLMatched && hasTarget);
 		const profileData = unwrap(state.user?.userPageData);
 		const detailCount = count(detailSelector);
 		const text = (document.body?.innerText || "").replace(/\s+/g, " ").slice(0, 1500);
@@ -300,9 +296,9 @@ func probeXHSReadyFull(page *hrod.Page, feedID string) (xhsReadyProbe, error) {
 		const stateFragment = JSON.stringify({
 			homeFeeds: homeFeedCount,
 			searchFeeds: searchFeedCount,
-			noteMap: sizeOf(detailMap),
+			noteMap: sizeOf(detailMapRaw),
 			profile: Boolean(profileData),
-			feedMatched: Boolean(detail),
+			feedMatched: hasTarget,
 		});
 		return JSON.stringify({
 			url: location.href.slice(0, 300),
@@ -314,14 +310,14 @@ func probeXHSReadyFull(page *hrod.Page, feedID string) (xhsReadyProbe, error) {
 			search_input_count: visibleCount(searchInputSelector),
 			search_result_count: count(searchResultSelector),
 			detail_count: detailCount,
-			visible_detail_count: visibleDetails.length,
+			visible_detail_count: rootCount,
 			comment_box_count: visibleCount(commentBoxSelector),
 			like_button_count: visibleCount(likeButtonSelector),
 			home_feed_count: homeFeedCount,
 			search_feed_count: searchFeedCount,
 			profile_state: Boolean(profileData),
-			detail_state: feedID ? Boolean(detail) : sizeOf(detailMap) > 0,
-			detail_feed_matched: feedID ? ((detailURLMatched && visibleDetails.length > 0) || visibleDetailMatched) : detailCount > 0,
+			detail_state: feedID ? hasTarget : sizeOf(detailMapRaw) > 0,
+			detail_feed_matched: feedID ? rootMatched : detailCount > 0,
 			detail_url_matched: detailURLMatched,
 			publish_signal_count: count("input[type='file'], .upload-input, .publish-container, .creator-container"),
 			search_input_in_feeds_ready: searchInputInFeedsReady,

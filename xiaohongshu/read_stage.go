@@ -110,6 +110,47 @@ func (a *ReadStageAction) read(ctx context.Context, counter *evalTimeoutCounter,
 	return a.state.RecordReadStage(feedID, time.Since(start), 1)
 }
 
+func (a *ReadStageAction) readWithoutRecording(ctx context.Context, counter *evalTimeoutCounter, feedID string, minDuration time.Duration) (time.Duration, error) {
+	page := a.page.Context(ctx)
+	probe, err := carouselReadProbe(ctx, page, counter)
+	if err != nil {
+		return 0, err
+	}
+	if minDuration <= 0 {
+		minDuration = dynamicReadDuration(probe.contentMetrics)
+	}
+	start := time.Now()
+	if err := page.SleepRandom(1*time.Second, 2*time.Second); err != nil {
+		return time.Since(start), err
+	}
+	if err := scrollNoteScroller(ctx, page, 160); err != nil {
+		return time.Since(start), err
+	}
+	activeIndex := probe.ActiveIndex
+	for turn := 0; turn < minInt(probe.Images-1, 2); turn++ {
+		if activeIndex < 0 {
+			break
+		}
+		next, err := advanceCarouselRight(ctx, page, counter, activeIndex)
+		if err != nil {
+			if IsFatalRendererError(err) || ctx.Err() != nil {
+				return time.Since(start), err
+			}
+			break
+		}
+		activeIndex = next
+		if err := page.SleepRandom(2*time.Second, 3*time.Second); err != nil {
+			return time.Since(start), err
+		}
+	}
+	if remaining := minDuration - time.Since(start); remaining > 0 {
+		if err := page.Sleep(remaining); err != nil {
+			return time.Since(start), err
+		}
+	}
+	return time.Since(start), nil
+}
+
 func readContentMetrics(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter) (contentMetrics, error) {
 	probe, err := carouselReadProbe(ctx, page, counter)
 	if err != nil {

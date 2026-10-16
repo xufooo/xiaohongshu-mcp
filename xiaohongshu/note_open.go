@@ -14,8 +14,10 @@ import (
 )
 
 type NoteOpenAction struct {
-	page  *hrod.Page
-	state *ActionStateStore
+	page             *hrod.Page
+	state            *ActionStateStore
+	recoveryErr      error
+	recoveryProbeErr error
 }
 
 func NewNoteOpenActionWithState(page *hrod.Page, state *ActionStateStore) *NoteOpenAction {
@@ -23,6 +25,8 @@ func NewNoteOpenActionWithState(page *hrod.Page, state *ActionStateStore) *NoteO
 }
 
 func (a *NoteOpenAction) OpenFromCards(ctx context.Context, counter *evalTimeoutCounter, feedID, xsecToken string) error {
+	a.recoveryErr = nil
+	a.recoveryProbeErr = nil
 	page := a.page.Context(ctx).Timeout(60 * time.Second)
 	anchor, err := findFeedCardAnchor(ctx, page, counter, feedID)
 	if err != nil {
@@ -53,13 +57,34 @@ func (a *NoteOpenAction) OpenFromCards(ctx context.Context, counter *evalTimeout
 	if err := validateFeedCardClickPoint(anchor); err != nil {
 		return err
 	}
-	if err := anchor.Click(proto.InputMouseButtonLeft, 1); err != nil {
-		return fmt.Errorf("点击目标 anchor 失败: %w", err)
-	}
-	if err := waitFeedDetailVisible(ctx, page, counter, feedID); err != nil {
+	recoveredFrom, err := clickAndWaitWithRecovery(
+		func() error { return anchor.Click(proto.InputMouseButtonLeft, 1) },
+		func() error { return waitFeedDetailVisible(ctx, page, counter, feedID) },
+		func(err error) bool { return a.recoverOpenAttempt(ctx, page, counter, feedID, err) },
+	)
+	if err != nil {
+		if a.recoveryProbeErr != nil {
+			return errors.Join(err, a.recoveryProbeErr)
+		}
 		return err
 	}
+	a.recoveryErr = recoveredFrom
 	return nil
+}
+
+func clickAndWaitWithRecovery(click, wait func() error, recover func(error) bool) (recoveredFrom, err error) {
+	// hrod Element.Click 先做等待可交互等点击前准备，再派发真实点击；仅凭返回 error
+	// 无法可靠区分准备失败与已派发后的不确定错误，故点击错误一律 fail-closed，不做恢复。
+	if clickErr := click(); clickErr != nil {
+		return nil, fmt.Errorf("点击目标 anchor 失败: %w", clickErr)
+	}
+	if waitErr := wait(); waitErr != nil {
+		if recover != nil && recover(waitErr) {
+			return waitErr, nil
+		}
+		return nil, waitErr
+	}
+	return nil, nil
 }
 
 // 只接受已连接且有尺寸的候选；零匹配报未找到，多匹配报歧义；Go 侧只调用一次 Elements 按索引取 anchor。
@@ -149,6 +174,7 @@ func validateFeedCardClickPoint(anchor *hrod.Element) error {
 
 const (
 	feedDetailVisibleWaitBudget = 15 * time.Second
+	feedDetailRecoveryBudget    = 3 * time.Second
 )
 
 func waitFeedDetailVisible(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, feedID string) error {
@@ -179,6 +205,17 @@ func waitFeedDetailVisibleWith(
 	probe func(context.Context) (currentFeedDetailProbe, error),
 	sleep func(context.Context, time.Duration, time.Duration) error,
 ) error {
+	return waitFeedDetailVisibleWithMatcher(ctx, feedID, pageErr, probe, sleep, currentFeedDetailMatched)
+}
+
+func waitFeedDetailVisibleWithMatcher(
+	ctx context.Context,
+	feedID string,
+	pageErr func() error,
+	probe func(context.Context) (currentFeedDetailProbe, error),
+	sleep func(context.Context, time.Duration, time.Duration) error,
+	matched func(currentFeedDetailProbe, string) bool,
+) error {
 	started := time.Now()
 	probes := 0
 	defer func() { observeWaitWithProbes("feed_detail_visible", time.Since(started), probes) }()
@@ -200,6 +237,9 @@ func waitFeedDetailVisibleWith(
 		probes++
 		probeResult, err := probe(waitCtx)
 		if ctxErr := ctx.Err(); ctxErr != nil {
+			if err != nil && IsFatalRendererError(err) {
+				return errors.Join(ctxErr, err)
+			}
 			return ctxErr
 		}
 		if err != nil {
@@ -214,7 +254,7 @@ func waitFeedDetailVisibleWith(
 		} else {
 			last = probeResult
 			lastErr = nil
-			if currentFeedDetailMatched(probeResult, feedID) {
+			if matched(probeResult, feedID) {
 				matchedSamples++
 				if matchedSamples >= 2 {
 					return nil
@@ -237,6 +277,167 @@ func waitFeedDetailVisibleWith(
 		return newDetailVisibilityError("transient_error", lastErr)
 	}
 	return newDetailVisibilityError("unmatched", nil, last)
+}
+
+func (a *NoteOpenAction) recoverOpenAttempt(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, feedID string, cause error) bool {
+	if !isRecoverableOpenAttemptError(cause) {
+		return false
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		if a != nil {
+			a.recoveryProbeErr = errors.Join(cause, ctxErr)
+		}
+		return false
+	}
+	if page == nil || page.Err() != nil {
+		if a != nil {
+			if page != nil && page.Err() != nil {
+				a.recoveryProbeErr = errors.Join(cause, page.Err())
+			} else {
+				a.recoveryProbeErr = cause
+			}
+		}
+		return false
+	}
+	recoveryCtx, cancel := context.WithTimeout(ctx, feedDetailRecoveryBudget)
+	defer cancel()
+	err := waitFeedDetailVisibleWithMatcher(
+		recoveryCtx,
+		feedID,
+		page.Err,
+		func(probeCtx context.Context) (currentFeedDetailProbe, error) {
+			return probeCurrentFeedDetailWithCounter(probeCtx, counter, page, feedID)
+		},
+		func(sleepCtx context.Context, min, max time.Duration) error {
+			return page.Context(sleepCtx).SleepRandom(min, max)
+		},
+		recoveredFeedDetailMatched,
+	)
+	if err != nil {
+		if a != nil {
+			a.recoveryProbeErr = err
+		}
+		return false
+	}
+	return true
+}
+
+func isRecoverableOpenAttemptError(err error) bool {
+	if err == nil || IsFatalRendererError(err) {
+		return false
+	}
+	if errors.Is(err, context.Canceled) {
+		return false
+	}
+	if errors.Is(err, ErrDetailIdentityConflict) {
+		return false
+	}
+	var visibilityErr *DetailVisibilityError
+	if errors.As(err, &visibilityErr) {
+		if visibilityErr.probeTerminal == "unmatched" {
+			return true
+		}
+		if visibilityErr.probeTerminal == "transient_error" {
+			cause := visibilityErr.cause
+			if cause == nil {
+				return false
+			}
+			if IsFatalRendererError(cause) || errors.Is(cause, context.Canceled) || errors.Is(cause, ErrDetailIdentityConflict) {
+				return false
+			}
+			if errors.Is(cause, context.DeadlineExceeded) ||
+				errors.Is(cause, errCurrentDetailEvalTimeout) ||
+				isEvalTimeout(cause) ||
+				errors.Is(cause, cdp.ErrCtxDestroyed) ||
+				errors.Is(cause, cdp.ErrCtxNotFound) {
+				return true
+			}
+			message := strings.ToLower(cause.Error())
+			if strings.Contains(message, "execution context was destroyed") ||
+				strings.Contains(message, "cannot find context with specified id") {
+				return true
+			}
+			return false
+		}
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) ||
+		isEvalTimeout(err) ||
+		errors.Is(err, cdp.ErrCtxDestroyed) ||
+		errors.Is(err, cdp.ErrCtxNotFound) {
+		return true
+	}
+	return false
+}
+
+func recoveredFeedDetailMatched(probe currentFeedDetailProbe, feedID string) bool {
+	return strictFeedDetailMatched(probe, feedID)
+}
+
+// assertOpenTargetIdentity 在快照读取前与状态提交前确认当前详情属于请求的 feedID。
+func pollOpenTargetIdentity(ctx context.Context, counter *evalTimeoutCounter, page *hrod.Page, feedID string, timeout, interval time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := assertOpenTargetIdentity(ctx, counter, page, feedID); err == nil {
+			if !time.Now().Before(deadline) {
+				return context.DeadlineExceeded
+			}
+			return nil
+		} else if IsFatalRendererError(err) || errors.Is(err, context.Canceled) {
+			return err
+		} else {
+			lastErr = err
+		}
+		if !time.Now().Before(deadline) {
+			return lastErr
+		}
+		timer := time.NewTimer(min(interval, time.Until(deadline)))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+func assertOpenTargetIdentity(ctx context.Context, counter *evalTimeoutCounter, page *hrod.Page, feedID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if page == nil {
+		return fmt.Errorf("目标详情复核页面不存在")
+	}
+	if err := page.Err(); err != nil {
+		return fmt.Errorf("目标详情复核页面不可用: %w", err)
+	}
+	probe, err := probeCurrentFeedDetailWithCounter(ctx, counter, page, feedID)
+	if err != nil {
+		return fmt.Errorf("目标详情复核探测失败: %w", err)
+	}
+	if !strictFeedDetailMatched(probe, feedID) {
+		return fmt.Errorf("提交前目标详情未确认: %w", ErrDetailIdentityConflict)
+	}
+	return nil
+}
+
+func (a *NoteOpenAction) verifyRecoveredTarget(ctx context.Context, counter *evalTimeoutCounter, feedID string) error {
+	var page *hrod.Page
+	var recoveryErr error
+	if a != nil {
+		page = a.page
+		recoveryErr = a.recoveryErr
+	}
+	if err := assertOpenTargetIdentity(ctx, counter, page, feedID); err != nil {
+		if recoveryErr != nil {
+			return errors.Join(recoveryErr, err)
+		}
+		return err
+	}
+	return nil
 }
 
 type DetailVisibilityError struct {

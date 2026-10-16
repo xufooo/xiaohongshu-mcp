@@ -127,3 +127,25 @@ func TestXHSReadyPollRange(t *testing.T) {
 		t.Fatalf("普通 kind 轮询应为 300-500ms，得到 %v-%v", min, max)
 	}
 }
+
+func TestDetailReadyRequiresAuthoritativeMatchFlag(t *testing.T) {
+	matched := xhsReadyProbe{DetailFeedMatched: true}
+	if !isXHSReady(matched, XHSReadyDetail, "feed-1", true) {
+		t.Fatal("detail kind 在 authoritative 匹配成立时应就绪")
+	}
+	unmatched := xhsReadyProbe{
+		URL:                "https://www.xiaohongshu.com/explore/feed-1",
+		DetailState:        true,
+		DetailURLMatched:   true,
+		VisibleDetailCount: 1,
+	}
+	if isXHSReady(unmatched, XHSReadyDetail, "feed-1", true) {
+		t.Fatal("仅 URL 与 state 命中、authoritative 匹配未成立时不得就绪")
+	}
+	if detailReady(unmatched, "feed-1") {
+		t.Fatal("detailReady 不得绕过 DetailFeedMatched")
+	}
+	if !detailReady(xhsReadyProbe{DetailState: true}, "") {
+		t.Fatal("无 feedID 时应保留原有宽松语义")
+	}
+}

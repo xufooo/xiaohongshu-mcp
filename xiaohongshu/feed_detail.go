@@ -74,6 +74,9 @@ func (f *FeedDetailAction) GetFeedDetailCommentsBatch(ctx context.Context, feedI
 	if err := validateFeedAccessArgs(feedID, xsecToken); err != nil {
 		return nil, nil, false, err
 	}
+	if cursor != nil && cursor.FeedID != "" && cursor.FeedID != feedID {
+		return nil, nil, false, fmt.Errorf("输入 cursor 与请求笔记不一致: expected=%s actual=%s", feedID, cursor.FeedID)
+	}
 
 	config = normalizeCommentLoadConfig(config)
 	page := f.page.Context(ctx).Timeout(feedDetailPageTimeout)
@@ -88,33 +91,116 @@ func (f *FeedDetailAction) GetFeedDetailCommentsBatch(ctx context.Context, feedI
 	if err := opener.OpenFromCards(ctx, counter, feedID, xsecToken); err != nil {
 		return nil, nil, false, fmt.Errorf("从卡片打开笔记失败，请重新搜索或滚动后重试: %w", err)
 	}
-	if f.state != nil {
-		_ = f.state.RecordOpen(feedID, source)
+	if err := opener.verifyRecoveredTarget(ctx, counter, feedID); err != nil {
+		return nil, nil, false, fmt.Errorf("恢复后目标详情复核失败: %w", err)
 	}
 	humanize.Delay(ctx, humanize.AfterNavigate)
 	if err := checkPageAccessible(ctx, page, counter); err != nil {
+		if opener.recoveryErr != nil {
+			return nil, nil, false, errors.Join(opener.recoveryErr, err)
+		}
 		return nil, nil, false, err
 	}
 
 	reader := NewReadStageAction(page, f.state)
-	if err := reader.read(ctx, counter, feedID, 5*time.Second); err != nil {
+	readElapsed, err := reader.readWithoutRecording(ctx, counter, feedID, 5*time.Second)
+	if err != nil {
+		if opener.recoveryErr != nil {
+			return nil, nil, false, errors.Join(opener.recoveryErr, fmt.Errorf("阅读阶段失败: %w", err))
+		}
 		return nil, nil, false, fmt.Errorf("阅读阶段失败: %w", err)
+	}
+	if err := assertOpenTargetIdentity(ctx, counter, page, feedID); err != nil {
+		if opener.recoveryErr != nil {
+			return nil, nil, false, errors.Join(opener.recoveryErr, err)
+		}
+		return nil, nil, false, err
 	}
 
 	detail, err := f.extractFeedDetail(ctx, page, counter, feedID)
 	if err != nil {
+		if opener.recoveryErr != nil {
+			return nil, nil, false, errors.Join(opener.recoveryErr, err)
+		}
+		return nil, nil, false, err
+	}
+	if detail.Note.NoteID != "" && detail.Note.NoteID != feedID {
+		if opener.recoveryErr != nil {
+			return nil, nil, false, errors.Join(opener.recoveryErr, ErrDetailIdentityConflict)
+		}
+		return nil, nil, false, ErrDetailIdentityConflict
+	}
+	if err := assertOpenTargetIdentity(ctx, counter, page, feedID); err != nil {
+		if opener.recoveryErr != nil {
+			return nil, nil, false, errors.Join(opener.recoveryErr, err)
+		}
 		return nil, nil, false, err
 	}
 
 	commentPage := page.Timeout(commentLoadTimeout)
 	commentStart := time.Now()
 	outcome, err := loadCommentsBatchOutcome(ctx, commentPage, config, cursor, maxItems)
-	reader.RecordCommentDwell(feedID, time.Since(commentStart), true)
+	commentElapsed := time.Since(commentStart)
 	if err != nil {
+		if opener.recoveryErr != nil {
+			return nil, nil, false, errors.Join(opener.recoveryErr, err)
+		}
 		return nil, nil, false, err
 	}
-	if outcome.nextCursor != nil && outcome.nextCursor.FeedID == "" {
-		outcome.nextCursor.FeedID = feedID
+	if err := assertOpenTargetIdentity(ctx, counter, page, feedID); err != nil {
+		if opener.recoveryErr != nil {
+			return nil, nil, false, errors.Join(opener.recoveryErr, err)
+		}
+		return nil, nil, false, err
+	}
+	if outcome.nextCursor != nil {
+		if outcome.nextCursor.FeedID == "" {
+			outcome.nextCursor.FeedID = feedID
+		} else if outcome.nextCursor.FeedID != feedID {
+			if opener.recoveryErr != nil {
+				return nil, nil, false, errors.Join(opener.recoveryErr, ErrDetailIdentityConflict)
+			}
+			return nil, nil, false, ErrDetailIdentityConflict
+		}
+	}
+	for _, c := range outcome.comments {
+		if c.NoteID != "" && c.NoteID != feedID {
+			if opener.recoveryErr != nil {
+				return nil, nil, false, errors.Join(opener.recoveryErr, ErrDetailIdentityConflict)
+			}
+			return nil, nil, false, ErrDetailIdentityConflict
+		}
+		for _, sub := range c.SubComments {
+			if sub.NoteID != "" && sub.NoteID != feedID {
+				if opener.recoveryErr != nil {
+					return nil, nil, false, errors.Join(opener.recoveryErr, ErrDetailIdentityConflict)
+				}
+				return nil, nil, false, ErrDetailIdentityConflict
+			}
+		}
+	}
+	if f.state != nil {
+		if err := f.state.update(func(state *ActionState) {
+			now := time.Now()
+			state.ReadDuration = 0
+			state.FeedScrollCount = 0
+			state.CommentDwellTime = 0
+			state.CommentScrollCount = 0
+			state.InteractionsOnFeed = 0
+			state.LastAction = "open_note"
+			state.LastActionAt = now
+			state.LastOpenedFeedID = feedID
+			state.LastOpenSource = source
+			state.LastOpenAt = now
+			state.SessionActions++
+			state.ReadDuration += readElapsed
+			state.FeedScrollCount++
+			state.LastReadAt = now
+			state.CommentDwellTime += commentElapsed
+			state.CommentScrollCount++
+		}); err != nil {
+			return nil, nil, false, fmt.Errorf("记录评论停留状态失败: %w", err)
+		}
 	}
 
 	detail.Comments = CommentList{
@@ -258,8 +344,9 @@ func loadCommentsBatchOutcome(ctx context.Context, page *hrod.Page, config Comme
 
 		comments := flattenComments(snapshot.Comments)
 		snapshot.Comments = nil
-		batch := make([]Comment, 0, len(comments))
-		newIDs := make(map[string]struct{}, len(comments))
+		batchCapacity := min(max(limit, 0), len(comments))
+		batch := make([]Comment, 0, batchCapacity)
+		newIDs := make(map[string]struct{}, batchCapacity)
 		moreVisible := false
 		for _, comment := range comments {
 			key := commentBatchKey(len(batch), comment)
@@ -305,6 +392,15 @@ func loadCommentsBatchOutcome(ctx context.Context, page *hrod.Page, config Comme
 
 	partialOrError := func(err error) (commentBatchOutcome, error) {
 		if IsFatalRendererError(err) {
+			return commentBatchOutcome{progress: progress}, err
+		}
+		if errors.Is(err, ErrDetailIdentityConflict) {
+			return commentBatchOutcome{progress: progress}, err
+		}
+		if ctx.Err() != nil {
+			return commentBatchOutcome{progress: progress}, err
+		}
+		if errors.Is(err, context.Canceled) {
 			return commentBatchOutcome{progress: progress}, err
 		}
 		if len(batchCursor.ReturnedIDs) > inputBase && ctx.Err() == nil {
@@ -1047,6 +1143,9 @@ func (f *FeedDetailAction) extractFeedDetail(ctx context.Context, page *hrod.Pag
 			if IsFatalRendererError(err) {
 				return nil, err
 			}
+			if errors.Is(err, ErrDetailIdentityConflict) {
+				return nil, err
+			}
 			response, err = readFeedDetailState(ctx, page, counter, feedID)
 			if err != nil {
 				if IsFatalRendererError(err) {
@@ -1061,6 +1160,9 @@ func (f *FeedDetailAction) extractFeedDetail(ctx context.Context, page *hrod.Pag
 		// snapshot as a successful result. A genuinely empty or unavailable list
 		// still returns after the short bounded wait.
 		if response != nil && (!shouldWaitForInitialComments(response) || time.Now().After(deadline)) {
+			if response.Note.NoteID != "" && response.Note.NoteID != feedID {
+				return nil, ErrDetailIdentityConflict
+			}
 			return response, nil
 		}
 		if time.Now().After(deadline) && lastErr != nil {

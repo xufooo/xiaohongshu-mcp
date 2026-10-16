@@ -2,18 +2,184 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/go-rod/rod/lib/launcher"
+	"github.com/xpzouying/headless_browser"
+	"github.com/xpzouying/xiaohongshu-mcp/browser"
+	"github.com/xpzouying/xiaohongshu-mcp/humanize"
+	hrod "github.com/xpzouying/xiaohongshu-mcp/humanize/rod"
 	"github.com/xpzouying/xiaohongshu-mcp/xiaohongshu"
 )
+
+const serviceCommentFeedID = "5f4d8e7b00000000010001a2"
+const serviceCommentStateKey = "service-comment-production-path"
+
+func serviceCommentHTML(feedID string, search bool) string {
+	if search {
+		return strings.ReplaceAll(`<!doctype html><meta charset="utf-8"><style>body{margin:0}section.note-item a.cover.mask.ld{display:block;width:420px;height:300px;background:#ddd}</style><section class="note-item"><a class="cover mask ld" data-feed-id="{{feedID}}" href="/explore/{{feedID}}?xsec_token=token">open</a></section>`, "{{feedID}}", feedID)
+	}
+	return strings.ReplaceAll(`<!doctype html><meta charset="utf-8"><style>.note-container{height:80px;overflow-y:auto}</style><div class="note-detail-mask"><div class="note-container"><div class="note-content"><div id="detail-title">Test Note Title</div><div class="author-wrapper"><span class="name">note author</span><a href="/user/profile/user-1">author</a></div><div id="detail-desc">state description text</div><div class="swiper"><img src="https://example.com/img1.jpg"></div></div><div class="interact-container"></div><div class="comments-container"><span class="total">共 7 条评论</span></div><div class="parent-comment" data-id="parent-1"><div class="comment-item" id="parent-1"><div class="content">parent content</div><div class="author-wrapper"><span class="name">parent user</span></div><div class="interactions"><span class="like">1</span></div></div><div class="reply-container"><div class="list-container"><div class="comment-item" id="reply-1"><div class="content">reply one</div></div><div class="comment-item" id="reply-2"><div class="content">reply two</div></div><div class="comment-item" id="reply-3"><div class="content">reply three</div></div></div></div></div><div class="end-container">THE END</div></div></div><script>window.__INITIAL_STATE__={note:{currentNoteId:"{{feedID}}",noteDetailMap:{"{{feedID}}":{note:{noteId:"{{feedID}}",title:"Test Note Title",desc:"state description text",user:{userId:"user-1",nickname:"note author"},interactInfo:{liked:false,collected:false,commentCount:"7"},imageList:[{urlDefault:"https://example.com/img1.jpg"}]}}}}};</script>`, "{{feedID}}", feedID)
+}
+
+func newServiceCommentBrowserFactory(t *testing.T) browser.BrowserFactory {
+	t.Helper()
+	bin, ok := launcher.LookPath()
+	if !ok {
+		t.Skip("未找到 Chrome/Chromium，跳过 service 评论生产路径 fixture")
+	}
+	origin := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if strings.Contains(r.URL.Path, "search_result") {
+			_, _ = w.Write([]byte(serviceCommentHTML(serviceCommentFeedID, true)))
+			return
+		}
+		_, _ = w.Write([]byte(serviceCommentHTML(serviceCommentFeedID, false)))
+	}))
+	t.Cleanup(origin.Close)
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodConnect {
+			http.Error(w, "CONNECT required", http.StatusMethodNotAllowed)
+			return
+		}
+		client, rw, err := http.NewResponseController(w).Hijack()
+		if err != nil {
+			return
+		}
+		upstream, err := net.Dial("tcp", origin.Listener.Addr().String())
+		if err != nil {
+			_, _ = rw.WriteString("HTTP/1.1 502 Bad Gateway\r\n\r\n")
+			_ = rw.Flush()
+			_ = client.Close()
+			return
+		}
+		_, _ = rw.WriteString("HTTP/1.1 200 Connection Established\r\n\r\n")
+		if rw.Flush() != nil {
+			_ = client.Close()
+			_ = upstream.Close()
+			return
+		}
+		go func() {
+			_, _ = io.Copy(upstream, client)
+			_ = upstream.Close()
+		}()
+		_, _ = io.Copy(client, upstream)
+		_ = client.Close()
+		_ = upstream.Close()
+	}))
+	t.Cleanup(proxy.Close)
+	proxyAddr := strings.TrimPrefix(proxy.URL, "http://")
+	return func(ctx context.Context) (*hrod.Browser, error) {
+		b, err := headless_browser.New(ctx,
+			headless_browser.WithChromeBinPath(bin),
+			headless_browser.WithProxy(proxyAddr),
+			headless_browser.WithStealthJS(false),
+			headless_browser.WithExtraArgs([]string{"--ignore-certificate-errors"}),
+		)
+		if err != nil {
+			return nil, err
+		}
+		return hrod.NewBrowser(b, humanize.Config{}), nil
+	}
+}
+
+func newServiceCommentPage(t *testing.T, factory browser.BrowserFactory, url string) *hrod.Page {
+	t.Helper()
+	b, err := factory(context.Background())
+	if err != nil {
+		t.Fatalf("启动 fixture 浏览器: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+	page, err := b.Page()
+	if err != nil {
+		t.Fatalf("创建 fixture 页面: %v", err)
+	}
+	if err := page.Rod.Navigate(url); err != nil {
+		t.Fatalf("导航 fixture 页面: %v", err)
+	}
+	if err := page.Rod.WaitLoad(); err != nil {
+		t.Fatalf("等待 fixture 页面: %v", err)
+	}
+	return page
+}
+
+func serviceCommentStatePath(root string) string {
+	sum := sha256.Sum256([]byte(serviceCommentStateKey))
+	return filepath.Join(root, hex.EncodeToString(sum[:])+".json")
+}
+
+func blockServiceCommentStateWrite(t *testing.T, root string) {
+	t.Helper()
+	path := serviceCommentStatePath(root)
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		if err := os.WriteFile(path, []byte(`{}`), 0600); err != nil {
+			t.Fatalf("初始化状态文件: %v", err)
+		}
+	} else if err != nil {
+		t.Fatalf("读取状态文件状态: %v", err)
+	}
+	if err := os.Mkdir(path+".tmp", 0700); err != nil {
+		t.Fatalf("构造状态落盘失败: %v", err)
+	}
+}
+
+func serviceCommentScope(entryType, sessionID string, maxItems int, token string, config xiaohongshu.CommentLoadConfig) replayScope {
+	scope := replayScope{
+		EntryType:           entryType,
+		SessionID:           sessionID,
+		FeedID:              serviceCommentFeedID,
+		MaxItems:            maxItems,
+		ClickMoreReplies:    config.ClickMoreReplies,
+		MaxRepliesThreshold: config.MaxRepliesThreshold,
+		ScrollSpeed:         normalizeScopeSpeed(config.ScrollSpeed),
+	}
+	if entryType == "standalone" {
+		scope.XsecDigest = xsecDigest(token)
+	}
+	return scope
+}
+
+func assertServiceCommentBatch(t *testing.T, detail *xiaohongshu.FeedDetailResponse, maxItems int) {
+	t.Helper()
+	if detail == nil || len(detail.Comments.List) == 0 || !detail.Comments.HasMore || detail.Comments.Complete || detail.Comments.IncompleteReason != "more_comments_available" || detail.Comments.Cursor == "" {
+		t.Fatalf("分页/完成状态错误: %+v", detail)
+	}
+	if len(detail.Note.ImageList) != 1 || detail.Note.ImageList[0].URLDefault != "https://example.com/img1.jpg" {
+		t.Fatalf("service 批次未保留已读图片: %+v", detail.Note.ImageList)
+	}
+	seen := make(map[string]bool)
+	count := 0
+	var visit func([]xiaohongshu.Comment)
+	visit = func(comments []xiaohongshu.Comment) {
+		for _, comment := range comments {
+			count++
+			if comment.ID == "" || strings.TrimSpace(comment.Content) == "" || seen[comment.ID] {
+				t.Fatalf("批次包含空内容、无稳定 ID 或重复评论: %+v", comment)
+			}
+			seen[comment.ID] = true
+			visit(comment.SubComments)
+		}
+	}
+	visit(detail.Comments.List)
+	if count == 0 || count > maxItems {
+		t.Fatalf("批次数量超出 maxItems: count=%d max=%d", count, maxItems)
+	}
+}
 
 func TestRunReadyWithColdStartRecoveryRetriesOnlyNarrowStall(t *testing.T) {
 	stall := fmt.Errorf("页面停止推进: %w", context.DeadlineExceeded)
@@ -749,5 +915,178 @@ func TestCommentContinueStep(t *testing.T) {
 	}
 	if got := commentContinueStep(args, 50, config, &FeedDetailResponse{Data: "not-a-detail"}); got != nil {
 		t.Fatalf("payload 类型不符时不得猜: %+v", got)
+	}
+}
+
+func TestGetFeedDetailCommentsBatchSessionProductionCommitBoundary(t *testing.T) {
+	for _, failRecord := range []bool{false, true} {
+		name := "successful batch commits and replays"
+		if failRecord {
+			name = "state recording failure preserves input cursor"
+		}
+		t.Run(name, func(t *testing.T) {
+			factory := newServiceCommentBrowserFactory(t)
+			page := newServiceCommentPage(t, factory, "https://www.xiaohongshu.com/explore/"+serviceCommentFeedID+"?xsec_token=token")
+			root := t.TempDir()
+			state, err := xiaohongshu.NewActionStateStore(root, serviceCommentStateKey)
+			if err != nil {
+				t.Fatalf("创建状态存储: %v", err)
+			}
+			if err := state.RecordOpen(serviceCommentFeedID, xiaohongshu.OpenSourceSearch); err != nil {
+				t.Fatalf("初始化打开状态: %v", err)
+			}
+			sessions := xiaohongshu.NewBrowseSessionManager(time.Minute)
+			t.Cleanup(sessions.CloseAll)
+			session := sessions.Create(page, state, nil)
+			if _, err := session.OpenNote(context.Background(), "", "https://www.xiaohongshu.com/explore/"+serviceCommentFeedID+"?xsec_token=token", ""); err != nil {
+				t.Fatalf("建立已验证的生产 session: %v", err)
+			}
+			stateBefore, err := state.Load()
+			if err != nil {
+				t.Fatalf("初始化状态读取失败: %v", err)
+			}
+			service := &XiaohongshuService{
+				browseSessions:   sessions,
+				actionState:      state,
+				commentCursorTTL: time.Minute,
+				cursorGuardMap:   make(map[string]*cursorGuardEntry),
+			}
+			config := xiaohongshu.DefaultCommentLoadConfig()
+			const maxItems = 2
+			scope := serviceCommentScope("session", session.ID(), maxItems, "", config)
+			inputCursor := &xiaohongshu.CommentCursor{FeedID: serviceCommentFeedID, ReturnedIDs: []string{"already-returned"}}
+			service.setCommentCursor("input", inputCursor, scope)
+			if failRecord {
+				blockServiceCommentStateWrite(t, root)
+			}
+
+			result, callErr := service.GetFeedDetailCommentsBatch(context.Background(), serviceCommentFeedID, "", "input", maxItems, config)
+			if failRecord {
+				if callErr == nil || !strings.Contains(callErr.Error(), "记录评论停留状态失败") || result != nil {
+					t.Fatalf("状态记录失败应中止 service 成功提交: result=%+v err=%v", result, callErr)
+				}
+				entry, ok := service.commentCursors.Load("input")
+				if !ok || entry.(*commentCursorEntry).Cursor.ReturnedIDs[0] != "already-returned" {
+					t.Fatalf("失败后输入 cursor 不应被消费或改写: %v", entry)
+				}
+				if _, ok := service.commentReplays.Load("input"); ok {
+					t.Fatal("失败后不应写入 replay")
+				}
+				stateAfter, err := state.Load()
+				if err != nil || !reflect.DeepEqual(stateBefore, stateAfter) {
+					t.Fatalf("落盘失败后 ActionState 不应部分更新: before=%+v after=%+v err=%v", stateBefore, stateAfter, err)
+				}
+				return
+			}
+			if callErr != nil {
+				t.Fatalf("session 评论批次生产调用链失败: %v", callErr)
+			}
+			if result == nil || result.FeedID != serviceCommentFeedID {
+				t.Fatalf("成功批次响应错误: %+v", result)
+			}
+			detail, ok := result.Data.(*xiaohongshu.FeedDetailResponse)
+			if !ok {
+				t.Fatalf("service payload 类型错误: %T", result.Data)
+			}
+			assertServiceCommentBatch(t, detail, maxItems)
+			if _, ok := service.commentCursors.Load("input"); ok {
+				t.Fatal("成功提交后输入 cursor 应被消费")
+			}
+			if _, ok := service.commentReplays.Load("input"); !ok {
+				t.Fatal("成功提交后应缓存 replay")
+			}
+			replay, replayErr := service.GetFeedDetailCommentsBatch(context.Background(), serviceCommentFeedID, "", "input", maxItems, config)
+			if replayErr != nil || !reflect.DeepEqual(result, replay) {
+				t.Fatalf("成功批次 replay 应稳定返回原响应: equal=%v err=%v", reflect.DeepEqual(result, replay), replayErr)
+			}
+		})
+	}
+}
+
+func TestGetFeedDetailCommentsBatchStandaloneProductionCommitBoundary(t *testing.T) {
+	for _, failRecord := range []bool{false, true} {
+		name := "successful batch commits and replays"
+		if failRecord {
+			name = "state recording failure preserves input cursor"
+		}
+		t.Run(name, func(t *testing.T) {
+			factory := newServiceCommentBrowserFactory(t)
+			manager := browser.NewManager(factory, browser.WithWarmPageTTL(time.Minute), browser.WithIdleTimeout(time.Minute))
+			t.Cleanup(func() { _ = manager.Close(context.Background()) })
+			page, err := manager.AcquireFor(context.Background(), "fixture")
+			if err != nil {
+				t.Fatalf("获取 fixture page: %v", err)
+			}
+			if err := page.Rod.Navigate("https://www.xiaohongshu.com/search_result?keyword=fixture"); err != nil {
+				t.Fatalf("导航搜索结果 fixture: %v", err)
+			}
+			if err := page.Rod.WaitLoad(); err != nil {
+				t.Fatalf("等待搜索结果 fixture: %v", err)
+			}
+			manager.Release(page)
+			root := t.TempDir()
+			state, err := xiaohongshu.NewActionStateStore(root, serviceCommentStateKey)
+			if err != nil {
+				t.Fatalf("创建状态存储: %v", err)
+			}
+			service := &XiaohongshuService{
+				browserManager:   manager,
+				actionState:      state,
+				commentCursorTTL: time.Minute,
+				cursorGuardMap:   make(map[string]*cursorGuardEntry),
+			}
+			stateBefore, err := state.Load()
+			if err != nil {
+				t.Fatalf("初始化状态读取失败: %v", err)
+			}
+			config := xiaohongshu.DefaultCommentLoadConfig()
+			const maxItems = 2
+			scope := serviceCommentScope("standalone", "", maxItems, "token", config)
+			inputCursor := &xiaohongshu.CommentCursor{FeedID: serviceCommentFeedID, ReturnedIDs: []string{"already-returned"}}
+			service.setCommentCursor("input", inputCursor, scope)
+			if failRecord {
+				blockServiceCommentStateWrite(t, root)
+			}
+
+			result, callErr := service.GetFeedDetailCommentsBatch(context.Background(), serviceCommentFeedID, "token", "input", maxItems, config)
+			if failRecord {
+				if callErr == nil || !strings.Contains(callErr.Error(), "记录评论停留状态失败") || result != nil {
+					t.Fatalf("状态记录失败应中止 standalone 成功提交: result=%+v err=%v", result, callErr)
+				}
+				entry, ok := service.commentCursors.Load("input")
+				if !ok || entry.(*commentCursorEntry).Cursor.ReturnedIDs[0] != "already-returned" {
+					t.Fatalf("失败后输入 cursor 不应被消费或改写: %v", entry)
+				}
+				if _, ok := service.commentReplays.Load("input"); ok {
+					t.Fatal("失败后不应写入 replay")
+				}
+				stateAfter, err := state.Load()
+				if err != nil || !reflect.DeepEqual(stateBefore, stateAfter) {
+					t.Fatalf("落盘失败后 ActionState 不应部分更新: before=%+v after=%+v err=%v", stateBefore, stateAfter, err)
+				}
+				return
+			}
+			if callErr != nil {
+				t.Fatalf("standalone 评论批次生产调用链失败: %v", callErr)
+			}
+			if result == nil || result.FeedID != serviceCommentFeedID {
+				t.Fatalf("成功批次响应错误: %+v", result)
+			}
+			detail, ok := result.Data.(*xiaohongshu.FeedDetailResponse)
+			if !ok {
+				t.Fatalf("service payload 类型错误: %T", result.Data)
+			}
+			assertServiceCommentBatch(t, detail, maxItems)
+			if _, ok := service.commentCursors.Load("input"); ok {
+				t.Fatal("成功提交后输入 cursor 应被消费")
+			}
+			if _, ok := service.commentReplays.Load("input"); !ok {
+				t.Fatal("成功提交后应缓存 replay")
+			}
+			replay, replayErr := service.GetFeedDetailCommentsBatch(context.Background(), serviceCommentFeedID, "token", "input", maxItems, config)
+			if replayErr != nil || !reflect.DeepEqual(result, replay) {
+				t.Fatalf("成功批次 replay 应稳定返回原响应: equal=%v err=%v", reflect.DeepEqual(result, replay), replayErr)
+			}
+		})
 	}
 }

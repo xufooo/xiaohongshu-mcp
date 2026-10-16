@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -397,6 +398,187 @@ func TestOpenedNoteFeedDetailCopiesContent(t *testing.T) {
 	}
 	if got := session.openedNoteFeedDetail("other-feed"); got.NoteID != "" || got.Title != "" || got.Desc != "" || len(got.ImageList) != 0 || got.XsecToken != "" {
 		t.Fatalf("feed 不匹配时应返回零值: %+v", got)
+	}
+}
+
+func TestBrowseSessionOpenNoteProductionCommitPath(t *testing.T) {
+	tests := []struct {
+		name       string
+		failRecord bool
+	}{
+		{name: "commits snapshot after image and identity checks"},
+		{name: "state recording failure does not commit opened note", failRecord: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			page := newOfficialURLCommentPagingPage(t, "feed-1")
+			state, err := NewActionStateStore(t.TempDir(), "open-note-production-path")
+			if err != nil {
+				t.Fatalf("创建状态存储: %v", err)
+			}
+			if tt.failRecord {
+				if err := state.Save(ActionState{LastOpenedFeedID: "previous-feed", LastOpenSource: OpenSourceHome, SessionActions: 3}); err != nil {
+					t.Fatalf("初始化已有状态: %v", err)
+				}
+				if err := os.Mkdir(state.path+".tmp", 0700); err != nil {
+					t.Fatalf("构造状态落盘失败: %v", err)
+				}
+			}
+			manager := NewBrowseSessionManager(time.Minute)
+			t.Cleanup(manager.CloseAll)
+			session := manager.Create(page, state, nil)
+			session.mu.Lock()
+			session.results["result-1"] = Feed{ID: "feed-1", XsecToken: "token"}
+			session.mu.Unlock()
+
+			response, openErr := session.OpenNote(context.Background(), "result-1", "", "")
+			if tt.failRecord {
+				if openErr == nil || !strings.Contains(openErr.Error(), "记录打开笔记状态失败") {
+					t.Fatalf("状态记录失败应返回错误，got response=%+v err=%v", response, openErr)
+				}
+				info := session.Info()
+				if info.Opened || info.Read || info.CurrentFeedID != "" || response != nil {
+					t.Fatalf("状态记录失败后不应提交成功 session 状态: info=%+v response=%+v", info, response)
+				}
+				stored, err := state.Load()
+				if err != nil || stored.LastOpenedFeedID != "previous-feed" || stored.LastOpenSource != OpenSourceHome || stored.SessionActions != 3 {
+					t.Fatalf("状态落盘失败后不得部分更新 ActionState: state=%+v err=%v", stored, err)
+				}
+				return
+			}
+			if openErr != nil {
+				t.Fatalf("OpenNote 生产调用链失败: %v", openErr)
+			}
+			if response == nil || !response.Opened || !response.Read || response.CurrentFeedID != "feed-1" {
+				t.Fatalf("成功 OpenNote 未提交 session 状态: %+v", response)
+			}
+			if response.Note.NoteID != "feed-1" || response.Note.Title != "Test Note Title" || response.Note.Desc != "state description text with more DOM content" || len(response.Note.ImageList) != 1 || response.Note.ImageList[0].URLDefault != "https://example.com/img1.jpg" {
+				t.Fatalf("OpenNote snapshot/image read 结果不完整: %+v", response.Note)
+			}
+			stored, err := state.Load()
+			if err != nil || stored.LastOpenedFeedID != "feed-1" || stored.LastOpenSource != OpenSourceSearch || stored.SessionActions != 1 || stored.LastReadAt.IsZero() {
+				t.Fatalf("状态记录未成功完成: state=%+v err=%v", stored, err)
+			}
+			if len(response.Comments) != 1 || response.Comments[0].ID != "parent-1" {
+				t.Fatalf("OpenNote 未保留首屏评论快照: %+v", response.Comments)
+			}
+			if got := session.openedNoteFeedDetail("feed-1"); got.NoteID != "feed-1" || len(got.ImageList) != 1 {
+				t.Fatalf("commitOpenedNote 未保存已验证详情: %+v", got)
+			}
+		})
+	}
+}
+
+func TestBrowseSessionOpenNoteSnapshotReadFailuresDoNotCommit(t *testing.T) {
+	tests := []struct {
+		name     string
+		injectJS string
+	}{
+		{
+			name: "正文快照读取失败",
+			injectJS: `() => {
+				const root = Array.from(document.querySelectorAll(".note-detail-mask")).find((el) => {
+					const rect = el.getBoundingClientRect();
+					return rect.width > 0 && rect.height > 0;
+				});
+				const original = root.querySelector.bind(root);
+				root.querySelector = (selector) => {
+					if (selector === ".author img") throw new Error("injected body snapshot failure");
+					return original(selector);
+				};
+			}`,
+		},
+		{
+			name: "评论读取失败",
+			injectJS: `() => {
+				const root = Array.from(document.querySelectorAll(".note-detail-mask")).find((el) => {
+					const rect = el.getBoundingClientRect();
+					return rect.width > 0 && rect.height > 0;
+				});
+				const original = root.querySelectorAll.bind(root);
+				root.querySelectorAll = (selector) => {
+					if (selector === ".parent-comment") throw new Error("injected comment snapshot failure");
+					return original(selector);
+				};
+			}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			page := newOfficialURLCommentPagingPage(t, "feed-1")
+			state, err := NewActionStateStore(t.TempDir(), "open-note-read-failure")
+			if err != nil {
+				t.Fatalf("创建状态存储: %v", err)
+			}
+			manager := NewBrowseSessionManager(time.Minute)
+			t.Cleanup(manager.CloseAll)
+			session := manager.Create(page, state, nil)
+			session.mu.Lock()
+			session.results["result-1"] = Feed{ID: "feed-1", XsecToken: "token"}
+			session.mu.Unlock()
+			if _, err := page.Rod.Eval(tt.injectJS); err != nil {
+				t.Fatalf("安装读取失败注入: %v", err)
+			}
+			response, openErr := session.OpenNote(context.Background(), "result-1", "", "")
+			if openErr == nil || response != nil || !strings.Contains(openErr.Error(), "首屏内容读取阶段") {
+				t.Fatalf("首屏读取失败必须阻止 OpenNote 提交: response=%+v err=%v", response, openErr)
+			}
+			info := session.Info()
+			if info.Opened || info.Read || info.CurrentFeedID != "" {
+				t.Fatalf("首屏读取失败后不应提交 session 状态: %+v", info)
+			}
+			if got := session.openedNoteFeedDetail("feed-1"); got.NoteID != "" {
+				t.Fatalf("首屏读取失败后不应提交已打开详情: %+v", got)
+			}
+			stored, err := state.Load()
+			if err != nil || stored != (ActionState{}) {
+				t.Fatalf("首屏读取失败后不应记录 ActionState: state=%+v err=%v", stored, err)
+			}
+		})
+	}
+}
+
+func TestBrowseSessionOpenNoteRejectsFinalIdentityMismatch(t *testing.T) {
+	page := newOfficialURLCommentPagingPage(t, "feed-1")
+	state, err := NewActionStateStore(t.TempDir(), "open-note-final-identity")
+	if err != nil {
+		t.Fatalf("创建状态存储: %v", err)
+	}
+	manager := NewBrowseSessionManager(time.Minute)
+	t.Cleanup(manager.CloseAll)
+	session := manager.Create(page, state, nil)
+	session.mu.Lock()
+	session.results["result-1"] = Feed{ID: "feed-1", XsecToken: "token"}
+	session.mu.Unlock()
+	if _, err := page.Rod.Eval(`() => {
+		const note = window.__INITIAL_STATE__.note;
+		let reads = 0;
+		Object.defineProperty(note, "currentNoteId", {
+			configurable: true,
+			get() {
+				reads++;
+				window.__finalIdentityReadCount = reads;
+				return reads <= 8 ? "feed-1" : "other-feed";
+			}
+		});
+	}`); err != nil {
+		t.Fatalf("安装最终身份变化探针: %v", err)
+	}
+	response, openErr := session.OpenNote(context.Background(), "result-1", "", "")
+	if !errors.Is(openErr, ErrDetailIdentityConflict) || response != nil {
+		t.Fatalf("最终身份不匹配必须阻止 OpenNote 提交: response=%+v err=%v", response, openErr)
+	}
+	reads, err := page.Rod.Eval(`() => String(window.__finalIdentityReadCount)`)
+	if err != nil || reads == nil || reads.Value.Str() != "9" {
+		t.Fatalf("身份变化应发生在状态提交前最终复核: reads=%v err=%v", reads, err)
+	}
+	info := session.Info()
+	if info.Opened || info.Read || info.CurrentFeedID != "" {
+		t.Fatalf("最终身份不匹配后不应提交 session 状态: %+v", info)
+	}
+	stored, err := state.Load()
+	if err != nil || stored.LastOpenedFeedID != "" {
+		t.Fatalf("最终身份不匹配后不应记录打开状态: state=%+v err=%v", stored, err)
 	}
 }
 
@@ -1386,7 +1568,7 @@ func newCurrentPageURLSession(t *testing.T, client *currentPageURLCDPClient) *Br
 	client.runtimeExpressions = nil
 	client.methodHistory = nil
 	client.keyEvents = nil
-	return &BrowseSession{page: &hrod.Page{Rod: page, Keyboard: page.Keyboard}}
+	return &BrowseSession{page: (&hrod.Page{Rod: page, Keyboard: page.Keyboard}).Context(context.Background())}
 }
 
 func TestAdvanceCarouselRightUsesArrowRightWithoutMouseClick(t *testing.T) {
@@ -2121,7 +2303,7 @@ func TestOpenNoteRejectsOtherVisibleDetailBeforeCardActions(t *testing.T) {
 }
 
 func TestWaitFeedDetailVisibleMatched(t *testing.T) {
-	matched := currentFeedDetailProbe{URLMatched: true, VisibleDetailCount: 1}
+	matched := currentFeedDetailProbe{URLMatched: true, VisibleDetailCount: 1, VisibleMatchedDetailCount: 1, StateMatched: true}
 	calls := 0
 	sleeps := 0
 	activeProbes := 0
@@ -2173,10 +2355,10 @@ func TestWaitFeedDetailVisibleMatched(t *testing.T) {
 
 func TestWaitFeedDetailVisibleResetsMatchedSamples(t *testing.T) {
 	probes := []currentFeedDetailProbe{
-		{URLMatched: true, VisibleDetailCount: 1},
+		{URLMatched: true, VisibleDetailCount: 1, VisibleMatchedDetailCount: 1, StateMatched: true},
 		{},
-		{URLMatched: true, VisibleDetailCount: 1},
-		{URLMatched: true, VisibleDetailCount: 1},
+		{URLMatched: true, VisibleDetailCount: 1, VisibleMatchedDetailCount: 1, StateMatched: true},
+		{URLMatched: true, VisibleDetailCount: 1, VisibleMatchedDetailCount: 1, StateMatched: true},
 	}
 	calls := 0
 	err := waitFeedDetailVisibleWith(
@@ -2761,5 +2943,347 @@ func TestGuidanceNeverRecommendsTheToolJustCalled(t *testing.T) {
 	repeat := searched.Guidance("search_feeds", nil)
 	if repeat.NextStep == nil || repeat.NextStep.Tool != "search_feeds" {
 		t.Fatalf("无结果时没有别的候选，仍应推荐 search_feeds: %+v", repeat.NextStep)
+	}
+}
+
+func TestClickAndWaitWithRecoveryDoesNotRepeatClick(t *testing.T) {
+	t.Run("click error never recovers", func(t *testing.T) {
+		clickErr := context.DeadlineExceeded
+		clicks, waits, recoveries := 0, 0, 0
+		recoveredFrom, err := clickAndWaitWithRecovery(
+			func() error { clicks++; return clickErr },
+			func() error { waits++; return nil },
+			func(err error) bool { recoveries++; return true },
+		)
+		if recoveredFrom != nil || !errors.Is(err, clickErr) {
+			t.Fatalf("点击错误应直接失败并保留原错误: (%v,%v)", recoveredFrom, err)
+		}
+		if clicks != 1 || waits != 0 || recoveries != 0 {
+			t.Fatalf("click/wait/recovery 次数=%d/%d/%d，期望 1/0/0（点击错误不恢复、不重放）", clicks, waits, recoveries)
+		}
+	})
+
+	t.Run("detail wait failed", func(t *testing.T) {
+		waitErr := newDetailVisibilityError("unmatched", nil)
+		clicks, waits, recoveries := 0, 0, 0
+		recoveredFrom, err := clickAndWaitWithRecovery(
+			func() error { clicks++; return nil },
+			func() error { waits++; return waitErr },
+			func(err error) bool { recoveries++; return err == waitErr },
+		)
+		if err != nil || recoveredFrom != waitErr {
+			t.Fatalf("恢复结果=(%v,%v)，期望原等待错误作为恢复原因", recoveredFrom, err)
+		}
+		if clicks != 1 || waits != 1 || recoveries != 1 {
+			t.Fatalf("click/wait/recovery 次数=%d/%d/%d，期望 1/1/1", clicks, waits, recoveries)
+		}
+	})
+
+	t.Run("unrecoverable wait error", func(t *testing.T) {
+		waitErr := errors.New("wait rejected")
+		clicks, waits, recoveries := 0, 0, 0
+		recoveredFrom, err := clickAndWaitWithRecovery(
+			func() error { clicks++; return nil },
+			func() error { waits++; return waitErr },
+			func(error) bool { recoveries++; return false },
+		)
+		if recoveredFrom != nil || err != waitErr {
+			t.Fatalf("失败结果=(%v,%v)，应保留原等待错误", recoveredFrom, err)
+		}
+		if clicks != 1 || waits != 1 || recoveries != 1 {
+			t.Fatalf("click/wait/recovery 次数=%d/%d/%d，期望 1/1/1", clicks, waits, recoveries)
+		}
+	})
+}
+
+func TestDetailURLMatchesFeedIDStrict(t *testing.T) {
+	id := "5f4d8e7b00000000010001a2"
+	cases := []struct {
+		name string
+		url  string
+		want bool
+	}{
+		{name: "explore 精确路径", url: "https://www.xiaohongshu.com/explore/" + id, want: true},
+		{name: "discovery 精确路径", url: "https://www.xiaohongshu.com/discovery/item/" + id, want: true},
+		{name: "query 携带目标不能单独证明", url: "https://www.xiaohongshu.com/search_result?keyword=" + id, want: false},
+		{name: "路径其他位置不能单独证明", url: "https://www.xiaohongshu.com/explore/other?from=" + id, want: false},
+		{name: "额外路径段拒绝", url: "https://www.xiaohongshu.com/explore/" + id + "/extra", want: false},
+		{name: "错误 host 拒绝", url: "https://evil.com/explore/" + id, want: false},
+		{name: "错误目标拒绝", url: "https://www.xiaohongshu.com/explore/6a5e9f8c10000000020002b3", want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := detailURLMatchesFeedID(tc.url, id); got != tc.want {
+				t.Fatalf("detailURLMatchesFeedID(%q) = %v, want %v", tc.url, got, tc.want)
+			}
+		})
+	}
+	if detailURLMatchesFeedID("https://www.xiaohongshu.com/explore/"+id, "") {
+		t.Fatal("空 feedID 必须 fail-closed")
+	}
+}
+
+func TestIsRecoverableOpenAttemptErrorClassifies(t *testing.T) {
+	fatal := fmt.Errorf("renderer: %w", ErrFatalRendererError)
+	if isRecoverableOpenAttemptError(nil) || isRecoverableOpenAttemptError(fatal) {
+		t.Fatal("nil 与 fatal renderer 不得恢复")
+	}
+	if isRecoverableOpenAttemptError(context.Canceled) {
+		t.Fatal("parent 取消不得恢复")
+	}
+	if !isRecoverableOpenAttemptError(context.DeadlineExceeded) {
+		t.Fatal("等待超时应可恢复核验")
+	}
+	unmatched := newDetailVisibilityError("unmatched", nil)
+	var asTarget *DetailVisibilityError
+	if !isRecoverableOpenAttemptError(unmatched) || !errors.As(unmatched, &asTarget) {
+		t.Fatal("unmatched 可见性错误应可恢复且 errors.As 可分类")
+	}
+	transient := newDetailVisibilityError("transient_error", context.DeadlineExceeded)
+	if !isRecoverableOpenAttemptError(transient) {
+		t.Fatal("recognized transient cause 应可进入有界只读恢复")
+	}
+	unrecognized := newDetailVisibilityError("transient_error", errors.New("boom"))
+	if isRecoverableOpenAttemptError(unrecognized) {
+		t.Fatal("不相关 transient 不得恢复")
+	}
+	permanent := newDetailVisibilityError("permanent_error", context.DeadlineExceeded)
+	if isRecoverableOpenAttemptError(permanent) {
+		t.Fatal("永久错误不得恢复")
+	}
+}
+
+func TestRecoverOpenAttemptPreservesCancelChain(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	action := &NoteOpenAction{}
+	if action.recoverOpenAttempt(ctx, nil, &evalTimeoutCounter{}, "feed-1", context.DeadlineExceeded) {
+		t.Fatal("parent 已取消时不得执行恢复探针")
+	}
+	if !errors.Is(action.recoveryProbeErr, context.Canceled) || !errors.Is(action.recoveryProbeErr, context.DeadlineExceeded) {
+		t.Fatalf("应保留 original 与 cancel cause: %v", action.recoveryProbeErr)
+	}
+}
+
+func TestRecoveredFeedDetailMatchedRequiresTargetIdentity(t *testing.T) {
+	target := currentFeedDetailProbe{URLMatched: true, VisibleDetailCount: 1, VisibleMatchedDetailCount: 1, StateMatched: true}
+	tests := []struct {
+		name  string
+		probe currentFeedDetailProbe
+		want  bool
+	}{
+		{name: "target detail", probe: target, want: true},
+		{name: "wrong URL", probe: currentFeedDetailProbe{VisibleDetailCount: 1, VisibleMatchedDetailCount: 1, StateMatched: true}},
+		{name: "visible detail without target identity", probe: currentFeedDetailProbe{URLMatched: true, VisibleDetailCount: 1, StateMatched: true}},
+		{name: "target identity without visible detail", probe: currentFeedDetailProbe{URLMatched: true, VisibleMatchedDetailCount: 1, StateMatched: true}},
+		{name: "missing page state", probe: currentFeedDetailProbe{URLMatched: true, VisibleDetailCount: 1, VisibleMatchedDetailCount: 1}},
+		{name: "duplicate visible details", probe: currentFeedDetailProbe{URLMatched: true, VisibleDetailCount: 2, VisibleMatchedDetailCount: 1, StateMatched: true}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := recoveredFeedDetailMatched(tt.probe, "feed-1"); got != tt.want {
+				t.Fatalf("recoveredFeedDetailMatched() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+	if recoveredFeedDetailMatched(target, "") {
+		t.Fatal("空 feedID 必须 fail-closed")
+	}
+}
+
+func TestVerifyCommitTargetJoinsBothErrors(t *testing.T) {
+	actionErr := errors.New("sentinel action error")
+	client := &currentPageURLCDPClient{
+		runtimeResponses: [][]byte{
+			runtimeFeedDetailResponse(t, "/explore/other-feed", false, 1, 0),
+		},
+	}
+	session := newCurrentPageURLSession(t, client)
+	action := &NoteOpenAction{page: session.page, recoveryErr: actionErr}
+	err := action.verifyRecoveredTarget(context.Background(), &evalTimeoutCounter{}, "feed-1")
+	if err == nil {
+		t.Fatal("错误目标必须复核失败")
+	}
+	if !errors.Is(err, actionErr) {
+		t.Fatalf("应保留原始动作错误 errors.Is: %v", err)
+	}
+	if !strings.Contains(err.Error(), "目标详情") {
+		t.Fatalf("应同时保留核验错误: %v", err)
+	}
+}
+
+func TestWaitFeedDetailRecoveryRequiresConsecutiveTargetMatches(t *testing.T) {
+	target := currentFeedDetailProbe{URLMatched: true, VisibleDetailCount: 1, VisibleMatchedDetailCount: 1, StateMatched: true}
+	probes := []currentFeedDetailProbe{
+		target,
+		{URLMatched: true, VisibleDetailCount: 1, StateMatched: true},
+		target,
+		target,
+	}
+	calls, sleeps := 0, 0
+	err := waitFeedDetailVisibleWithMatcher(
+		context.Background(),
+		"feed-1",
+		func() error { return nil },
+		func(context.Context) (currentFeedDetailProbe, error) {
+			probe := probes[calls]
+			calls++
+			return probe, nil
+		},
+		func(context.Context, time.Duration, time.Duration) error { sleeps++; return nil },
+		recoveredFeedDetailMatched,
+	)
+	if err != nil {
+		t.Fatalf("目标连续两次匹配应通过: %v", err)
+	}
+	if calls != 4 || sleeps != 3 {
+		t.Fatalf("probe/sleep 次数=%d/%d，期望 4/3（中间身份不匹配须清零）", calls, sleeps)
+	}
+}
+
+func TestFeedDetailRecoveryBudgetAllowsSlowSuccessfulProbes(t *testing.T) {
+	if feedDetailRecoveryBudget != 3*time.Second {
+		t.Fatalf("recovery budget = %v, want 3s", feedDetailRecoveryBudget)
+	}
+	target := currentFeedDetailProbe{URLMatched: true, VisibleDetailCount: 1, VisibleMatchedDetailCount: 1, StateMatched: true}
+	ctx, cancel := context.WithTimeout(context.Background(), feedDetailRecoveryBudget)
+	defer cancel()
+	calls := 0
+	started := time.Now()
+	err := waitFeedDetailVisibleWithMatcher(
+		ctx, "feed-1", func() error { return nil },
+		func(probeCtx context.Context) (currentFeedDetailProbe, error) {
+			calls++
+			timer := time.NewTimer(1100 * time.Millisecond)
+			defer timer.Stop()
+			select {
+			case <-probeCtx.Done():
+				return currentFeedDetailProbe{}, probeCtx.Err()
+			case <-timer.C:
+				return target, nil
+			}
+		},
+		func(context.Context, time.Duration, time.Duration) error { return nil },
+		recoveredFeedDetailMatched,
+	)
+	if err != nil {
+		t.Fatalf("两次慢但成功的目标 probe 应在 3s 预算内恢复: %v", err)
+	}
+	if calls != 2 || time.Since(started) >= feedDetailRecoveryBudget {
+		t.Fatalf("calls=%d elapsed=%v, want two successful probes within budget", calls, time.Since(started))
+	}
+}
+
+func TestFeedDetailRecoveryBudgetAllowsDelayedReadiness(t *testing.T) {
+	target := currentFeedDetailProbe{URLMatched: true, VisibleDetailCount: 1, VisibleMatchedDetailCount: 1, StateMatched: true}
+	probes := []currentFeedDetailProbe{{}, {}, target, target}
+	calls := 0
+	ctx, cancel := context.WithTimeout(context.Background(), feedDetailRecoveryBudget)
+	defer cancel()
+	err := waitFeedDetailVisibleWithMatcher(
+		ctx, "feed-1", func() error { return nil },
+		func(context.Context) (currentFeedDetailProbe, error) {
+			probe := probes[calls]
+			calls++
+			return probe, nil
+		},
+		func(context.Context, time.Duration, time.Duration) error { return nil },
+		recoveredFeedDetailMatched,
+	)
+	if err != nil || calls != len(probes) {
+		t.Fatalf("目标延迟就绪后连续匹配应恢复: calls=%d err=%v", calls, err)
+	}
+}
+
+func TestFeedDetailRecoveryBudgetStopsWhenExhausted(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), feedDetailRecoveryBudget)
+	defer cancel()
+	started := time.Now()
+	err := waitFeedDetailVisibleWithMatcher(
+		ctx, "feed-1", func() error { return nil },
+		func(probeCtx context.Context) (currentFeedDetailProbe, error) {
+			<-probeCtx.Done()
+			return currentFeedDetailProbe{}, probeCtx.Err()
+		},
+		func(sleepCtx context.Context, _, _ time.Duration) error {
+			<-sleepCtx.Done()
+			return sleepCtx.Err()
+		},
+		recoveredFeedDetailMatched,
+	)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("exhausted recovery budget should return deadline error: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed < feedDetailRecoveryBudget || elapsed > feedDetailRecoveryBudget+time.Second {
+		t.Fatalf("exhaustion elapsed=%v, expected approximately %v", elapsed, feedDetailRecoveryBudget)
+	}
+}
+
+func TestRecoverOpenAttemptStopsWhenParentCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	action := &NoteOpenAction{}
+	if action.recoverOpenAttempt(ctx, nil, &evalTimeoutCounter{}, "feed-1", context.DeadlineExceeded) {
+		t.Fatal("parent 已取消时不得执行恢复探针")
+	}
+}
+
+func TestRecoverOpenAttemptAcceptsDelayedTarget(t *testing.T) {
+	client := &currentPageURLCDPClient{
+		runtimeResponses: [][]byte{
+			runtimeFeedDetailResponse(t, "/search_result", false, 0, 0),
+			runtimeFeedDetailResponse(t, "/explore/feed-1", true, 1, 1),
+			runtimeFeedDetailResponse(t, "/explore/feed-1", true, 1, 1),
+		},
+	}
+	session := newCurrentPageURLSession(t, client)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	action := &NoteOpenAction{page: session.page}
+	if !action.recoverOpenAttempt(ctx, session.page, &evalTimeoutCounter{}, "feed-1", context.DeadlineExceeded) {
+		t.Fatal("目标详情在短复核窗口内稳定出现时应恢复")
+	}
+	if client.runtimeCall != 3 {
+		t.Fatalf("应重试只读探针直至两次连续目标匹配，不应重放点击: probes=%d", client.runtimeCall)
+	}
+}
+
+func runtimeFeedDetailResponse(t *testing.T, pageURL string, urlMatched bool, visibleCount, matchedCount int) []byte {
+	t.Helper()
+	value, err := json.Marshal(map[string]any{
+		"url":                           pageURL,
+		"url_matched":                   urlMatched,
+		"visible_detail_count":          visibleCount,
+		"visible_matched_detail_count":  matchedCount,
+		"state_matched":                 matchedCount > 0,
+	})
+	if err != nil {
+		t.Fatalf("序列化详情探针响应: %v", err)
+	}
+	return []byte(`{"result":{"type":"string","value":` + strconv.Quote(string(value)) + `}}`)
+}
+
+func TestDetailIdentityConflictTerminal(t *testing.T) {
+	if isRecoverableOpenAttemptError(ErrDetailIdentityConflict) {
+		t.Fatal("身份冲突不得恢复")
+	}
+	wrapped := fmt.Errorf("提交前目标详情未确认: %w", ErrDetailIdentityConflict)
+	if isRecoverableOpenAttemptError(wrapped) {
+		t.Fatal("包装后的身份冲突不得恢复")
+	}
+	if !errors.Is(wrapped, ErrDetailIdentityConflict) {
+		t.Fatal("身份冲突应通过 errors.Is 传播")
+	}
+	transient := newDetailVisibilityError("transient_error", context.DeadlineExceeded)
+	if !isRecoverableOpenAttemptError(transient) {
+		t.Fatal("recognized transient cause 应可进入有界只读恢复")
+	}
+	unmatched := newDetailVisibilityError("unmatched", nil)
+	if !isRecoverableOpenAttemptError(unmatched) {
+		t.Fatal("unmatched 应可恢复核验")
+	}
+	joined := errors.Join(errors.New("recovery"), wrapped)
+	if !errors.Is(joined, ErrDetailIdentityConflict) {
+		t.Fatal("recovery 与下游错误 Join 后应保留身份冲突")
 	}
 }

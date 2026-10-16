@@ -743,6 +743,7 @@ func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, shareURL, xsecT
 	var sourceURL string
 	var resultRefForTimeline string
 	var finalURL string
+	var opener *NoteOpenAction
 
 	if hasShareURL {
 		parsed, parseErr := parseAndValidateShareURL(shareURL)
@@ -830,7 +831,7 @@ func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, shareURL, xsecT
 			if err != nil {
 				return fail(fmt.Errorf("读取当前页面 URL: %w", err))
 			}
-			opener := NewNoteOpenActionWithState(page.Context(opCtx), s.state)
+			opener = NewNoteOpenActionWithState(page.Context(opCtx), s.state)
 			if err := opener.OpenFromCards(opCtx, counter, feed.ID, feed.XsecToken); err != nil {
 				return fail(fmt.Errorf("从卡片打开笔记失败，请重新搜索或滚动后重试: %w", err))
 			}
@@ -844,6 +845,12 @@ func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, shareURL, xsecT
 		return fail(fmt.Errorf("browse session 页面不存在: %s", s.id))
 	}
 	counter := &evalTimeoutCounter{}
+	if err := pollOpenTargetIdentity(opCtx, counter, page, feed.ID, 20*time.Second, 500*time.Millisecond); err != nil {
+		if opener != nil && opener.recoveryErr != nil {
+			return fail(errors.Join(opener.recoveryErr, fmt.Errorf("读取前目标详情复核失败: %w", err)))
+		}
+		return fail(fmt.Errorf("读取前目标详情复核失败: %w", err))
+	}
 	snapshot, err := pollOpenedNoteSnapshot(opCtx, 40*time.Second, 250*time.Millisecond, func(attemptCtx context.Context) (*OpenedNoteSnapshot, error) {
 		return ExtractOpenedNoteSnapshotFromDOM(attemptCtx, page, counter, feed.ID)
 	})
@@ -855,6 +862,12 @@ func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, shareURL, xsecT
 			if cancel != nil {
 				cancel()
 			}
+		}
+		if opener != nil && opener.recoveryErr != nil {
+			if errors.Is(err, xerrors.ErrNoFeedDetail) {
+				return fail(errors.Join(opener.recoveryErr, fmt.Errorf("笔记已打开但内容未就绪: %w", err)))
+			}
+			return fail(errors.Join(opener.recoveryErr, fmt.Errorf("首屏内容读取阶段: %w", err)))
 		}
 		if errors.Is(err, xerrors.ErrNoFeedDetail) {
 			return fail(fmt.Errorf("笔记已打开但内容未就绪: %w", err))
@@ -875,7 +888,17 @@ func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, shareURL, xsecT
 	comments := snapshot.Comments
 	content.ImageList, err = preferOpenedNoteImages(opCtx, page, counter, feed.ID, content.ImageList)
 	if err != nil {
+		if opener != nil && opener.recoveryErr != nil {
+			return fail(errors.Join(opener.recoveryErr, fmt.Errorf("图片状态读取阶段: %w", err)))
+		}
 		return fail(fmt.Errorf("图片状态读取阶段: %w", err))
+	}
+	verifier := opener
+	if verifier == nil {
+		verifier = &NoteOpenAction{page: page}
+	}
+	if err := verifier.verifyRecoveredTarget(opCtx, counter, feed.ID); err != nil {
+		return fail(fmt.Errorf("状态提交前目标详情复核失败: %w", err))
 	}
 
 	initialCommentIDs := make([]string, 0)
@@ -890,8 +913,23 @@ func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, shareURL, xsecT
 		}
 	}
 	if !hasShareURL && s.state != nil {
-		_ = s.state.RecordOpen(feed.ID, OpenSourceSearch)
-		_ = s.state.RecordRead(feed.ID, 0)
+		if err := s.state.update(func(state *ActionState) {
+			now := time.Now()
+			state.ReadDuration = 0
+			state.FeedScrollCount = 0
+			state.CommentDwellTime = 0
+			state.CommentScrollCount = 0
+			state.InteractionsOnFeed = 0
+			state.LastAction = "open_note"
+			state.LastActionAt = now
+			state.LastOpenedFeedID = feed.ID
+			state.LastOpenSource = OpenSourceSearch
+			state.LastOpenAt = now
+			state.LastReadAt = now
+			state.SessionActions++
+		}); err != nil {
+			return fail(fmt.Errorf("记录打开笔记状态失败: %w", err))
+		}
 	}
 	info := s.commitOpenedNote(feed, redactSensitiveURL(sourceURL), resultRefForTimeline, initialCommentIDs, content)
 	if hasShareURL && finalURL != "" {
@@ -1151,19 +1189,21 @@ func (s *BrowseSession) detailCommentsBatchLifecycle(
 	if err != nil {
 		return nil, nil, false, err
 	}
-	// loader 成功后记录本次真实停留时间与是否发生确认过的物理滚动；
-	// error 路径不记录未完成停留。
+	detail, nextCursor, hasMore, err = s.completeDetailCommentsBatch(opCtx, page, counter, feedID, cursor, maxItems, config, outcome)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	// loader 与最终身份复核均成功后才记录本次真实停留时间与是否发生确认过的物理滚动；
+	// error 或身份复核失败路径不记录未完成停留。
 	if s.state != nil {
 		inputRound := 0
 		if cursor != nil {
 			inputRound = cursor.Round
 		}
-		scrolled := outcome.nextCursor != nil && outcome.nextCursor.Round > inputRound
-		_ = s.state.RecordCommentDwell(feedID, time.Since(dwellStart), scrolled)
-	}
-	detail, nextCursor, hasMore, err = s.completeDetailCommentsBatch(opCtx, page, counter, feedID, cursor, maxItems, config, outcome)
-	if err != nil {
-		return nil, nil, false, err
+		scrolled := nextCursor != nil && nextCursor.Round > inputRound
+		if err := s.state.RecordCommentDwell(feedID, time.Since(dwellStart), scrolled); err != nil {
+			return nil, nil, false, fmt.Errorf("记录评论停留状态失败: %w", err)
+		}
 	}
 	if detail != nil && detail.Comments.Complete {
 		s.mu.Lock()
@@ -1220,6 +1260,9 @@ func (s *BrowseSession) completeDetailCommentsBatch(
 ) (*FeedDetailResponse, *CommentCursor, bool, error) {
 	if opCtx.Err() != nil {
 		return nil, nil, false, opCtx.Err()
+	}
+	if err := assertOpenTargetIdentity(opCtx, counter, page, feedID); err != nil {
+		return nil, nil, false, err
 	}
 	nextCursor := outcome.nextCursor
 	hasMore := outcome.hasMore
@@ -1303,6 +1346,9 @@ func (s *BrowseSession) recoverCommentBatchSession(ctx context.Context, page *hr
 	}
 	if feedID != expectedFeedID {
 		return fmt.Errorf("session 当前页面与目标笔记不匹配: expected=%s, actual=%s", expectedFeedID, feedID)
+	}
+	if err := assertOpenTargetIdentity(ctx, counter, page, expectedFeedID); err != nil {
+		return err
 	}
 	return p.Sleep(1500 * time.Millisecond)
 }
