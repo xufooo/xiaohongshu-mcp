@@ -30,32 +30,32 @@ func (a *NoteOpenAction) OpenFromCards(ctx context.Context, counter *evalTimeout
 	page := a.page.Context(ctx).Timeout(60 * time.Second)
 	anchor, err := findFeedCardAnchor(ctx, page, counter, feedID)
 	if err != nil {
-		return err
+		return fmt.Errorf("点击前查找目标卡片失败: %w", err)
 	}
 	if err := anchor.ScrollIntoView(); err != nil {
 		if strings.Contains(err.Error(), "scroll made no progress") {
 			// SPA 列表重挂载可能导致 anchor 失效，等待后重取 anchor 重试一次。
 			if err := page.SleepRandom(300*time.Millisecond, 800*time.Millisecond); err != nil {
-				return fmt.Errorf("滚动到目标 anchor 失败: %w", err)
+				return fmt.Errorf("点击前滚动等待失败: %w", err)
 			}
 			anchor, err = findFeedCardAnchor(ctx, page, counter, feedID)
 			if err == nil {
 				err = anchor.ScrollIntoView()
 			}
 			if err != nil {
-				return fmt.Errorf("滚动到目标 anchor 失败: %w", err)
+				return fmt.Errorf("点击前滚动到目标 anchor 失败: %w", err)
 			}
 		} else {
-			return fmt.Errorf("滚动到目标 anchor 失败: %w", err)
+			return fmt.Errorf("点击前滚动到目标 anchor 失败: %w", err)
 		}
 	}
 	if err := page.SleepRandom(600*time.Millisecond, 1800*time.Millisecond); err != nil {
-		return err
+		return fmt.Errorf("点击前等待目标 anchor 稳定失败: %w", err)
 	}
 	// 命中校验仍在 JS 里做（elementFromPoint 必须命中 anchor 或其子节点），
 	// 但点击交给元素级点击：rod 在点击当刻重新读取元素盒子，不再按坐标点。
 	if err := validateFeedCardClickPoint(anchor); err != nil {
-		return err
+		return fmt.Errorf("点击前目标 anchor 校验失败: %w", err)
 	}
 	recoveredFrom, err := clickAndWaitWithRecovery(
 		func() error { return anchor.Click(proto.InputMouseButtonLeft, 1) },
@@ -76,13 +76,13 @@ func clickAndWaitWithRecovery(click, wait func() error, recover func(error) bool
 	// hrod Element.Click 先做等待可交互等点击前准备，再派发真实点击；仅凭返回 error
 	// 无法可靠区分准备失败与已派发后的不确定错误，故点击错误一律 fail-closed，不做恢复。
 	if clickErr := click(); clickErr != nil {
-		return nil, fmt.Errorf("点击目标 anchor 失败: %w", clickErr)
+		return nil, fmt.Errorf("Click 返回错误，点击结果未知: %w", clickErr)
 	}
 	if waitErr := wait(); waitErr != nil {
 		if recover != nil && recover(waitErr) {
 			return waitErr, nil
 		}
-		return nil, waitErr
+		return nil, fmt.Errorf("Click 返回 nil 后详情确认失败: %w", waitErr)
 	}
 	return nil, nil
 }
@@ -284,17 +284,19 @@ func (a *NoteOpenAction) recoverOpenAttempt(ctx context.Context, page *hrod.Page
 		return false
 	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		if a != nil {
-			a.recoveryProbeErr = errors.Join(cause, ctxErr)
+		if a != nil && !errors.Is(cause, ctxErr) {
+			a.recoveryProbeErr = ctxErr
 		}
 		return false
 	}
 	if page == nil || page.Err() != nil {
 		if a != nil {
-			if page != nil && page.Err() != nil {
-				a.recoveryProbeErr = errors.Join(cause, page.Err())
-			} else {
+			if page == nil {
 				a.recoveryProbeErr = cause
+			} else if pageErr := page.Err(); pageErr != nil && !errors.Is(cause, pageErr) {
+				a.recoveryProbeErr = pageErr
+			} else {
+				a.recoveryProbeErr = nil
 			}
 		}
 		return false

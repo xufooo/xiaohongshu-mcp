@@ -833,7 +833,7 @@ func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, shareURL, xsecT
 			}
 			opener = NewNoteOpenActionWithState(page.Context(opCtx), s.state)
 			if err := opener.OpenFromCards(opCtx, counter, feed.ID, feed.XsecToken); err != nil {
-				return fail(fmt.Errorf("从卡片打开笔记失败，请重新搜索或滚动后重试: %w", err))
+				return fail(fmt.Errorf("open_note 卡片操作失败: %w", err))
 			}
 		}
 	}

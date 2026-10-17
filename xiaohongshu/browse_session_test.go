@@ -2958,6 +2958,9 @@ func TestClickAndWaitWithRecoveryDoesNotRepeatClick(t *testing.T) {
 		if recoveredFrom != nil || !errors.Is(err, clickErr) {
 			t.Fatalf("点击错误应直接失败并保留原错误: (%v,%v)", recoveredFrom, err)
 		}
+		if !strings.Contains(err.Error(), "Click 返回错误，点击结果未知") {
+			t.Fatalf("Click 返回错误必须标明点击结果未知: %v", err)
+		}
 		if clicks != 1 || waits != 0 || recoveries != 0 {
 			t.Fatalf("click/wait/recovery 次数=%d/%d/%d，期望 1/0/0（点击错误不恢复、不重放）", clicks, waits, recoveries)
 		}
@@ -2979,6 +2982,22 @@ func TestClickAndWaitWithRecoveryDoesNotRepeatClick(t *testing.T) {
 		}
 	})
 
+	t.Run("nil click with unconfirmed detail", func(t *testing.T) {
+		waitErr := errors.New("detail not confirmed")
+		clicks, waits, recoveries := 0, 0, 0
+		_, err := clickAndWaitWithRecovery(
+			func() error { clicks++; return nil },
+			func() error { waits++; return waitErr },
+			func(error) bool { recoveries++; return false },
+		)
+		if !errors.Is(err, waitErr) || !strings.Contains(err.Error(), "Click 返回 nil 后详情确认失败") {
+			t.Fatalf("详情确认失败应标明 Click 返回 nil 且保留原错误: %v", err)
+		}
+		if clicks != 1 || waits != 1 || recoveries != 1 {
+			t.Fatalf("click/wait/recovery 次数=%d/%d/%d，期望 1/1/1", clicks, waits, recoveries)
+		}
+	})
+
 	t.Run("unrecoverable wait error", func(t *testing.T) {
 		waitErr := errors.New("wait rejected")
 		clicks, waits, recoveries := 0, 0, 0
@@ -2987,8 +3006,8 @@ func TestClickAndWaitWithRecoveryDoesNotRepeatClick(t *testing.T) {
 			func() error { waits++; return waitErr },
 			func(error) bool { recoveries++; return false },
 		)
-		if recoveredFrom != nil || err != waitErr {
-			t.Fatalf("失败结果=(%v,%v)，应保留原等待错误", recoveredFrom, err)
+		if recoveredFrom != nil || !errors.Is(err, waitErr) || !strings.Contains(err.Error(), "Click 返回 nil 后详情确认失败") {
+			t.Fatalf("失败结果=(%v,%v)，应标明详情确认阶段并保留原等待错误", recoveredFrom, err)
 		}
 		if clicks != 1 || waits != 1 || recoveries != 1 {
 			t.Fatalf("click/wait/recovery 次数=%d/%d/%d，期望 1/1/1", clicks, waits, recoveries)
@@ -3060,8 +3079,65 @@ func TestRecoverOpenAttemptPreservesCancelChain(t *testing.T) {
 	if action.recoverOpenAttempt(ctx, nil, &evalTimeoutCounter{}, "feed-1", context.DeadlineExceeded) {
 		t.Fatal("parent 已取消时不得执行恢复探针")
 	}
-	if !errors.Is(action.recoveryProbeErr, context.Canceled) || !errors.Is(action.recoveryProbeErr, context.DeadlineExceeded) {
-		t.Fatalf("应保留 original 与 cancel cause: %v", action.recoveryProbeErr)
+	if !errors.Is(action.recoveryProbeErr, context.Canceled) || errors.Is(action.recoveryProbeErr, context.DeadlineExceeded) {
+		t.Fatalf("恢复错误只应保留新增 cancel cause: %v", action.recoveryProbeErr)
+	}
+	combined := errors.Join(context.DeadlineExceeded, action.recoveryProbeErr)
+	if !errors.Is(combined, context.Canceled) || !errors.Is(combined, context.DeadlineExceeded) {
+		t.Fatalf("组合错误仍应保留 original 与 cancel cause: %v", combined)
+	}
+	deadlineCtx, cancelDeadline := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancelDeadline()
+	deadlineAction := &NoteOpenAction{}
+	deadlineAction.recoverOpenAttempt(deadlineCtx, nil, &evalTimeoutCounter{}, "feed-1", context.DeadlineExceeded)
+	if deadlineAction.recoveryProbeErr != nil {
+		t.Fatalf("相同 deadline cause 不应重复 Join: %v", deadlineAction.recoveryProbeErr)
+	}
+}
+
+func TestRecoverOpenAttemptAvoidsDuplicatePageError(t *testing.T) {
+	client := &currentPageURLCDPClient{}
+	session := newCurrentPageURLSession(t, client)
+	parentCtx := context.Background()
+	pageCtx, cancelPage := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancelPage()
+	page := session.page.Context(pageCtx)
+	if parentCtx.Err() != nil {
+		t.Fatalf("测试 parent context 应保持有效: %v", parentCtx.Err())
+	}
+	if !errors.Is(page.Err(), context.DeadlineExceeded) {
+		t.Fatalf("测试 page context 应已 DeadlineExceeded: %v", page.Err())
+	}
+
+	tests := []struct {
+		name          string
+		cause         error
+		wantProbeErr  bool
+		wantPageErr   bool
+	}{
+		{name: "cause contains page error", cause: fmt.Errorf("wait: %w", context.DeadlineExceeded)},
+		{name: "distinct cause keeps page error", cause: errCurrentDetailEvalTimeout, wantProbeErr: true, wantPageErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			action := &NoteOpenAction{}
+			if action.recoverOpenAttempt(parentCtx, page, &evalTimeoutCounter{}, "feed-1", tt.cause) {
+				t.Fatal("page context 已结束时不得执行恢复探针")
+			}
+			if got := action.recoveryProbeErr != nil; got != tt.wantProbeErr {
+				t.Fatalf("recoveryProbeErr 是否存在 = %v，期望 %v: %v", got, tt.wantProbeErr, action.recoveryProbeErr)
+			}
+			if tt.wantPageErr && !errors.Is(action.recoveryProbeErr, context.DeadlineExceeded) {
+				t.Fatalf("不同 cause 时应保留 page error: %v", action.recoveryProbeErr)
+			}
+			if tt.wantPageErr && errors.Is(action.recoveryProbeErr, tt.cause) {
+				t.Fatalf("recoveryProbeErr 不应重复保留外层 cause: %v", action.recoveryProbeErr)
+			}
+			outerErr := errors.Join(tt.cause, action.recoveryProbeErr)
+			if !errors.Is(outerErr, tt.cause) || !errors.Is(outerErr, context.DeadlineExceeded) {
+				t.Fatalf("外层错误应保留 cause 与 page error: %v", outerErr)
+			}
+		})
 	}
 }
 
