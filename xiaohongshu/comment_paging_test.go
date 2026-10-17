@@ -1007,7 +1007,7 @@ func TestExtractCommentsPageOfficialURLCoverage(t *testing.T) {
 		t.Fatalf("DOM 已渲染 state 图片子集时仍应确认详情身份: %s", got)
 	}
 	mutate(`window.__INITIAL_STATE__.note.noteDetailMap["feed-1"].note.imageList.pop();
-	__pickVisible(".swiper img").src = "https://example.com/foreign.jpg";`)
+	__pickVisible(".note-detail-mask").querySelector(".swiper img").src = "https://example.com/foreign.jpg";`)
 	expectConflict("外来媒体图片")
 	mutate(`__pickVisible(".swiper img").src = "https://example.com/img1.jpg";
 	const trap = document.createElement('div');
