@@ -1276,7 +1276,7 @@ func (s *BrowseSession) completeDetailCommentsBatch(
 	resp := detailBatchResponse(note, comments, hasMore)
 	seenCount := len(comments)
 	if nextCursor != nil {
-		seenCount = len(nextCursor.ReturnedIDs)
+		seenCount = CommentCursorEffectiveSeenCount(nextCursor)
 	}
 	if progress.Total > 0 {
 		resp.Comments.TotalItems = progress.Total
@@ -1291,11 +1291,7 @@ func (s *BrowseSession) completeDetailCommentsBatch(
 	resp.Comments.SeenCount = seenCount
 	complete, reason, forceHasMore := decideCommentCompletion(progress, config, resp.Comments.TotalItems, seenCount, hasMore)
 	if forceHasMore {
-		inputLen := 0
-		if inputCursor != nil {
-			inputLen = len(inputCursor.ReturnedIDs)
-		}
-		if nextCursor == nil || len(nextCursor.ReturnedIDs) <= inputLen {
+		if !commentCursorHasProgress(inputCursor, nextCursor) {
 			return nil, nil, false, fmt.Errorf("评论总数未收敛，请重试")
 		}
 		hasMore = true

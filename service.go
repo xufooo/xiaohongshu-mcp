@@ -288,12 +288,10 @@ func (s *XiaohongshuService) commitCommentBatchResult(
 		if nextCursor.FeedID != "" && nextCursor.FeedID != feedID {
 			return nil, fmt.Errorf("校验失败: nextCursor feed_id 不匹配")
 		}
-		inputLen := 0
-		if inputCursor != nil {
-			inputLen = len(inputCursor.ReturnedIDs)
-		}
-		if len(nextCursor.ReturnedIDs) <= inputLen {
-			return nil, fmt.Errorf("校验失败: nextCursor.ReturnedIDs 未增长 (input=%d, output=%d)", inputLen, len(nextCursor.ReturnedIDs))
+		inputCount := xiaohongshu.CommentCursorEffectiveSeenCount(inputCursor)
+		nextCount := xiaohongshu.CommentCursorEffectiveSeenCount(nextCursor)
+		if !xiaohongshu.CommentCursorHasProgress(inputCursor, nextCursor) {
+			return nil, fmt.Errorf("校验失败: nextCursor.ReturnedIDs 未保留全部输入有效 ID 并严格增长 (input=%d, output=%d)", inputCount, nextCount)
 		}
 	}
 
@@ -304,10 +302,10 @@ func (s *XiaohongshuService) commitCommentBatchResult(
 
 	detail.Comments.Cursor = nextCursorID
 	detail.Comments.HasMore = hasMore
-	if seenCount > 0 {
+	if nextCursor != nil {
+		detail.Comments.SeenCount = xiaohongshu.CommentCursorEffectiveSeenCount(nextCursor)
+	} else if seenCount > 0 {
 		detail.Comments.SeenCount = seenCount
-	} else if nextCursor != nil {
-		detail.Comments.SeenCount = len(nextCursor.ReturnedIDs)
 	}
 	if detail.Comments.List == nil {
 		detail.Comments.List = []xiaohongshu.Comment{}
@@ -1676,7 +1674,7 @@ func (s *XiaohongshuService) SessionDetailBatch(ctx context.Context, id, cursorI
 		}
 		seenCount := 0
 		if nextCursor != nil {
-			seenCount = len(nextCursor.ReturnedIDs)
+			seenCount = xiaohongshu.CommentCursorEffectiveSeenCount(nextCursor)
 		}
 		return s.commitCommentBatchResult(info.CurrentFeedID, cursorID, guardCursor, detail, nextCursor, hasMore, seenCount, nil, scope)
 	})

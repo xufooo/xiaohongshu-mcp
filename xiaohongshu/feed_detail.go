@@ -51,6 +51,48 @@ type CommentCursor struct {
 	CreatedAt   time.Time `json:"created_at"`
 }
 
+func isValidCommentCursorID(id string) bool {
+	return id != "" && !strings.HasPrefix(id, "idx_")
+}
+
+func commentCursorEffectiveIDs(cursor *CommentCursor) map[string]struct{} {
+	seen := make(map[string]struct{})
+	if cursor == nil {
+		return seen
+	}
+	for _, id := range cursor.ReturnedIDs {
+		if isValidCommentCursorID(id) {
+			seen[id] = struct{}{}
+		}
+	}
+	return seen
+}
+
+func CommentCursorEffectiveSeenCount(cursor *CommentCursor) int {
+	return len(commentCursorEffectiveIDs(cursor))
+}
+
+func commentCursorHasProgress(input, next *CommentCursor) bool {
+	if next == nil {
+		return false
+	}
+	inputIDs := commentCursorEffectiveIDs(input)
+	nextIDs := commentCursorEffectiveIDs(next)
+	if len(nextIDs) <= len(inputIDs) {
+		return false
+	}
+	for id := range inputIDs {
+		if _, ok := nextIDs[id]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func CommentCursorHasProgress(input, next *CommentCursor) bool {
+	return commentCursorHasProgress(input, next)
+}
+
 func DefaultCommentLoadConfig() CommentLoadConfig {
 	return CommentLoadConfig{
 		ClickMoreReplies:    false,
@@ -163,7 +205,11 @@ func (f *FeedDetailAction) GetFeedDetailCommentsBatch(ctx context.Context, feedI
 			return nil, nil, false, ErrDetailIdentityConflict
 		}
 	}
-	for _, c := range outcome.comments {
+	nextCursor := outcome.nextCursor
+	hasMore := outcome.hasMore
+	comments := outcome.comments
+	progress := outcome.progress
+	for _, c := range comments {
 		if c.NoteID != "" && c.NoteID != feedID {
 			if opener.recoveryErr != nil {
 				return nil, nil, false, errors.Join(opener.recoveryErr, ErrDetailIdentityConflict)
@@ -178,6 +224,21 @@ func (f *FeedDetailAction) GetFeedDetailCommentsBatch(ctx context.Context, feedI
 				return nil, nil, false, ErrDetailIdentityConflict
 			}
 		}
+	}
+	totalItems := 0
+	if progress.Total > 0 {
+		totalItems = progress.Total
+	}
+	seenCount := len(comments)
+	if nextCursor != nil {
+		seenCount = CommentCursorEffectiveSeenCount(nextCursor)
+	}
+	complete, reason, forceHasMore := decideCommentCompletion(progress, config, totalItems, seenCount, hasMore)
+	if forceHasMore {
+		if !commentCursorHasProgress(cursor, nextCursor) {
+			return nil, nil, false, fmt.Errorf("评论总数未收敛，请重试")
+		}
+		hasMore = true
 	}
 	if f.state != nil {
 		if err := f.state.update(func(state *ActionState) {
@@ -204,13 +265,14 @@ func (f *FeedDetailAction) GetFeedDetailCommentsBatch(ctx context.Context, feedI
 	}
 
 	detail.Comments = CommentList{
-		List:    outcome.comments,
-		HasMore: outcome.hasMore,
+		List:              comments,
+		HasMore:           hasMore,
+		TotalItems:        totalItems,
+		SeenCount:         seenCount,
+		Complete:          complete,
+		IncompleteReason: reason,
 	}
-	if outcome.progress.Total > 0 {
-		detail.Comments.TotalItems = outcome.progress.Total
-	}
-	return detail, outcome.nextCursor, outcome.hasMore, nil
+	return detail, nextCursor, hasMore, nil
 }
 
 func normalizeCommentLoadConfig(config CommentLoadConfig) CommentLoadConfig {
@@ -278,7 +340,7 @@ func loadCommentsBatchOutcome(ctx context.Context, page *hrod.Page, config Comme
 			batchCursor.CreatedAt = time.Now()
 		}
 		for _, id := range cursor.ReturnedIDs {
-			if id == "" || strings.HasPrefix(id, "idx_") {
+			if !isValidCommentCursorID(id) {
 				continue
 			}
 			if _, ok := returned[id]; ok {
@@ -597,7 +659,7 @@ func loadCommentsBatchOutcome(ctx context.Context, page *hrod.Page, config Comme
 }
 
 func commentBatchKey(_ int, comment Comment) string {
-	if comment.ID != "" {
+	if isValidCommentCursorID(comment.ID) {
 		return comment.ID
 	}
 	return ""

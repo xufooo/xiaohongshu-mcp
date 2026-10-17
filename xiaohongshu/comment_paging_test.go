@@ -646,6 +646,7 @@ func TestLoadCommentsBatchPropagatesCallerContextDeadline(t *testing.T) {
 func TestLoadCommentsBatchDedupesStableIDsAndCapsAtMaxItems(t *testing.T) {
 	comments := []Comment{
 		{ID: "old-comment", Content: "old"},
+		{ID: "idx_temporary", Content: "invalid cursor id"},
 		{ID: "comment-1", Content: "one"},
 		{ID: "comment-1", Content: "duplicate"},
 		{ID: "", Content: "missing id"},
@@ -675,7 +676,7 @@ func TestLoadCommentsBatchDedupesStableIDsAndCapsAtMaxItems(t *testing.T) {
 	}
 	seen := make(map[string]struct{}, len(got))
 	for _, comment := range got {
-		if comment.ID == "" || comment.Content == "" {
+		if !isValidCommentCursorID(comment.ID) || comment.Content == "" {
 			t.Fatalf("批次包含无效评论: %+v", comment)
 		}
 		if _, ok := seen[comment.ID]; ok {
@@ -694,6 +695,37 @@ func TestLoadCommentsBatchDedupesStableIDsAndCapsAtMaxItems(t *testing.T) {
 	}
 	if len(input.ReturnedIDs) != 4 || input.ReturnedIDs[1] != "old-comment" || input.ReturnedIDs[2] != "idx_legacy" {
 		t.Fatalf("输入 cursor 不应被修改: %+v", input)
+	}
+}
+
+func TestCommentCursorEffectiveProgressUsesCleanedUniqueIDs(t *testing.T) {
+	input := &CommentCursor{ReturnedIDs: []string{"old-comment", "old-comment", "idx_legacy", ""}}
+	if got := CommentCursorEffectiveSeenCount(input); got != 1 {
+		t.Fatalf("输入 cursor 清洗后数量错误: got=%d want=1", got)
+	}
+
+	growth := &CommentCursor{ReturnedIDs: []string{"old-comment", "new-comment"}}
+	if !commentCursorHasProgress(input, growth) || CommentCursorEffectiveSeenCount(growth) != 2 {
+		t.Fatalf("旧 cursor 清洗后仍有新有效 ID 应判定增长: input=%+v next=%+v", input, growth)
+	}
+
+	noGrowth := &CommentCursor{ReturnedIDs: []string{"old-comment", "idx_discarded", ""}}
+	if commentCursorHasProgress(input, noGrowth) || CommentCursorEffectiveSeenCount(noGrowth) != 1 {
+		t.Fatalf("清洗后没有新有效 ID 必须判定无增长: input=%+v next=%+v", input, noGrowth)
+	}
+
+	replacementInput := &CommentCursor{ReturnedIDs: []string{"a", "b"}}
+	for _, next := range []*CommentCursor{
+		{ReturnedIDs: []string{"a", "c", "d"}},
+		{ReturnedIDs: []string{"a", "c"}},
+	} {
+		if commentCursorHasProgress(replacementInput, next) {
+			t.Fatalf("替换或等量替换旧有效 ID 必须拒绝: input=%+v next=%+v", replacementInput, next)
+		}
+	}
+	strictSuperset := &CommentCursor{ReturnedIDs: []string{"a", "b", "c"}}
+	if !commentCursorHasProgress(replacementInput, strictSuperset) {
+		t.Fatalf("保留所有旧 ID 并新增有效 ID 应判定进展: input=%+v next=%+v", replacementInput, strictSuperset)
 	}
 }
 
@@ -789,8 +821,8 @@ func TestExtractCommentsPageIdentityBinding(t *testing.T) {
 	page := newRealCommentPagingPage(t)
 	evalIdentity := func(fid, check string) string {
 		t.Helper()
-		expression := `(` + `(feedID) => {` + xhsVisibleJS + xhsProbeFeedMatchJS + `const fid = feedID;` + check + `}` + `)(` + strconv.Quote(fid) + `)`
-		result, err := page.Rod.Eval(expression)
+		expression := `(feedID) => {` + xhsVisibleJS + xhsProbeFeedMatchJS + `const fid = feedID;` + check + `}`
+		result, err := page.Rod.Eval(expression, fid)
 		if err != nil || result == nil {
 			t.Fatalf("身份绑定探针执行失败: %v", err)
 		}
@@ -884,8 +916,8 @@ func TestExtractCommentsPageOfficialURLCoverage(t *testing.T) {
 	page := newOfficialURLCommentPagingPage(t, "feed-1")
 	runCheck := func(fid, check string) string {
 		t.Helper()
-		expression := `(` + `(feedID) => {` + xhsVisibleJS + xhsProbeFeedMatchJS + `const fid = feedID;` + check + `}` + `)(` + strconv.Quote(fid) + `)`
-		result, err := page.Rod.Eval(expression)
+		expression := `(feedID) => {` + xhsVisibleJS + xhsProbeFeedMatchJS + `const fid = feedID;` + check + `}`
+		result, err := page.Rod.Eval(expression, fid)
 		if err != nil || result == nil {
 			t.Fatalf("生产身份判定执行失败: %v", err)
 		}
@@ -1090,6 +1122,59 @@ func TestCommentPagingOutcomeCarriesProgressToCompletion(t *testing.T) {
 			t.Fatalf("取消后不应再次执行 progress DOM Eval: %d", client.runtimeCalls)
 		}
 	})
+}
+
+func TestCompleteDetailCommentsBatchUsesEffectiveCursorProgress(t *testing.T) {
+	tests := []struct {
+		name        string
+		returned    []string
+		wantErr     bool
+		wantSeen    int
+		wantHasMore bool
+	}{
+		{
+			name:        "cleaned cursor still grows",
+			returned:    []string{"old-comment", "new-comment"},
+			wantSeen:    2,
+			wantHasMore: true,
+		},
+		{
+			name:     "cleaned cursor does not grow",
+			returned: []string{"old-comment", "idx_discarded", ""},
+			wantErr:  true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &commentPagingCDPClient{runtimeResponses: [][]byte{commentIdentityProbeResponse()}}
+			page := newCommentPagingPage(t, client)
+			session := &BrowseSession{
+				page:              page,
+				currentFeedID:     "feed-1",
+				opened:             true,
+				openedNoteContent: OpenedNoteContent{NoteID: "feed-1"},
+			}
+			input := &CommentCursor{FeedID: "feed-1", ReturnedIDs: []string{"old-comment", "old-comment", "idx_legacy", ""}}
+			outcome := commentBatchOutcome{
+				comments:   []Comment{{ID: "new-comment", NoteID: "feed-1"}},
+				nextCursor: &CommentCursor{FeedID: "feed-1", ReturnedIDs: tt.returned},
+				progress:   commentProgress{Total: 3, AtEnd: true},
+			}
+			config := CommentLoadConfig{ClickMoreReplies: true, MaxRepliesThreshold: 0}
+			response, next, hasMore, err := session.completeDetailCommentsBatch(
+				context.Background(), page, &evalTimeoutCounter{}, "feed-1", input, 20, config, outcome,
+			)
+			if tt.wantErr {
+				if err == nil || response != nil || next != nil || hasMore {
+					t.Fatalf("清洗后无增长必须 fail-closed: response=%+v next=%+v hasMore=%v err=%v", response, next, hasMore, err)
+				}
+				return
+			}
+			if err != nil || response == nil || next == nil || !hasMore || response.Comments.SeenCount != tt.wantSeen || response.Comments.HasMore != tt.wantHasMore {
+				t.Fatalf("清洗旧 cursor 后仍增长应允许续页: response=%+v next=%+v hasMore=%v err=%v", response, next, hasMore, err)
+			}
+		})
+	}
 }
 
 func TestBatchCursorFeedMismatchRejected(t *testing.T) {

@@ -156,7 +156,7 @@ func serviceCommentScope(entryType, sessionID string, maxItems int, token string
 
 func assertServiceCommentBatch(t *testing.T, detail *xiaohongshu.FeedDetailResponse, maxItems int) {
 	t.Helper()
-	if detail == nil || len(detail.Comments.List) == 0 || !detail.Comments.HasMore || detail.Comments.Complete || detail.Comments.IncompleteReason != "more_comments_available" || detail.Comments.Cursor == "" {
+	if detail == nil || len(detail.Comments.List) == 0 || !detail.Comments.HasMore || detail.Comments.TotalItems != 7 || detail.Comments.SeenCount != 3 || detail.Comments.Complete || detail.Comments.IncompleteReason != "more_comments_available" || detail.Comments.Cursor == "" {
 		t.Fatalf("分页/完成状态错误: %+v", detail)
 	}
 	if len(detail.Note.ImageList) != 1 || detail.Note.ImageList[0].URLDefault != "https://example.com/img1.jpg" {
@@ -179,6 +179,98 @@ func assertServiceCommentBatch(t *testing.T, detail *xiaohongshu.FeedDetailRespo
 	if count == 0 || count > maxItems {
 		t.Fatalf("批次数量超出 maxItems: count=%d max=%d", count, maxItems)
 	}
+}
+
+func TestCommitCommentBatchResultUsesEffectiveCursorProgress(t *testing.T) {
+	input := &xiaohongshu.CommentCursor{
+		FeedID:      serviceCommentFeedID,
+		ReturnedIDs: []string{"old-comment", "old-comment", "idx_legacy", ""},
+	}
+	scope := serviceCommentScope("standalone", "", 2, "token", xiaohongshu.DefaultCommentLoadConfig())
+
+	t.Run("cleaned cursor still grows", func(t *testing.T) {
+		service := &XiaohongshuService{}
+		detail := &xiaohongshu.FeedDetailResponse{Comments: xiaohongshu.CommentList{List: []xiaohongshu.Comment{{ID: "new-comment"}}}}
+		next := &xiaohongshu.CommentCursor{FeedID: serviceCommentFeedID, ReturnedIDs: []string{"old-comment", "new-comment", "new-comment", "idx_legacy"}}
+		result, err := service.commitCommentBatchResult(serviceCommentFeedID, "input", input, detail, next, true, 0, nil, scope)
+		if err != nil {
+			t.Fatalf("有效去重 ID 增长应允许提交: %v", err)
+		}
+		if result == nil {
+			t.Fatal("有效进展提交返回空结果")
+		}
+		got, ok := result.Data.(*xiaohongshu.FeedDetailResponse)
+		if !ok || got.Comments.SeenCount != 2 || got.Comments.Cursor == "" {
+			t.Fatalf("提交结果必须使用清洗后的 SeenCount 并保留续页 cursor: %+v", result)
+		}
+	})
+
+	t.Run("cleaned cursor does not grow", func(t *testing.T) {
+		service := &XiaohongshuService{}
+		service.setCommentCursor("input", input, scope)
+		wantInput := *input
+		wantInput.ReturnedIDs = append([]string(nil), input.ReturnedIDs...)
+		detail := &xiaohongshu.FeedDetailResponse{Comments: xiaohongshu.CommentList{List: []xiaohongshu.Comment{{ID: "old-comment"}}}}
+		next := &xiaohongshu.CommentCursor{FeedID: serviceCommentFeedID, ReturnedIDs: []string{"old-comment", "idx_discarded", ""}}
+		if result, err := service.commitCommentBatchResult(serviceCommentFeedID, "input", input, detail, next, true, 0, nil, scope); err == nil || result != nil {
+			t.Fatalf("清洗后无增长仍必须 fail-closed: result=%+v err=%v", result, err)
+		}
+		value, ok := service.commentCursors.Load("input")
+		entry, entryOK := value.(*commentCursorEntry)
+		if !ok || !entryOK || entry == nil || !reflect.DeepEqual(entry.Cursor, &wantInput) {
+			t.Fatalf("无增长拒绝后必须完整保留输入 cursor: got=%+v want=%+v", entry, &wantInput)
+		}
+		cursorCount := 0
+		service.commentCursors.Range(func(key, value any) bool {
+			cursorCount++
+			return true
+		})
+		if cursorCount != 1 {
+			t.Fatalf("无增长拒绝不得新增 cursor: count=%d", cursorCount)
+		}
+		replayCount := 0
+		service.commentReplays.Range(func(key, value any) bool {
+			replayCount++
+			return true
+		})
+		if replayCount != 0 {
+			t.Fatalf("无增长拒绝不得新增 replay: count=%d", replayCount)
+		}
+	})
+
+	t.Run("effective ID replacement is rejected", func(t *testing.T) {
+		service := &XiaohongshuService{}
+		input := &xiaohongshu.CommentCursor{FeedID: serviceCommentFeedID, ReturnedIDs: []string{"old-a", "old-b"}}
+		service.setCommentCursor("input", input, scope)
+		wantInput := *input
+		wantInput.ReturnedIDs = append([]string(nil), input.ReturnedIDs...)
+		detail := &xiaohongshu.FeedDetailResponse{Comments: xiaohongshu.CommentList{List: []xiaohongshu.Comment{{ID: "new-c"}}}}
+		next := &xiaohongshu.CommentCursor{FeedID: serviceCommentFeedID, ReturnedIDs: []string{"old-a", "new-c", "new-d"}}
+		if result, err := service.commitCommentBatchResult(serviceCommentFeedID, "input", input, detail, next, true, 0, nil, scope); err == nil || result != nil {
+			t.Fatalf("有效 ID 数量增加但丢失旧 ID 必须拒绝: result=%+v err=%v", result, err)
+		}
+		value, ok := service.commentCursors.Load("input")
+		entry, entryOK := value.(*commentCursorEntry)
+		if !ok || !entryOK || entry == nil || !reflect.DeepEqual(entry.Cursor, &wantInput) {
+			t.Fatalf("替换拒绝后必须完整保留输入 cursor: got=%+v want=%+v", entry, &wantInput)
+		}
+		cursorCount := 0
+		service.commentCursors.Range(func(key, value any) bool {
+			cursorCount++
+			return true
+		})
+		if cursorCount != 1 {
+			t.Fatalf("替换拒绝不得新增 cursor: count=%d", cursorCount)
+		}
+		replayCount := 0
+		service.commentReplays.Range(func(key, value any) bool {
+			replayCount++
+			return true
+		})
+		if replayCount != 0 {
+			t.Fatalf("替换拒绝不得新增 replay: count=%d", replayCount)
+		}
+	})
 }
 
 func TestRunReadyWithColdStartRecoveryRetriesOnlyNarrowStall(t *testing.T) {
@@ -919,12 +1011,17 @@ func TestCommentContinueStep(t *testing.T) {
 }
 
 func TestGetFeedDetailCommentsBatchSessionProductionCommitBoundary(t *testing.T) {
-	for _, failRecord := range []bool{false, true} {
-		name := "successful batch commits and replays"
-		if failRecord {
-			name = "state recording failure preserves input cursor"
-		}
-		t.Run(name, func(t *testing.T) {
+	tests := []struct {
+		name       string
+		failRecord bool
+		noGrowth   bool
+	}{
+		{name: "successful batch commits and replays"},
+		{name: "state recording failure preserves input cursor", failRecord: true},
+		{name: "production no-growth failure preserves input cursor", noGrowth: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
 			factory := newServiceCommentBrowserFactory(t)
 			page := newServiceCommentPage(t, factory, "https://www.xiaohongshu.com/explore/"+serviceCommentFeedID+"?xsec_token=token")
 			root := t.TempDir()
@@ -952,22 +1049,31 @@ func TestGetFeedDetailCommentsBatchSessionProductionCommitBoundary(t *testing.T)
 				cursorGuardMap:   make(map[string]*cursorGuardEntry),
 			}
 			config := xiaohongshu.DefaultCommentLoadConfig()
+			if tt.noGrowth {
+				config.ClickMoreReplies = true
+				config.MaxRepliesThreshold = 0
+			}
 			const maxItems = 2
 			scope := serviceCommentScope("session", session.ID(), maxItems, "", config)
-			inputCursor := &xiaohongshu.CommentCursor{FeedID: serviceCommentFeedID, ReturnedIDs: []string{"already-returned"}}
+			inputCursor := &xiaohongshu.CommentCursor{FeedID: serviceCommentFeedID, ReturnedIDs: []string{"already-returned", "already-returned", "idx_legacy", ""}}
+			if tt.noGrowth {
+				inputCursor.ReturnedIDs = []string{"parent-1", "reply-1", "reply-2", "reply-3", "parent-1", "idx_legacy", ""}
+			}
+			wantInputCursor := *inputCursor
+			wantInputCursor.ReturnedIDs = append([]string(nil), inputCursor.ReturnedIDs...)
 			service.setCommentCursor("input", inputCursor, scope)
-			if failRecord {
+			if tt.failRecord {
 				blockServiceCommentStateWrite(t, root)
 			}
 
 			result, callErr := service.GetFeedDetailCommentsBatch(context.Background(), serviceCommentFeedID, "", "input", maxItems, config)
-			if failRecord {
+			if tt.failRecord {
 				if callErr == nil || !strings.Contains(callErr.Error(), "记录评论停留状态失败") || result != nil {
 					t.Fatalf("状态记录失败应中止 service 成功提交: result=%+v err=%v", result, callErr)
 				}
 				entry, ok := service.commentCursors.Load("input")
-				if !ok || entry.(*commentCursorEntry).Cursor.ReturnedIDs[0] != "already-returned" {
-					t.Fatalf("失败后输入 cursor 不应被消费或改写: %v", entry)
+				if !ok || !reflect.DeepEqual(entry.(*commentCursorEntry).Cursor, &wantInputCursor) {
+					t.Fatalf("失败后输入 cursor 不应被消费或改写: got=%+v want=%+v", entry, &wantInputCursor)
 				}
 				if _, ok := service.commentReplays.Load("input"); ok {
 					t.Fatal("失败后不应写入 replay")
@@ -975,6 +1081,32 @@ func TestGetFeedDetailCommentsBatchSessionProductionCommitBoundary(t *testing.T)
 				stateAfter, err := state.Load()
 				if err != nil || !reflect.DeepEqual(stateBefore, stateAfter) {
 					t.Fatalf("落盘失败后 ActionState 不应部分更新: before=%+v after=%+v err=%v", stateBefore, stateAfter, err)
+				}
+				return
+			}
+			if tt.noGrowth {
+				if callErr == nil || !strings.Contains(callErr.Error(), "评论总数未收敛") || result != nil {
+					t.Fatalf("真实 session 评论路径无增长必须 fail-closed: result=%+v err=%v", result, callErr)
+				}
+				entry, ok := service.commentCursors.Load("input")
+				if !ok || !reflect.DeepEqual(entry.(*commentCursorEntry).Cursor, &wantInputCursor) {
+					t.Fatalf("真实路径拒绝后必须完整保留输入 cursor: got=%+v want=%+v", entry, &wantInputCursor)
+				}
+				cursorCount := 0
+				service.commentCursors.Range(func(key, value any) bool {
+					cursorCount++
+					return true
+				})
+				if cursorCount != 1 {
+					t.Fatalf("真实路径无增长拒绝不得新增 cursor: count=%d", cursorCount)
+				}
+				replayCount := 0
+				service.commentReplays.Range(func(key, value any) bool {
+					replayCount++
+					return true
+				})
+				if replayCount != 0 {
+					t.Fatalf("真实路径无增长拒绝不得新增 replay: count=%d", replayCount)
 				}
 				return
 			}
@@ -1042,7 +1174,7 @@ func TestGetFeedDetailCommentsBatchStandaloneProductionCommitBoundary(t *testing
 			config := xiaohongshu.DefaultCommentLoadConfig()
 			const maxItems = 2
 			scope := serviceCommentScope("standalone", "", maxItems, "token", config)
-			inputCursor := &xiaohongshu.CommentCursor{FeedID: serviceCommentFeedID, ReturnedIDs: []string{"already-returned"}}
+			inputCursor := &xiaohongshu.CommentCursor{FeedID: serviceCommentFeedID, ReturnedIDs: []string{"already-returned", "already-returned", "idx_legacy", ""}}
 			service.setCommentCursor("input", inputCursor, scope)
 			if failRecord {
 				blockServiceCommentStateWrite(t, root)
