@@ -996,12 +996,12 @@ func TestExtractCommentsPageOfficialURLCoverage(t *testing.T) {
 	mutate(`__pickVisible("#detail-title").textContent = "Stale Other Title";
 	__pickVisible('.note-content a[href*="/user/profile/"]').href = "/user/profile/other-user";
 	__pickVisible("#detail-desc").textContent = "foreign description";
-	__pickVisible(".swiper img").src = "https://example.com/foreign.jpg";`)
+	__pickVisible(".note-detail-mask").querySelector(".swiper img").src = "https://example.com/foreign.jpg";`)
 	expectConflict("陈旧 root 内容")
 	mutate(`__pickVisible("#detail-title").textContent = "Test Note Title";
 	__pickVisible('.note-content a[href*="/user/profile/"]').href = "/user/profile/user-1";
 	__pickVisible("#detail-desc").textContent = "state description text with more DOM content";
-	__pickVisible(".swiper img").src = "https://example.com/img1.jpg";
+	__pickVisible(".note-detail-mask").querySelector(".swiper img").src = "https://example.com/img1.jpg";
 	window.__INITIAL_STATE__.note.noteDetailMap["feed-1"].note.imageList.push({urlDefault: "https://example.com/img2.jpg"});`)
 	if got := runCheck("feed-1", `return String(detailRootContentMatched(fid));`); got != "true" {
 		t.Fatalf("DOM 已渲染 state 图片子集时仍应确认详情身份: %s", got)
@@ -1009,7 +1009,7 @@ func TestExtractCommentsPageOfficialURLCoverage(t *testing.T) {
 	mutate(`window.__INITIAL_STATE__.note.noteDetailMap["feed-1"].note.imageList.pop();
 	__pickVisible(".note-detail-mask").querySelector(".swiper img").src = "https://example.com/foreign.jpg";`)
 	expectConflict("外来媒体图片")
-	mutate(`__pickVisible(".swiper img").src = "https://example.com/img1.jpg";
+	mutate(`__pickVisible(".note-detail-mask").querySelector(".swiper img").src = "https://example.com/img1.jpg";
 	const trap = document.createElement('div');
 	trap.className = 'parent-comment';
 	trap.innerHTML = '<a href="/user/profile/user-1">trap</a>';
