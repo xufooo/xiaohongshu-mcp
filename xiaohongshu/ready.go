@@ -1,7 +1,9 @@
 package xiaohongshu
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -10,6 +12,7 @@ import (
 	hrod "github.com/xpzouying/xiaohongshu-mcp/humanize/rod"
 
 	"github.com/go-rod/rod/lib/proto"
+	"github.com/sirupsen/logrus"
 )
 
 type XHSReadyKind string
@@ -136,13 +139,17 @@ func WaitForXHSReady(page *hrod.Page, opts XHSReadyOptions) error {
 	var last xhsReadyProbe
 	var lastErr error
 	var stability xhsReadyStability
+	probeDeadlines, waitDeadlines := 0, 0
 
-	return waitForCondition(waitRound{
+	waitErr := waitForCondition(waitRound{
 		Kind:    "ready:" + string(opts.Kind),
 		Page:    page,
 		Ceiling: opts.Timeout,
 		Probe: func() (string, bool, error) {
 			probe, err := probeXHSReady(page, opts.Kind, opts.FeedID)
+			if errors.Is(err, context.DeadlineExceeded) {
+				probeDeadlines++
+			}
 			if err != nil {
 				lastErr = err
 				stability.Observe(time.Now(), false)
@@ -159,6 +166,7 @@ func WaitForXHSReady(page *hrod.Page, opts XHSReadyOptions) error {
 		},
 		OnReady: func() { probeWatchdogSelectors(page, opts) },
 		OnExhausted: func() error {
+			waitDeadlines++
 			// 超时直接用最后一次 scoped probe 结果完成 URL fallback 与诊断（对齐 pre，不换 full probe）。
 			// HomeSearch 不允许 fallback 绕过稳定窗：未连续稳定满窗即使最后一次为 true 也返回 timeout。
 			if opts.Kind != XHSReadyHomeSearch && lastErr == nil && isXHSReady(last, opts.Kind, opts.FeedID, true) {
@@ -173,6 +181,9 @@ func WaitForXHSReady(page *hrod.Page, opts XHSReadyOptions) error {
 				opts.Kind, opts.Timeout, formatXHSReadyProbe(last))
 		},
 	})
+	logrus.Debugf("ready_probe_summary target_id=%s kind=%s probe_deadlines=%d wait_deadlines=%d ready=%t",
+		page.Rod.TargetID, opts.Kind, probeDeadlines, waitDeadlines, waitErr == nil)
+	return waitErr
 }
 
 // probeWatchdogSelectors 在页面就绪后探测相关选择器健康状态。

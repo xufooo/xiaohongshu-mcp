@@ -49,6 +49,13 @@ func (b *Browser) Rod() *headless_browser.Browser {
 func (b *Browser) Close() error {
 	ctx, cancel := context.WithTimeout(context.Background(), browserCloseTimeout)
 	defer cancel()
+	return b.CloseContext(ctx)
+}
+
+func (b *Browser) CloseContext(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	return b.hb.CloseContext(ctx)
 }
 
@@ -66,6 +73,15 @@ func (b *Browser) MustClose() *Browser {
 // Page creates a humanized page.
 func (b *Browser) Page() (*Page, error) {
 	page, err := b.hb.Page()
+	if err != nil {
+		return nil, err
+	}
+	return b.wrapPage(page), nil
+}
+
+// PageContext bounds creation while the returned page keeps the browser lifetime.
+func (b *Browser) PageContext(ctx context.Context) (*Page, error) {
+	page, err := b.hb.PageContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -155,6 +171,10 @@ func (p *Page) wrapPage(rp *rod.Page) *Page {
 // Close closes the page.
 func (p *Page) Close() error {
 	return p.Rod.Close()
+}
+
+func (p *Page) CloseContext(ctx context.Context) error {
+	return p.Context(ctx).Rod.Close()
 }
 
 // Context returns a humanized clone with the specified context.

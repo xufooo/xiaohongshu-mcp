@@ -580,7 +580,7 @@ func (s *AppServer) handleCreateBrowseSession(ctx context.Context, args CreateBr
 	logrus.Info("MCP: 创建页面会话 (start_page)")
 	info, err := s.xiaohongshuService.CreateBrowseSession(ctx, args.ForceRecreate)
 	if err != nil {
-		return s.startPageErrorResult(ctx, err)
+		return s.startPageErrorResult(err)
 	}
 	return s.startPageToolResult(ctx, info)
 }
@@ -589,7 +589,7 @@ func (s *AppServer) handleCloseBrowseSession(ctx context.Context, args BrowseSes
 	if args.SessionID == "" {
 		return sessionMCPErrorResult("关闭浏览会话失败: 缺少session_id参数", sessionNextStepCreateSession())
 	}
-	if err := s.xiaohongshuService.CloseBrowseSession(args.SessionID); err != nil {
+	if err := s.xiaohongshuService.CloseBrowseSession(ctx, args.SessionID); err != nil {
 		return sessionMCPErrorFromErr("关闭浏览会话失败", err, sessionNextStepCreateSession())
 	}
 	return toolResultWithStep(map[string]string{"closed_session_id": args.SessionID}, sessionNextStepCreateSession(), afterCloseTools)
@@ -627,6 +627,7 @@ func (s *AppServer) handleSessionSearch(ctx context.Context, args SessionSearchA
 	if err != nil {
 		return sessionMCPErrorFromErr("搜索失败", err, sessionNextStepState(args.SessionID))
 	}
+	logrus.Debugf("search_feeds phase=complete session_id=%s", args.SessionID)
 	return s.sessionToolResult(args.SessionID, "search_feeds", result)
 }
 
@@ -992,19 +993,8 @@ func (s *AppServer) handleSessionAISummary(ctx context.Context, args BrowseSessi
 	return s.sessionToolResult(args.SessionID, "get_ai_summary", result)
 }
 
-// startPageErrorResult 把 start_page 的失败翻译成下一步工具：
-// 页面已加载但就绪判定失败时先读登录态（同页读取，不额外导航），未登录就直接引导扫码。
-func (s *AppServer) startPageErrorResult(ctx context.Context, err error) *MCPToolResult {
+func (s *AppServer) startPageErrorResult(err error) *MCPToolResult {
 	message := "创建页面会话失败 (start_page): " + err.Error()
-	if strings.Contains(err.Error(), "等待探索页就绪失败") {
-		if status, statusErr := s.xiaohongshuService.CheckLoginStatus(ctx); statusErr == nil && !status.IsLoggedIn {
-			return sessionMCPErrorResult(message, xiaohongshu.NextStep{
-				Tool:   "get_login_qrcode",
-				Reason: "探索页已加载但处于未登录状态",
-				Hint:   "先 get_login_qrcode 扫码登录，登录成功后再 start_page",
-			})
-		}
-	}
 	return sessionMCPErrorResult(message, startPageNextStep(err))
 }
 

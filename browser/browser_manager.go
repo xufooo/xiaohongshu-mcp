@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/go-rod/rod/lib/proto"
 	"github.com/sirupsen/logrus"
 	"github.com/xpzouying/xiaohongshu-mcp/configs"
 	hrod "github.com/xpzouying/xiaohongshu-mcp/humanize/rod"
@@ -78,16 +79,21 @@ type Manager struct {
 	factory BrowserFactory
 	token   chan struct{}
 
-	mu        sync.Mutex
-	wg        sync.WaitGroup
-	browser   *hrod.Browser
-	starting  *browserStartup
-	startErr  error
-	closed    bool
-	resetting bool
-	resetDone chan struct{}
-	owner     string
-	ownerAt   time.Time
+	mu                sync.Mutex
+	wg                sync.WaitGroup
+	browser           *hrod.Browser
+	starting          *browserStartup
+	startErr          error
+	closed            bool
+	resetting         bool
+	resetOp           *resetOperation
+	resetErr          error
+	resetErrByBrowser map[*hrod.Browser]error
+	browserCleanups   map[*hrod.Browser]*browserCleanupRecord
+	resetPages        []*pendingPage
+	pendingBrowsers   []*hrod.Browser
+	owner             string
+	ownerAt           time.Time
 
 	idleTimeout time.Duration
 	idleTimer   *time.Timer
@@ -103,6 +109,25 @@ type Manager struct {
 	warmPageTTL   time.Duration
 
 	sessionIdleGrace time.Duration
+}
+
+type resetOperation struct {
+	done chan struct{}
+	err  error
+	ctx  context.Context
+}
+
+type browserCleanupRecord struct {
+	browser *hrod.Browser
+}
+
+type pendingPage struct {
+	page            *hrod.Page
+	browser         *hrod.Browser
+	operation       *resetOperation
+	err             error
+	targetDestroyed <-chan struct{}
+	stopTargetWatch context.CancelFunc
 }
 
 type browserStartup struct {
@@ -187,21 +212,32 @@ func (m *Manager) acquireFor(ctx context.Context, owner string) (*hrod.Page, boo
 		}
 		m.cancelIdleCloseLocked()
 		m.mu.Unlock()
-		if err := checkBrowserHealth(b); err != nil {
-			m.discardBrowser(b)
+		if err := checkBrowserHealth(ctx, b); err != nil {
+			if ctx.Err() != nil {
+				m.releaseToken()
+				return nil, false, ctx.Err()
+			}
+			if closeErr := m.discardBrowser(ctx, b); closeErr != nil {
+				m.releaseToken()
+				return nil, false, errors.Join(err, closeErr)
+			}
 			m.releaseToken()
 			continue
 		}
 
-		page := m.takeWarmPage(b)
+		page, err := m.takeWarmPage(ctx, b)
+		if err != nil {
+			m.releaseToken()
+			return nil, false, err
+		}
 		if page != nil {
 			atomic.AddInt64(&m.warmPageReused, 1)
 			return page, false, nil
 		}
 		atomic.AddInt64(&m.pagesCreated, 1)
-		page, err = newPage(b)
+		page, err = newPage(ctx, b)
 		if err != nil {
-			m.discardBrowser(b)
+			m.discardBrowser(ctx, b)
 			m.releaseToken()
 			return nil, false, err
 		}
@@ -232,24 +268,37 @@ func (m *Manager) Stats() BrowserStats {
 }
 
 // takeWarmPage 取出可复用的热页面；取不到（无缓存/已过期/不可用）返回 nil。
-func (m *Manager) takeWarmPage(b *hrod.Browser) *hrod.Page {
+func (m *Manager) takeWarmPage(ctx context.Context, b *hrod.Browser) (*hrod.Page, error) {
 	m.mu.Lock()
 	page, parkedAt, ttl := m.warmPage, m.warmPageAt, m.warmPageTTL
 	m.warmPage, m.warmPageAt = nil, time.Time{}
+	var pending *pendingPage
+	if page != nil {
+		pending = m.retainResetPageLocked(page, b)
+	}
 	if m.warmPageTimer != nil {
 		m.warmPageTimer.Stop()
 		m.warmPageTimer = nil
 	}
 	m.mu.Unlock()
 	if page == nil {
-		return nil
+		return nil, nil
 	}
-	if !warmPageReusable(page, b, parkedAt, time.Now(), ttl) {
-		_ = page.Close()
-		return nil
+	probeCtx, cancelProbe := context.WithTimeout(ctx, browserHealthTimeout)
+	reusable := warmPageReusable(page.Context(probeCtx), b, parkedAt, time.Now(), ttl)
+	cancelProbe()
+	if !reusable || ctx.Err() != nil {
+		err := m.closePendingPageRecord(ctx, pending)
+		if err != nil {
+			return nil, fmt.Errorf("close unusable warm page: %w", err)
+		}
+		return nil, ctx.Err()
 	}
+	m.mu.Lock()
+	m.removeResetPageRecordLocked(pending)
+	m.mu.Unlock()
 	logrus.Debug("reuse warm page")
-	return page
+	return page, nil
 }
 
 // warmPageReusable 判断缓存的热页面是否还能复用：未过期、属于当前浏览器实例、CDP 仍然可用。
@@ -272,36 +321,52 @@ func warmPageReusable(page *hrod.Page, b *hrod.Browser, parkedAt, now time.Time,
 
 // parkWarmPage 把页面放进热页面缓存，到期自动关闭。返回 false 表示调用方应直接关闭它。
 func (m *Manager) parkWarmPage(page *hrod.Page) bool {
+	pageBrowser := page.Browser()
 	m.mu.Lock()
 	if m.closed || m.resetting || m.warmPageTTL <= 0 {
 		m.mu.Unlock()
 		return false
 	}
 	previous := m.warmPage
+	var previousPending *pendingPage
+	if previous != nil {
+		previousPending = m.retainResetPageLocked(previous, previous.Browser())
+	}
 	if m.warmPageTimer != nil {
 		m.warmPageTimer.Stop()
 	}
 	ttl := m.warmPageTTL
 	m.warmPage = page
 	m.warmPageAt = time.Now()
-	m.warmPageTimer = time.AfterFunc(ttl, func() { m.expireWarmPage(page) })
+	m.warmPageTimer = time.AfterFunc(ttl, func() { m.expireWarmPage(page, pageBrowser) })
 	m.mu.Unlock()
 
 	if previous != nil {
-		_ = previous.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), pageCloseTimeout)
+		err := m.closePendingPageRecord(ctx, previousPending)
+		cancel()
+		if err != nil {
+			logrus.WithError(err).Debug("close replaced warm page")
+		}
 	}
 	return true
 }
 
-func (m *Manager) expireWarmPage(page *hrod.Page) {
+func (m *Manager) expireWarmPage(page *hrod.Page, browser *hrod.Browser) {
 	m.mu.Lock()
 	if m.warmPage != page {
 		m.mu.Unlock()
 		return
 	}
 	m.warmPage, m.warmPageAt, m.warmPageTimer = nil, time.Time{}, nil
+	pending := m.retainResetPageLocked(page, browser)
 	m.mu.Unlock()
-	_ = page.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), pageCloseTimeout)
+	err := m.closePendingPageRecord(ctx, pending)
+	cancel()
+	if err != nil {
+		logrus.WithError(err).Debug("warm page cleanup pending")
+	}
 }
 
 // clearWarmPageLocked 丢弃热页面缓存并返回需要关闭的页面，调用方持锁。
@@ -313,6 +378,352 @@ func (m *Manager) clearWarmPageLocked() *hrod.Page {
 		m.warmPageTimer = nil
 	}
 	return page
+}
+
+func (m *Manager) retainResetPageLocked(page *hrod.Page, browser *hrod.Browser) *pendingPage {
+	if page == nil {
+		return nil
+	}
+	if browser == nil {
+		browser = page.Browser()
+	}
+	// Reset may have retired this browser's records before an old session retries.
+	// Only confirmed process cleanup makes its pages terminal; transport loss does not.
+	if browserCleanupComplete(browser) {
+		m.removeResetPagesForBrowserLocked(browser)
+		return nil
+	}
+	for _, current := range m.resetPages {
+		if current.page == page {
+			if current.browser == nil {
+				current.browser = browser
+			}
+			return current
+		}
+	}
+	targetDestroyed, stopTargetWatch := watchPageTargetDestroyed(page)
+	pending := &pendingPage{
+		page:            page,
+		browser:         browser,
+		targetDestroyed: targetDestroyed,
+		stopTargetWatch: stopTargetWatch,
+	}
+	m.resetPages = append(m.resetPages, pending)
+	return pending
+}
+
+func watchPageTargetDestroyed(page *hrod.Page) (<-chan struct{}, context.CancelFunc) {
+	return watchPageTargetDestroyedWithObserver(page, nil)
+}
+
+// observed runs after a targetDestroyed event has been processed. Tests use it
+// to distinguish watcher consumption from delivery to Rod's upstream event bus.
+func watchPageTargetDestroyedWithObserver(page *hrod.Page, observed func(proto.TargetTargetDestroyed)) (<-chan struct{}, context.CancelFunc) {
+	if page == nil || page.Rod == nil || page.Rod.Browser() == nil || page.Rod.TargetID == "" {
+		return nil, nil
+	}
+	watchCtx, cancel := context.WithCancel(context.Background())
+	events := page.Rod.Browser().Context(watchCtx).Event()
+	destroyed := make(chan struct{})
+	targetID := page.Rod.TargetID
+	go func() {
+		defer cancel()
+		for message := range events {
+			if message.Method != "Target.targetDestroyed" {
+				continue
+			}
+			var event proto.TargetTargetDestroyed
+			if !message.Load(&event) {
+				continue
+			}
+			matched := event.TargetID == targetID
+			if matched {
+				close(destroyed)
+			}
+			if observed != nil {
+				observed(event)
+			}
+			if matched {
+				return
+			}
+		}
+	}()
+	return destroyed, cancel
+}
+
+func stopPendingPageTargetWatchLocked(pending *pendingPage) {
+	if pending != nil && pending.stopTargetWatch != nil {
+		pending.stopTargetWatch()
+		pending.stopTargetWatch = nil
+	}
+}
+
+func (m *Manager) closePendingPage(ctx context.Context, page *hrod.Page, browser *hrod.Browser) error {
+	if page == nil {
+		return nil
+	}
+	m.mu.Lock()
+	pending := m.retainResetPageLocked(page, browser)
+	m.mu.Unlock()
+	return m.closePendingPageRecord(ctx, pending)
+}
+
+func (m *Manager) closePendingPageRecord(ctx context.Context, pending *pendingPage) error {
+	if pending == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	m.mu.Lock()
+	if browserCleanupComplete(pending.browser) {
+		m.removeResetPageRecordLocked(pending)
+		m.mu.Unlock()
+		return nil
+	}
+	recordCurrent := false
+	for _, current := range m.resetPages {
+		if current == pending {
+			recordCurrent = true
+			break
+		}
+	}
+	if !recordCurrent {
+		m.mu.Unlock()
+		return nil
+	}
+	if pending.operation != nil {
+		operation := pending.operation
+		m.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-operation.done:
+			return operation.err
+		}
+	}
+	operation := &resetOperation{done: make(chan struct{})}
+	pending.operation = operation
+	m.mu.Unlock()
+
+	var closeErr error
+	if !pendingTargetDestroyed(pending) {
+		probeCtx, cancelProbe := context.WithTimeout(ctx, pageCloseTimeout)
+		targetClosed, probeErr := pageTargetClosed(probeCtx, pending.page)
+		probeCtxErr := probeCtx.Err()
+		cancelProbe()
+		if pendingTargetDestroyed(pending) {
+			closeErr = nil
+		} else if probeErr != nil {
+			closeErr = errors.Join(probeErr, probeCtxErr)
+		} else if targetClosed {
+			closeErr = nil
+		} else if pendingTargetDestroyed(pending) {
+			closeErr = nil
+		} else {
+			pageCtx, cancelPage := context.WithTimeout(ctx, pageCloseTimeout)
+			closeErr = pending.page.CloseContext(pageCtx)
+			pageCtxErr := pageCtx.Err()
+			cancelPage()
+			if pendingTargetDestroyed(pending) {
+				closeErr = nil
+			} else {
+				verifyCtx, cancelVerify := context.WithTimeout(context.Background(), pageCloseTimeout)
+				targetClosed, verifyErr := pageTargetClosed(verifyCtx, pending.page)
+				cancelVerify()
+				if pendingTargetDestroyed(pending) {
+					closeErr = nil
+				} else if verifyErr != nil {
+					closeErr = errors.Join(closeErr, pageCtxErr, verifyErr)
+				} else if targetClosed {
+					closeErr = nil
+				} else {
+					closeErr = errors.Join(closeErr, pageCtxErr, errors.New("page target remains after close request"))
+				}
+			}
+		}
+	}
+
+	m.mu.Lock()
+	// Reset can finish while the target query is in flight on the old transport.
+	if browserCleanupComplete(pending.browser) {
+		closeErr = nil
+	}
+	operation.err = closeErr
+	recordCurrent = false
+	for _, current := range m.resetPages {
+		if current == pending {
+			recordCurrent = true
+			break
+		}
+	}
+	if recordCurrent && pending.operation == operation {
+		if pendingTargetDestroyed(pending) {
+			closeErr = nil
+			operation.err = nil
+		}
+		pending.err = closeErr
+		pending.operation = nil
+		if closeErr == nil {
+			m.removeResetPageLocked(pending.page)
+		}
+	}
+	close(operation.done)
+	m.mu.Unlock()
+	return closeErr
+}
+
+func browserCleanupComplete(browser *hrod.Browser) bool {
+	return browser != nil && browser.Rod() != nil && browser.Rod().CleanupComplete()
+}
+
+func pendingTargetDestroyed(pending *pendingPage) bool {
+	if pending == nil || pending.targetDestroyed == nil {
+		return false
+	}
+	select {
+	case <-pending.targetDestroyed:
+		return true
+	default:
+		return false
+	}
+}
+
+func pageTargetClosed(ctx context.Context, page *hrod.Page) (bool, error) {
+	if page == nil || page.Rod == nil || page.Rod.Browser() == nil {
+		return false, errors.New("page has no Rod browser for target confirmation")
+	}
+	result, err := (proto.TargetGetTargets{}).Call(page.Rod.Browser().Context(ctx))
+	if err != nil {
+		return false, err
+	}
+	for _, target := range result.TargetInfos {
+		if target.TargetID == page.Rod.TargetID {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func (m *Manager) closePendingPagesForBrowser(ctx context.Context, browser *hrod.Browser) error {
+	m.mu.Lock()
+	pages := make([]*pendingPage, 0, len(m.resetPages))
+	for _, pending := range m.resetPages {
+		if pending.browser == browser {
+			pages = append(pages, pending)
+		}
+	}
+	m.mu.Unlock()
+	var closeErr error
+	for _, pending := range pages {
+		closeErr = errors.Join(closeErr, m.closePendingPageRecord(ctx, pending))
+	}
+	return closeErr
+}
+
+func (m *Manager) browserCleanupRecordLocked(browser *hrod.Browser) *browserCleanupRecord {
+	if browser == nil {
+		return nil
+	}
+	if m.browserCleanups == nil {
+		m.browserCleanups = make(map[*hrod.Browser]*browserCleanupRecord)
+	}
+	if record := m.browserCleanups[browser]; record != nil {
+		return record
+	}
+	record := &browserCleanupRecord{browser: browser}
+	m.browserCleanups[browser] = record
+	return record
+}
+
+func (m *Manager) retireBrowserCleanupLocked(browser *hrod.Browser, record *browserCleanupRecord) bool {
+	if browser == nil || record == nil || m.browserCleanups[browser] != record {
+		return false
+	}
+	delete(m.browserCleanups, browser)
+	m.removePendingBrowserLocked(browser)
+	m.removeResetPagesForBrowserLocked(browser)
+	m.setBrowserResetErrorLocked(browser, nil)
+	return true
+}
+
+func (m *Manager) retainPendingBrowserLocked(browser *hrod.Browser) {
+	if browser == nil {
+		return
+	}
+	m.browserCleanupRecordLocked(browser)
+	for _, current := range m.pendingBrowsers {
+		if current == browser {
+			return
+		}
+	}
+	m.pendingBrowsers = append(m.pendingBrowsers, browser)
+}
+
+func (m *Manager) removePendingBrowserLocked(browser *hrod.Browser) {
+	for index, current := range m.pendingBrowsers {
+		if current == browser {
+			m.pendingBrowsers = append(m.pendingBrowsers[:index], m.pendingBrowsers[index+1:]...)
+			return
+		}
+	}
+}
+
+func (m *Manager) removeResetPagesForBrowserLocked(browser *hrod.Browser) {
+	if browser == nil {
+		return
+	}
+	remaining := m.resetPages[:0]
+	for _, pending := range m.resetPages {
+		if pending.browser != browser {
+			remaining = append(remaining, pending)
+		} else {
+			stopPendingPageTargetWatchLocked(pending)
+		}
+	}
+	m.resetPages = remaining
+}
+
+func (m *Manager) removeResetPageLocked(page *hrod.Page) {
+	for index, current := range m.resetPages {
+		if current.page == page {
+			stopPendingPageTargetWatchLocked(current)
+			m.resetPages = append(m.resetPages[:index], m.resetPages[index+1:]...)
+			return
+		}
+	}
+}
+
+func (m *Manager) removeResetPageRecordLocked(target *pendingPage) {
+	for index, current := range m.resetPages {
+		if current == target {
+			stopPendingPageTargetWatchLocked(current)
+			m.resetPages = append(m.resetPages[:index], m.resetPages[index+1:]...)
+			return
+		}
+	}
+}
+
+func (m *Manager) setBrowserResetErrorLocked(browser *hrod.Browser, err error) {
+	if browser == nil {
+		return
+	}
+	if err == nil {
+		delete(m.resetErrByBrowser, browser)
+		return
+	}
+	if m.resetErrByBrowser == nil {
+		m.resetErrByBrowser = make(map[*hrod.Browser]error)
+	}
+	m.resetErrByBrowser[browser] = err
+}
+
+func (m *Manager) browserResetErrorLocked() error {
+	var err error
+	for _, browserErr := range m.resetErrByBrowser {
+		err = errors.Join(err, browserErr)
+	}
+	return err
 }
 
 // Detach 归还独占权但保留页面句柄：页面既不关闭也不进入热页面缓存，
@@ -348,34 +759,16 @@ func (m *Manager) UpdateOwner(owner string) {
 // Release 归还独占权，浏览器保持常驻。
 // 页面进入热页面缓存（到期自动关闭），取不到缓存的下一次 Acquire 会新建页面。
 func (m *Manager) Release(page *hrod.Page) {
-	if page != nil && !m.parkWarmPage(page) {
-		ctx, cancel := context.WithTimeout(context.Background(), pageCloseTimeout)
-		err := page.Context(ctx).Close()
-		cancel()
-		if err != nil {
-			m.discardBrowser(page.Browser())
-		}
-	}
-	m.mu.Lock()
-	owner := m.owner
-	configuredIdleTimeout := m.idleTimeout
-	sessionGrace := m.sessionIdleGrace
-	m.mu.Unlock()
-	m.scheduleIdleCloseAfter(idleCloseDelay(owner, configuredIdleTimeout, sessionGrace))
-	m.releaseToken()
+	_ = m.ReleaseContext(context.Background(), page)
 }
 
-// ReleaseAndClose 关闭独占页面并归还浏览器独占权。
-// 与 Release 不同，它不会把已关闭页面放入热页面缓存。
-func (m *Manager) ReleaseAndClose(page *hrod.Page) error {
+func (m *Manager) ReleaseContext(ctx context.Context, page *hrod.Page) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	var closeErr error
-	if page != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), pageCloseTimeout)
-		closeErr = page.Context(ctx).Close()
-		cancel()
-		if closeErr != nil {
-			m.discardBrowser(page.Browser())
-		}
+	if page != nil && !m.parkWarmPage(page) {
+		closeErr = m.closePageWithBrowserFallback(ctx, page)
 	}
 	m.mu.Lock()
 	owner := m.owner
@@ -385,6 +778,61 @@ func (m *Manager) ReleaseAndClose(page *hrod.Page) error {
 	m.scheduleIdleCloseAfter(idleCloseDelay(owner, configuredIdleTimeout, sessionGrace))
 	m.releaseToken()
 	return closeErr
+}
+
+// ReleaseAndClose 关闭独占页面并归还浏览器独占权。
+// 与 Release 不同，它不会把已关闭页面放入热页面缓存。
+func (m *Manager) ReleaseAndClose(page *hrod.Page) error {
+	return m.ReleaseAndCloseContext(context.Background(), page)
+}
+
+func (m *Manager) ReleaseAndCloseContext(ctx context.Context, page *hrod.Page) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	var closeErr error
+	if page != nil {
+		closeErr = m.closePageWithBrowserFallback(ctx, page)
+	}
+	m.mu.Lock()
+	owner := m.owner
+	configuredIdleTimeout := m.idleTimeout
+	sessionGrace := m.sessionIdleGrace
+	m.mu.Unlock()
+	m.scheduleIdleCloseAfter(idleCloseDelay(owner, configuredIdleTimeout, sessionGrace))
+	m.releaseToken()
+	return closeErr
+}
+
+func (m *Manager) ClosePageContext(ctx context.Context, page *hrod.Page) error {
+	if page == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	// A session close can be upgraded to discard after Release parked this page.
+	// Remove it before target cleanup so later Acquire cannot reuse the cache entry.
+	m.mu.Lock()
+	if m.warmPage == page {
+		m.clearWarmPageLocked()
+	}
+	m.mu.Unlock()
+	return m.closePendingPage(ctx, page, page.Browser())
+}
+
+// Only the caller still holding the browser lease may escalate target cleanup.
+func (m *Manager) closePageWithBrowserFallback(ctx context.Context, page *hrod.Page) error {
+	browser := page.Browser()
+	err := m.ClosePageContext(ctx, page)
+	if err != nil {
+		browserErr := m.discardBrowser(ctx, browser)
+		if browser != nil && browserErr == nil {
+			return nil
+		}
+		return errors.Join(err, browserErr)
+	}
+	return nil
 }
 
 // idleCloseDelay 选择页面释放后的浏览器空闲关闭延迟。
@@ -402,79 +850,222 @@ func idleCloseDelay(owner string, configured, sessionGrace time.Duration) time.D
 
 // Reset 关闭常驻浏览器。下次 Acquire 会创建新实例。
 func (m *Manager) Reset(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	m.mu.Lock()
+	if m.resetting {
+		operation := m.resetOp
+		m.mu.Unlock()
+		return m.waitReset(ctx, operation)
+	}
+	m.mu.Unlock()
 	if err := m.lifecycleLockForOwner(ctx, "reset"); err != nil {
 		return err
 	}
-	defer m.releaseToken()
 
 	m.mu.Lock()
-	resetDone := make(chan struct{})
+	operation := &resetOperation{done: make(chan struct{}), ctx: ctx}
 	m.resetting = true
-	m.resetDone = resetDone
+	m.resetOp = operation
+	m.resetErr = nil
 	m.cancelIdleCloseLocked()
-	warmPage := m.clearWarmPageLocked()
-	b := m.browser
-	m.browser = nil
+	if page := m.clearWarmPageLocked(); page != nil {
+		m.retainResetPageLocked(page, m.browser)
+	}
 	if m.starting != nil {
 		m.starting.err = errors.New("browser startup reset")
 		m.starting.cancel()
 		if m.starting.timer != nil {
 			m.starting.timer.Stop()
 		}
-		m.starting.finish()
-		m.starting = nil
 	}
-	m.startErr = nil
 	m.mu.Unlock()
+
+	go m.finishReset(ctx, operation)
+	return m.waitReset(ctx, operation)
+}
+
+func (m *Manager) waitReset(ctx context.Context, operation *resetOperation) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-operation.done:
+		return operation.err
+	}
+}
+
+func (m *Manager) finishReset(ctx context.Context, operation *resetOperation) {
+	defer m.releaseToken()
 	m.wg.Wait()
 
-	// 热页面属于旧浏览器实例，随浏览器一起关闭。
-	if warmPage != nil {
-		_ = warmPage.Close()
-	}
-
-	var closeErr error
-	if b != nil {
-		closeErr = b.Close()
+	var resetErr error
+	if err := ctx.Err(); err != nil {
+		resetErr = err
+	} else {
+		m.mu.Lock()
+		pages := append([]*pendingPage(nil), m.resetPages...)
+		b := m.browser
+		browserRecord := m.browserCleanupRecordLocked(b)
+		pendingBrowsers := append([]*hrod.Browser(nil), m.pendingBrowsers...)
+		pendingRecords := make(map[*hrod.Browser]*browserCleanupRecord, len(pendingBrowsers))
+		for _, pending := range pendingBrowsers {
+			pendingRecords[pending] = m.browserCleanupRecordLocked(pending)
+		}
+		m.mu.Unlock()
+		pageErrors := make(map[*pendingPage]error)
+		for _, pending := range pages {
+			if ctx.Err() != nil {
+				resetErr = ctx.Err()
+				break
+			}
+			err := m.closePendingPageRecord(ctx, pending)
+			if err != nil && ctx.Err() == nil {
+				err = m.closePendingPageRecord(ctx, pending)
+			}
+			if err != nil {
+				pageErrors[pending] = err
+			}
+		}
+		if b != nil {
+			if ctx.Err() != nil {
+				resetErr = errors.Join(resetErr, ctx.Err())
+			} else {
+				browserCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+				err := b.CloseContext(browserCtx)
+				cancel()
+				m.mu.Lock()
+				if err == nil {
+					if m.browserCleanups[b] == browserRecord {
+						if m.browser == b {
+							m.browser = nil
+						}
+						m.clearWarmPageLocked()
+						m.retireBrowserCleanupLocked(b, browserRecord)
+					}
+				} else if m.browserCleanups[b] == browserRecord {
+					resetErr = errors.Join(resetErr, fmt.Errorf("close browser during reset: %w", err))
+				}
+				m.mu.Unlock()
+			}
+		}
+		for _, pending := range pendingBrowsers {
+			if ctx.Err() != nil {
+				resetErr = errors.Join(resetErr, ctx.Err())
+				break
+			}
+			browserCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			err := pending.CloseContext(browserCtx)
+			cancel()
+			m.mu.Lock()
+			if err == nil {
+				if m.browserCleanups[pending] == pendingRecords[pending] {
+					m.retireBrowserCleanupLocked(pending, pendingRecords[pending])
+				}
+			} else if m.browserCleanups[pending] == pendingRecords[pending] {
+				resetErr = errors.Join(resetErr, fmt.Errorf("close pending browser during reset: %w", err))
+			}
+			m.mu.Unlock()
+		}
+		for pending, err := range pageErrors {
+			m.mu.Lock()
+			retained := false
+			for _, current := range m.resetPages {
+				if current == pending {
+					retained = true
+					break
+				}
+			}
+			m.mu.Unlock()
+			if retained {
+				resetErr = errors.Join(resetErr, fmt.Errorf("close warm page during browser reset: %w", err))
+			}
+		}
+		if resetErr == nil && ctx.Err() != nil {
+			resetErr = ctx.Err()
+		}
 	}
 
 	m.mu.Lock()
-	if m.resetDone == resetDone {
-		m.resetting = false
-		m.resetDone = nil
-		close(resetDone)
+	operation.err = resetErr
+	m.resetErr = resetErr
+	m.resetting = false
+	if m.resetOp == operation {
+		m.resetOp = nil
 	}
+	close(operation.done)
 	m.mu.Unlock()
-
-	if b == nil {
-		return nil
-	}
-	return closeErr
 }
 
 // Close 阻止新的获取并关闭常驻浏览器。
 func (m *Manager) Close(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	m.mu.Lock()
 	m.closed = true
 	m.cancelIdleCloseLocked()
+	operation := m.resetOp
 	m.mu.Unlock()
+	if operation != nil {
+		err := m.waitReset(ctx, operation)
+		if err == nil || ctx.Err() != nil || operation.ctx == nil || operation.ctx.Err() == nil {
+			return err
+		}
+		// 旧调用已取消时，用本次仍有效的 context 继续未完成的清理。
+	}
 	return m.Reset(ctx)
 }
 
 func (m *Manager) getBrowser(ctx context.Context) (*hrod.Browser, error) {
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		m.mu.Lock()
+		for index := 0; index < len(m.pendingBrowsers); {
+			pending := m.pendingBrowsers[index]
+			if pending == nil || pending.Rod() == nil || !pending.Rod().CleanupComplete() {
+				index++
+				continue
+			}
+			record := m.browserCleanups[pending]
+			if record == nil {
+				index++
+				continue
+			}
+			m.retireBrowserCleanupLocked(pending, record)
+		}
+		if err := errors.Join(m.resetErr, m.browserResetErrorLocked()); err != nil {
+			m.mu.Unlock()
+			return nil, fmt.Errorf("browser reset cleanup pending: %w", err)
+		}
+		if len(m.pendingBrowsers) > 0 {
+			err := m.resetErr
+			if err == nil {
+				err = errors.New("pending browser cleanup remains")
+			}
+			m.mu.Unlock()
+			return nil, fmt.Errorf("browser reset cleanup pending: %w", err)
+		}
+		for _, pending := range m.resetPages {
+			if pending.err != nil {
+				err := pending.err
+				m.mu.Unlock()
+				return nil, fmt.Errorf("browser reset cleanup pending: %w", err)
+			}
+		}
 		if m.closed {
 			m.mu.Unlock()
 			return nil, errors.New("browser manager is closing")
 		}
 		if m.resetting {
-			done := m.resetDone
+			operation := m.resetOp
 			m.mu.Unlock()
 			select {
 			case <-ctx.Done():
 				return nil, ctx.Err()
-			case <-done:
+			case <-operation.done:
 				continue
 			}
 		}
@@ -484,6 +1075,13 @@ func (m *Manager) getBrowser(ctx context.Context) (*hrod.Browser, error) {
 			return b, nil
 		}
 		started := m.starting
+		// A timed-out factory still owns its startup resources until it returns.
+		// Do not launch a second Chromium against the same persistent profile.
+		if started != nil && started.err != nil {
+			err := started.err
+			m.mu.Unlock()
+			return nil, err
+		}
 		if started == nil {
 			startupTimeout := defaultStartupTimeout
 			if configuredTimeout := configs.GetBrowserStartupTimeout(); configuredTimeout > 0 {
@@ -525,19 +1123,29 @@ func (m *Manager) startBrowser(started *browserStartup) {
 	defer m.wg.Done()
 
 	b, err := newBrowser(started.ctx, m.factory)
-
 	m.mu.Lock()
-	if m.starting != started {
+	if startupErr := started.ctx.Err(); startupErr != nil {
+		err = errors.Join(err, startupErr)
 		m.mu.Unlock()
 		if b != nil {
-			_ = b.Close()
+			cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), 10*time.Second)
+			cleanupErr := b.CloseContext(cleanupCtx)
+			cancelCleanup()
+			err = errors.Join(err, cleanupErr)
+			if cleanupErr == nil {
+				b = nil
+			}
 		}
+		m.mu.Lock()
+	}
+
+	if m.starting != started {
+		m.retainPendingBrowserLocked(b)
+		m.mu.Unlock()
 		return
 	}
-	if m.closed && b != nil {
-		m.mu.Unlock()
-		_ = b.Close()
-		m.mu.Lock()
+	if err != nil && b != nil {
+		m.retainPendingBrowserLocked(b)
 		b = nil
 	}
 	m.browser = b
@@ -561,35 +1169,87 @@ func newBrowser(ctx context.Context, factory BrowserFactory) (browser *hrod.Brow
 	return factory(ctx)
 }
 
-func newPage(browser *hrod.Browser) (page *hrod.Page, err error) {
+func newPage(ctx context.Context, browser *hrod.Browser) (page *hrod.Page, err error) {
+	pageCtx, cancel := context.WithTimeout(ctx, lifecycleAcquireTimeout)
+	defer cancel()
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			err = fmt.Errorf("create browser page failed: %v", recovered)
 			logrus.WithError(fmt.Errorf("%v", recovered)).Debug("newPage panicked")
 		}
 	}()
-	return browser.Page()
+	return browser.PageContext(pageCtx)
 }
 
-func (m *Manager) discardBrowser(target *hrod.Browser) {
+func (m *Manager) discardBrowser(ctx context.Context, target *hrod.Browser) error {
 	if target == nil {
-		return
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	m.mu.Lock()
-	if m.browser == target {
-		m.browser = nil
+	current := m.browser == target
+	record := m.browserCleanupRecordLocked(target)
+	if current {
+		if page := m.clearWarmPageLocked(); page != nil {
+			m.retainResetPageLocked(page, target)
+		}
+		m.cancelIdleCloseLocked()
 	}
-	warmPage := m.clearWarmPageLocked()
-	m.cancelIdleCloseLocked()
 	m.mu.Unlock()
-	if warmPage != nil {
-		_ = warmPage.Close()
+	if !current {
+		pageErr := m.closePendingPagesForBrowser(ctx, target)
+		browserCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		err := target.CloseContext(browserCtx)
+		cancel()
+		if err == nil {
+			m.mu.Lock()
+			m.retireBrowserCleanupLocked(target, record)
+			m.mu.Unlock()
+			return nil
+		}
+		combinedErr := errors.Join(pageErr, err)
+		m.mu.Lock()
+		if m.browserCleanups[target] != record {
+			m.mu.Unlock()
+			return nil
+		}
+		m.retainPendingBrowserLocked(target)
+		m.setBrowserResetErrorLocked(target, combinedErr)
+		m.mu.Unlock()
+		return combinedErr
 	}
-	_ = target.Close()
+
+	pageErr := m.closePendingPagesForBrowser(ctx, target)
+	browserCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	browserErr := target.CloseContext(browserCtx)
+	cancel()
+	if browserErr == nil {
+		m.mu.Lock()
+		if m.browserCleanups[target] == record {
+			if m.browser == target {
+				m.browser = nil
+			}
+			m.retireBrowserCleanupLocked(target, record)
+		}
+		m.mu.Unlock()
+		return nil
+	}
+
+	combinedErr := errors.Join(pageErr, browserErr)
+	m.mu.Lock()
+	if m.browserCleanups[target] != record {
+		m.mu.Unlock()
+		return nil
+	}
+	m.setBrowserResetErrorLocked(target, combinedErr)
+	m.mu.Unlock()
+	return combinedErr
 }
 
-func checkBrowserHealth(browser *hrod.Browser) error {
-	ctx, cancel := context.WithTimeout(context.Background(), browserHealthTimeout)
+func checkBrowserHealth(ctx context.Context, browser *hrod.Browser) error {
+	ctx, cancel := context.WithTimeout(ctx, browserHealthTimeout)
 	defer cancel()
 	return browser.Health(ctx)
 }
@@ -603,7 +1263,6 @@ func (m *Manager) failStartup(started *browserStartup) {
 	started.err = errors.New("browser startup timed out")
 	m.startErr = started.err
 	started.cancel()
-	m.starting = nil
 	started.finish()
 }
 
@@ -632,7 +1291,10 @@ func (m *Manager) closeIfIdle(version uint64) {
 		return
 	}
 	b := m.browser
-	m.browser = nil
+	browserRecord := m.browserCleanupRecordLocked(b)
+	if page := m.clearWarmPageLocked(); page != nil {
+		m.retainResetPageLocked(page, m.browser)
+	}
 	m.idleTimer = nil
 	m.idleVersion++
 	m.mu.Unlock()
@@ -640,7 +1302,22 @@ func (m *Manager) closeIfIdle(version uint64) {
 		atomic.LoadInt64(&m.pagesCreated), atomic.LoadInt64(&m.warmPageReused))
 
 	if b != nil {
-		_ = b.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		pageErr := m.closePendingPagesForBrowser(ctx, b)
+		err := b.CloseContext(ctx)
+		cancel()
+		m.mu.Lock()
+		if m.browserCleanups[b] == browserRecord {
+			if err == nil {
+				if m.browser == b {
+					m.browser = nil
+				}
+				m.retireBrowserCleanupLocked(b, browserRecord)
+			} else {
+				m.setBrowserResetErrorLocked(b, errors.Join(pageErr, err))
+			}
+		}
+		m.mu.Unlock()
 	}
 }
 
@@ -684,6 +1361,10 @@ func (m *Manager) lockForOwnerWithTimeout(ctx context.Context, owner string, acq
 		}
 		return m.currentBusyError(acquireTimeout)
 	case <-m.token:
+		if err := ctx.Err(); err != nil {
+			m.token <- struct{}{}
+			return err
+		}
 		m.mu.Lock()
 		m.owner = owner
 		m.ownerAt = time.Now()

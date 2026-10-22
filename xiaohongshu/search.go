@@ -504,7 +504,13 @@ func probeSearchResultsKeyword(ctx context.Context, page *hrod.Page, counter *ev
 			}));
 		};
 		const domSignature = () => {
-			const cards = Array.from(document.querySelectorAll(feedCardSelector)).filter((el) => visibleWithSize(el, 1)).slice(0, 6);
+			const cards = [];
+			for (const el of document.querySelectorAll(feedCardSelector)) {
+				if (visibleWithSize(el, 1)) {
+					cards.push(el);
+					if (cards.length === 6) break;
+				}
+			}
 			if (cards.length === 0) return "";
 			return JSON.stringify(cards.map((card) => {
 				const link = Array.from(card.querySelectorAll("a[href]"))
@@ -1348,7 +1354,14 @@ func normalizeAIResponse(probe aiStateProbe) (*AIChatReply, bool) {
 
 	dqa := decodeAIStateValue(probe.DQAInstantElements)
 	onebox := decodeAIStateValue(probe.OneboxInfo)
-	content := firstNonEmpty(probe.DomAIText, extractAIText(dqa), extractAIText(onebox))
+	// 正文按优先级惰性提取；状态仍从两个来源读取，保留 HasMore 判据。
+	content := probe.DomAIText
+	if content == "" {
+		content = extractAIText(dqa)
+	}
+	if content == "" {
+		content = extractAIText(onebox)
+	}
 	hasMore := aiStateHasMore(dqa) || aiStateHasMore(onebox)
 	if content == "" {
 		return nil, probe.Active || hasMore
@@ -1481,44 +1494,37 @@ func aiStateHasMore(value any) bool {
 	return false
 }
 
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if value != "" {
-			return value
-		}
-	}
-	return ""
-}
-
 func mergeFeedsByID(primary, fallback []Feed) []Feed {
-	byID := make(map[string]Feed, len(fallback))
-	for _, feed := range fallback {
-		if feed.ID != "" {
-			byID[feed.ID] = feed
+	// 只存索引，避免复制完整 Feed；重复 ID 仍取最后一条补字段。
+	byID := make(map[string]int, len(fallback))
+	for i := range fallback {
+		if id := fallback[i].ID; id != "" {
+			byID[id] = i
 		}
 	}
 	result := make([]Feed, 0, len(primary)+len(fallback))
 	seen := make(map[string]bool, len(primary))
 	for _, feed := range primary {
-		if other, ok := byID[feed.ID]; ok {
-			fillMissingFeedFields(&feed, other)
+		if i, ok := byID[feed.ID]; ok {
+			fillMissingFeedFields(&feed, &fallback[i])
 		}
 		result = append(result, feed)
 		if feed.ID != "" {
 			seen[feed.ID] = true
 		}
 	}
-	for _, feed := range fallback {
-		if feed.ID == "" || seen[feed.ID] {
+	for i := range fallback {
+		id := fallback[i].ID
+		if id == "" || seen[id] {
 			continue
 		}
-		result = append(result, feed)
-		seen[feed.ID] = true
+		result = append(result, fallback[i])
+		seen[id] = true
 	}
 	return result
 }
 
-func fillMissingFeedFields(dst *Feed, src Feed) {
+func fillMissingFeedFields(dst, src *Feed) {
 	if dst.ID == "" {
 		dst.ID = src.ID
 	}

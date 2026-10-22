@@ -16,6 +16,7 @@ import (
 
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/proto"
+	"github.com/sirupsen/logrus"
 	xerrors "github.com/xpzouying/xiaohongshu-mcp/errors"
 	"github.com/xpzouying/xiaohongshu-mcp/humanize"
 	hrod "github.com/xpzouying/xiaohongshu-mcp/humanize/rod"
@@ -252,19 +253,27 @@ type BrowseSessionPageCounts struct {
 }
 
 type BrowseSession struct {
-	mu       sync.Mutex
-	opToken  chan struct{}
-	closedCh chan struct{}
-	opCtx    context.Context
-	activeOp context.CancelFunc
-	evalJS   func(ctx context.Context, page *hrod.Page, script string) (*proto.RuntimeRemoteObject, error)
-	id       string
-	page     *hrod.Page
-	state    *ActionStateStore
-	timeout  time.Duration
-	timer    *time.Timer
-	onClose  func(*hrod.Page)
-	onRemove func(*BrowseSession)
+	mu                 sync.Mutex
+	opToken            chan struct{}
+	closedCh           chan struct{}
+	opCtx              context.Context
+	activeOp           context.CancelFunc
+	activeCancelMu     sync.Mutex
+	activeCancel       context.CancelFunc
+	evalJS             func(ctx context.Context, page *hrod.Page, script string) (*proto.RuntimeRemoteObject, error)
+	id                 string
+	page               *hrod.Page
+	state              *ActionStateStore
+	timeout            time.Duration
+	timer              *time.Timer
+	onClose            func(*hrod.Page)
+	onCloseContext     BrowseSessionCloseFunc
+	onRemove           func(*BrowseSession)
+	closeManager       *BrowseSessionManager
+	closeDone          chan struct{}
+	closeErr           error
+	closeDiscard       bool
+	closeLeaseReleased bool
 
 	touchOnFinish bool
 
@@ -290,10 +299,24 @@ type BrowseSession struct {
 }
 
 type BrowseSessionManager struct {
-	mu       sync.Mutex
-	timeout  time.Duration
-	sessions map[string]*BrowseSession
+	mu             sync.Mutex
+	timeout        time.Duration
+	sessions       map[string]*BrowseSession
+	closing        map[string]*BrowseSession
+	workers        map[string]*sessionCleanupWorker
+	workersStopped bool
+	generation     uint64
 }
+
+type sessionCleanupWorker struct {
+	session *BrowseSession
+	ctx     context.Context
+	cancel  context.CancelFunc
+	done    chan struct{}
+}
+
+type BrowseSessionCloseFunc func(context.Context, *hrod.Page, bool, bool) error
+type BrowseSessionCommitFunc func(*BrowseSession, func()) error
 
 func NewBrowseSessionManager(timeout time.Duration) *BrowseSessionManager {
 	if timeout <= 0 {
@@ -302,29 +325,78 @@ func NewBrowseSessionManager(timeout time.Duration) *BrowseSessionManager {
 	return &BrowseSessionManager{
 		timeout:  timeout,
 		sessions: make(map[string]*BrowseSession),
+		closing:  make(map[string]*BrowseSession),
+		workers:  make(map[string]*sessionCleanupWorker),
 	}
 }
 
 func (m *BrowseSessionManager) Create(page *hrod.Page, state *ActionStateStore, onClose func(*hrod.Page)) *BrowseSession {
-	return m.create(page, state, onClose, func(session *BrowseSession) {
+	session, err := m.create(context.Background(), page, state, onClose, nil, nil, nil, func(session *BrowseSession) {
 		session.evalJS = func(ctx context.Context, p *hrod.Page, script string) (*proto.RuntimeRemoteObject, error) {
 			return p.Context(ctx).Eval(script)
 		}
 	})
+	if err != nil {
+		session.close()
+		return nil
+	}
+	return session
 }
 
-func (m *BrowseSessionManager) create(page *hrod.Page, state *ActionStateStore, onClose func(*hrod.Page), configure func(*BrowseSession)) *BrowseSession {
+func (m *BrowseSessionManager) CreateContext(ctx context.Context, page *hrod.Page, state *ActionStateStore, onClose func(*hrod.Page), publish ...func(*BrowseSession)) (*BrowseSession, error) {
+	session, err := m.create(ctx, page, state, onClose, nil, nil, publish, func(session *BrowseSession) {
+		session.evalJS = func(ctx context.Context, p *hrod.Page, script string) (*proto.RuntimeRemoteObject, error) {
+			return p.Context(ctx).Eval(script)
+		}
+	})
+	if err != nil {
+		session.close()
+		return nil, err
+	}
+	return session, nil
+}
+
+func (m *BrowseSessionManager) CreateContextWithLifecycle(ctx context.Context, page *hrod.Page, state *ActionStateStore, onClose BrowseSessionCloseFunc, commit BrowseSessionCommitFunc) (*BrowseSession, error) {
+	session, err := m.create(ctx, page, state, nil, onClose, commit, nil, func(session *BrowseSession) {
+		session.evalJS = func(ctx context.Context, p *hrod.Page, script string) (*proto.RuntimeRemoteObject, error) {
+			return p.Context(ctx).Eval(script)
+		}
+	})
+	if err != nil {
+		m.mu.Lock()
+		m.closing[session.id] = session
+		m.mu.Unlock()
+		cleanupErr := session.closeContext(ctx, true)
+		if cleanupErr == nil {
+			m.mu.Lock()
+			if m.closing[session.id] == session {
+				delete(m.closing, session.id)
+			}
+			m.mu.Unlock()
+		}
+		return nil, errors.Join(err, cleanupErr)
+	}
+	return session, nil
+}
+
+func (m *BrowseSessionManager) create(ctx context.Context, page *hrod.Page, state *ActionStateStore, onClose func(*hrod.Page), onCloseContext BrowseSessionCloseFunc, commit BrowseSessionCommitFunc, publish []func(*BrowseSession), configure func(*BrowseSession)) (*BrowseSession, error) {
+	m.mu.Lock()
+	generation := m.generation
+	m.mu.Unlock()
 	session := &BrowseSession{
-		id:        newBrowseSessionID(),
-		opToken:   make(chan struct{}, 1),
-		closedCh:  make(chan struct{}),
-		page:      page,
-		state:     state,
-		timeout:   m.timeout,
-		onClose:   onClose,
-		onRemove:  m.remove,
-		seenNotes: make(map[string]bool),
-		results:   make(map[string]Feed),
+		id:             newBrowseSessionID(),
+		opToken:        make(chan struct{}, 1),
+		closedCh:       make(chan struct{}),
+		page:           page,
+		state:          state,
+		timeout:        m.timeout,
+		onClose:        onClose,
+		onCloseContext: onCloseContext,
+		onRemove:       m.remove,
+		closeManager:   m,
+		expiresAt:      time.Now().Add(m.timeout),
+		seenNotes:      make(map[string]bool),
+		results:        make(map[string]Feed),
 		notification: browseNotificationState{
 			targets:     make(map[string]notificationTarget),
 			returnedIDs: make(map[string]bool),
@@ -336,19 +408,51 @@ func (m *BrowseSessionManager) create(page *hrod.Page, state *ActionStateStore, 
 		configure(session)
 	}
 
-	m.mu.Lock()
-	m.sessions[session.id] = session
-	session.mu.Lock()
-	session.touchLocked()
-	session.mu.Unlock()
-	m.mu.Unlock()
-
-	opCtx, err := session.beginLockedOperation(context.Background(), false)
-	if err == nil {
-		session.refreshPageState(opCtx)
-		session.releaseOperation()
+	opCtx, err := session.beginLockedOperation(ctx, false)
+	if err != nil {
+		return session, err
 	}
-	return session
+	session.refreshPageState(opCtx)
+	session.releaseOperation()
+	if err := ctx.Err(); err != nil {
+		return session, err
+	}
+	m.mu.Lock()
+	session.mu.Lock()
+	defer m.mu.Unlock()
+	defer session.mu.Unlock()
+	if generation != m.generation || session.closed {
+		return session, fmt.Errorf("browse session manager closed during creation")
+	}
+	if err := ctx.Err(); err != nil {
+		return session, err
+	}
+	inserted := false
+	insert := func() {
+		if inserted {
+			return
+		}
+		session.touchLocked()
+		m.sessions[session.id] = session
+		inserted = true
+	}
+	if commit != nil {
+		if err := commit(session, insert); err != nil {
+			return session, err
+		}
+		if !inserted {
+			return session, errors.New("browse session commit did not publish the session")
+		}
+		return session, nil
+	}
+	if len(publish) > 0 && publish[0] != nil {
+		publish[0](session)
+	}
+	if err := ctx.Err(); err != nil {
+		return session, err
+	}
+	insert()
+	return session, nil
 }
 
 func (m *BrowseSessionManager) Get(id string) (*BrowseSession, error) {
@@ -363,6 +467,16 @@ func (m *BrowseSessionManager) Get(id string) (*BrowseSession, error) {
 		return nil, fmt.Errorf("browse session 已过期: %s", id)
 	}
 	return session, nil
+}
+
+// ActiveSessionSnapshot returns an active candidate without checking TTL or starting cleanup.
+func (m *BrowseSessionManager) ActiveSessionSnapshot() (*BrowseSession, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, session := range m.sessions {
+		return session, true
+	}
+	return nil, false
 }
 
 func (m *BrowseSessionManager) ActiveInfo() (BrowseSessionInfo, bool) {
@@ -385,15 +499,135 @@ func (m *BrowseSessionManager) ActiveInfo() (BrowseSessionInfo, bool) {
 }
 
 func (m *BrowseSessionManager) Close(id string) error {
+	return m.CloseContext(context.Background(), id)
+}
+
+func (m *BrowseSessionManager) CloseContext(ctx context.Context, id string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	closeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	ctx = closeCtx
 	m.mu.Lock()
 	session := m.sessions[id]
-	delete(m.sessions, id)
+	if session != nil {
+		delete(m.sessions, id)
+		m.closing[id] = session
+	} else {
+		session = m.closing[id]
+	}
+	worker := m.workers[id]
+	if session == nil && worker != nil {
+		session = worker.session
+		if session != nil {
+			m.closing[id] = session
+		}
+	}
+	if worker != nil && worker.session != session {
+		worker = nil
+	}
+	if worker != nil {
+		worker.cancel()
+	}
 	m.mu.Unlock()
 	if session == nil {
 		return fmt.Errorf("browse session 不存在: %s", id)
 	}
-	session.Close()
+	if worker != nil {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("等待 browse session cleanup worker 退出失败: %w", ctx.Err())
+		case <-worker.done:
+		}
+	}
+	if err := session.closeContext(ctx, false); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	if m.closing[id] == session {
+		delete(m.closing, id)
+	}
+	m.mu.Unlock()
 	return nil
+}
+
+func (m *BrowseSessionManager) CloseInvalidatedAsync(id string) bool {
+	m.mu.Lock()
+	session := m.sessions[id]
+	if session == nil {
+		session = m.closing[id]
+	}
+	if session != nil {
+		// Publish discard before ordinary close can remove the tracked session.
+		// Do not call markClosed here: its onRemove callback takes m.mu again.
+		session.cancelActiveOperation()
+		session.mu.Lock()
+		session.closeDiscard = true
+		session.mu.Unlock()
+		delete(m.sessions, id)
+		m.closing[id] = session
+	}
+	if current := m.workers[id]; current != nil && current.session == session {
+		m.mu.Unlock()
+		return true
+	}
+	var worker *sessionCleanupWorker
+	if session != nil && !m.workersStopped {
+		workerCtx, cancel := context.WithCancel(context.Background())
+		worker = &sessionCleanupWorker{session: session, ctx: workerCtx, cancel: cancel, done: make(chan struct{})}
+		m.workers[id] = worker
+	}
+	m.mu.Unlock()
+	if session == nil {
+		return false
+	}
+	session.markClosed(true)
+	if worker == nil {
+		return true
+	}
+	go m.runInvalidatedCleanup(id, worker)
+	return true
+}
+
+func (m *BrowseSessionManager) runInvalidatedCleanup(id string, worker *sessionCleanupWorker) {
+	defer func() {
+		worker.cancel()
+		m.mu.Lock()
+		if m.workers[id] == worker {
+			delete(m.workers, id)
+		}
+		close(worker.done)
+		m.mu.Unlock()
+	}()
+	for attempt := 1; attempt <= 3; attempt++ {
+		if worker.ctx.Err() != nil {
+			return
+		}
+		ctx, cancel := context.WithTimeout(worker.ctx, 5*time.Second)
+		err := worker.session.closeContext(ctx, true)
+		cancel()
+		if err == nil {
+			m.mu.Lock()
+			if m.closing[id] == worker.session {
+				delete(m.closing, id)
+			}
+			m.mu.Unlock()
+			logrus.Debugf("invalidated browse session cleanup complete session_id=%s attempts=%d", id, attempt)
+			return
+		}
+		logrus.Warnf("invalidated browse session cleanup pending session_id=%s attempt=%d err=%v", id, attempt, err)
+		if attempt < 3 {
+			timer := time.NewTimer(250 * time.Millisecond)
+			select {
+			case <-worker.ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+		}
+	}
+	logrus.Errorf("invalidated browse session cleanup exhausted retries; pending session retained session_id=%s", id)
 }
 
 func (m *BrowseSessionManager) remove(session *BrowseSession) {
@@ -404,20 +638,77 @@ func (m *BrowseSessionManager) remove(session *BrowseSession) {
 	if m.sessions[session.id] == session {
 		delete(m.sessions, session.id)
 	}
+	session.mu.Lock()
+	pending := session.page != nil
+	session.mu.Unlock()
+	if pending {
+		m.closing[session.id] = session
+	} else if m.closing[session.id] == session {
+		delete(m.closing, session.id)
+	}
+	m.mu.Unlock()
+}
+
+func (m *BrowseSessionManager) StopCleanupWorkers() {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.workersStopped = true
+	for _, worker := range m.workers {
+		worker.cancel()
+	}
 	m.mu.Unlock()
 }
 
 func (m *BrowseSessionManager) CloseAll() {
+	_ = m.CloseAllContext(context.Background())
+}
+
+func (m *BrowseSessionManager) CloseAllContext(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	closeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
 	m.mu.Lock()
-	sessions := make([]*BrowseSession, 0, len(m.sessions))
+	m.generation++
+	sessions := make(map[string]*BrowseSession, len(m.sessions)+len(m.closing))
 	for id, session := range m.sessions {
-		sessions = append(sessions, session)
 		delete(m.sessions, id)
+		m.closing[id] = session
+		sessions[id] = session
+	}
+	for id, session := range m.closing {
+		sessions[id] = session
+	}
+	workers := make([]*sessionCleanupWorker, 0, len(m.workers))
+	for _, worker := range m.workers {
+		worker.cancel()
+		workers = append(workers, worker)
 	}
 	m.mu.Unlock()
-	for _, session := range sessions {
-		session.Close()
+
+	for _, worker := range workers {
+		select {
+		case <-closeCtx.Done():
+			return fmt.Errorf("等待 browse session cleanup worker 退出失败: %w", closeCtx.Err())
+		case <-worker.done:
+		}
 	}
+	var closeErr error
+	for id, session := range sessions {
+		if err := session.closeContext(closeCtx, false); err != nil {
+			closeErr = errors.Join(closeErr, fmt.Errorf("close browse session %s: %w", id, err))
+			continue
+		}
+		m.mu.Lock()
+		if m.closing[id] == session {
+			delete(m.closing, id)
+		}
+		m.mu.Unlock()
+	}
+	return closeErr
 }
 
 func (s *BrowseSession) ID() string {
@@ -471,6 +762,14 @@ func (s *BrowseSession) PageState(ctx context.Context) (state *BrowseSessionPage
 	liveDetail := probe.VisibleDetailCount > 0
 	liveKind := inferLivePageKind(probe, liveDetail)
 	mismatch := opened && feedID != "" && !liveDetail
+	kind := liveKind
+	ready := false
+	if !mismatch {
+		ready = isXHSReady(probe, kind, feedID, true)
+		if ready {
+			probeWatchdogSelectors(page, XHSReadyOptions{Kind: kind, FeedID: feedID})
+		}
+	}
 
 	s.mu.Lock()
 	if probe.URL != "" {
@@ -484,16 +783,6 @@ func (s *BrowseSession) PageState(ctx context.Context) (state *BrowseSessionPage
 	notification := s.notificationSurfaceLocked()
 	results := s.semanticResultsLocked()
 
-	kind := liveKind
-	var ready bool
-	if mismatch {
-		ready = false
-	} else {
-		ready = isXHSReady(probe, kind, feedID, true)
-		if ready {
-			probeWatchdogSelectors(page, XHSReadyOptions{Kind: kind, FeedID: feedID})
-		}
-	}
 	guidance := s.guidanceLocked(guidanceQuery{Ready: ready, Mismatch: mismatch}, results)
 	current := s.currentStateLocked(kind)
 	summary := browseSessionSummary(kind, ready, resultsCount, seenCount, current, guidance.NextStep)
@@ -2224,22 +2513,31 @@ func (s *BrowseSession) CheckReusable(ctx context.Context) ReuseCheck {
 }
 
 func (s *BrowseSession) Close() {
-	s.close()
+	if err := s.closeContext(context.Background(), false); err != nil {
+		logrus.Warnf("browse session cleanup remains pending session_id=%s err=%v", s.id, err)
+	}
 }
 
-// TryCloseIdle 非阻塞尝试关闭空闲 session。
-// 获取 opToken 成功说明当前无操作，原子关闭并释放页面，返回 true；
-// 失败说明有操作正在执行，返回 false（调用方应返回 blocked 而非自动重建）。
+// TryCloseIdle retains the background-context compatibility wrapper.
 func (s *BrowseSession) TryCloseIdle() bool {
+	closed, err := s.TryCloseIdleContext(context.Background())
+	if err != nil {
+		logrus.Warnf("browse session cleanup remains pending session_id=%s err=%v", s.id, err)
+	}
+	return closed
+}
+
+// TryCloseIdleContext acquires the idle operation token without waiting.
+// The bool reports token acquisition; cleanup errors are returned to the caller.
+func (s *BrowseSession) TryCloseIdleContext(ctx context.Context) (bool, error) {
 	select {
 	case <-s.opToken:
 	default:
-		return false
+		return false, nil
 	}
 	defer func() { s.opToken <- struct{}{} }()
 
-	s.close()
-	return true
+	return true, s.CloseContext(ctx)
 }
 
 func (s *BrowseSession) ClassifyRisk() (RiskSignal, error) {
@@ -2262,33 +2560,131 @@ func (s *BrowseSession) ClassifyRiskContext(ctx context.Context) (signal RiskSig
 	return ClassifyRisk(page.Context(opCtx))
 }
 
+func (s *BrowseSession) CloseContext(ctx context.Context) error {
+	return s.closeContext(ctx, false)
+}
+
 func (s *BrowseSession) close() {
-	s.mu.Lock()
-	if s.closed {
-		s.mu.Unlock()
-		return
+	s.Close()
+}
+
+func (s *BrowseSession) cancelActiveOperation() {
+	s.activeCancelMu.Lock()
+	activeCancel := s.activeCancel
+	s.activeCancelMu.Unlock()
+	if activeCancel != nil {
+		activeCancel()
 	}
-	s.closed = true
-	close(s.closedCh)
-	if s.timer != nil {
-		s.timer.Stop()
+}
+
+func (s *BrowseSession) markClosed(discard bool) {
+	s.cancelActiveOperation()
+	s.mu.Lock()
+	if !s.closed {
+		s.closed = true
+		close(s.closedCh)
+		if s.timer != nil {
+			s.timer.Stop()
+		}
+	}
+	if discard {
+		s.closeDiscard = true
 	}
 	cancel := s.activeOp
-	page := s.page
-	onClose := s.onClose
 	onRemove := s.onRemove
-	s.page = nil
-	s.onClose = nil
 	s.mu.Unlock()
-
 	if onRemove != nil {
 		onRemove(s)
 	}
 	if cancel != nil {
 		cancel()
 	}
-	if onClose != nil {
-		onClose(page)
+}
+
+func (s *BrowseSession) closeContext(ctx context.Context, discard bool) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	s.markClosed(discard)
+	for {
+		s.mu.Lock()
+		page := s.page
+		if page == nil {
+			s.mu.Unlock()
+			return nil
+		}
+		// Cancellation retains page and lease responsibility for an explicit retry.
+		// Do not invoke callbacks or start background cleanup with a fresh context.
+		if err := ctx.Err(); err != nil {
+			s.mu.Unlock()
+			return err
+		}
+		if done := s.closeDone; done != nil {
+			s.mu.Unlock()
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-done:
+				continue
+			}
+		}
+		done := make(chan struct{})
+		s.closeDone = done
+		onClose := s.onClose
+		onCloseContext := s.onCloseContext
+		closeDiscard := s.closeDiscard
+		leaseReleased := s.closeLeaseReleased
+		s.mu.Unlock()
+
+		var closeErr error
+		if onCloseContext != nil {
+			closeErr = onCloseContext(ctx, page, closeDiscard, leaseReleased)
+		} else if onClose != nil && !leaseReleased {
+			onClose(page)
+		}
+
+		// Commit completion under the same manager -> session lock order as
+		// invalidation. Either fatal publishes discard first, or normal close
+		// retires the session before a later invalidation can find it.
+		if s.closeManager != nil {
+			s.closeManager.mu.Lock()
+		}
+		s.mu.Lock()
+		if onCloseContext != nil || onClose != nil {
+			s.closeLeaseReleased = true
+		}
+		// Ordinary release may have parked the page while fatal invalidation
+		// upgraded the requirement. Keep the handle and retry as resource-only
+		// cleanup; the browser lease has already been returned exactly once.
+		retryDiscard := closeErr == nil && !closeDiscard && s.closeDiscard && onCloseContext != nil
+		if closeErr == nil && !retryDiscard && s.page == page {
+			s.page = nil
+			s.onClose = nil
+			s.onCloseContext = nil
+			if m := s.closeManager; m != nil {
+				if m.sessions[s.id] == s {
+					delete(m.sessions, s.id)
+				}
+				if m.closing[s.id] == s {
+					delete(m.closing, s.id)
+				}
+			}
+		}
+		s.closeErr = closeErr
+		s.closeDone = nil
+		onRemove := s.onRemove
+		close(done)
+		s.mu.Unlock()
+		if s.closeManager != nil {
+			s.closeManager.mu.Unlock()
+		}
+		if retryDiscard {
+			continue
+		}
+		if closeErr == nil && onRemove != nil {
+			onRemove(s)
+		}
+		return closeErr
 	}
 }
 
@@ -2323,6 +2719,9 @@ func (s *BrowseSession) beginLockedOperation(ctx context.Context, touchTTL bool)
 		s.touchLocked()
 	}
 	s.opCtx, s.activeOp = context.WithCancel(ctx)
+	s.activeCancelMu.Lock()
+	s.activeCancel = s.activeOp
+	s.activeCancelMu.Unlock()
 	s.mu.Unlock()
 	return s.opCtx, nil
 }
@@ -2364,12 +2763,15 @@ func (s *BrowseSession) endOperation(operationErr error) {
 func (s *BrowseSession) releaseOperation() {
 	s.mu.Lock()
 	cancel := s.activeOp
+	s.opCtx = nil
+	s.activeOp = nil
+	s.activeCancelMu.Lock()
+	s.activeCancel = nil
+	s.activeCancelMu.Unlock()
+	s.mu.Unlock()
 	if cancel != nil {
 		cancel()
 	}
-	s.opCtx = nil
-	s.activeOp = nil
-	s.mu.Unlock()
 
 	s.opToken <- struct{}{}
 }

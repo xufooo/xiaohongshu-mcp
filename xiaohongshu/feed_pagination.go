@@ -106,16 +106,20 @@ func loadFeedBatchWithOps(ctx context.Context, cursor *FeedCursor, maxItems int,
 			)
 			return batch, true, nil
 		}
-		before := feedKeySet(feeds)
 		batch = append(batch, takeNewFeeds(feeds, cursor, maxItems-len(batch))...)
 		if len(batch) == maxItems {
-			hasLocalRemaining := hasUnseenFeeds(feeds, cursor)
+			// 本地仍有卡片时必然可续页，无需再发一次 DOM/CDP 末尾探测。
+			if hasUnseenFeeds(feeds, cursor) {
+				return batch, true, nil
+			}
 			atEnd := ops.atEnd != nil && ops.atEnd()
-			return batch, hasLocalRemaining || !atEnd, nil
+			return batch, !atEnd, nil
 		}
 		if err := ctx.Err(); err != nil {
 			return batch, true, err
 		}
+		// 只有需要滚动等待增长时才构建基线，收满批次时不使用它。
+		before := feedKeySet(feeds)
 		if err := ops.scroll(); err != nil {
 			if len(batch) > 0 {
 				return batch, true, nil
@@ -170,9 +174,9 @@ func LoadFeedBatch(ctx context.Context, page *hrod.Page, kind FeedPageKind, curs
 				if err != nil {
 					return false, false, err
 				}
-				after := feedKeySet(feeds)
-				for key := range after {
-					if !before[key] {
+				// 增长只需存在一个新 key，无需分配并填满另一张集合。
+				for i := range feeds {
+					if !before[feedKey(feeds[i])] {
 						return true, false, nil
 					}
 				}

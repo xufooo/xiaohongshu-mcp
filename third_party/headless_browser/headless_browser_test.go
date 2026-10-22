@@ -1,12 +1,55 @@
 package headless_browser
 
 import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
+	"runtime"
+	"strconv"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/go-rod/rod/lib/cdp"
 	"github.com/go-rod/rod/lib/launcher"
 	"github.com/go-rod/rod/lib/launcher/flags"
 )
+
+type blockedBrowserCloseClient struct {
+	events  chan *cdp.Event
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (c *blockedBrowserCloseClient) Event() <-chan *cdp.Event { return c.events }
+
+func (c *blockedBrowserCloseClient) Call(ctx context.Context, _ string, method string, _ interface{}) ([]byte, error) {
+	if method != "Browser.close" {
+		return []byte(`{}`), nil
+	}
+	select {
+	case c.started <- struct{}{}:
+	default:
+	}
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-c.release:
+		return nil, errors.New("fixture Browser.close released")
+	}
+}
+
+func (c *blockedBrowserCloseClient) Close() {
+	c.once.Do(func() {
+		close(c.events)
+		close(c.release)
+	})
+}
 
 func TestParseLaunchArg(t *testing.T) {
 	tests := []struct {
@@ -201,5 +244,404 @@ func TestWithBlockedURLsDefensiveCopy(t *testing.T) {
 func TestSetBrowserCookiesEmptyListIsNoOp(t *testing.T) {
 	if err := setBrowserCookies(nil, nil); err != nil {
 		t.Fatalf("空 cookie 列表不应产生任何浏览器调用: %v", err)
+	}
+}
+
+type launcherProcessIdentity struct {
+	pid       int
+	startTime uint64
+}
+
+func launcherProcessInfo(pid int) (int, uint64, bool, error) {
+	stat, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, 0, false, nil
+	}
+	if err != nil {
+		return 0, 0, false, fmt.Errorf("read PID %d stat: %w", pid, err)
+	}
+	end := strings.LastIndexByte(string(stat), ')')
+	if end < 0 {
+		return 0, 0, false, fmt.Errorf("parse PID %d stat", pid)
+	}
+	fields := strings.Fields(string(stat[end+1:]))
+	if len(fields) <= 19 {
+		return 0, 0, false, fmt.Errorf("parse PID %d stat fields", pid)
+	}
+	parent, err := strconv.Atoi(fields[1])
+	if err != nil {
+		return 0, 0, false, fmt.Errorf("parse PID %d parent: %w", pid, err)
+	}
+	startTime, err := strconv.ParseUint(fields[19], 10, 64)
+	if err != nil {
+		return 0, 0, false, fmt.Errorf("parse PID %d starttime: %w", pid, err)
+	}
+	return parent, startTime, true, nil
+}
+
+func launcherProcessesForProfile(profileDir string) ([]launcherProcessIdentity, error) {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil, err
+	}
+	parents := make(map[int]int, len(entries))
+	identities := make(map[int]launcherProcessIdentity, len(entries))
+	roots := make(map[int]struct{})
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil {
+			continue
+		}
+		parentBefore, startBefore, exists, err := launcherProcessInfo(pid)
+		if err != nil {
+			return nil, err
+		}
+		if !exists {
+			continue
+		}
+		cmdline, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "cmdline"))
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read PID %d cmdline: %w", pid, err)
+		}
+		parentAfter, startAfter, exists, err := launcherProcessInfo(pid)
+		if err != nil {
+			return nil, err
+		}
+		if !exists || parentBefore != parentAfter || startBefore != startAfter {
+			continue
+		}
+		parents[pid] = parentAfter
+		identities[pid] = launcherProcessIdentity{pid: pid, startTime: startAfter}
+		if strings.Contains(string(cmdline), profileDir) {
+			roots[pid] = struct{}{}
+		}
+	}
+	matched := make(map[launcherProcessIdentity]struct{}, len(roots))
+	for pid, identity := range identities {
+		current := pid
+		for depth := 0; depth <= len(parents); depth++ {
+			if _, ok := roots[current]; ok {
+				matched[identity] = struct{}{}
+				break
+			}
+			parent, ok := parents[current]
+			if !ok || parent == 0 || parent == current {
+				break
+			}
+			current = parent
+		}
+	}
+	processes := make([]launcherProcessIdentity, 0, len(matched))
+	for identity := range matched {
+		processes = append(processes, identity)
+	}
+	return processes, nil
+}
+
+func mergeLauncherProcessIdentities(existing, added []launcherProcessIdentity) []launcherProcessIdentity {
+	seen := make(map[launcherProcessIdentity]struct{}, len(existing)+len(added))
+	merged := make([]launcherProcessIdentity, 0, len(existing)+len(added))
+	for _, identity := range append(append([]launcherProcessIdentity(nil), existing...), added...) {
+		if _, ok := seen[identity]; !ok {
+			seen[identity] = struct{}{}
+			merged = append(merged, identity)
+		}
+	}
+	return merged
+}
+
+func aliveLauncherProcessIdentities(processes []launcherProcessIdentity) ([]launcherProcessIdentity, error) {
+	alive := make([]launcherProcessIdentity, 0, len(processes))
+	for _, identity := range processes {
+		_, startTime, exists, err := launcherProcessInfo(identity.pid)
+		if err != nil {
+			return nil, err
+		}
+		if exists && startTime == identity.startTime {
+			alive = append(alive, identity)
+		}
+	}
+	return alive, nil
+}
+
+func killTrackedLauncherProcesses(processes []launcherProcessIdentity) error {
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		alive, err := aliveLauncherProcessIdentities(processes)
+		if err != nil {
+			return err
+		}
+		for _, identity := range alive {
+			process, err := os.FindProcess(identity.pid)
+			if err != nil {
+				return fmt.Errorf("find tracked browser PID %d: %w", identity.pid, err)
+			}
+			if err := process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+				_, startTime, exists, statErr := launcherProcessInfo(identity.pid)
+				if statErr != nil {
+					return statErr
+				}
+				if exists && startTime == identity.startTime {
+					return fmt.Errorf("kill tracked browser PID %d: %w", identity.pid, err)
+				}
+			}
+		}
+		alive, err = aliveLauncherProcessIdentities(processes)
+		if err != nil {
+			return err
+		}
+		if len(alive) == 0 {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("tracked browser processes did not exit before watchdog: %v", alive)
+		}
+		<-time.After(25 * time.Millisecond)
+	}
+}
+
+func killBrowserProcessesForProfile(profileDir string) error {
+	deadline := time.Now().Add(5 * time.Second)
+	var tracked []launcherProcessIdentity
+	for {
+		current, err := launcherProcessesForProfile(profileDir)
+		if err != nil {
+			return err
+		}
+		tracked = mergeLauncherProcessIdentities(tracked, current)
+		alive, err := aliveLauncherProcessIdentities(tracked)
+		if err != nil {
+			return err
+		}
+		for _, identity := range alive {
+			process, err := os.FindProcess(identity.pid)
+			if err != nil {
+				return fmt.Errorf("find isolated browser PID %d: %w", identity.pid, err)
+			}
+			if err := process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+				_, startTime, exists, statErr := launcherProcessInfo(identity.pid)
+				if statErr != nil {
+					return statErr
+				}
+				if exists && startTime == identity.startTime {
+					return fmt.Errorf("kill isolated browser PID %d: %w", identity.pid, err)
+				}
+			}
+		}
+		alive, err = aliveLauncherProcessIdentities(tracked)
+		if err != nil {
+			return err
+		}
+		if len(alive) == 0 {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("isolated browser processes did not exit before watchdog: %v", alive)
+		}
+		<-time.After(25 * time.Millisecond)
+	}
+}
+
+func TestCloseContextKillsAndRetriesRealLauncherCleanup(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("launcher process assertion requires Linux /proc")
+	}
+	bin := os.Getenv("ROD_BROWSER_BIN")
+	if bin == "" {
+		var ok bool
+		bin, ok = launcher.LookPath()
+		if !ok {
+			t.Skip("未找到 Chrome/Chromium，跳过隔离 launcher cleanup fixture")
+		}
+	}
+	profileDir := t.TempDir()
+	startupCtx, cancelStartup := context.WithTimeout(context.Background(), 20*time.Second)
+	type startupResult struct {
+		browser *Browser
+		err     error
+	}
+	startupDone := make(chan startupResult, 1)
+	startupFinished := make(chan struct{})
+	var b *Browser
+	var trackedProcesses []launcherProcessIdentity
+	t.Cleanup(func() {
+		if processes, err := launcherProcessesForProfile(profileDir); err != nil {
+			t.Errorf("launcher fixture cleanup 前进程快照失败: %v", err)
+		} else {
+			trackedProcesses = mergeLauncherProcessIdentities(trackedProcesses, processes)
+		}
+		cancelStartup()
+		if b != nil {
+			cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), 10*time.Second)
+			if err := b.CloseContext(cleanupCtx); err != nil {
+				t.Errorf("launcher fixture cleanup failed: %v", err)
+			}
+			cancelCleanup()
+		}
+		if processes, err := launcherProcessesForProfile(profileDir); err != nil {
+			t.Errorf("launcher fixture cleanup 后 process tree snapshot failed: %v", err)
+		} else {
+			trackedProcesses = mergeLauncherProcessIdentities(trackedProcesses, processes)
+		}
+		if err := killTrackedLauncherProcesses(trackedProcesses); err != nil {
+			t.Errorf("launcher fixture tracked Kill failed: %v", err)
+		}
+		if err := killBrowserProcessesForProfile(profileDir); err != nil {
+			t.Errorf("launcher fixture independent Kill failed: %v", err)
+		}
+		select {
+		case <-startupFinished:
+		case <-time.After(5 * time.Second):
+			t.Errorf("launcher fixture New remained blocked after cancellation")
+		}
+		select {
+		case late := <-startupDone:
+			if b == nil {
+				b = late.browser
+			}
+		default:
+		}
+		if b != nil {
+			cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), 10*time.Second)
+			if err := b.CloseContext(cleanupCtx); err != nil {
+				t.Errorf("launcher fixture late browser cleanup failed: %v", err)
+			}
+			cancelCleanup()
+		}
+		processes, err := launcherProcessesForProfile(profileDir)
+		if err != nil {
+			t.Errorf("launcher fixture final process snapshot failed: %v", err)
+		} else {
+			trackedProcesses = mergeLauncherProcessIdentities(trackedProcesses, processes)
+		}
+		if err := killTrackedLauncherProcesses(trackedProcesses); err != nil {
+			t.Errorf("launcher fixture final tracked Kill failed: %v", err)
+		}
+		if err := killBrowserProcessesForProfile(profileDir); err != nil {
+			t.Errorf("launcher fixture final independent Kill failed: %v", err)
+		}
+	})
+	go func() {
+		instance, err := New(startupCtx,
+			WithChromeBinPath(bin),
+			WithHeadless(true),
+			WithUserDataDir(profileDir),
+			WithStealthJS(false),
+		)
+		startupDone <- startupResult{browser: instance, err: err}
+		close(startupFinished)
+	}()
+	var result startupResult
+	select {
+	case result = <-startupDone:
+	case <-time.After(25 * time.Second):
+		cancelStartup()
+		t.Fatal("launcher fixture New exceeded watchdog")
+	}
+	b = result.browser
+	if result.err != nil {
+		t.Fatalf("启动隔离 launcher fixture: %v", result.err)
+	}
+	if b == nil {
+		t.Fatal("launcher fixture New 未返回 browser")
+	}
+	cancelStartup()
+	pid := b.launcher.PID()
+	procPath := filepath.Join("/proc", strconv.Itoa(pid))
+	if _, err := os.Stat(procPath); err != nil {
+		t.Fatalf("launcher PID %d 未出现在 /proc: %v", pid, err)
+	}
+	processDeadline := time.Now().Add(5 * time.Second)
+	for {
+		processes, err := launcherProcessesForProfile(profileDir)
+		if err != nil {
+			t.Fatalf("记录 Close 前 launcher PID/starttime 集合失败: %v", err)
+		}
+		trackedProcesses = mergeLauncherProcessIdentities(trackedProcesses, processes)
+		if len(trackedProcesses) > 0 {
+			break
+		}
+		if time.Now().After(processDeadline) {
+			t.Fatal("Close 前未识别任何隔离 launcher 进程")
+		}
+		<-time.After(25 * time.Millisecond)
+	}
+	closeClient := &blockedBrowserCloseClient{events: make(chan *cdp.Event), started: make(chan struct{}, 1), release: make(chan struct{})}
+	b.browser.Client(closeClient)
+	t.Cleanup(closeClient.Close)
+	closeCtx, cancelClose := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelClose()
+	closeResult := make(chan error, 1)
+	go func() { closeResult <- b.CloseContext(closeCtx) }()
+	select {
+	case <-closeClient.started:
+	case <-time.After(2 * time.Second):
+		cancelClose()
+		b.launcher.Kill()
+		t.Fatal("首次 Close 未进入受控的真实 Browser.close 调用")
+	}
+	b.closeMu.Lock()
+	cleanupOperation := b.cleanupDone
+	b.closeMu.Unlock()
+	if cleanupOperation == nil {
+		cancelClose()
+		b.launcher.Kill()
+		t.Fatal("首次 Close 未创建 launcher cleanup operation")
+	}
+	select {
+	case <-cleanupOperation:
+		cancelClose()
+		t.Fatal("触发 deadline 前 cleanup operation 已完成，未覆盖 pending cleanup")
+	default:
+	}
+	var firstErr error
+	select {
+	case firstErr = <-closeResult:
+	case <-time.After(7 * time.Second):
+		cancelClose()
+		b.launcher.Kill()
+		t.Fatal("首次 Close 未在独立 watchdog 内返回")
+	}
+	if !errors.Is(firstErr, context.DeadlineExceeded) {
+		t.Fatalf("首次 Close 必须因 deadline 失败: %v", firstErr)
+	}
+	select {
+	case <-cleanupOperation:
+	case <-time.After(5 * time.Second):
+		t.Fatal("首次 deadline 后的 launcher Kill 未完成 Cleanup operation")
+	}
+	if _, err := os.Stat(procPath); !os.IsNotExist(err) {
+		t.Fatalf("真实 launcher PID %d 在首次 Close cleanup 后仍存在: %v", pid, err)
+	}
+	retryCtx, cancelRetry := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelRetry()
+	if err := b.CloseContext(retryCtx); err != nil {
+		t.Fatalf("同一 launcher cleanup operation 的 Close retry 失败: %v", err)
+	}
+	b.closeMu.Lock()
+	sameOperation, closed := b.cleanupDone == cleanupOperation, b.closed
+	b.closeMu.Unlock()
+	if !sameOperation {
+		t.Fatal("Close retry 未复用首次 Close 创建的 cleanup operation")
+	}
+	if !closed {
+		t.Fatal("Close retry 成功后 browser 应标记为 closed")
+	}
+	processDeadline = time.Now().Add(5 * time.Second)
+	for {
+		alive, err := aliveLauncherProcessIdentities(trackedProcesses)
+		if err != nil {
+			t.Fatalf("复核 Close 前已跟踪 PID/starttime 失败: %v", err)
+		}
+		if len(alive) == 0 {
+			break
+		}
+		if time.Now().After(processDeadline) {
+			t.Fatalf("Close 后仍有已跟踪 launcher 进程: %v", alive)
+		}
+		<-time.After(25 * time.Millisecond)
 	}
 }

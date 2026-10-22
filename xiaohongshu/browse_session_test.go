@@ -269,9 +269,22 @@ func TestClassifyProbeError(t *testing.T) {
 func TestBrowseSessionCloseReleasesActivePageOnce(t *testing.T) {
 	manager := NewBrowseSessionManager(time.Minute)
 	var releases atomic.Int32
-	session := manager.Create(nil, nil, func(*hrod.Page) {
-		releases.Add(1)
-	})
+	session := &BrowseSession{
+		id:        "test-session",
+		opToken:   make(chan struct{}, 1),
+		closedCh:  make(chan struct{}),
+		page:      &hrod.Page{},
+		timeout:   time.Minute,
+		expiresAt: time.Now().Add(time.Minute),
+		onClose: func(*hrod.Page) {
+			releases.Add(1)
+		},
+		onRemove: manager.remove,
+	}
+	session.opToken <- struct{}{}
+	manager.mu.Lock()
+	manager.sessions[session.id] = session
+	manager.mu.Unlock()
 	opCtx, err := session.beginLockedOperation(context.Background(), true)
 	if err != nil {
 		t.Fatalf("beginLockedOperation: %v", err)
@@ -295,6 +308,359 @@ func TestBrowseSessionCloseReleasesActivePageOnce(t *testing.T) {
 	}
 	if _, err := manager.Get(session.ID()); err == nil {
 		t.Fatal("关闭后 session 应从 manager 移除")
+	}
+}
+
+func TestBrowseSessionManagerCancelsAndJoinsFatalCleanupWorker(t *testing.T) {
+	manager := NewBrowseSessionManager(time.Minute)
+	t.Cleanup(func() {
+		manager.StopCleanupWorkers()
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = manager.CloseAllContext(ctx)
+	})
+	var attempts atomic.Int32
+	started := make(chan struct{}, 1)
+	session := &BrowseSession{id: newBrowseSessionID(), page: &hrod.Page{}, closedCh: make(chan struct{}), onRemove: manager.remove}
+	session.onCloseContext = func(ctx context.Context, _ *hrod.Page, _, _ bool) error {
+		if attempts.Add(1) == 1 {
+			started <- struct{}{}
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		return nil
+	}
+	manager.mu.Lock()
+	manager.sessions[session.id] = session
+	manager.mu.Unlock()
+	if !manager.CloseInvalidatedAsync(session.id) {
+		t.Fatal("fatal cleanup 应登记 worker")
+	}
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker 未在 watchdog 内开始")
+	}
+	manager.mu.Lock()
+	worker := manager.workers[session.id]
+	manager.mu.Unlock()
+	if worker == nil {
+		t.Fatal("worker 完成前必须保留登记")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	closed := make(chan error, 1)
+	go func() { closed <- manager.CloseAllContext(ctx) }()
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("CloseAllContext 应 join worker 并重试资源清理: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("CloseAllContext 未在 watchdog 内完成")
+	}
+	select {
+	case <-worker.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("CloseAllContext 返回后 worker done 尚未关闭")
+	}
+	if attempts.Load() != 2 || session.page != nil {
+		t.Fatalf("应在停止 worker 后只由 CloseAll 重试一次: attempts=%d page=%v", attempts.Load(), session.page)
+	}
+	manager.mu.Lock()
+	_, tracked := manager.workers[session.id]
+	_, closing := manager.closing[session.id]
+	manager.mu.Unlock()
+	if tracked || closing {
+		t.Fatalf("完成后不应保留 worker/closing: tracked=%t closing=%t", tracked, closing)
+	}
+
+	var nextAttempts atomic.Int32
+	nextStarted := make(chan struct{}, 1)
+	next := &BrowseSession{id: newBrowseSessionID(), page: &hrod.Page{}, closedCh: make(chan struct{}), onRemove: manager.remove}
+	next.onCloseContext = func(ctx context.Context, _ *hrod.Page, _, _ bool) error {
+		if nextAttempts.Add(1) == 1 {
+			nextStarted <- struct{}{}
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		return nil
+	}
+	manager.mu.Lock()
+	manager.sessions[next.id] = next
+	manager.mu.Unlock()
+	if !manager.CloseInvalidatedAsync(next.id) {
+		t.Fatal("普通 CloseAll 后新 generation 应仍能登记 cleanup worker")
+	}
+	select {
+	case <-nextStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("新 generation worker 未在 watchdog 内开始")
+	}
+	manager.mu.Lock()
+	nextWorker := manager.workers[next.id]
+	manager.mu.Unlock()
+	if nextWorker == nil {
+		t.Fatal("新 generation worker 应受 manager 跟踪")
+	}
+	manager.StopCleanupWorkers()
+	var stoppedAttempts atomic.Int32
+	stopped := &BrowseSession{id: newBrowseSessionID(), page: &hrod.Page{}, closedCh: make(chan struct{}), onRemove: manager.remove}
+	stopped.onCloseContext = func(context.Context, *hrod.Page, bool, bool) error {
+		stoppedAttempts.Add(1)
+		return nil
+	}
+	manager.mu.Lock()
+	manager.sessions[stopped.id] = stopped
+	manager.mu.Unlock()
+	if !manager.CloseInvalidatedAsync(stopped.id) {
+		t.Fatal("停止 worker 后 fatal session 仍应转入 closing")
+	}
+	manager.mu.Lock()
+	_, stoppedTracked := manager.workers[stopped.id]
+	stoppedClosing := manager.closing[stopped.id] == stopped
+	manager.mu.Unlock()
+	if stoppedTracked || !stoppedClosing {
+		t.Fatalf("停止后不得登记新 worker，但资源责任须保留: worker=%t closing=%t", stoppedTracked, stoppedClosing)
+	}
+	stopCtx, cancelStop := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancelStop()
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- manager.CloseAllContext(stopCtx) }()
+	select {
+	case err := <-stopDone:
+		if err != nil {
+			t.Fatalf("StopCleanupWorkers 后 CloseAll 清理失败: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("StopCleanupWorkers 后 CloseAll 未在 watchdog 内返回")
+	}
+	select {
+	case <-nextWorker.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("停止 worker 后 done 未关闭")
+	}
+	if nextAttempts.Load() != 2 || next.page != nil {
+		t.Fatalf("停止 worker 后资源应由 CloseAll 重试完成: attempts=%d page=%v", nextAttempts.Load(), next.page)
+	}
+	if stoppedAttempts.Load() != 1 || stopped.page != nil {
+		t.Fatalf("CloseAll 应接手无 worker 登记的 closing 资源: attempts=%d page=%v", stoppedAttempts.Load(), stopped.page)
+	}
+}
+
+func TestBrowseSessionManagerBoundsWorkerJoinAndRetainsPending(t *testing.T) {
+	manager := NewBrowseSessionManager(time.Minute)
+	var attempts atomic.Int32
+	started := make(chan struct{}, 1)
+	release := make(chan struct{}, 1)
+	releaseWorker := func() {
+		select {
+		case release <- struct{}{}:
+		default:
+		}
+	}
+	t.Cleanup(func() {
+		releaseWorker()
+		manager.StopCleanupWorkers()
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = manager.CloseAllContext(ctx)
+	})
+	session := &BrowseSession{id: newBrowseSessionID(), page: &hrod.Page{}, closedCh: make(chan struct{}), onRemove: manager.remove}
+	session.onCloseContext = func(context.Context, *hrod.Page, bool, bool) error {
+		if attempts.Add(1) == 1 {
+			started <- struct{}{}
+			<-release
+			return errors.New("controlled cleanup failure")
+		}
+		return nil
+	}
+	manager.mu.Lock()
+	manager.sessions[session.id] = session
+	manager.mu.Unlock()
+	if !manager.CloseInvalidatedAsync(session.id) {
+		t.Fatal("fatal cleanup 应登记 worker")
+	}
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker 未在 watchdog 内开始")
+	}
+	manager.mu.Lock()
+	worker := manager.workers[session.id]
+	manager.mu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	closed := make(chan error, 1)
+	go func() { closed <- manager.CloseAllContext(ctx) }()
+	select {
+	case err := <-closed:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			releaseWorker()
+			t.Fatalf("worker 未退出时 CloseAll 应返回 deadline: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		releaseWorker()
+		t.Fatal("CloseAll 未在独立 watchdog 内有界返回")
+	}
+	manager.mu.Lock()
+	stillTracked := manager.workers[session.id] == worker
+	stillClosing := manager.closing[session.id] == session
+	manager.mu.Unlock()
+	if !stillTracked || !stillClosing {
+		releaseWorker()
+		t.Fatalf("worker join 超时后必须保留责任: worker=%t closing=%t", stillTracked, stillClosing)
+	}
+	releaseWorker()
+	select {
+	case <-worker.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("释放受控回调后 worker 未退出")
+	}
+	retryCtx, cancelRetry := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancelRetry()
+	if err := manager.CloseAllContext(retryCtx); err != nil {
+		t.Fatalf("worker 退出后重试 CloseAll 失败: %v", err)
+	}
+	if attempts.Load() != 2 || session.page != nil {
+		t.Fatalf("pending session 应经后续入口完成清理: attempts=%d page=%v", attempts.Load(), session.page)
+	}
+}
+
+func TestBrowseSessionManagerCloseJoinsWorkerAfterClosingEntryRemoved(t *testing.T) {
+	manager := NewBrowseSessionManager(time.Minute)
+	releaseWorker := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseWorker) }) }
+	removed := make(chan struct{})
+	var removeCalls atomic.Int32
+	session := &BrowseSession{id: newBrowseSessionID(), page: &hrod.Page{}, closedCh: make(chan struct{})}
+	session.onCloseContext = func(context.Context, *hrod.Page, bool, bool) error { return nil }
+	session.onRemove = func(session *BrowseSession) {
+		manager.remove(session)
+		if removeCalls.Add(1) == 3 {
+			close(removed)
+			<-releaseWorker
+		}
+	}
+	manager.mu.Lock()
+	manager.sessions[session.id] = session
+	manager.mu.Unlock()
+	t.Cleanup(func() {
+		release()
+		manager.StopCleanupWorkers()
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = manager.CloseAllContext(ctx)
+	})
+	if !manager.CloseInvalidatedAsync(session.id) {
+		t.Fatal("fatal cleanup worker 未登记")
+	}
+	select {
+	case <-removed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker 未进入 closing entry 移除后的等待窗口")
+	}
+	manager.mu.Lock()
+	worker := manager.workers[session.id]
+	_, closing := manager.closing[session.id]
+	manager.mu.Unlock()
+	if worker == nil || closing {
+		t.Fatalf("测试窗口应只保留 worker 登记: worker=%t closing=%t", worker != nil, closing)
+	}
+	shortCtx, cancelShort := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	err := manager.CloseContext(shortCtx, session.id)
+	cancelShort()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("CloseContext 应有界等待被取消 worker: %v", err)
+	}
+	manager.mu.Lock()
+	tracked := manager.workers[session.id] == worker
+	closingSession := manager.closing[session.id]
+	manager.mu.Unlock()
+	if !tracked || closingSession != session {
+		t.Fatalf("join 超时后须保留 worker 与资源责任: worker=%t closing=%t", tracked, closingSession == session)
+	}
+	select {
+	case <-worker.done:
+		t.Fatal("worker 未退出时 done 不得提前关闭")
+	default:
+	}
+	release()
+	select {
+	case <-worker.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker 在放行后未退出")
+	}
+	retryCtx, cancelRetry := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancelRetry()
+	if err := manager.CloseContext(retryCtx, session.id); err == nil || !strings.Contains(err.Error(), "browse session 不存在") {
+		t.Fatalf("worker 退出且资源已清理后 session 应完全退休: %v", err)
+	}
+	manager.mu.Lock()
+	_, tracked = manager.workers[session.id]
+	_, closing = manager.closing[session.id]
+	manager.mu.Unlock()
+	if tracked || closing || session.page != nil {
+		t.Fatalf("显式重试完成后不应残留资源或 worker: worker=%t closing=%t page=%v", tracked, closing, session.page)
+	}
+}
+
+func TestBrowseSessionMarkClosedCancelsActiveBeforeSessionLock(t *testing.T) {
+	opCtx, cancelOp := context.WithCancel(context.Background())
+	defer cancelOp()
+	session := &BrowseSession{closedCh: make(chan struct{}), opCtx: opCtx, activeOp: cancelOp, activeCancel: cancelOp}
+	session.mu.Lock()
+	closed := make(chan struct{})
+	go func() {
+		session.markClosed(true)
+		close(closed)
+	}()
+	select {
+	case <-opCtx.Done():
+	case <-time.After(2 * time.Second):
+		session.mu.Unlock()
+		t.Fatal("关闭必须先取消 active operation，再等待 session mutex")
+	}
+	select {
+	case <-closed:
+		session.mu.Unlock()
+		t.Fatal("markClosed 不得绕过 session mutex")
+	default:
+	}
+	session.mu.Unlock()
+	select {
+	case <-closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("释放 session mutex 后 markClosed 未完成")
+	}
+}
+
+func TestBrowseSessionCloseRetryDoesNotReleaseLeaseTwice(t *testing.T) {
+	var releases, cleanupRetries atomic.Int32
+	var retrySawReleasedLease atomic.Bool
+	session := &BrowseSession{
+		id:       "lease-retry-session",
+		page:     &hrod.Page{},
+		closedCh: make(chan struct{}),
+		onCloseContext: func(_ context.Context, _ *hrod.Page, _ bool, leaseReleased bool) error {
+			if !leaseReleased {
+				releases.Add(1)
+				return errors.New("first resource cleanup failed")
+			}
+			cleanupRetries.Add(1)
+			retrySawReleasedLease.Store(true)
+			return nil
+		},
+	}
+	if err := session.CloseContext(context.Background()); err == nil {
+		t.Fatal("first cleanup attempt should report its failure")
+	}
+	if err := session.CloseContext(context.Background()); err != nil {
+		t.Fatalf("resource-only cleanup retry failed: %v", err)
+	}
+	if releases.Load() != 1 || cleanupRetries.Load() != 1 || !retrySawReleasedLease.Load() || session.page != nil {
+		t.Fatalf("retry must clean the retained page without releasing a new lease: releases=%d retries=%d released=%t page=%v", releases.Load(), cleanupRetries.Load(), retrySawReleasedLease.Load(), session.page)
 	}
 }
 
@@ -1465,6 +1831,8 @@ type currentPageURLCDPClient struct {
 	runtimeCall           int
 	runtimeTimeouts       []proto.RuntimeTimeDelta
 	runtimeExpressions    []string
+	runtimeStarted        chan struct{}
+	runtimeRelease        chan struct{}
 	methodHistory         []string
 	keyEvents             []proto.InputDispatchKeyEvent
 	err                   error
@@ -1519,8 +1887,17 @@ func (c *currentPageURLCDPClient) Call(ctx context.Context, _ string, method str
 		index := c.runtimeCall
 		c.runtimeCall++
 		if index < len(c.runtimeBlockUntilDone) && c.runtimeBlockUntilDone[index] {
-			<-ctx.Done()
-			return nil, ctx.Err()
+			if c.runtimeStarted != nil {
+				select {
+				case c.runtimeStarted <- struct{}{}:
+				default:
+				}
+			}
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-c.runtimeRelease:
+			}
 		}
 		if index < len(c.runtimeResponses) {
 			return c.runtimeResponses[index], nil
@@ -1535,6 +1912,102 @@ func (c *currentPageURLCDPClient) Call(ctx context.Context, _ string, method str
 		return nil, c.err
 	}
 	return c.response, nil
+}
+
+func TestBrowseSessionManagerCreateContextCancelsDuringRefreshAndClosesOnce(t *testing.T) {
+	client := &currentPageURLCDPClient{
+		runtimeBlockUntilDone: []bool{true},
+		runtimeStarted:        make(chan struct{}, 1),
+	}
+	pageSession := newCurrentPageURLSession(t, client)
+	manager := NewBrowseSessionManager(time.Minute)
+	t.Cleanup(manager.CloseAll)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var releases atomic.Int32
+	type createResult struct {
+		session *BrowseSession
+		err     error
+	}
+	done := make(chan createResult, 1)
+	go func() {
+		session, err := manager.CreateContext(ctx, pageSession.page, nil, func(*hrod.Page) {
+			releases.Add(1)
+		})
+		done <- createResult{session: session, err: err}
+	}()
+	select {
+	case <-client.runtimeStarted:
+		if _, ok := manager.ActiveInfo(); ok {
+			cancel()
+			t.Fatal("refresh 尚未结束时不得向 manager 发布 session")
+		}
+		cancel()
+	case <-time.After(3 * time.Second):
+		cancel()
+		t.Fatal("CreateContext 未进入 refreshPageState 的 Runtime.evaluate")
+	}
+	select {
+	case result := <-done:
+		if result.session != nil || !errors.Is(result.err, context.Canceled) {
+			t.Fatalf("refresh 期间取消应返回 context.Canceled 且不返回 session: session=%v err=%v", result.session, result.err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("取消 refresh 后 CreateContext 未及时返回")
+	}
+	if _, ok := manager.ActiveInfo(); ok {
+		t.Fatal("refresh 期间取消后不得保留已登记 session")
+	}
+	if got := releases.Load(); got != 1 {
+		t.Fatalf("取消清理必须经 session close 路径释放一次，实际 %d", got)
+	}
+}
+
+func TestBrowseSessionManagerCloseAllDuringRefreshPreventsPublish(t *testing.T) {
+	client := &currentPageURLCDPClient{
+		runtimeBlockUntilDone: []bool{true},
+		runtimeStarted:        make(chan struct{}, 1),
+		runtimeRelease:        make(chan struct{}, 1),
+	}
+	pageSession := newCurrentPageURLSession(t, client)
+	manager := NewBrowseSessionManager(time.Minute)
+	t.Cleanup(manager.CloseAll)
+	var releases atomic.Int32
+	type createResult struct {
+		session *BrowseSession
+		err     error
+	}
+	done := make(chan createResult, 1)
+	go func() {
+		session, err := manager.CreateContext(context.Background(), pageSession.page, nil, func(*hrod.Page) {
+			releases.Add(1)
+		})
+		done <- createResult{session: session, err: err}
+	}()
+	select {
+	case <-client.runtimeStarted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("CreateContext 未进入 refreshPageState 的 Runtime.evaluate")
+	}
+	if _, ok := manager.ActiveInfo(); ok {
+		t.Fatal("初始化期间 session 不得暴露")
+	}
+	manager.CloseAll()
+	client.runtimeRelease <- struct{}{}
+	select {
+	case result := <-done:
+		if result.session != nil || result.err == nil || !strings.Contains(result.err.Error(), "closed during creation") {
+			t.Fatalf("CloseAll 期间创建必须失败且不返回 session: session=%v err=%v", result.session, result.err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("CloseAll 后 CreateContext 未及时返回")
+	}
+	if _, ok := manager.ActiveInfo(); ok {
+		t.Fatal("CloseAll 取消创建后不得登记 session")
+	}
+	if got := releases.Load(); got != 1 {
+		t.Fatalf("取消创建应释放页面一次，实际 %d", got)
+	}
 }
 
 func newCurrentPageURLSession(t *testing.T, client *currentPageURLCDPClient) *BrowseSession {
@@ -3110,10 +3583,10 @@ func TestRecoverOpenAttemptAvoidsDuplicatePageError(t *testing.T) {
 	}
 
 	tests := []struct {
-		name          string
-		cause         error
-		wantProbeErr  bool
-		wantPageErr   bool
+		name         string
+		cause        error
+		wantProbeErr bool
+		wantPageErr  bool
 	}{
 		{name: "cause contains page error", cause: fmt.Errorf("wait: %w", context.DeadlineExceeded)},
 		{name: "distinct cause keeps page error", cause: errCurrentDetailEvalTimeout, wantProbeErr: true, wantPageErr: true},
@@ -3327,11 +3800,11 @@ func TestRecoverOpenAttemptAcceptsDelayedTarget(t *testing.T) {
 func runtimeFeedDetailResponse(t *testing.T, pageURL string, urlMatched bool, visibleCount, matchedCount int) []byte {
 	t.Helper()
 	value, err := json.Marshal(map[string]any{
-		"url":                           pageURL,
-		"url_matched":                   urlMatched,
-		"visible_detail_count":          visibleCount,
-		"visible_matched_detail_count":  matchedCount,
-		"state_matched":                 matchedCount > 0,
+		"url":                          pageURL,
+		"url_matched":                  urlMatched,
+		"visible_detail_count":         visibleCount,
+		"visible_matched_detail_count": matchedCount,
+		"state_matched":                matchedCount > 0,
 	})
 	if err != nil {
 		t.Fatalf("序列化详情探针响应: %v", err)

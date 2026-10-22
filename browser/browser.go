@@ -215,7 +215,10 @@ func NewBrowser(ctx context.Context, headless bool, options ...Option) (*hrod.Br
 	hb, err := headless_browser.New(ctx, opts...)
 	if err != nil {
 		logrus.WithError(err).Error("browser startup failed")
-		return nil, err
+		if hb == nil {
+			return nil, err
+		}
+		return hrod.NewBrowser(hb, humanize.DefaultConfig()), err
 	}
 	logrus.Info("browser startup completed")
 

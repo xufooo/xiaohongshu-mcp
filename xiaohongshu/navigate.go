@@ -107,16 +107,34 @@ func onExplorePage(page *hrod.Page) bool {
 // 热页面复用（Manager.Release 保留页面）后，这条判断会经常命中：
 // 例如 check_login_status 刚加载过 /explore，紧接着 start_page 不必再加载一次。
 func EnsureReadyOn(page *hrod.Page, target string, kind XHSReadyKind, timeout time.Duration) error {
-	if onURL(page, target) {
-		if err := WaitForXHSReady(page, XHSReadyOptions{Kind: kind, Timeout: readyProbeTimeout}); err == nil {
+	ctx := page.Rod.GetContext()
+	pageID := page.Rod.TargetID
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	alreadyOnTarget := onURL(page, target)
+	if alreadyOnTarget {
+		quickStarted := time.Now()
+		err := WaitForXHSReady(page, XHSReadyOptions{Kind: kind, Timeout: readyProbeTimeout})
+		logrus.Debugf("ensure_ready target_id=%s phase=quick_confirm end elapsed_ms=%d executed=true ready=%t err=%v", pageID, time.Since(quickStarted).Milliseconds(), err == nil, err)
+		if err == nil {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			atomic.AddInt64(&navigationSkipped, 1)
 			logrus.Infof("skip redundant navigation: already ready at %s", target)
 			return nil
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	navStarted := time.Now()
 	if err := page.Navigate(target); err != nil {
+		logrus.Debugf("ensure_ready target_id=%s phase=navigation end elapsed_ms=%d executed=true err=%v", pageID, time.Since(navStarted).Milliseconds(), err)
 		return fmt.Errorf("navigate to %s failed: %w", target, err)
 	}
+	logrus.Debugf("ensure_ready target_id=%s phase=navigation end elapsed_ms=%d executed=true err=<nil>", pageID, time.Since(navStarted).Milliseconds())
 	return WaitForXHSReady(page, XHSReadyOptions{Kind: kind, Timeout: timeout})
 }
 

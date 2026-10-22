@@ -2,23 +2,32 @@ name: Build Check
 
 on:
   push:
-    branches: [ fixup, fixup-pre, fixup-test ]
+    branches: [ fixup, fixup-pre, fixup-test, perf/pi3-optimize ]
   workflow_dispatch:
 
 jobs:
   verify:
     runs-on: ubuntu-latest
+    timeout-minutes: 35
     steps:
     - uses: actions/checkout@v4
     - name: Set up Go
       uses: actions/setup-go@v4
       with:
         go-version: "1.24"
+    - name: Set up Chrome for browser fixtures
+      id: chrome
+      uses: browser-actions/setup-chrome@v1
+      with:
+        chrome-version: stable
     - name: Verify
+      env:
+        ROD_BROWSER_BIN: ${{ steps.chrome.outputs.chrome-path }}
       run: |
-        go test ./...
-        go build ./...
-        (cd third_party/headless_browser && go mod tidy && go test ./...)
+        go test -mod=readonly -timeout=20m ./...
+        go test -mod=readonly -race -run 'TestTimedOutStartupKeepsSingleFactory|TestCanceledAcquireDoesNotTakeAvailableToken' ./browser
+        go build -mod=readonly ./...
+        (cd third_party/headless_browser && go test -mod=readonly -timeout=10m ./...)
 
   build:
     needs: verify
@@ -53,7 +62,7 @@ jobs:
         mkdir -p dist
         # -trimpath 去掉构建机绝对路径；-s -w 去掉符号表与调试信息。
         # 产物直接拷进树莓派 SD 卡，体积与页缓存占用都要省。
-        go build -v -trimpath -ldflags="-s -w" -o "dist/xiaohongshu-mcp-${GOOS}-${GOARCH}${EXT}" .
+        go build -mod=readonly -v -trimpath -ldflags="-s -w" -o "dist/xiaohongshu-mcp-${GOOS}-${GOARCH}${EXT}" .
         ls -l "dist/xiaohongshu-mcp-${GOOS}-${GOARCH}${EXT}"
     - name: Upload artifact
       uses: actions/upload-artifact@v4

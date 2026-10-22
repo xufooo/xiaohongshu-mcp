@@ -51,9 +51,15 @@ type XiaohongshuService struct {
 	identityCheckedAt     time.Time
 	identityCheckInterval time.Duration
 
-	createSessionMu sync.Mutex
-	loginCookieSave cookieSaveGate
+	createSessionMu        sync.Mutex
+	createSessionGate      chan struct{}
+	createSessionClosing   bool
+	createSessionClosingCh chan struct{}
+	createSessionCancel    context.CancelFunc
+	loginCookieSave        cookieSaveGate
 }
+
+var errBrowseSessionServiceClosing = errors.New("browse session service is closing")
 
 func NewXiaohongshuService() (*XiaohongshuService, error) {
 	actionState, err := xiaohongshu.DefaultActionStateStore(
@@ -695,15 +701,21 @@ func (s *XiaohongshuService) CheckLoginStatus(ctx context.Context) (*LoginStatus
 }
 
 type loginQrcodeSession struct {
-	img string; expiresAt time.Time; page *hrod.Page
-	cancel context.CancelFunc; done chan struct{}
-	generation uint64; cleanupErr error
+	img        string
+	expiresAt  time.Time
+	page       *hrod.Page
+	cancel     context.CancelFunc
+	done       chan struct{}
+	generation uint64
+	cleanupErr error
 }
 
 var errCookieSaveInProgress, errCookieSaveFailed = errors.New("cookie save already in progress"), errors.New("cookie save stage failed")
 var errLoginQrcodeCleanup = errors.New("login qrcode page cleanup failed")
+
 type cookieSaveGate struct {
-	mu sync.Mutex; done chan struct{}
+	mu        sync.Mutex
+	done      chan struct{}
 	succeeded bool
 }
 
@@ -735,12 +747,20 @@ func (g *cookieSaveGate) run(save func() error) error {
 }
 
 func waitDone(ctx context.Context, done <-chan struct{}) error {
-	if done == nil { return nil }
-	select { case <-done: return nil; case <-ctx.Done(): return ctx.Err() }
+	if done == nil {
+		return nil
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func closeDetachedPage(closePage func(context.Context) error) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second); defer cancel()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
 	return closePage(ctx)
 }
 
@@ -752,11 +772,15 @@ func (s *XiaohongshuService) stopLoginWork(ctx context.Context) error {
 }
 
 func (g *cookieSaveGate) wait(ctx context.Context) error {
-	g.mu.Lock(); done := g.done; g.mu.Unlock()
+	g.mu.Lock()
+	done := g.done
+	g.mu.Unlock()
 	return waitDone(ctx, done)
 }
 func (g *cookieSaveGate) reset() {
-	g.mu.Lock(); g.succeeded = false; g.mu.Unlock()
+	g.mu.Lock()
+	g.succeeded = false
+	g.mu.Unlock()
 }
 func (s *XiaohongshuService) saveAuthenticatedCookies(ctx context.Context, session *loginQrcodeSession) error {
 	if !s.currentLoginQrcode(session) {
@@ -817,7 +841,9 @@ func (s *XiaohongshuService) cancelPendingLoginQrcode(ctx context.Context) error
 	if session.cancel != nil {
 		session.cancel()
 	}
-	if err := waitDone(ctx, session.done); err != nil { return err }
+	if err := waitDone(ctx, session.done); err != nil {
+		return err
+	}
 	return session.cleanupErr
 }
 
@@ -874,11 +900,11 @@ func (s *XiaohongshuService) GetLoginQrcode(ctx context.Context) (*LoginQrcodeRe
 
 	waitCtx, cancel := context.WithTimeout(context.Background(), loginQrcodeTimeout)
 	session = &loginQrcodeSession{
-		img:       img,
-		expiresAt: time.Now().Add(loginQrcodeTimeout),
-		page:      page,
-		cancel:    cancel,
-		done:      make(chan struct{}),
+		img:        img,
+		expiresAt:  time.Now().Add(loginQrcodeTimeout),
+		page:       page,
+		cancel:     cancel,
+		done:       make(chan struct{}),
 		generation: generation,
 	}
 	s.loginQRMu.Lock()
@@ -915,7 +941,9 @@ func (s *XiaohongshuService) waitLoginQrcode(ctx context.Context, session *login
 
 	loggedIn, err := xiaohongshu.NewLogin(session.page).WaitForLogin(ctx)
 	if err != nil {
-		if ctx.Err() == nil { logrus.Warnf("等待扫码登录失败，待扫码会话已结束: %v", err) }
+		if ctx.Err() == nil {
+			logrus.Warnf("等待扫码登录失败，待扫码会话已结束: %v", err)
+		}
 		return
 	}
 	if !loggedIn {
@@ -1289,26 +1317,162 @@ func (s *XiaohongshuService) ReplyCommentToFeed(ctx context.Context, feedID, xse
 	}, nil
 }
 
-func (s *XiaohongshuService) CreateBrowseSession(ctx context.Context, forceRecreate bool) (result *xiaohongshu.CreateBrowseSessionResult, err error) {
+func (s *XiaohongshuService) initCreateSessionGateLocked() {
+	if s.createSessionGate == nil {
+		s.createSessionGate = make(chan struct{}, 1)
+		s.createSessionGate <- struct{}{}
+	}
+	if s.createSessionClosingCh == nil {
+		s.createSessionClosingCh = make(chan struct{})
+		if s.createSessionClosing {
+			close(s.createSessionClosingCh)
+		}
+	}
+}
+
+func (s *XiaohongshuService) acquireCreateSessionGate(ctx context.Context, allowClosing bool) (func(), error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	s.createSessionMu.Lock()
+	s.initCreateSessionGateLocked()
+	gate, closingCh, closing := s.createSessionGate, s.createSessionClosingCh, s.createSessionClosing
+	s.createSessionMu.Unlock()
+	if closing && !allowClosing {
+		return nil, errBrowseSessionServiceClosing
+	}
+	if allowClosing {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-gate:
+		}
+	} else {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-closingCh:
+			return nil, errBrowseSessionServiceClosing
+		case <-gate:
+		}
+	}
 	if err := ctx.Err(); err != nil {
-		s.createSessionMu.Unlock()
+		gate <- struct{}{}
 		return nil, err
 	}
+	if !allowClosing {
+		s.createSessionMu.Lock()
+		closing = s.createSessionClosing
+		s.createSessionMu.Unlock()
+		if closing {
+			gate <- struct{}{}
+			return nil, errBrowseSessionServiceClosing
+		}
+	}
+	return func() { gate <- struct{}{} }, nil
+}
+
+func (s *XiaohongshuService) beginCreateSession(ctx context.Context) (context.Context, context.CancelFunc, error) {
+	s.createSessionMu.Lock()
 	defer s.createSessionMu.Unlock()
+	if s.createSessionClosing {
+		return nil, nil, errBrowseSessionServiceClosing
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	createCtx, cancel := context.WithCancel(ctx)
+	s.createSessionCancel = cancel
+	return createCtx, cancel, nil
+}
+
+func (s *XiaohongshuService) endCreateSession(cancel context.CancelFunc) {
+	s.createSessionMu.Lock()
+	s.createSessionCancel = nil
+	s.createSessionMu.Unlock()
+	cancel()
+}
+
+func (s *XiaohongshuService) beginCreateSessionClose() {
+	s.createSessionMu.Lock()
+	s.initCreateSessionGateLocked()
+	if !s.createSessionClosing {
+		s.createSessionClosing = true
+		close(s.createSessionClosingCh)
+	}
+	if s.createSessionCancel != nil {
+		s.createSessionCancel()
+	}
+	s.createSessionMu.Unlock()
+}
+
+func (s *XiaohongshuService) createSessionResultError(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.createSessionMu.Lock()
+	closing := s.createSessionClosing
+	s.createSessionMu.Unlock()
+	if closing {
+		return errBrowseSessionServiceClosing
+	}
+	return nil
+}
+
+func (s *XiaohongshuService) CreateBrowseSession(ctx context.Context, forceRecreate bool) (result *xiaohongshu.CreateBrowseSessionResult, err error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	releaseGate, err := s.acquireCreateSessionGate(ctx, false)
+	if err != nil {
+		return nil, err
+	}
+	createCtx, cancelCreate, err := s.beginCreateSession(ctx)
+	if err != nil {
+		releaseGate()
+		return nil, err
+	}
+	defer func() {
+		s.endCreateSession(cancelCreate)
+		releaseGate()
+	}()
+	ctx = createCtx
 
 	if !forceRecreate {
-		if reuseResult := s.tryReuseSession(ctx); reuseResult != nil {
+		reuseResult, reuseErr := s.tryReuseSession(ctx)
+		if reuseErr != nil {
+			return nil, reuseErr
+		}
+		if reuseResult != nil {
+			if err := s.createSessionResultError(ctx); err != nil {
+				return nil, err
+			}
+			sessionID := ""
+			if reuseResult.Session != nil {
+				sessionID = reuseResult.Session.ID
+			}
+			logrus.Debugf("start_page phase=reuse end outcome=%s session_id=%s", reuseResult.Outcome, sessionID)
 			return reuseResult, nil
 		}
+		logrus.Debug("start_page phase=reuse end outcome=miss")
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 	}
 
-	s.browseSessions.CloseAll()
+	if err := s.browseSessions.CloseAllContext(ctx); err != nil {
+		return nil, fmt.Errorf("清理旧浏览会话失败: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	page, newPage, err := s.acquirePageForSource(ctx, "session")
+	targetID := ""
+	if page != nil {
+		targetID = string(page.Rod.TargetID)
+	}
+	logrus.Debugf("start_page phase=page_acquire end target_id=%s new_page=%t err=%v", targetID, newPage, err)
 	if err != nil {
 		return nil, err
 	}
@@ -1324,16 +1488,80 @@ func (s *XiaohongshuService) CreateBrowseSession(ctx context.Context, forceRecre
 		})
 	})
 	if err != nil {
-		s.browserManager.Release(page)
+		if releaseErr := s.browserManager.ReleaseContext(ctx, page); releaseErr != nil {
+			return nil, errors.Join(fmt.Errorf("等待探索页就绪失败: %w", err), releaseErr)
+		}
 		return nil, fmt.Errorf("等待探索页就绪失败: %w", err)
 	}
 
-	session := s.browseSessions.Create(page, s.actionState, func(page *hrod.Page) {
-		s.browserManager.Release(page)
-	})
-	s.browserManager.UpdateOwner("session:" + session.ID())
+	result, err = s.registerReadyBrowseSession(ctx, page, s.browserManager.Release, s.browserManager.UpdateOwner)
+	if err == nil && result != nil && result.Session != nil {
+		logrus.Debugf("start_page phase=created session_id=%s target_id=%s", result.Session.ID, page.Rod.TargetID)
+	}
+	if err != nil {
+		return result, err
+	}
+	if resultErr := s.createSessionResultError(ctx); resultErr != nil {
+		if result != nil && result.Session != nil {
+			resultErr = errors.Join(resultErr, s.browseSessions.CloseContext(ctx, result.Session.ID))
+		}
+		return nil, resultErr
+	}
+	return result, err
+}
+
+func (s *XiaohongshuService) registerReadyBrowseSession(ctx context.Context, page *hrod.Page, release func(*hrod.Page), updateOwner func(string)) (*xiaohongshu.CreateBrowseSessionResult, error) {
+	// This closure always destroys its target, even for ordinary close. Preserve
+	// success if fatal invalidation asks the session to retry after lease return.
+	// BrowseSession.closeDone serializes calls to this per-session closure.
+	targetClosed := false
+	closePage := func(closeCtx context.Context, page *hrod.Page, discard, leaseReleased bool) error {
+		if targetClosed {
+			return nil
+		}
+		if s.browserManager != nil {
+			var closeErr error
+			if leaseReleased {
+				closeErr = s.browserManager.ClosePageContext(closeCtx, page)
+			} else {
+				closeErr = s.browserManager.ReleaseAndCloseContext(closeCtx, page)
+			}
+			targetClosed = closeErr == nil
+			return closeErr
+		}
+		if !leaseReleased && release != nil {
+			release(page)
+		}
+		targetClosed = true
+		return nil
+	}
+	commit := func(session *xiaohongshu.BrowseSession, insert func()) error {
+		s.createSessionMu.Lock()
+		defer s.createSessionMu.Unlock()
+		if s.createSessionClosing {
+			return errBrowseSessionServiceClosing
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if updateOwner != nil {
+			updateOwner("session:" + session.ID())
+		}
+		if err := ctx.Err(); err != nil {
+			if updateOwner != nil {
+				updateOwner("browser_operation")
+			}
+			return err
+		}
+		insert()
+		return nil
+	}
+	session, err := s.browseSessions.CreateContextWithLifecycle(ctx, page, s.actionState, closePage, commit)
+	if err != nil {
+		return nil, err
+	}
 	info := session.Info()
-	return &xiaohongshu.CreateBrowseSessionResult{
+	result := &xiaohongshu.CreateBrowseSessionResult{
 		Outcome: "created",
 		Session: &info,
 		Status: xiaohongshu.BrowseSessionStatusInfo{
@@ -1341,7 +1569,8 @@ func (s *XiaohongshuService) CreateBrowseSession(ctx context.Context, forceRecre
 			Session: &info,
 			Ready:   true,
 		},
-	}, nil
+	}
+	return result, nil
 }
 
 func runReadyWithColdStartRecovery(ctx context.Context, newPage, forceRecreate bool, ready, waitReady func(context.Context) error) error {
@@ -1355,24 +1584,34 @@ func runReadyWithColdStartRecovery(ctx context.Context, newPage, forceRecreate b
 	return waitReady(retryCtx)
 }
 
-func (s *XiaohongshuService) tryReuseSession(ctx context.Context) *xiaohongshu.CreateBrowseSessionResult {
-	info, ok := s.browseSessions.ActiveInfo()
+func (s *XiaohongshuService) tryReuseSession(ctx context.Context) (*xiaohongshu.CreateBrowseSessionResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	session, ok := s.browseSessions.ActiveSessionSnapshot()
 	if !ok {
-		return nil
+		return nil, nil
 	}
-
-	session, err := s.browseSessions.Get(info.ID)
-	if err != nil {
-		return nil
-	}
-
+	info := session.Info()
 	check := session.CheckReusable(ctx)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	switch check.Status {
 	case xiaohongshu.SessionReady:
 		previous := info
 		info = session.Renew()
-		return buildBrowseSessionReuseResult(previous, info, check.HealthCheckedAt)
+		return buildBrowseSessionReuseResult(previous, info, check.HealthCheckedAt), nil
+	case xiaohongshu.SessionExpired, xiaohongshu.SessionNotReady, xiaohongshu.SessionUnhealthy:
+		closed, err := session.TryCloseIdleContext(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("清理旧浏览会话失败: %w", err)
+		}
+		if closed {
+			return nil, nil
+		}
+		fallthrough
 	case xiaohongshu.SessionBusy:
 		return &xiaohongshu.CreateBrowseSessionResult{
 			Outcome: "blocked",
@@ -1380,27 +1619,7 @@ func (s *XiaohongshuService) tryReuseSession(ctx context.Context) *xiaohongshu.C
 				Status:    xiaohongshu.SessionBusy,
 				LastError: "session 正在执行操作",
 			},
-		}
-	case xiaohongshu.SessionExpired, xiaohongshu.SessionNotReady, xiaohongshu.SessionUnhealthy:
-		if ctx.Err() != nil {
-			return &xiaohongshu.CreateBrowseSessionResult{
-				Outcome: "blocked",
-				Status: xiaohongshu.BrowseSessionStatusInfo{
-					Status:    check.Status,
-					LastError: check.LastError,
-				},
-			}
-		}
-		if session.TryCloseIdle() {
-			return nil
-		}
-		return &xiaohongshu.CreateBrowseSessionResult{
-			Outcome: "blocked",
-			Status: xiaohongshu.BrowseSessionStatusInfo{
-				Status:    xiaohongshu.SessionBusy,
-				LastError: "session 正在执行操作",
-			},
-		}
+		}, nil
 	default:
 		return &xiaohongshu.CreateBrowseSessionResult{
 			Outcome: "blocked",
@@ -1408,12 +1627,17 @@ func (s *XiaohongshuService) tryReuseSession(ctx context.Context) *xiaohongshu.C
 				Status:    check.Status,
 				LastError: check.LastError,
 			},
-		}
+		}, nil
 	}
 }
 
-func (s *XiaohongshuService) CloseBrowseSession(id string) error {
-	return s.browseSessions.Close(id)
+func (s *XiaohongshuService) CloseBrowseSession(ctx context.Context, id string) error {
+	releaseGate, err := s.acquireCreateSessionGate(ctx, true)
+	if err != nil {
+		return err
+	}
+	defer releaseGate()
+	return s.browseSessions.CloseContext(ctx, id)
 }
 
 // buildBrowseSessionReuseResult 构造 session 复用结果。
@@ -1912,8 +2136,13 @@ func (s *XiaohongshuService) handleSessionOperationError(ctx context.Context, id
 	if operationErr == nil {
 		return
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if xiaohongshu.IsFatalRendererError(operationErr) {
-		_ = s.browseSessions.Close(id)
+		if s.browseSessions != nil {
+			s.browseSessions.CloseInvalidatedAsync(id)
+		}
 		return
 	}
 	if ctx.Err() != nil || errors.Is(operationErr, context.Canceled) || errors.Is(operationErr, context.DeadlineExceeded) {
@@ -2056,13 +2285,34 @@ func (s *XiaohongshuService) withBrowserPage(ctx context.Context, fn func(*hrod.
 }
 
 func (s *XiaohongshuService) Close(ctx context.Context) error {
-	if err := s.stopLoginWork(ctx); err != nil {
-		return err
+	if ctx == nil {
+		ctx = context.Background()
 	}
+	closeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	ctx = closeCtx
 	if s.browseSessions != nil {
-		s.browseSessions.CloseAll()
+		s.browseSessions.StopCleanupWorkers()
 	}
-	return s.browserManager.Close(ctx)
+	s.beginCreateSessionClose()
+	loginErr := s.stopLoginWork(ctx)
+	releaseGate, err := s.acquireCreateSessionGate(ctx, true)
+	if err != nil {
+		return errors.Join(loginErr, fmt.Errorf("等待在途浏览会话创建结束失败；服务已拒绝新创建，可重试 Close 完成清理: %w", err))
+	}
+	defer releaseGate()
+	if err := ctx.Err(); err != nil {
+		return errors.Join(loginErr, fmt.Errorf("关闭 deadline 已到；服务已拒绝新创建，可重试 Close 完成清理: %w", err))
+	}
+	var sessionsErr error
+	if s.browseSessions != nil {
+		sessionsErr = s.browseSessions.CloseAllContext(ctx)
+	}
+	var browserErr error
+	if s.browserManager != nil {
+		browserErr = s.browserManager.Close(ctx)
+	}
+	return errors.Join(loginErr, sessionsErr, browserErr)
 }
 
 // GetMyProfile 获取当前登录用户的个人信息

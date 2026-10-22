@@ -4,6 +4,7 @@ package headless_browser
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand"
 	"os"
@@ -24,18 +25,24 @@ import (
 
 // Browser represents a browser instance with its launcher.
 type Browser struct {
-	browser       *rod.Browser
-	browserCancel context.CancelFunc
-	launcher      *launcher.Launcher
-	stealthJS     bool // 是否注入 go-rod/stealth 的 JS 补丁
+	browser         *rod.Browser
+	browserCancel   context.CancelFunc
+	launcherCancel  context.CancelFunc
+	launcher        *launcher.Launcher
+	transport       *cdp.WebSocket
+	transportClosed bool
+	stealthJS       bool // 是否注入 go-rod/stealth 的 JS 补丁
 
 	// uaOverride：每个新页面套用的一致 UA/Client-Hints 覆盖。
 	// 用浏览器实读的真实版本 + 平台补丁实读的 platform 三项拼出自洽元数据补回。
 	// nil = 不覆盖。
 	uaOverride *proto.NetworkSetUserAgentOverride
 
-	closeOnce   sync.Once
+	closeMu     sync.Mutex
+	closeDone   chan struct{}
+	cleanupDone chan struct{}
 	closeErr    error
+	closed      bool
 	traceFile   *os.File
 	browserCtx  context.Context
 	diagnostic  *diagnosticCDPClient
@@ -240,6 +247,10 @@ func New(ctx context.Context, options ...Option) (*Browser, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	// The caller owns the startup budget (Manager supplies its configured timeout).
+	// Keep cancellation local so successful startup can detach its lifetime below.
+	startupCtx, cancelStartup := context.WithCancel(ctx)
+	defer cancelStartup()
 
 	// Fingerprint 与显式 UA 互斥：会制造 UA/Client-Hints 冲突，直接拒绝。
 	if cfg.Fingerprint && cfg.UserAgent != "" {
@@ -303,103 +314,129 @@ func New(ctx context.Context, options ...Option) (*Browser, error) {
 		"bin":       cfg.ChromeBinPath,
 		"arg_count": len(l.FormatArgs()),
 	}).Info("launching browser")
-	url, err := l.Context(ctx).Launch()
+	launchCtx, cancelLaunch := context.WithCancel(context.Background())
+	stopLaunchCancel := context.AfterFunc(startupCtx, cancelLaunch)
+	defer stopLaunchCancel()
+	browserCtx, browserCancel := context.WithCancel(context.Background())
+	stopBrowserStartupCancel := context.AfterFunc(startupCtx, browserCancel)
+	defer stopBrowserStartupCancel()
+	hb := &Browser{browserCancel: browserCancel, launcherCancel: cancelLaunch, browserCtx: browserCtx, launcher: l, stealthJS: cfg.StealthJS}
+	url, err := l.Context(launchCtx).Launch()
+	stopLaunchCancel()
 	if err != nil {
-		l.Kill()
-		go l.Cleanup()
-		return nil, fmt.Errorf("launch browser: %w", err)
+		return hb.failStartup(fmt.Errorf("launch browser: %w", err))
 	}
 	logrus.WithFields(logrus.Fields{
 		"pid": l.PID(),
 		"url": url,
 	}).Info("browser launched")
 
-	browserCtx, browserCancel := context.WithCancel(context.Background())
-
 	controller := rod.New().Trace(cfg.Trace)
 	var traceFile *os.File
 	var diagnostic *diagnosticCDPClient
+	var logger *redactedCDPLogger
 	if tracePath := os.Getenv("XHS_CDP_TRACE_FILE"); tracePath != "" {
 		traceFile, err = os.OpenFile(tracePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 		if err != nil {
-			browserCancel()
-			l.Kill()
-			go l.Cleanup()
-			return nil, fmt.Errorf("open CDP trace file: %w", err)
+			return hb.failStartup(fmt.Errorf("open CDP trace file: %w", err))
 		}
-		client, err := cdp.StartWithURL(browserCtx, url, nil)
+		hb.traceFile = traceFile
+		logger, err = newRedactedCDPLogger(traceFile)
 		if err != nil {
-			if traceFile != nil {
-				_ = traceFile.Close()
-			}
-			browserCancel()
-			l.Kill()
-			go l.Cleanup()
-			return nil, fmt.Errorf("connect traced CDP client: %w", err)
+			return hb.failStartup(fmt.Errorf("create CDP trace logger: %w", err))
 		}
-		logger, loggerErr := newRedactedCDPLogger(traceFile)
-		if loggerErr != nil {
-			_ = traceFile.Close()
-			browserCancel()
-			l.Kill()
-			go l.Cleanup()
-			return nil, fmt.Errorf("create CDP trace logger: %w", loggerErr)
-		}
+		defer func() { _ = traceFile.Sync() }()
+	}
+	ws, err := connectCancelableWebSocket(startupCtx, url, nil)
+	if err != nil {
+		return hb.failStartup(fmt.Errorf("connect browser transport: %w", err))
+	}
+	hb.transport = ws
+	client := cdp.New().Start(ws)
+	if logger != nil {
 		client.Logger(logger)
 		diagnostic = newDiagnosticCDPClient(client, browserCtx, logger)
-		controller = controller.Client(diagnostic)
-		defer func() { _ = traceFile.Sync() }()
+		controller = controller.ControlURL("").Client(diagnostic)
 	} else {
-		controller = controller.ControlURL(url)
+		controller = controller.ControlURL("").Client(client)
 	}
 	if cfg.CloakProfile {
 		// CloakBrowser 已接管 UA 和视口指纹，避免 rod 默认设备再发覆盖指令。
 		controller = controller.NoDefaultDevice()
 	}
-	controller = controller.Context(browserCtx)
-	if err := controller.Connect(); err != nil {
-		if traceFile != nil {
-			_ = traceFile.Close()
-		}
-		browserCancel()
-		l.Kill()
-		go l.Cleanup()
-		return nil, fmt.Errorf("connect browser: %w", err)
+	startupBrowser := controller.Context(browserCtx)
+	if err := startupBrowser.Connect(); err != nil {
+		return hb.failStartup(fmt.Errorf("connect browser: %w", err))
 	}
-	browser := controller
+	hb.browser = startupBrowser
+	hb.diagnostic = diagnostic
+	hb.blockedURLs = append([]string(nil), cfg.BlockedURLs...)
 	logrus.WithField("pid", l.PID()).Info("browser connected")
 	if cfg.Cookies != "" {
 		var cookies []*proto.NetworkCookie
 		if err := json.Unmarshal([]byte(cfg.Cookies), &cookies); err != nil {
 			logrus.Warnf("failed to unmarshal cookies: %v", err)
 		} else {
-			if err := setBrowserCookies(browser, cookies); err != nil {
+			if err := setBrowserCookies(startupBrowser, cookies); err != nil {
 				logrus.Warnf("failed to set cookies: %v", err)
 			}
 		}
 	}
 
-	hb := &Browser{browser: browser, browserCancel: browserCancel, browserCtx: browserCtx, launcher: l, stealthJS: cfg.StealthJS, diagnostic: diagnostic}
-	hb.traceFile = traceFile
-	hb.blockedURLs = append([]string(nil), cfg.BlockedURLs...)
-
-	// 启用指纹时，构建一致 UA 覆盖，补回 go-rod 建页面丢失的 UA 版本保真度。
-	// 构建失败必须终止启动，不能无声降级。
 	if cfg.Fingerprint {
-		ov, err := buildUAOverride(browser, cfg.Language)
+		ov, err := buildUAOverride(startupBrowser, cfg.Language)
 		if err != nil {
-			if traceFile != nil {
-				_ = traceFile.Close()
-			}
-			browserCancel()
-			l.Kill()
-			go l.Cleanup()
-			return nil, fmt.Errorf("build UA override: %w", err)
+			return hb.failStartup(fmt.Errorf("build UA override: %w", err))
 		}
 		hb.uaOverride = ov
 	}
 
+	if err := startupCtx.Err(); err != nil {
+		return hb.failStartup(fmt.Errorf("initialize browser: %w", err))
+	}
+	if !stopBrowserStartupCancel() {
+		if err := startupCtx.Err(); err != nil {
+			return hb.failStartup(fmt.Errorf("initialize browser: %w", err))
+		}
+	}
+	if err := browserCtx.Err(); err != nil {
+		return hb.failStartup(fmt.Errorf("initialize browser: %w", err))
+	}
 	return hb, nil
+}
+
+func (b *Browser) failStartup(err error) (*Browser, error) {
+	if b.browser != nil {
+		cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), time.Second)
+		_ = b.browser.Context(cleanupCtx).Close()
+		cancelCleanup()
+	}
+	b.closeMu.Lock()
+	b.closeTransportLocked()
+	b.closeMu.Unlock()
+	if b.browserCancel != nil {
+		b.browserCancel()
+	}
+	if b.launcherCancel != nil {
+		b.launcherCancel()
+	}
+	if b.launcher != nil && b.launcher.PID() > 0 {
+		b.launcher.Kill()
+		b.startLauncherCleanup()
+	} else {
+		b.closeMu.Lock()
+		b.finishCloseLocked()
+		b.closeMu.Unlock()
+	}
+	return b, err
+}
+
+func (b *Browser) closeTransportLocked() {
+	if b.transport == nil || b.transportClosed {
+		return
+	}
+	b.transportClosed = true
+	_ = b.transport.Close()
 }
 
 func setBrowserCookies(browser *rod.Browser, cookies []*proto.NetworkCookie) (err error) {
@@ -488,13 +525,133 @@ func (b *Browser) Close() {
 // it must be raced with ctx as well as Browser.close. If either stage does not
 // finish in time, kill the launcher's process group before returning.
 func (b *Browser) CloseContext(ctx context.Context) error {
-	b.closeOnce.Do(func() {
-		b.closeErr = b.close(ctx)
-		if b.traceFile != nil {
-			_ = b.traceFile.Close()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	for {
+		b.closeMu.Lock()
+		if b.closed {
+			b.closeMu.Unlock()
+			return nil
 		}
-	})
-	return b.closeErr
+		if done := b.closeDone; done != nil {
+			b.closeMu.Unlock()
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-done:
+				continue
+			}
+		}
+		if done := b.cleanupDone; done != nil {
+			b.closeMu.Unlock()
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-done:
+				b.closeMu.Lock()
+				b.finishCloseLocked()
+				b.closeMu.Unlock()
+				return nil
+			}
+		}
+		done := make(chan struct{})
+		b.closeDone = done
+		b.closeMu.Unlock()
+
+		cleaned := b.startLauncherCleanup()
+		launcherKillIssued := false
+		killLauncherOnce := func() {
+			if launcherKillIssued {
+				return
+			}
+			b.launcher.Kill()
+			launcherKillIssued = true
+		}
+		var closeErr error
+		if err := b.browser.Context(ctx).Close(); err != nil {
+			killLauncherOnce()
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				closeErr = ctxErr
+			} else if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				closeErr = err
+			}
+		}
+		if closeErr == nil {
+			select {
+			case <-ctx.Done():
+				killLauncherOnce()
+				closeErr = ctx.Err()
+			case <-cleaned:
+			}
+		}
+
+		b.closeMu.Lock()
+		if closeErr != nil {
+			b.closeTransportLocked()
+		}
+		b.closeErr = closeErr
+		if closeErr == nil {
+			b.finishCloseLocked()
+		}
+		b.closeDone = nil
+		close(done)
+		b.closeMu.Unlock()
+		return closeErr
+	}
+}
+
+func (b *Browser) CleanupComplete() bool {
+	if b == nil {
+		return true
+	}
+	b.closeMu.Lock()
+	defer b.closeMu.Unlock()
+	if b.closed {
+		return true
+	}
+	if b.cleanupDone == nil {
+		return false
+	}
+	select {
+	case <-b.cleanupDone:
+		b.finishCloseLocked()
+		return true
+	default:
+		return false
+	}
+}
+
+func (b *Browser) startLauncherCleanup() <-chan struct{} {
+	b.closeMu.Lock()
+	if b.cleanupDone == nil {
+		b.cleanupDone = make(chan struct{})
+		done := b.cleanupDone
+		go func() {
+			b.launcher.Cleanup()
+			close(done)
+		}()
+	}
+	done := b.cleanupDone
+	b.closeMu.Unlock()
+	return done
+}
+
+func (b *Browser) finishCloseLocked() {
+	if b.closed {
+		return
+	}
+	b.closed = true
+	if b.browserCancel != nil {
+		b.browserCancel()
+	}
+	if b.launcherCancel != nil {
+		b.launcherCancel()
+	}
+	if b.traceFile != nil {
+		_ = b.traceFile.Close()
+	}
+	b.closeTransportLocked()
 }
 
 // Health 检查 CDP 连接是否可用。
@@ -503,36 +660,20 @@ func (b *Browser) Health(ctx context.Context) error {
 	return err
 }
 
-func (b *Browser) close(ctx context.Context) error {
-	if b.browserCancel != nil {
-		defer b.browserCancel()
-	}
-
-	err := b.browser.Context(ctx).Close()
-	if err != nil {
-		b.launcher.Kill()
-		go b.launcher.Cleanup()
-		return err
-	}
-
-	cleaned := make(chan struct{})
-	go func() {
-		b.launcher.Cleanup()
-		close(cleaned)
-	}()
-
-	select {
-	case <-cleaned:
-		return nil
-	case <-ctx.Done():
-		b.launcher.Kill()
-		return ctx.Err()
-	}
-}
-
 // Page 创建页面。CloakBrowser 已在浏览器层处理指纹，不能再叠加 stealth 注入。
 // 若配置了一致 UA 覆盖，则在返回前套用，补回 UA 版本保真度。
 func (b *Browser) Page() (page *rod.Page, err error) {
+	return b.PageContext(b.browserCtx)
+}
+
+// PageContext applies the request budget only to target creation and setup.
+func (b *Browser) PageContext(ctx context.Context) (page *rod.Page, err error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			err = fmt.Errorf("create page: %v", recovered)
@@ -540,9 +681,9 @@ func (b *Browser) Page() (page *rod.Page, err error) {
 		}
 	}()
 	if b.stealthJS {
-		page, err = stealth.Page(b.browser)
+		page, err = stealth.Page(b.browser.Context(ctx))
 	} else {
-		page, err = b.browser.Page(proto.TargetCreateTarget{})
+		page, err = b.browser.Context(ctx).Page(proto.TargetCreateTarget{})
 	}
 	if err != nil {
 		logrus.WithError(err).Debug("rod.Browser.Page returned error")
@@ -560,7 +701,7 @@ func (b *Browser) Page() (page *rod.Page, err error) {
 		}
 	}
 	if b.diagnostic != nil {
-		ctx, cancel := context.WithTimeout(b.browserCtx, 2*time.Second)
+		ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		bound := page.Context(ctx)
 		var setup sync.WaitGroup
 		var runtimeErr, lifecycleErr error
@@ -575,7 +716,10 @@ func (b *Browser) Page() (page *rod.Page, err error) {
 		b.diagnostic.logger.setup(runtimeErr, lifecycleErr)
 		b.diagnostic.Arm(page.SessionID)
 	}
-	return page, nil
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return page.Context(b.browserCtx), nil
 }
 
 // NewPage preserves the upstream convenience API.

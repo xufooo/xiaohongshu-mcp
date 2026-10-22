@@ -1,8 +1,14 @@
 package xiaohongshu
 
 import (
+	"bytes"
+	"context"
+	"errors"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/sirupsen/logrus"
 )
 
 func TestHomeSearchReadyRequiresInputSignal(t *testing.T) {
@@ -147,5 +153,31 @@ func TestDetailReadyRequiresAuthoritativeMatchFlag(t *testing.T) {
 	}
 	if !detailReady(xhsReadyProbe{DetailState: true}, "") {
 		t.Fatal("无 feedID 时应保留原有宽松语义")
+	}
+}
+
+func TestWaitForXHSReadySummarySeparatesProbeAndWaitDeadlines(t *testing.T) {
+	logger := logrus.StandardLogger()
+	oldLevel, oldOut := logger.GetLevel(), logger.Out
+	var output bytes.Buffer
+	logger.SetLevel(logrus.DebugLevel)
+	logger.SetOutput(&output)
+	t.Cleanup(func() {
+		logger.SetLevel(oldLevel)
+		logger.SetOutput(oldOut)
+	})
+
+	client := &currentPageURLCDPClient{}
+	session := newCurrentPageURLSession(t, client)
+	client.forceErr = true
+	client.err = context.DeadlineExceeded
+	err := WaitForXHSReady(session.page.Context(context.Background()), XHSReadyOptions{
+		Kind: XHSReadyHome, Timeout: time.Nanosecond,
+	})
+	if err == nil || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("probe deadline 应保留在等待错误链中，得到 %v", err)
+	}
+	if !strings.Contains(output.String(), "probe_deadlines=1 wait_deadlines=1") {
+		t.Fatalf("实际 wait 路径应分别报告 probe 与总体 deadline，日志为 %q", output.String())
 	}
 }

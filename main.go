@@ -22,11 +22,18 @@ func main() {
 		headless bool
 		binPath  string // 浏览器二进制文件路径
 		port     string
+		logLevel string
 	)
 	flag.BoolVar(&headless, "headless", true, "是否无头模式")
 	flag.StringVar(&binPath, "bin", "", "浏览器二进制文件路径")
 	flag.StringVar(&port, "port", ":18060", "端口")
+	flag.StringVar(&logLevel, "log-level", "info", "日志级别 (panic/fatal/error/warn/info/debug/trace)")
 	flag.Parse()
+	parsedLogLevel, err := logrus.ParseLevel(logLevel)
+	if err != nil {
+		logrus.Fatalf("invalid log level %q: %v", logLevel, err)
+	}
+	logrus.SetLevel(parsedLogLevel)
 
 	if len(binPath) == 0 {
 		binPath = os.Getenv("ROD_BROWSER_BIN")
