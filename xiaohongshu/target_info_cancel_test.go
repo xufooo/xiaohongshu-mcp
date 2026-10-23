@@ -141,6 +141,9 @@ func TestProductionTargetQueriesCancelAfterEntry(t *testing.T) {
 			_, err := s.currentPageURL(ctx, nil)
 			return err
 		}},
+		{"recover_comment_batch", func(ctx context.Context, s *BrowseSession) error {
+			return s.recoverCommentBatchSession(ctx, s.page, nil, "feed-1")
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

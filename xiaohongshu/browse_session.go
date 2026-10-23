@@ -1500,9 +1500,10 @@ func (s *BrowseSession) detailCommentsBatchLifecycle(
 }
 
 func commentLoadDeadline(ctx context.Context) time.Time {
-	deadline := time.Now().Add(commentLoadTimeout)
+	now := time.Now()
+	deadline := now.Add(commentLoadTimeout)
 	if dl, ok := ctx.Deadline(); ok {
-		reserve := 45 * time.Second
+		reserve := min(45*time.Second, max(0, dl.Sub(now)/10))
 		adjusted := dl.Add(-reserve)
 		if adjusted.Before(deadline) {
 			deadline = adjusted

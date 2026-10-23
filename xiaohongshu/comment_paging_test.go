@@ -475,7 +475,7 @@ func TestRecoverCommentBatchSessionPropagatesCallerContext(t *testing.T) {
 			if !errors.Is(err, tt.want) {
 				t.Fatalf("caller context 错误未原样传播: got=%v want=%v", err, tt.want)
 			}
-			assertCommentPagingCalls(t, client, 1)
+			assertCommentPagingCalls(t, client, 0)
 		})
 	}
 }
@@ -631,16 +631,84 @@ func TestLoadCommentsBatchDoesNotConsumeCursorOnEvalFailure(t *testing.T) {
 }
 
 func TestLoadCommentsBatchPropagatesCallerContextDeadline(t *testing.T) {
-	client := &commentPagingCDPClient{}
-	page := newCommentPagingPage(t, client)
-	ctx, cancel := context.WithCancel(context.Background())
+	canceledCtx, cancel := context.WithCancel(context.Background())
 	cancel()
-	input := &CommentCursor{FeedID: "feed-1", Round: 1}
-
-	_, _, _, err := loadCommentsBatch(ctx, page, CommentLoadConfig{}, input, 20)
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("caller context 错误被吞掉: %v", err)
+	deadlineCtx, cancelDeadline := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancelDeadline()
+	for _, tc := range []struct {
+		name string
+		ctx  context.Context
+		want error
+	}{
+		{"canceled", canceledCtx, context.Canceled},
+		{"deadline", deadlineCtx, context.DeadlineExceeded},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &commentPagingCDPClient{}
+			page := newCommentPagingPage(t, client)
+			input := &CommentCursor{FeedID: "feed-1", Round: 1}
+			comments, next, hasMore, err := loadCommentsBatch(tc.ctx, page, CommentLoadConfig{}, input, 20)
+			if !errors.Is(err, tc.want) || comments != nil || next != nil || hasMore {
+				t.Fatalf("caller context 错误或结果错误: comments=%+v next=%+v hasMore=%v err=%v", comments, next, hasMore, err)
+			}
+			if client.runtimeCalls != 0 || client.callFunctionCalls != 0 || len(input.ReturnedIDs) != 0 {
+				t.Fatalf("caller context 结束后不应采集或消费 cursor: client=%+v input=%+v", client, input)
+			}
+		})
 	}
+}
+
+func TestCommentLoadDeadlineReservesWithinCallerBudget(t *testing.T) {
+	for _, tc := range []struct {
+		budget     time.Duration
+		minReserve time.Duration
+		maxReserve time.Duration
+	}{
+		{15 * time.Second, time.Second, 1500 * time.Millisecond},
+		{8 * time.Minute, 45 * time.Second, 45 * time.Second},
+	} {
+		t.Run(tc.budget.String(), func(t *testing.T) {
+			callerDeadline := time.Now().Add(tc.budget)
+			ctx, cancel := context.WithDeadline(context.Background(), callerDeadline)
+			defer cancel()
+			got := commentLoadDeadline(ctx)
+			reserve := callerDeadline.Sub(got)
+			if reserve < tc.minReserve || reserve > tc.maxReserve || !got.After(time.Now()) {
+				t.Fatalf("评论 deadline 未保留可用预算: budget=%s reserve=%s got=%s caller=%s", tc.budget, reserve, got, callerDeadline)
+			}
+		})
+	}
+}
+
+func TestLoadCommentsBatchCollectsVisibleCommentsWithinShortBudget(t *testing.T) {
+	snapshot := commentPageRuntimeResponse(t, commentPageDOMSnapshot{
+		Comments: []Comment{
+			{ID: "old-comment", NoteID: "feed-1", Content: "old"},
+			{ID: "comment-1", NoteID: "feed-1", Content: "one"},
+			{ID: "comment-2", NoteID: "feed-1", Content: "two"},
+			{ID: "comment-3", NoteID: "feed-1", Content: "three"},
+		},
+		Progress: commentProgress{Total: 4, AtEnd: true},
+	})
+	client := &commentPagingCDPClient{responses: [][]byte{snapshot, snapshot}}
+	page := newCommentPagingPage(t, client)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	input := &CommentCursor{FeedID: "feed-1", Round: 1, ReturnedIDs: []string{"old-comment"}}
+	comments, next, hasMore, err := loadCommentsBatch(ctx, page.Context(ctx), DefaultCommentLoadConfig(), input, 2)
+	if err != nil || ctx.Err() != nil {
+		t.Fatalf("短预算仍应采集已加载评论: err=%v caller=%v", err, ctx.Err())
+	}
+	if len(comments) != 2 || comments[0].ID != "comment-1" || comments[1].ID != "comment-2" || !hasMore {
+		t.Fatalf("短预算批次结果错误: comments=%+v hasMore=%v", comments, hasMore)
+	}
+	if next == nil || strings.Join(next.ReturnedIDs, ",") != "old-comment,comment-1,comment-2" || next.Round != input.Round {
+		t.Fatalf("短预算应推进 cursor 且不开始新滚动: %+v", next)
+	}
+	if len(input.ReturnedIDs) != 1 || input.ReturnedIDs[0] != "old-comment" {
+		t.Fatalf("短预算采集不得改写输入 cursor: %+v", input)
+	}
+	assertCommentPagingMainCalls(t, client, 2, "feed-1")
 }
 
 func TestLoadCommentsBatchDedupesStableIDsAndCapsAtMaxItems(t *testing.T) {

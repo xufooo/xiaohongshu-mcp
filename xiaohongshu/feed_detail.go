@@ -396,8 +396,8 @@ func loadCommentsBatchOutcome(ctx context.Context, page *hrod.Page, config Comme
 		if err := ctx.Err(); err != nil {
 			return nil, false, commentProgress{}, err
 		}
-		if remaining() < 15*time.Second {
-			return nil, false, commentProgress{}, context.DeadlineExceeded
+		if err := extractCtx.Err(); err != nil {
+			return nil, false, commentProgress{}, err
 		}
 		snapshot, err := extractCommentsPageWithProgressFromDOM(extractCtx, page, feedID)
 		if err != nil {
