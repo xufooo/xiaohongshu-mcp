@@ -139,7 +139,11 @@ func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...Fi
 	preSearchCounter := &evalTimeoutCounter{}
 	var previousAIState *aiStateProbe
 	pageBeforeSearch := s.page.Context(ctx)
-	if !isCurrentSearchPage(pageBeforeSearch, keyword) || len(filters) > 0 {
+	currentSearch, err := isCurrentSearchPage(pageBeforeSearch, keyword)
+	if err != nil {
+		return SearchPageResult{}, err
+	}
+	if !currentSearch || len(filters) > 0 {
 		previousAIState = &aiStateProbe{}
 		probe, err := probeAIResponseState(ctx, pageBeforeSearch, preSearchCounter, "", -1)
 		if err == nil {
@@ -178,7 +182,11 @@ func (s *SearchAction) searchFeeds(ctx context.Context, counter *evalTimeoutCoun
 	}
 
 	// 检查当前页面是否已在该关键词搜索结果上，是则跳过搜索
-	if !isCurrentSearchPage(page, keyword) {
+	currentSearch, err := isCurrentSearchPage(page, keyword)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !currentSearch {
 		if err := s.searchByUI(ctx, page, counter, keyword); err != nil {
 			return nil, nil, err
 		}
@@ -203,17 +211,15 @@ func (s *SearchAction) SearchFeedsOnly(ctx context.Context, keyword string, filt
 }
 
 func (s *SearchAction) searchByUI(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, keyword string) error {
-	// 使用 Info() 读取 URL（非阻塞），避免在冷启动/blank 页面上执行 DOM Eval。
-	searchSelector, err := prepareSearchPage(
-		func() string {
-			info, infoErr := page.Rod.Info()
-			if infoErr != nil || info == nil {
-				return ""
-			}
-			return info.URL
-		},
-		page.Navigate,
-	)
+	// Read the URL without a renderer Eval, using this operation's context.
+	info, err := pageTargetInfo(ctx, page)
+	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	searchSelector, err := prepareSearchPage(func() string { return info.URL }, page.Navigate)
 	if err != nil {
 		return err
 	}
@@ -1642,17 +1648,17 @@ func prepareSearchPage(infoFn func() string, navigateFn func(string) error) (str
 }
 
 // isCurrentSearchPage 检查页面 URL 是否已在指定关键词搜索结果上
-func isCurrentSearchPage(page *hrod.Page, keyword string) bool {
-	info, err := page.Rod.Info()
-	if err != nil || info == nil {
-		return false
+func isCurrentSearchPage(page *hrod.Page, keyword string) (bool, error) {
+	info, err := pageTargetInfo(page.Rod.GetContext(), page)
+	if err != nil {
+		return false, err
 	}
 	u, err := url.Parse(info.URL)
 	if err != nil {
-		return false
+		return false, nil
 	}
 	q := u.Query()
-	return q.Get("keyword") == keyword
+	return q.Get("keyword") == keyword, nil
 }
 
 func extractSearchFeedSourcesWithRetry(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, includeState bool) (searchFeedSources, error) {

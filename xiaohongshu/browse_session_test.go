@@ -2339,8 +2339,8 @@ func TestCurrentPageURLPropagatesOuterCancellation(t *testing.T) {
 	if got != "" {
 		t.Fatalf("取消时不应返回 URL: %q", got)
 	}
-	if client.calls != 1 || client.ctx == nil || !errors.Is(client.ctx.Err(), context.Canceled) {
-		t.Fatalf("Target 调用应收到已取消的外层 context: calls=%d ctx=%v", client.calls, client.ctx)
+	if client.calls != 0 {
+		t.Fatalf("已取消的外层 context 不应发起 Target 调用: calls=%d", client.calls)
 	}
 }
 

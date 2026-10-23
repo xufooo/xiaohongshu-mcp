@@ -666,6 +666,12 @@ func (b *Browser) Page() (page *rod.Page, err error) {
 	return b.PageContext(b.browserCtx)
 }
 
+// Rod returns the browser controller shared by newly created pages.
+// Configure its client before creating pages or starting concurrent operations.
+func (b *Browser) Rod() *rod.Browser {
+	return b.browser
+}
+
 // PageContext applies the request budget only to target creation and setup.
 func (b *Browser) PageContext(ctx context.Context) (page *rod.Page, err error) {
 	if ctx == nil {
@@ -674,6 +680,23 @@ func (b *Browser) PageContext(ctx context.Context) (page *rod.Page, err error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	// Rod retains the creating Browser in the page and starts its event pump
+	// with that Browser's context. Replacing only Page.ctx after creation leaves
+	// Info and the event pump tied to the expired request budget.
+	pageBrowserCtx, cancelPageBrowser := context.WithCancel(b.browserCtx)
+	stopRequestCancel := context.AfterFunc(ctx, cancelPageBrowser)
+	defer func() {
+		stopRequestCancel()
+		if err != nil {
+			cancelPageBrowser()
+			page = nil
+			// The lifetime bridge uses CancelFunc, so Rod sees Canceled even
+			// when the request actually exhausted its deadline.
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				err = ctxErr
+			}
+		}
+	}()
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			err = fmt.Errorf("create page: %v", recovered)
@@ -681,9 +704,9 @@ func (b *Browser) PageContext(ctx context.Context) (page *rod.Page, err error) {
 		}
 	}()
 	if b.stealthJS {
-		page, err = stealth.Page(b.browser.Context(ctx))
+		page, err = stealth.Page(b.browser.Context(pageBrowserCtx))
 	} else {
-		page, err = b.browser.Context(ctx).Page(proto.TargetCreateTarget{})
+		page, err = b.browser.Context(pageBrowserCtx).Page(proto.TargetCreateTarget{})
 	}
 	if err != nil {
 		logrus.WithError(err).Debug("rod.Browser.Page returned error")
@@ -719,7 +742,17 @@ func (b *Browser) PageContext(ctx context.Context) (page *rod.Page, err error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return page.Context(b.browserCtx), nil
+	if !stopRequestCancel() {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+	}
+	if err := pageBrowserCtx.Err(); err != nil {
+		return nil, err
+	}
+	// Retire this Browser clone's context when Rod retires the target session.
+	context.AfterFunc(page.GetContext(), cancelPageBrowser)
+	return page, nil
 }
 
 // NewPage preserves the upstream convenience API.

@@ -392,7 +392,7 @@ func waitPublishSuccess(page *hrod.Page) error {
 		Kind: "publish_success",
 		Page: page,
 		Probe: func() (string, bool, error) {
-			info, err := page.Rod.Info()
+			info, err := pageTargetInfo(page.Rod.GetContext(), page)
 			if err != nil {
 				return "", false, err
 			}

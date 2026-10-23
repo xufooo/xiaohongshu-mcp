@@ -77,29 +77,48 @@ func NavigationSkippedCount() int64 {
 // 通过就跳过导航，不通过就走正常导航路径。
 const readyProbeTimeout = 5 * time.Second
 
+// pageTargetInfo scopes only this browser-level query to the operation context.
+// Page.Info in Rod v0.116.2 uses the creating Browser's context instead.
+func pageTargetInfo(ctx context.Context, page *hrod.Page) (*proto.TargetTargetInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	result, err := (proto.TargetGetTargetInfo{TargetID: page.Rod.TargetID}).Call(page.Rod.Browser().Context(ctx))
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, ctxErr
+	}
+	if err != nil {
+		return nil, err
+	}
+	if result == nil || result.TargetInfo == nil {
+		return nil, fmt.Errorf("页面信息为空")
+	}
+	return result.TargetInfo, nil
+}
+
 // onURL 判断当前页是否已经是目标 URL（同 host、path 一致，忽略 query）。
-func onURL(page *hrod.Page, target string) bool {
-	info, err := page.Rod.Info()
-	if err != nil || info == nil {
-		return false
+func onURL(page *hrod.Page, target string) (bool, error) {
+	info, err := pageTargetInfo(page.Rod.GetContext(), page)
+	if err != nil {
+		return false, err
 	}
 	current, err := url.Parse(info.URL)
 	if err != nil {
-		return false
+		return false, nil
 	}
 	want, err := url.Parse(target)
 	if err != nil {
-		return false
+		return false, nil
 	}
 	if !strings.EqualFold(current.Host, want.Host) {
-		return false
+		return false, nil
 	}
-	return strings.TrimRight(current.Path, "/") == strings.TrimRight(want.Path, "/")
+	return strings.TrimRight(current.Path, "/") == strings.TrimRight(want.Path, "/"), nil
 }
 
 // onExplorePage 判断当前页是否已在 /explore。
 // Pi 上一次全页导航是分钟级成本，已在目标页时不得重复导航。
-func onExplorePage(page *hrod.Page) bool {
+func onExplorePage(page *hrod.Page) (bool, error) {
 	return onURL(page, ExploreURL)
 }
 
@@ -112,7 +131,10 @@ func EnsureReadyOn(page *hrod.Page, target string, kind XHSReadyKind, timeout ti
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	alreadyOnTarget := onURL(page, target)
+	alreadyOnTarget, err := onURL(page, target)
+	if err != nil {
+		return err
+	}
 	if alreadyOnTarget {
 		quickStarted := time.Now()
 		err := WaitForXHSReady(page, XHSReadyOptions{Kind: kind, Timeout: readyProbeTimeout})
@@ -142,7 +164,14 @@ func (n *NavigateAction) ToProfilePage(ctx context.Context) error {
 	page := n.page.Context(ctx)
 
 	// 已在发现页时跳过重复导航（Pi 上一次全页加载是分钟级成本）。
-	if !onExplorePage(page) {
+	onExplore, err := onExplorePage(page)
+	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !onExplore {
 		if err := n.ToExplorePage(ctx); err != nil {
 			return err
 		}

@@ -46,6 +46,7 @@ type blockedPageCloseCDPClient struct {
 	closeErrAt            int
 	closeErr              error
 	postCloseErr          error
+	targetInfoCancel      context.CancelFunc
 }
 
 func (c *blockedPageCloseCDPClient) Event() <-chan *cdp.Event {
@@ -91,6 +92,15 @@ func (c *blockedPageCloseCDPClient) Call(ctx context.Context, _ string, method s
 	}
 	if method == "Target.attachToTarget" {
 		return []byte(`{"sessionId":"session-close"}`), nil
+	}
+	if method == "Target.getTargetInfo" {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if c.targetInfoCancel != nil {
+			c.targetInfoCancel()
+		}
+		return []byte(`{"targetInfo":{"targetId":"target-close-test","type":"page"}}`), nil
 	}
 	if method == "Runtime.evaluate" {
 		return []byte(`{"result":{"type":"object","objectId":"window"}}`), nil
@@ -476,9 +486,62 @@ func TestWarmPageReusableExpiry(t *testing.T) {
 		{"已过期", page, now.Add(-2 * time.Minute), time.Minute, false},
 	}
 	for _, c := range cases {
-		if got := warmPageReusable(c.page, nil, c.parkedAt, now, c.ttl); got != c.want {
+		if got := warmPageReusable(context.Background(), c.page, nil, c.parkedAt, now, c.ttl); got != c.want {
 			t.Errorf("%s: warmPageReusable = %v, want %v", c.name, got, c.want)
 		}
+	}
+}
+
+func TestWarmPageReusableUsesProbeContext(t *testing.T) {
+	client := &blockedPageCloseCDPClient{}
+	page := newBlockedPageCloseFixture(t, client)
+	now := time.Now()
+	if !warmPageReusable(context.Background(), page, nil, now, now, time.Minute) {
+		t.Fatal("live target must remain reusable")
+	}
+	probeCtx, cancelProbe := context.WithCancel(context.Background())
+	cancelProbe()
+	if warmPageReusable(probeCtx, page, nil, now, now, time.Minute) {
+		t.Fatal("target query ignored the canceled page probe context")
+	}
+	probeCtx, cancelProbe = context.WithCancel(context.Background())
+	defer cancelProbe()
+	client.targetInfoCancel = cancelProbe
+	if warmPageReusable(probeCtx, page, nil, now, now, time.Minute) {
+		t.Fatal("successful target response masked probe cancellation")
+	}
+	if page.Rod.GetContext().Err() != nil || page.Rod.Browser().GetContext().Err() != nil {
+		t.Fatal("probe cancellation changed the page or browser lifetime")
+	}
+}
+
+func TestWarmPageReusableRejectsCanceledPageLifetime(t *testing.T) {
+	for _, cancelDuringProbe := range []bool{false, true} {
+		name := "before probe"
+		if cancelDuringProbe {
+			name = "during successful probe"
+		}
+		t.Run(name, func(t *testing.T) {
+			client := &blockedPageCloseCDPClient{}
+			page := newBlockedPageCloseFixture(t, client)
+			pageCtx, cancelPage := context.WithCancel(page.Rod.GetContext())
+			defer cancelPage()
+			page = page.Context(pageCtx)
+			if cancelDuringProbe {
+				client.targetInfoCancel = cancelPage
+			} else {
+				cancelPage()
+			}
+			probeCtx, cancelProbe := context.WithTimeout(context.Background(), time.Second)
+			defer cancelProbe()
+			now := time.Now()
+			if warmPageReusable(probeCtx, page, nil, now, now, time.Minute) {
+				t.Fatal("live browser target must not revive a canceled page session")
+			}
+			if probeCtx.Err() != nil || page.Rod.Browser().GetContext().Err() != nil {
+				t.Fatal("page cancellation changed the probe or browser lifetime")
+			}
+		})
 	}
 }
 
@@ -1075,6 +1138,10 @@ func TestWrongTargetDestroyedEventKeepsPendingPage(t *testing.T) {
 		postCloseQueryStarted: make(chan struct{}, 1),
 		postCloseQueryRelease: make(chan struct{}),
 		postCloseErr:          verifyErr,
+		// Return an error so Rod does not wait for a matching destroyed event
+		// inside Page.Close before Manager can query the target state.
+		closeErrAt:            1,
+		closeErr:              errors.New("injected Page.close failure"),
 	}
 	page := newBlockedPageCloseFixture(t, client)
 	manager := NewManager(nil, WithWarmPageTTL(0))

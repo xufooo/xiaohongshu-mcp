@@ -924,7 +924,7 @@ func (s *BrowseSession) searchBatch(ctx context.Context, keyword string, filters
 		if err != nil && searchCtx.Err() == context.DeadlineExceeded && ctx.Err() == nil {
 			err = fmt.Errorf("搜索操作超过内部时限 %s: %w", sessionSearchTimeout, err)
 		}
-		s.reconcileAfterFailedSearch(err)
+		s.reconcileAfterFailedSearch(opCtx, err)
 		s.finishOperation(err)
 	}()
 
@@ -1061,14 +1061,11 @@ func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, shareURL, xsecT
 			}
 		}
 		pollResult, pollErr := waitForNoteURLStable(opCtx, 60*time.Second, func(readCtx context.Context) (string, error) {
-			result, infoErr := proto.TargetGetTargetInfo{TargetID: page.Rod.TargetID}.Call(page.Rod.Browser().Context(readCtx))
+			info, infoErr := pageTargetInfo(readCtx, page)
 			if infoErr != nil {
 				return "", infoErr
 			}
-			if result == nil || result.TargetInfo == nil {
-				return "", fmt.Errorf("页面信息为空")
-			}
-			return result.TargetInfo.URL, nil
+			return info.URL, nil
 		})
 		if pollErr != nil {
 			return fail(pollErr)
@@ -2852,8 +2849,8 @@ func (s *BrowseSession) closeExpired(expiresAt time.Time) {
 	s.close()
 }
 
-func (s *BrowseSession) reconcileAfterFailedSearch(operationErr error) {
-	if operationErr == nil {
+func (s *BrowseSession) reconcileAfterFailedSearch(ctx context.Context, operationErr error) {
+	if operationErr == nil || ctx.Err() != nil {
 		return
 	}
 	s.mu.Lock()
@@ -2863,7 +2860,7 @@ func (s *BrowseSession) reconcileAfterFailedSearch(operationErr error) {
 	if closed || page == nil {
 		return
 	}
-	info, err := page.Rod.Info()
+	info, err := pageTargetInfo(ctx, page)
 	if err != nil {
 		return
 	}
@@ -2947,14 +2944,11 @@ func (s *BrowseSession) currentPageURL(ctx context.Context, counter *evalTimeout
 	if page == nil {
 		return "", nil
 	}
-	result, err := proto.TargetGetTargetInfo{TargetID: page.Rod.TargetID}.Call(page.Rod.Browser().Context(ctx))
+	info, err := pageTargetInfo(ctx, page)
 	if err != nil {
 		return "", err
 	}
-	if result == nil || result.TargetInfo == nil {
-		return "", fmt.Errorf("页面信息为空")
-	}
-	return result.TargetInfo.URL, nil
+	return info.URL, nil
 }
 
 func parseFeedIDFromPageURL(rawURL string) (string, bool) {

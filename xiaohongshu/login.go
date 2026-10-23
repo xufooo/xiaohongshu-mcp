@@ -129,7 +129,14 @@ func hasLoginSurface(page *hrod.Page) (bool, error) {
 
 func (a *LoginAction) Login(ctx context.Context) error {
 	pp := a.page.Context(ctx)
-	if !onExplorePage(pp) {
+	onExplore, err := onExplorePage(pp)
+	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !onExplore {
 		if err := pp.Navigate(ExploreURL); err != nil {
 			return errors.Wrap(err, "navigate to explore")
 		}
@@ -161,7 +168,14 @@ func (a *LoginAction) Login(ctx context.Context) error {
 
 func (a *LoginAction) FetchQrcodeImage(ctx context.Context) (string, bool, error) {
 	pp := a.page.Context(ctx)
-	if !onExplorePage(pp) {
+	onExplore, err := onExplorePage(pp)
+	if err != nil {
+		return "", false, err
+	}
+	if err := ctx.Err(); err != nil {
+		return "", false, err
+	}
+	if !onExplore {
 		if err := pp.Navigate(ExploreURL); err != nil {
 			return "", false, errors.Wrap(err, "navigate to explore")
 		}

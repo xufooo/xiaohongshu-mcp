@@ -14,10 +14,170 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/cdp"
 	"github.com/go-rod/rod/lib/launcher"
 	"github.com/go-rod/rod/lib/launcher/flags"
 )
+
+type pageLifetimeCDPClient struct {
+	events       chan *cdp.Event
+	setupStarted chan struct{}
+	setupMethod  string
+}
+
+func (c *pageLifetimeCDPClient) Event() <-chan *cdp.Event { return c.events }
+
+func (c *pageLifetimeCDPClient) Call(ctx context.Context, _ string, method string, _ interface{}) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if c.setupStarted != nil && method == c.setupMethod {
+		close(c.setupStarted)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	switch method {
+	case "Target.createTarget":
+		return []byte(`{"targetId":"lifetime-target"}`), nil
+	case "Target.attachToTarget":
+		return []byte(`{"sessionId":"lifetime-session"}`), nil
+	case "Target.getTargetInfo":
+		return []byte(`{"targetInfo":{"targetId":"lifetime-target","type":"page","url":"about:blank"}}`), nil
+	}
+	return []byte(`{}`), nil
+}
+
+func TestPageContextPreservesBrowserAndEventsAfterCreation(t *testing.T) {
+	browserCtx, cancelBrowser := context.WithCancel(context.Background())
+	defer cancelBrowser()
+	client := &pageLifetimeCDPClient{events: make(chan *cdp.Event)}
+	defer close(client.events)
+	controller := rod.New().Context(browserCtx).NoDefaultDevice().ControlURL("").Client(client)
+	if err := controller.Connect(); err != nil {
+		t.Fatal(err)
+	}
+	b := &Browser{browser: controller, browserCtx: browserCtx}
+	createCtx, cancelCreate := context.WithCancel(context.Background())
+	defer cancelCreate()
+	page, err := b.PageContext(createCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelCreate()
+	if err := page.GetContext().Err(); err != nil {
+		t.Fatalf("creation cancellation reached the returned page: %v", err)
+	}
+	info, err := page.Info()
+	if err != nil || info == nil || info.TargetID != page.TargetID {
+		t.Fatalf("page's Browser retained the creation budget: info=%+v err=%v", info, err)
+	}
+	events := page.Event()
+	select {
+	case client.events <- &cdp.Event{SessionID: string(page.SessionID), Method: "Runtime.executionContextsCleared", Params: []byte(`{}`)}:
+	case <-time.After(time.Second):
+		t.Fatal("browser event pump did not accept the page event")
+	}
+	select {
+	case event, ok := <-events:
+		if !ok || event.Method != "Runtime.executionContextsCleared" {
+			t.Fatalf("page event pump did not survive creation cancellation: event=%+v open=%t", event, ok)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("page event pump stopped with the creation budget")
+	}
+	select {
+	case client.events <- &cdp.Event{Method: "Target.detachedFromTarget", Params: []byte(`{"sessionId":"lifetime-session"}`)}:
+	case <-time.After(time.Second):
+		t.Fatal("browser event pump did not accept session retirement")
+	}
+	select {
+	case <-page.Browser().GetContext().Done():
+	case <-time.After(time.Second):
+		t.Fatal("retired page retained its Browser clone's lifetime")
+	}
+	if page.GetContext().Err() == nil || controller.GetContext().Err() != nil {
+		t.Fatal("session retirement must cancel the page without canceling the root Browser")
+	}
+}
+
+func TestPageContextCancellationStillBoundsSetup(t *testing.T) {
+	for _, deadline := range []bool{false, true} {
+		name := "cancel"
+		if deadline {
+			name = "deadline"
+		}
+		t.Run(name, func(t *testing.T) {
+			testPageContextSetupCancellation(t, deadline)
+		})
+	}
+}
+
+func testPageContextSetupCancellation(t *testing.T, deadline bool) {
+	t.Helper()
+	browserCtx, cancelBrowser := context.WithCancel(context.Background())
+	defer cancelBrowser()
+	client := &pageLifetimeCDPClient{
+		events: make(chan *cdp.Event), setupStarted: make(chan struct{}), setupMethod: "Page.enable",
+	}
+	if deadline {
+		// Fail inside Rod rather than at the wrapper's final ctx.Err check.
+		client.setupMethod = "Target.attachToTarget"
+	}
+	defer close(client.events)
+	controller := rod.New().Context(browserCtx).NoDefaultDevice().ControlURL("").Client(client)
+	if err := controller.Connect(); err != nil {
+		t.Fatal(err)
+	}
+	b := &Browser{browser: controller, browserCtx: browserCtx}
+	createCtx, cancelCreate := context.WithCancel(context.Background())
+	wantErr := context.Canceled
+	if deadline {
+		cancelCreate()
+		createCtx, cancelCreate = context.WithTimeout(context.Background(), 3*time.Second)
+		wantErr = context.DeadlineExceeded
+	}
+	defer cancelCreate()
+	done := make(chan error, 1)
+	joined := false
+	defer func() {
+		cancelCreate()
+		if !joined {
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Error("page setup did not join after fixture cancellation")
+			}
+		}
+	}()
+	go func() {
+		page, err := b.PageContext(createCtx)
+		if page != nil {
+			err = fmt.Errorf("canceled setup returned a page: %v", err)
+		}
+		done <- err
+	}()
+	select {
+	case <-client.setupStarted:
+	case <-time.After(time.Second):
+		t.Fatal("page setup did not reach its CDP barrier")
+	}
+	if !deadline {
+		cancelCreate()
+	}
+	select {
+	case err := <-done:
+		joined = true
+		if !errors.Is(err, wantErr) {
+			t.Fatalf("setup must respect creation cancellation: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("page setup did not stop after creation cancellation")
+	}
+	if controller.GetContext().Err() != nil {
+		t.Fatal("failed page setup canceled the root Browser")
+	}
+}
 
 type blockedBrowserCloseClient struct {
 	events  chan *cdp.Event

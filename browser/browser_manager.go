@@ -285,7 +285,7 @@ func (m *Manager) takeWarmPage(ctx context.Context, b *hrod.Browser) (*hrod.Page
 		return nil, nil
 	}
 	probeCtx, cancelProbe := context.WithTimeout(ctx, browserHealthTimeout)
-	reusable := warmPageReusable(page.Context(probeCtx), b, parkedAt, time.Now(), ttl)
+	reusable := warmPageReusable(probeCtx, page, b, parkedAt, time.Now(), ttl)
 	cancelProbe()
 	if !reusable || ctx.Err() != nil {
 		err := m.closePendingPageRecord(ctx, pending)
@@ -302,7 +302,7 @@ func (m *Manager) takeWarmPage(ctx context.Context, b *hrod.Browser) (*hrod.Page
 }
 
 // warmPageReusable 判断缓存的热页面是否还能复用：未过期、属于当前浏览器实例、CDP 仍然可用。
-func warmPageReusable(page *hrod.Page, b *hrod.Browser, parkedAt, now time.Time, ttl time.Duration) bool {
+func warmPageReusable(ctx context.Context, page *hrod.Page, b *hrod.Browser, parkedAt, now time.Time, ttl time.Duration) bool {
 	if page == nil || ttl <= 0 {
 		return false
 	}
@@ -312,11 +312,15 @@ func warmPageReusable(page *hrod.Page, b *hrod.Browser, parkedAt, now time.Time,
 	if b != nil && page.Browser() != b {
 		return false
 	}
-	if page.Rod == nil {
+	if page.Rod == nil || page.Rod.Browser() == nil {
 		return false
 	}
-	_, err := page.Rod.Info()
-	return err == nil
+	if ctx.Err() != nil || page.Rod.GetContext().Err() != nil {
+		return false
+	}
+	// Rod's Info uses its creating Browser's context, ignoring Page.Context.
+	_, err := (proto.TargetGetTargetInfo{TargetID: page.Rod.TargetID}).Call(page.Rod.Browser().Context(ctx))
+	return err == nil && ctx.Err() == nil && page.Rod.GetContext().Err() == nil
 }
 
 // parkWarmPage 把页面放进热页面缓存，到期自动关闭。返回 false 表示调用方应直接关闭它。

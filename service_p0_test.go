@@ -239,25 +239,12 @@ func newServiceInitialRefreshBrowserFactory(t *testing.T, gate *serviceInitialRe
 		if err != nil || instance == nil {
 			return instance, err
 		}
-		page, err := instance.Page()
-		if err != nil {
-			return instance, fmt.Errorf("创建初始刷新 CDP fixture page: %w", err)
-		}
-		rodBrowser := page.Rod.Browser()
+		rodBrowser := instance.Rod().Rod()
 		if rodBrowser == nil {
-			closeCtx, cancelClose := context.WithTimeout(context.Background(), 5*time.Second)
-			closeErr := page.CloseContext(closeCtx)
-			cancelClose()
-			return instance, errors.Join(errors.New("初始刷新 CDP fixture page 缺少 Rod Browser"), closeErr)
+			return instance, errors.New("初始刷新 CDP fixture 缺少 Rod Browser")
 		}
 		upstream := rodBrowser.Context(rodBrowser.GetContext())
 		rodBrowser.Client(&serviceInitialRefreshGateClient{upstream: upstream, gate: gate})
-		closeCtx, cancelClose := context.WithTimeout(context.Background(), 5*time.Second)
-		closeErr := page.CloseContext(closeCtx)
-		cancelClose()
-		if closeErr != nil {
-			return instance, fmt.Errorf("关闭初始刷新 CDP fixture page: %w", closeErr)
-		}
 		return instance, nil
 	}
 }
@@ -3414,6 +3401,8 @@ func TestProductionOwnedPageCloseFailureRetriesWithoutReleasingProbeLease(t *tes
 		browserCloseErr: errors.New("injected Browser.close failure"),
 	}
 	rodBrowser.Client(injected)
+	// PageContext creates a Browser clone; fallback closes the root controller.
+	page.Browser().Rod().Rod().Client(injected)
 	firstCtx, cancelFirst := context.WithTimeout(context.Background(), 20*time.Second)
 	firstDone := make(chan error, 1)
 	firstResultRead := false
@@ -4334,6 +4323,11 @@ func TestManagerCloseDeadlineWithUncancellableStartup(t *testing.T) {
 	factoryStarted := make(chan struct{}, 1)
 	factoryRelease := make(chan struct{}, 1)
 	factoryBrowser := make(chan *hrod.Browser, 1)
+	type processCapture struct {
+		processes []isolatedProcessIdentity
+		err       error
+	}
+	factoryProcesses := make(chan processCapture, 1)
 	factoryDone := make(chan struct{})
 	var trackedProcesses []isolatedProcessIdentity
 	manager := browser.NewManager(func(context.Context) (*hrod.Browser, error) {
@@ -4348,6 +4342,10 @@ func TestManagerCloseDeadlineWithUncancellableStartup(t *testing.T) {
 		defer cancelFactory()
 		lateBrowser, err := baseFactory(factoryCtx)
 		if lateBrowser != nil {
+			// Capture while the factory still owns the browser. Once returned,
+			// Manager may immediately destroy this canceled startup's processes.
+			processes, processErr := isolatedBrowserProcessesForProfile(profileDir)
+			factoryProcesses <- processCapture{processes, processErr}
 			factoryBrowser <- lateBrowser
 		}
 		return lateBrowser, err
@@ -4436,11 +4434,11 @@ func TestManagerCloseDeadlineWithUncancellableStartup(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("factory returned no browser identity for late-start cleanup")
 	}
-	processes, processErr := isolatedBrowserProcessesForProfile(profileDir)
-	if processErr != nil || len(processes) == 0 {
-		t.Fatalf("startup Close 前未能保存完整 PID/starttime 集合: processes=%v err=%v", processes, processErr)
+	captured := <-factoryProcesses
+	if captured.err != nil || len(captured.processes) == 0 {
+		t.Fatalf("startup Close 前未能保存完整 PID/starttime 集合: processes=%v err=%v", captured.processes, captured.err)
 	}
-	trackedProcesses = mergeIsolatedProcessIdentities(trackedProcesses, processes)
+	trackedProcesses = mergeIsolatedProcessIdentities(trackedProcesses, captured.processes)
 	factoryBrowser <- lateBrowser
 
 	retryCtx, cancelRetry := context.WithTimeout(context.Background(), 10*time.Second)
@@ -4844,6 +4842,9 @@ func TestGetFeedDetailCommentsBatchStandaloneProductionCommitBoundary(t *testing
 				t.Fatalf("等待搜索结果 fixture: %v", err)
 			}
 			manager.Release(page)
+			if stats := manager.Stats(); !stats.WarmPageCached || stats.PagesCreated != 1 || stats.WarmPageReused != 0 {
+				t.Fatalf("搜索结果页必须保留在真实 warm cache: %+v", stats)
+			}
 			root := t.TempDir()
 			state, err := xiaohongshu.NewActionStateStore(root, serviceCommentStateKey)
 			if err != nil {
@@ -4863,6 +4864,8 @@ func TestGetFeedDetailCommentsBatchStandaloneProductionCommitBoundary(t *testing
 			const maxItems = 2
 			scope := serviceCommentScope("standalone", "", maxItems, "token", config)
 			inputCursor := &xiaohongshu.CommentCursor{FeedID: serviceCommentFeedID, ReturnedIDs: []string{"already-returned", "already-returned", "idx_legacy", ""}}
+			wantInputCursor := *inputCursor
+			wantInputCursor.ReturnedIDs = append([]string(nil), inputCursor.ReturnedIDs...)
 			service.setCommentCursor("input", inputCursor, scope)
 			if failRecord {
 				blockServiceCommentStateWrite(t, root)
@@ -4876,12 +4879,15 @@ func TestGetFeedDetailCommentsBatchStandaloneProductionCommitBoundary(t *testing
 			}); err != nil {
 				t.Fatalf("standalone 评论批次生产调用超过 watchdog: %v", err)
 			}
+			if stats := manager.Stats(); stats.PagesCreated != 1 || stats.WarmPageReused != 1 || !stats.WarmPageCached {
+				t.Fatalf("standalone 必须复用并归还原搜索结果页: %+v", stats)
+			}
 			if failRecord {
 				if callErr == nil || !strings.Contains(callErr.Error(), "记录评论停留状态失败") || result != nil {
 					t.Fatalf("状态记录失败应中止 standalone 成功提交: result=%+v err=%v", result, callErr)
 				}
 				entry, ok := service.commentCursors.Load("input")
-				if !ok || entry.(*commentCursorEntry).Cursor.ReturnedIDs[0] != "already-returned" {
+				if !ok || !reflect.DeepEqual(entry.(*commentCursorEntry).Cursor, &wantInputCursor) {
 					t.Fatalf("失败后输入 cursor 不应被消费或改写: %v", entry)
 				}
 				if _, ok := service.commentReplays.Load("input"); ok {
@@ -4920,6 +4926,9 @@ func TestGetFeedDetailCommentsBatchStandaloneProductionCommitBoundary(t *testing
 			}
 			if replayErr != nil || !reflect.DeepEqual(result, replay) {
 				t.Fatalf("成功批次 replay 应稳定返回原响应: equal=%v err=%v", reflect.DeepEqual(result, replay), replayErr)
+			}
+			if stats := manager.Stats(); stats.PagesCreated != 1 || stats.WarmPageReused != 1 || !stats.WarmPageCached {
+				t.Fatalf("standalone replay 不应重新获取页面: %+v", stats)
 			}
 		})
 	}
