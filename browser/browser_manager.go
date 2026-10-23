@@ -1027,16 +1027,14 @@ func (m *Manager) getBrowser(ctx context.Context) (*hrod.Browser, error) {
 			return nil, err
 		}
 		m.mu.Lock()
-		for index := 0; index < len(m.pendingBrowsers); {
-			pending := m.pendingBrowsers[index]
-			if pending == nil || pending.Rod() == nil || !pending.Rod().CleanupComplete() {
-				index++
+		for pending, record := range m.browserCleanups {
+			if !browserCleanupComplete(pending) {
 				continue
 			}
-			record := m.browserCleanups[pending]
-			if record == nil {
-				index++
-				continue
+			if m.browser == pending {
+				m.browser = nil
+				m.clearWarmPageLocked()
+				m.cancelIdleCloseLocked()
 			}
 			m.retireBrowserCleanupLocked(pending, record)
 		}

@@ -1499,6 +1499,111 @@ func TestBrowserResetErrorsAreScopedByBrowser(t *testing.T) {
 	}
 }
 
+type failedAcquireCDPClient struct {
+	*blockedPageCloseCDPClient
+	browserCloses atomic.Int32
+}
+
+func (c *failedAcquireCDPClient) Call(ctx context.Context, sessionID, method string, params interface{}) ([]byte, error) {
+	if method == "Browser.close" {
+		c.browserCloses.Add(1)
+	}
+	if method == "Target.createTarget" || method == "Browser.close" {
+		return nil, context.DeadlineExceeded
+	}
+	return c.blockedPageCloseCDPClient.Call(ctx, sessionID, method, params)
+}
+
+func TestAcquireRetiresCompletedCurrentBrowserCleanup(t *testing.T) {
+	chromeBin := os.Getenv("ROD_BROWSER_BIN")
+	if chromeBin == "" {
+		var ok bool
+		chromeBin, ok = launcher.LookPath()
+		if !ok {
+			t.Skip("未找到 Chrome/Chromium，跳过 current-browser cleanup fixture")
+		}
+	}
+	client := &failedAcquireCDPClient{blockedPageCloseCDPClient: &blockedPageCloseCDPClient{}}
+	t.Cleanup(client.Close)
+	profileDir := t.TempDir()
+	var factoryCalls atomic.Int32
+	var oldBrowser *hrod.Browser
+	manager := NewManager(func(ctx context.Context) (*hrod.Browser, error) {
+		call := factoryCalls.Add(1)
+		hb, err := headless_browser.New(ctx,
+			headless_browser.WithChromeBinPath(chromeBin),
+			headless_browser.WithHeadless(true),
+			headless_browser.WithUserDataDir(profileDir),
+			headless_browser.WithStealthJS(false),
+		)
+		if hb == nil {
+			return nil, err
+		}
+		b := hrod.NewBrowser(hb, humanize.Config{})
+		if err == nil && call == 1 {
+			hb.Rod().Client(client)
+			oldBrowser = b
+		}
+		return b, err
+	}, WithIdleTimeout(0), WithWarmPageTTL(time.Minute))
+	t.Cleanup(func() {
+		// A failed assertion may leave a successfully acquired page leased.
+		if len(manager.token) == 0 {
+			manager.releaseToken()
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := manager.Close(ctx); err != nil {
+			t.Errorf("fixture cleanup: %v", err)
+		}
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	if page, err := manager.AcquireFor(ctx, "failed-acquire"); page != nil || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("controlled page creation must fail: page=%v err=%v", page, err)
+	}
+	manager.mu.Lock()
+	retained := oldBrowser != nil && manager.browser == oldBrowser && manager.browserCleanups[oldBrowser] != nil
+	cleanupErr := manager.resetErrByBrowser[oldBrowser]
+	manager.mu.Unlock()
+	if !retained || !errors.Is(cleanupErr, context.DeadlineExceeded) || len(manager.token) != 1 || client.browserCloses.Load() != 1 {
+		t.Fatalf("failed discard must retain cleanup and return its lease: retained=%t err=%v tokens=%d", retained, cleanupErr, len(manager.token))
+	}
+	poll := time.NewTicker(10 * time.Millisecond)
+	defer poll.Stop()
+	for !oldBrowser.Rod().CleanupComplete() {
+		select {
+		case <-ctx.Done():
+			t.Fatalf("launcher cleanup did not complete: %v", ctx.Err())
+		case <-poll.C:
+		}
+	}
+	page, err := manager.AcquireFor(ctx, "next-owner")
+	if err != nil || page == nil {
+		t.Fatalf("terminal cleanup must unblock ordinary Acquire: page=%v err=%v", page, err)
+	}
+	manager.mu.Lock()
+	_, cleanupRetained := manager.browserCleanups[oldBrowser]
+	_, errorRetained := manager.resetErrByBrowser[oldBrowser]
+	manager.mu.Unlock()
+	if cleanupRetained || errorRetained || page.Browser() == oldBrowser || factoryCalls.Load() != 2 {
+		t.Fatal("only the completed old browser's cleanup and error must be retired")
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		b, err := manager.getBrowser(ctx)
+		manager.mu.Lock()
+		owner := manager.owner
+		manager.mu.Unlock()
+		if err != nil || b != page.Browser() || owner != "next-owner" || len(manager.token) != 0 || factoryCalls.Load() != 2 || client.browserCloses.Load() != 1 {
+			t.Fatalf("repeated acquisition checks must preserve the new owner's lease and browser: %v", err)
+		}
+	}
+	manager.Release(page)
+	if len(manager.token) != 1 {
+		t.Fatal("successful owner must return exactly one lease")
+	}
+}
+
 func TestAcquireRetriesAfterCompletedStartupFailure(t *testing.T) {
 	chromeBin := os.Getenv("ROD_BROWSER_BIN")
 	if chromeBin == "" {

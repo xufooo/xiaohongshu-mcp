@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xpzouying/headless_browser"
+	"github.com/xpzouying/xiaohongshu-mcp/humanize"
 	hrod "github.com/xpzouying/xiaohongshu-mcp/humanize/rod"
 )
 
@@ -74,5 +76,36 @@ func TestCanceledAcquireDoesNotTakeAvailableToken(t *testing.T) {
 	manager.mu.Unlock()
 	if starting != nil {
 		t.Fatal("canceled acquisition created a startup worker")
+	}
+}
+
+func TestAcquireBlocksOnUnknownBrowserCleanup(t *testing.T) {
+	unknown := hrod.NewBrowser(&headless_browser.Browser{}, humanize.Config{})
+	startupErr := errors.New("startup returned an unconfirmed browser")
+	var calls atomic.Int32
+	manager := NewManager(func(context.Context) (*hrod.Browser, error) {
+		calls.Add(1)
+		return unknown, startupErr
+	}, WithIdleTimeout(0))
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if page, err := manager.Acquire(ctx); page != nil || !errors.Is(err, startupErr) {
+		t.Fatalf("startup failure must retain its browser: page=%v err=%v", page, err)
+	}
+	if err := manager.lockForOwner(ctx, "lease-probe"); err != nil {
+		t.Fatal(err)
+	}
+	defer manager.releaseToken()
+	for attempt := 0; attempt < 2; attempt++ {
+		if page, err := manager.Acquire(ctx); page != nil || err == nil {
+			t.Fatalf("unknown cleanup must block Acquire: page=%v err=%v", page, err)
+		}
+	}
+	manager.mu.Lock()
+	retained := len(manager.pendingBrowsers) == 1 && manager.pendingBrowsers[0] == unknown && manager.browserCleanups[unknown] != nil
+	owner := manager.owner
+	manager.mu.Unlock()
+	if !retained || calls.Load() != 1 || owner != "lease-probe" || len(manager.token) != 0 {
+		t.Fatal("unknown cleanup must retain responsibility without another factory or lease release")
 	}
 }
