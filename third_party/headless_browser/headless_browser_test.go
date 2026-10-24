@@ -24,11 +24,38 @@ type pageLifetimeCDPClient struct {
 	events       chan *cdp.Event
 	setupStarted chan struct{}
 	setupMethod  string
+	createDelay  time.Duration
+	attachDelay  time.Duration
+	cancelAttach context.CancelFunc
+	attached     bool
 }
 
 func (c *pageLifetimeCDPClient) Event() <-chan *cdp.Event { return c.events }
 
 func (c *pageLifetimeCDPClient) Call(ctx context.Context, _ string, method string, _ interface{}) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	delay := time.Duration(0)
+	switch method {
+	case "Target.createTarget":
+		delay = c.createDelay
+	case "Target.attachToTarget":
+		c.attached = true
+		delay = c.attachDelay
+		if c.cancelAttach != nil {
+			c.cancelAttach()
+		}
+	}
+	if delay > 0 {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -98,6 +125,101 @@ func TestPageContextPreservesBrowserAndEventsAfterCreation(t *testing.T) {
 	}
 	if page.GetContext().Err() == nil || controller.GetContext().Err() != nil {
 		t.Fatal("session retirement must cancel the page without canceling the root Browser")
+	}
+}
+
+// This covers the production PageContext -> Rod creation/lifetime boundary.
+// The manager's budget value is checked separately in browser's tests; this
+// fixture does not exercise newPage or the hrod wrapper across package boundaries.
+func TestPageContextSerialCreationAndParentCancellation(t *testing.T) {
+	for _, mode := range []string{"pi_create_attach", "parent_cancel", "parent_deadline"} {
+		t.Run(mode, func(t *testing.T) {
+			browserCtx, cancelBrowser := context.WithCancel(context.Background())
+			defer cancelBrowser()
+			client := &pageLifetimeCDPClient{events: make(chan *cdp.Event)}
+			defer close(client.events)
+			controller := rod.New().Context(browserCtx).NoDefaultDevice().ControlURL("").Client(client)
+			if err := controller.Connect(); err != nil {
+				t.Fatal(err)
+			}
+			b := &Browser{browser: controller, browserCtx: browserCtx}
+			parent := context.Background()
+			cancelParent := func() {}
+			var wantErr error
+			switch mode {
+			case "pi_create_attach":
+				client.createDelay = 24400 * time.Millisecond
+				client.attachDelay = 11800 * time.Millisecond
+			case "parent_cancel":
+				parent, cancelParent = context.WithCancel(parent)
+				client.cancelAttach = cancelParent
+				client.attachDelay = time.Minute
+				wantErr = context.Canceled
+			case "parent_deadline":
+				parent, cancelParent = context.WithTimeout(parent, time.Second)
+				client.attachDelay = time.Minute
+				wantErr = context.DeadlineExceeded
+			}
+			defer cancelParent()
+			// PageContext accepts the caller's budget. The manager's separate
+			// budget assertion rejects the old 30s value without a test hook.
+			createCtx, cancelCreate := context.WithTimeout(parent, 120*time.Second)
+			defer cancelCreate()
+			type result struct {
+				page *rod.Page
+				err  error
+			}
+			done := make(chan result, 1)
+			joined := false
+			defer func() {
+				cancelCreate()
+				cancelBrowser()
+				if !joined {
+					select {
+					case <-done:
+					case <-time.After(time.Second):
+						t.Error("PageContext worker did not join after fixture cancellation")
+					}
+				}
+			}()
+			go func() {
+				page, err := b.PageContext(createCtx)
+				done <- result{page, err}
+			}()
+			watchdog := 5 * time.Second
+			if mode == "pi_create_attach" {
+				watchdog = 50 * time.Second
+			}
+			var got result
+			select {
+			case got = <-done:
+				joined = true
+			case <-time.After(watchdog):
+				t.Fatal("PageContext exceeded independent watchdog")
+			}
+			if !client.attached {
+				t.Fatal("fixture did not reach the real Rod attach boundary")
+			}
+			if wantErr != nil {
+				if got.page != nil || !errors.Is(got.err, wantErr) {
+					t.Fatalf("parent must bound page creation: page=%v err=%v", got.page, got.err)
+				}
+				if controller.GetContext().Err() != nil {
+					t.Fatal("failed page creation canceled the root Browser")
+				}
+				return
+			}
+			if got.err != nil || got.page == nil {
+				t.Fatalf("36.2s create+attach must complete: page=%v err=%v", got.page, got.err)
+			}
+			cancelCreate()
+			if got.page.GetContext().Err() != nil {
+				t.Fatal("creation budget leaked into returned page lifetime")
+			}
+			if _, err := got.page.Info(); err != nil {
+				t.Fatalf("returned page Browser retained creation cancellation: %v", err)
+			}
+		})
 	}
 }
 

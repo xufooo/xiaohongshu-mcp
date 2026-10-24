@@ -1502,11 +1502,46 @@ func TestBrowserResetErrorsAreScopedByBrowser(t *testing.T) {
 type failedAcquireCDPClient struct {
 	*blockedPageCloseCDPClient
 	browserCloses atomic.Int32
+	closeErr      error
+}
+
+type pageContextFunc func(context.Context) (*hrod.Page, error)
+
+func (f pageContextFunc) PageContext(ctx context.Context) (*hrod.Page, error) {
+	return f(ctx)
+}
+
+// Check the context newPage actually passes to PageContext without Chrome or a
+// wait. The serial CDP timing and parent cancellation tests live in headless_browser.
+func TestPageCreationBudgetExceedsMeasuredCreateAttach(t *testing.T) {
+	const createAttachDuration = (24400 + 11800) * time.Millisecond
+	wantErr := errors.New("stop at PageContext boundary")
+	var received context.Context
+	var budget time.Duration
+	var hasDeadline bool
+	page, err := newPage(context.Background(), pageContextFunc(func(ctx context.Context) (*hrod.Page, error) {
+		received = ctx
+		deadline, ok := ctx.Deadline()
+		hasDeadline = ok
+		if ok {
+			budget = time.Until(deadline)
+		}
+		return nil, wantErr
+	}))
+	if received == nil || page != nil || !errors.Is(err, wantErr) {
+		t.Fatalf("newPage must call PageContext and propagate its error: called=%t page=%v err=%v", received != nil, page, err)
+	}
+	if !hasDeadline || budget <= createAttachDuration || budget > 120*time.Second {
+		t.Fatalf("PageContext budget must exceed 36.2s within the cold-start bound: deadline=%t budget=%v", hasDeadline, budget)
+	}
 }
 
 func (c *failedAcquireCDPClient) Call(ctx context.Context, sessionID, method string, params interface{}) ([]byte, error) {
 	if method == "Browser.close" {
 		c.browserCloses.Add(1)
+		if c.closeErr != nil {
+			return nil, c.closeErr
+		}
 	}
 	if method == "Target.createTarget" || method == "Browser.close" {
 		return nil, context.DeadlineExceeded
@@ -1523,7 +1558,10 @@ func TestAcquireRetiresCompletedCurrentBrowserCleanup(t *testing.T) {
 			t.Skip("未找到 Chrome/Chromium，跳过 current-browser cleanup fixture")
 		}
 	}
-	client := &failedAcquireCDPClient{blockedPageCloseCDPClient: &blockedPageCloseCDPClient{}}
+	client := &failedAcquireCDPClient{
+		blockedPageCloseCDPClient: &blockedPageCloseCDPClient{},
+		closeErr:                 context.Canceled,
+	}
 	t.Cleanup(client.Close)
 	profileDir := t.TempDir()
 	var factoryCalls atomic.Int32
@@ -1559,14 +1597,14 @@ func TestAcquireRetiresCompletedCurrentBrowserCleanup(t *testing.T) {
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
-	if page, err := manager.AcquireFor(ctx, "failed-acquire"); page != nil || !errors.Is(err, context.DeadlineExceeded) {
+	if page, err := manager.AcquireFor(ctx, "failed-acquire"); page != nil || !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, context.Canceled) {
 		t.Fatalf("controlled page creation must fail: page=%v err=%v", page, err)
 	}
 	manager.mu.Lock()
 	retained := oldBrowser != nil && manager.browser == oldBrowser && manager.browserCleanups[oldBrowser] != nil
 	cleanupErr := manager.resetErrByBrowser[oldBrowser]
 	manager.mu.Unlock()
-	if !retained || !errors.Is(cleanupErr, context.DeadlineExceeded) || len(manager.token) != 1 || client.browserCloses.Load() != 1 {
+	if !retained || !errors.Is(cleanupErr, context.Canceled) || len(manager.token) != 1 || client.browserCloses.Load() != 1 || factoryCalls.Load() != 1 {
 		t.Fatalf("failed discard must retain cleanup and return its lease: retained=%t err=%v tokens=%d", retained, cleanupErr, len(manager.token))
 	}
 	poll := time.NewTicker(10 * time.Millisecond)

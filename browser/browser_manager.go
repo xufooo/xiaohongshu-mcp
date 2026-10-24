@@ -21,6 +21,12 @@ const (
 	operationAcquireTimeout = 5 * time.Second
 	lifecycleAcquireTimeout = 30 * time.Second
 
+	// Page creation includes serial CDP create/attach and per-page setup. On Pi 3B,
+	// create+attach alone took 36.2s. Allow 83.8s more for setup/scheduling, bounded
+	// at the existing two-minute cold-start scale, independently of lock waiting.
+	// A shorter request deadline or cancellation always wins.
+	pageCreateTimeout = 120 * time.Second
+
 	// defaultWarmPageTTL 是热页面保留时长。保留页面能省掉「新建 page」和
 	// 「连续两次调用指向同一 URL 时的重复整页加载」（例如 check_login_status → start_page）。
 	// 但实测一个已加载小红书 SPA 的页面 PSS ≈ +500MB（桌面口径），
@@ -237,9 +243,9 @@ func (m *Manager) acquireFor(ctx context.Context, owner string) (*hrod.Page, boo
 		atomic.AddInt64(&m.pagesCreated, 1)
 		page, err = newPage(ctx, b)
 		if err != nil {
-			m.discardBrowser(ctx, b)
+			cleanupErr := m.discardBrowser(ctx, b)
 			m.releaseToken()
-			return nil, false, err
+			return nil, false, errors.Join(err, cleanupErr)
 		}
 		return page, true, nil
 	}
@@ -1171,8 +1177,12 @@ func newBrowser(ctx context.Context, factory BrowserFactory) (browser *hrod.Brow
 	return factory(ctx)
 }
 
-func newPage(ctx context.Context, browser *hrod.Browser) (page *hrod.Page, err error) {
-	pageCtx, cancel := context.WithTimeout(ctx, lifecycleAcquireTimeout)
+type pageCreator interface {
+	PageContext(context.Context) (*hrod.Page, error)
+}
+
+func newPage(ctx context.Context, browser pageCreator) (page *hrod.Page, err error) {
+	pageCtx, cancel := context.WithTimeout(ctx, pageCreateTimeout)
 	defer cancel()
 	defer func() {
 		if recovered := recover(); recovered != nil {
