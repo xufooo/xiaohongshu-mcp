@@ -30,7 +30,8 @@ type searchP0CDPClient struct {
 	searchRoute  bool
 	collections  int
 	homeReadErr  error
-	runtimeErr   error
+	aiProbeErr   error
+	aiProbes     int
 }
 
 func (c *searchP0CDPClient) Event() <-chan *cdp.Event {
@@ -66,15 +67,18 @@ func (c *searchP0CDPClient) Call(ctx context.Context, _ string, method string, p
 		}
 		return []byte(`{}`), nil
 	case "Runtime.evaluate":
-		if c.runtimeErr != nil {
-			return nil, c.runtimeErr
-		}
 		request, ok := params.(proto.RuntimeEvaluate)
 		if !ok {
 			raw, _ := json.Marshal(params)
 			_ = json.Unmarshal(raw, &request)
 		}
 		switch {
+		case strings.Contains(request.Expression, "const search = unwrapRef(window.__INITIAL_STATE__?.search)"):
+			c.aiProbes++
+			if c.aiProbeErr != nil {
+				return nil, c.aiProbeErr
+			}
+			return []byte(`{"result":{"type":"string","value":"{}"}}`), nil
 		case c.feedBatch && strings.Contains(request.Expression, "includeState"):
 			c.collections++
 			return []byte(`{"result":{"type":"string","value":"{\"dom\":[{\"id\":\"a\",\"modelType\":\"note\"},{\"id\":\"b\",\"modelType\":\"note\"}],\"state\":[]}"}}`), nil
@@ -187,12 +191,14 @@ func TestRepeatedOmittedFilterSearchDoesNotClickOrWaitForRefresh(t *testing.T) {
 
 func TestSearchPreflightPreservesTerminalAIProbeError(t *testing.T) {
 	for _, failure := range []error{context.Canceled, context.DeadlineExceeded, ErrFatalRendererError} {
-		client := &searchP0CDPClient{searchRoute: true, runtimeErr: failure}
+		client := &searchP0CDPClient{searchRoute: true}
 		rawPage, _ := newSearchP0Element(t, client)
 		page := (&hrod.Page{Rod: rawPage, Keyboard: rawPage.Keyboard}).Context(context.Background())
+		// Arm only the AI probe after the Rod window/filter setup has succeeded.
+		client.aiProbeErr = failure
 		result, err := NewSearchAction(page).Search(context.Background(), "different")
-		if !errors.Is(err, failure) || result.Feeds != nil || len(client.mouseEvents) != 0 {
-			t.Fatalf("terminal preflight error continued search: result=%v err=%v", result, err)
+		if !errors.Is(err, failure) || result.Feeds != nil || len(client.mouseEvents) != 0 || client.aiProbes != 1 {
+			t.Fatalf("terminal preflight error continued search: result=%v err=%v probes=%d", result, err, client.aiProbes)
 		}
 	}
 }
