@@ -94,3 +94,12 @@ func TestInteractableSnapshotShadowHost(t *testing.T) {
 		t.Fatal("可点击性探针没有拼入共用命中判据")
 	}
 }
+
+func TestWaitInteractableCanceledBeforeProbe(t *testing.T) {
+	el, _ := newTestElement(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := el.Context(ctx).waitInteractable(time.Minute, false); err != context.Canceled {
+		t.Fatalf("canceled wait reached probe or lost cancellation: %v", err)
+	}
+}

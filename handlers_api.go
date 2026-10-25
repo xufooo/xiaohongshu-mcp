@@ -233,7 +233,7 @@ func (s *AppServer) publishHandler(c *gin.Context) {
 		return
 	}
 
-	respondSuccess(c, result, "发布成功")
+	respondSuccess(c, result, result.Message)
 }
 
 // publishVideoHandler 发布视频内容
@@ -257,7 +257,7 @@ func (s *AppServer) publishVideoHandler(c *gin.Context) {
 		return
 	}
 
-	respondSuccess(c, result, "视频发布成功")
+	respondSuccess(c, result, result.Message)
 }
 
 // listFeedsHandler 获取Feeds列表

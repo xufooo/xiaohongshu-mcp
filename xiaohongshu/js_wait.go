@@ -47,8 +47,7 @@ const xhsPageSignalJS = `
 	`
 
 // pageSignal 是一次「等页面变化」的结果：结束原因 + 这段时间里 DOM 变化次数。
-// mutations=0 说明页面一动没动——结合"网络也没有在途请求"，就能判断页面是不是卡死了，
-// 而不需要猜"它该用多久"。
+// mutations 仅描述这个采样窗口，不证明业务进展或页面卡死。
 type pageSignal struct {
 	Reason    string `json:"reason"`
 	Mutations int    `json:"mutations"`

@@ -574,24 +574,25 @@ func (el *Element) waitInteractable(timeout time.Duration, scroll bool) error {
 	var lastErr error
 
 	for attempt := 0; time.Now().Before(deadline); attempt++ {
+		if err := el.actor.Ctx().Err(); err != nil {
+			return err
+		}
 		if scroll {
 			if err := el.ScrollIntoView(); err != nil {
-				lastErr = err
-				_ = el.actor.Sleep(120 * time.Millisecond)
-				continue
+				return err
 			}
 		}
 
 		first, err := el.interactableSnapshot()
 		if err != nil {
-			lastErr = err
-			_ = el.actor.Sleep(120 * time.Millisecond)
-			continue
+			return err
 		}
 		last = first
 		if !first.Connected || !first.Visible || !first.Clickable {
 			lastErr = fmt.Errorf("元素不可点击: %s%s", first.Reason, first.evidenceString())
-			_ = el.actor.Sleep(120 * time.Millisecond)
+			if err := el.actor.Sleep(120 * time.Millisecond); err != nil {
+				return err
+			}
 			continue
 		}
 
@@ -601,8 +602,7 @@ func (el *Element) waitInteractable(timeout time.Duration, scroll bool) error {
 		}
 		second, err := el.interactableSnapshot()
 		if err != nil {
-			lastErr = err
-			continue
+			return err
 		}
 		last = second
 		if second.Connected && second.Visible && second.Clickable && snapshotStable(first, second) {
@@ -611,7 +611,9 @@ func (el *Element) waitInteractable(timeout time.Duration, scroll bool) error {
 		lastErr = fmt.Errorf("元素尚未稳定: %s%s", second.Reason, second.evidenceString())
 
 		if attempt%2 == 1 {
-			_ = el.actor.Sleep(220 * time.Millisecond)
+			if err := el.actor.Sleep(220 * time.Millisecond); err != nil {
+				return err
+			}
 		}
 	}
 

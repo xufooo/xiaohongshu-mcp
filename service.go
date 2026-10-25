@@ -462,6 +462,7 @@ type PublishResponse struct {
 	Content string `json:"content"`
 	Images  int    `json:"images"`
 	Status  string `json:"status"`
+	Message string `json:"message,omitempty"`
 }
 
 type PublishVideoRequest struct {
@@ -480,6 +481,18 @@ type PublishVideoResponse struct {
 	Content string `json:"content"`
 	Video   string `json:"video"`
 	Status  string `json:"status"`
+	Message string `json:"message,omitempty"`
+}
+
+func publishOutcome(err error) (status, message string, failure error) {
+	var unconfirmed *xiaohongshu.PublishUnconfirmedError
+	if errors.As(err, &unconfirmed) {
+		return "unconfirmed", xiaohongshu.PublishUnconfirmedGuidance, nil
+	}
+	if err != nil {
+		return "", "", err
+	}
+	return "发布完成", "发布成功", nil
 }
 
 type FeedsListResponse struct {
@@ -933,7 +946,9 @@ func (s *XiaohongshuService) waitLoginQrcode(ctx context.Context, session *login
 	defer func() {
 		defer close(session.done)
 		s.takeLoginQrcode(session)
-		if err := s.browserManager.ReleaseAndClose(session.page); err != nil {
+		if err := closeDetachedPage(func(cleanupCtx context.Context) error {
+			return s.browserManager.ReleaseAndCloseContext(cleanupCtx, session.page)
+		}); err != nil {
 			session.cleanupErr = errLoginQrcodeCleanup
 			logrus.Warn("login qrcode page cleanup failed")
 		}
@@ -1016,7 +1031,8 @@ func (s *XiaohongshuService) PublishContent(ctx context.Context, req *PublishReq
 	}
 
 	// 执行发布
-	if err := s.publishContent(ctx, content); err != nil {
+	status, message, err := publishOutcome(s.publishContent(ctx, content))
+	if err != nil {
 		logrus.Errorf("发布内容失败: title=%s %v", content.Title, err)
 		return nil, err
 	}
@@ -1025,7 +1041,8 @@ func (s *XiaohongshuService) PublishContent(ctx context.Context, req *PublishReq
 		Title:   req.Title,
 		Content: req.Content,
 		Images:  len(imagePaths),
-		Status:  "发布完成",
+		Status:  status,
+		Message: message,
 	}
 
 	return response, nil
@@ -1112,7 +1129,8 @@ func (s *XiaohongshuService) PublishVideo(ctx context.Context, req *PublishVideo
 	}
 
 	// 执行发布
-	if err := s.publishVideo(ctx, content); err != nil {
+	status, message, err := publishOutcome(s.publishVideo(ctx, content))
+	if err != nil {
 		return nil, err
 	}
 
@@ -1120,7 +1138,8 @@ func (s *XiaohongshuService) PublishVideo(ctx context.Context, req *PublishVideo
 		Title:   req.Title,
 		Content: req.Content,
 		Video:   req.Video,
-		Status:  "发布完成",
+		Status:  status,
+		Message: message,
 	}
 	return resp, nil
 }
@@ -1579,9 +1598,7 @@ func runReadyWithColdStartRecovery(ctx context.Context, newPage, forceRecreate b
 		!strings.Contains(err.Error(), "页面停止推进") || !errors.Is(err, context.DeadlineExceeded) {
 		return err
 	}
-	retryCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
-	defer cancel()
-	return waitReady(retryCtx)
+	return waitReady(ctx)
 }
 
 func (s *XiaohongshuService) tryReuseSession(ctx context.Context) (*xiaohongshu.CreateBrowseSessionResult, error) {
@@ -1603,6 +1620,18 @@ func (s *XiaohongshuService) tryReuseSession(ctx context.Context) (*xiaohongshu.
 		previous := info
 		info = session.Renew()
 		return buildBrowseSessionReuseResult(previous, info, check.HealthCheckedAt), nil
+	case xiaohongshu.SessionUnconfirmed:
+		// Retain the candidate without advertising an unchecked session ID.
+		// start_page without force_recreate will inspect this same candidate.
+		return &xiaohongshu.CreateBrowseSessionResult{
+			Outcome: "blocked",
+			Status: xiaohongshu.BrowseSessionStatusInfo{
+				Status:          check.Status,
+				LastError:       check.LastError,
+				HealthCheckedAt: check.HealthCheckedAt,
+				ReadinessScope:  "page_transport",
+			},
+		}, nil
 	case xiaohongshu.SessionExpired, xiaohongshu.SessionNotReady, xiaohongshu.SessionUnhealthy:
 		closed, err := session.TryCloseIdleContext(ctx)
 		if err != nil {
@@ -1661,6 +1690,7 @@ func buildBrowseSessionReuseResult(previous, renewed xiaohongshu.BrowseSessionIn
 			Session:         &renewed,
 			HealthCheckedAt: healthCheckedAt,
 			Ready:           true,
+			ReadinessScope:  "page_transport",
 		},
 	}
 }
@@ -1742,6 +1772,9 @@ func (s *XiaohongshuService) SessionListFeeds(ctx context.Context, id, cursorID 
 		return nil, err
 	}
 
+	// A successful batch crossed its cancellation boundary while holding the
+	// session operation token. Always save/return its successor, even if the
+	// caller cancels after that boundary.
 	nextCursorID, seenCount := s.commitFeedCursor(cursorID, id, queryKey, nextCursor, hasMore)
 	return &FeedsListResponse{
 		Feeds:     feeds,
@@ -2203,8 +2236,14 @@ func (s *XiaohongshuService) acquirePageForSource(ctx context.Context, owner str
 	if err != nil {
 		return nil, false, err
 	}
-	if err := s.checkFixedIdentity(page); err != nil {
+	if err := s.checkFixedIdentity(ctx, page); err != nil {
 		logrus.Warnf("browser identity check skipped: %v", err)
+	}
+	if err := ctx.Err(); err != nil {
+		cleanupErr := closeDetachedPage(func(cleanupCtx context.Context) error {
+			return s.browserManager.ReleaseContext(cleanupCtx, page)
+		})
+		return nil, false, errors.Join(err, cleanupErr)
 	}
 	return page, newPage, nil
 }
@@ -2222,14 +2261,14 @@ func (s *XiaohongshuService) identityProbeDue(now time.Time) bool {
 	return true
 }
 
-func (s *XiaohongshuService) checkFixedIdentity(page *hrod.Page) error {
+func (s *XiaohongshuService) checkFixedIdentity(ctx context.Context, page *hrod.Page) error {
 	if !configs.UseFixedIdentity() || s.actionState == nil {
 		return nil
 	}
 	if !s.identityProbeDue(time.Now()) {
 		return nil
 	}
-	current, err := xiaohongshu.CaptureIdentityMetadata(page)
+	current, err := xiaohongshu.CaptureIdentityMetadata(ctx, page)
 	if err != nil {
 		return fmt.Errorf("browser identity fingerprint check failed: %w", err)
 	}

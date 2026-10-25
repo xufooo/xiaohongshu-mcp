@@ -28,17 +28,24 @@ type targetInfoGateClient struct {
 	blockAt int32
 	calls   atomic.Int32
 	cancel  context.CancelFunc
+	runtime bool
 }
 
 func (c *targetInfoGateClient) Event() <-chan *cdp.Event { return nil }
 
 func (c *targetInfoGateClient) Call(ctx context.Context, sessionID, method string, params interface{}) ([]byte, error) {
-	if method != "Target.getTargetInfo" {
-		return c.upstream.Call(ctx, sessionID, method, params)
-	}
-	request, ok := params.(proto.TargetGetTargetInfo)
-	if sessionID != "" || !ok || request.TargetID == "" {
-		return nil, fmt.Errorf("expected browser-level query with explicit target: session=%q params=%#v", sessionID, params)
+	if c.runtime {
+		if !strings.HasPrefix(method, "Runtime.") {
+			return c.upstream.Call(ctx, sessionID, method, params)
+		}
+	} else {
+		if method != "Target.getTargetInfo" {
+			return c.upstream.Call(ctx, sessionID, method, params)
+		}
+		request, ok := params.(proto.TargetGetTargetInfo)
+		if sessionID != "" || !ok || request.TargetID == "" {
+			return nil, fmt.Errorf("expected browser-level query with explicit target: session=%q params=%#v", sessionID, params)
+		}
 	}
 	if c.calls.Add(1) == c.blockAt {
 		close(c.entered)
@@ -254,6 +261,38 @@ func TestLoginURLResponseCannotMaskCancellationBeforeNavigation(t *testing.T) {
 			}
 			if !errors.Is(err, context.Canceled) || client.calls != 0 {
 				t.Fatalf("cancellation at URL response must prevent further I/O: err=%v methods=%v", err, client.methodHistory)
+			}
+		})
+	}
+}
+
+func TestIdentityAndQrcodeWaitCancelInsideRuntimeCall(t *testing.T) {
+	for _, operation := range []struct {
+		name string
+		run  func(context.Context, *hrod.Page) error
+	}{
+		{"identity", func(ctx context.Context, page *hrod.Page) error {
+			_, err := CaptureIdentityMetadata(ctx, page)
+			return err
+		}},
+		{"home_feed_collect", func(ctx context.Context, page *hrod.Page) error {
+			_, err := collectHomeFeeds(page.Context(ctx))
+			return err
+		}},
+		{"qrcode_wait", func(ctx context.Context, page *hrod.Page) error {
+			_, err := NewLogin(page).WaitForLogin(ctx)
+			return err
+		}},
+	} {
+		t.Run(operation.name, func(t *testing.T) {
+			session := newCurrentPageURLSession(t, &currentPageURLCDPClient{})
+			gate := installTargetInfoGate(t, session.page, 1)
+			gate.runtime = true
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			err := cancelTargetQueryAfterEntry(t, gate, cancel, func() error { return operation.run(ctx, session.page) })
+			if !errors.Is(err, context.Canceled) || session.page.Rod.GetContext().Err() != nil {
+				t.Fatalf("runtime cancellation lost or shared page canceled: %v", err)
 			}
 		})
 	}

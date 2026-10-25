@@ -3,6 +3,8 @@ package xiaohongshu
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -24,6 +26,11 @@ type searchP0CDPClient struct {
 	buttonClicks int
 	hit          bool
 	mouseEvents  []proto.InputDispatchMouseEventType
+	feedBatch    bool
+	searchRoute  bool
+	collections  int
+	homeReadErr  error
+	runtimeErr   error
 }
 
 func (c *searchP0CDPClient) Event() <-chan *cdp.Event {
@@ -50,13 +57,27 @@ func (c *searchP0CDPClient) Call(ctx context.Context, _ string, method string, p
 	switch method {
 	case "Target.attachToTarget":
 		return []byte(`{"sessionId":"session-1"}`), nil
+	case "Target.getTargetInfo":
+		if c.searchRoute {
+			return []byte(`{"targetInfo":{"targetId":"target-1","url":"https://www.xiaohongshu.com/search_result?keyword=same"}}`), nil
+		}
+		if c.feedBatch {
+			return []byte(`{"targetInfo":{"targetId":"target-1","url":"https://www.xiaohongshu.com/explore"}}`), nil
+		}
+		return []byte(`{}`), nil
 	case "Runtime.evaluate":
+		if c.runtimeErr != nil {
+			return nil, c.runtimeErr
+		}
 		request, ok := params.(proto.RuntimeEvaluate)
 		if !ok {
 			raw, _ := json.Marshal(params)
 			_ = json.Unmarshal(raw, &request)
 		}
 		switch {
+		case c.feedBatch && strings.Contains(request.Expression, "includeState"):
+			c.collections++
+			return []byte(`{"result":{"type":"string","value":"{\"dom\":[{\"id\":\"a\",\"modelType\":\"note\"},{\"id\":\"b\",\"modelType\":\"note\"}],\"state\":[]}"}}`), nil
 		case strings.Contains(request.Expression, ".filter-panel"):
 			c.panelProbes++
 			if c.panelOpen {
@@ -75,6 +96,11 @@ func (c *searchP0CDPClient) Call(ctx context.Context, _ string, method string, p
 			_ = json.Unmarshal(raw, &request)
 		}
 		switch {
+		case c.feedBatch && strings.Contains(request.FunctionDeclaration, "window.__INITIAL_STATE__.feed"):
+			if c.homeReadErr != nil {
+				return nil, c.homeReadErr
+			}
+			return []byte(`{"result":{"type":"string","value":"[]"}}`), nil
 		case strings.TrimSpace(request.FunctionDeclaration) == "() => window":
 			return []byte(`{"result":{"type":"object","objectId":"window"}}`), nil
 		case strings.Contains(request.FunctionDeclaration, "JSON.stringify([window.innerWidth, window.innerHeight])"):
@@ -141,6 +167,65 @@ func TestSelectorSearchInputCoversTextarea(t *testing.T) {
 	}
 	if strings.Contains(SelectorSearchInput, "textarea.search-input-ai") {
 		t.Fatalf("SelectorSearchInput must not include wrong class selector textarea.search-input-ai, got: %s", SelectorSearchInput)
+	}
+}
+
+func TestRepeatedOmittedFilterSearchDoesNotClickOrWaitForRefresh(t *testing.T) {
+	client := &searchP0CDPClient{feedBatch: true, searchRoute: true}
+	rawPage, _ := newSearchP0Element(t, client)
+	page := (&hrod.Page{Rod: rawPage, Keyboard: rawPage.Keyboard}).Context(context.Background())
+	for range 2 {
+		feeds, err := NewSearchAction(page).SearchFeedsOnly(context.Background(), "same")
+		if err != nil || len(feeds) != 2 {
+			t.Fatalf("unchanged search required a filter refresh: feeds=%v err=%v", feeds, err)
+		}
+	}
+	if client.buttonClicks != 0 || client.panelProbes != 0 || client.collections != 2 {
+		t.Fatalf("omission caused filter work: clicks=%d probes=%d collections=%d", client.buttonClicks, client.panelProbes, client.collections)
+	}
+}
+
+func TestSearchPreflightPreservesTerminalAIProbeError(t *testing.T) {
+	for _, failure := range []error{context.Canceled, context.DeadlineExceeded, ErrFatalRendererError} {
+		client := &searchP0CDPClient{searchRoute: true, runtimeErr: failure}
+		rawPage, _ := newSearchP0Element(t, client)
+		page := (&hrod.Page{Rod: rawPage, Keyboard: rawPage.Keyboard}).Context(context.Background())
+		result, err := NewSearchAction(page).Search(context.Background(), "different")
+		if !errors.Is(err, failure) || result.Feeds != nil || len(client.mouseEvents) != 0 {
+			t.Fatalf("terminal preflight error continued search: result=%v err=%v", result, err)
+		}
+	}
+}
+
+func TestHomeCollectionDoesNotHideTerminalStateErrorBehindDOMFeeds(t *testing.T) {
+	for _, failure := range []error{context.Canceled, context.DeadlineExceeded, ErrFatalRendererError} {
+		client := &searchP0CDPClient{feedBatch: true, homeReadErr: failure}
+		rawPage, _ := newSearchP0Element(t, client)
+		page := (&hrod.Page{Rod: rawPage, Keyboard: rawPage.Keyboard}).Context(context.Background())
+		feeds, err := collectHomeFeeds(page)
+		if !errors.Is(err, failure) || feeds != nil || client.collections != 1 {
+			t.Fatalf("DOM success swallowed state failure: feeds=%v err=%v", feeds, err)
+		}
+	}
+}
+
+func TestCurrentSearchRequiresTrustedSearchRouteAndKeyword(t *testing.T) {
+	for _, tc := range []struct {
+		url  string
+		want bool
+	}{
+		{"https://www.xiaohongshu.com/search_result?keyword=same", true},
+		{"https://www.xiaohongshu.com/search_result_ai?keyword=same", true},
+		{"https://www.xiaohongshu.com/search_result?keyword=other", false},
+		{"https://www.xiaohongshu.com/explore/note?keyword=same", false},
+		{"https://other.example/search_result?keyword=same", false},
+	} {
+		client := &currentPageURLCDPClient{response: []byte(fmt.Sprintf(`{"targetInfo":{"targetId":"target-1","url":%q}}`, tc.url))}
+		session := newCurrentPageURLSession(t, client)
+		got, err := isCurrentSearchPage(session.page, "same")
+		if err != nil || got != tc.want || client.runtimeCall != 0 {
+			t.Fatalf("search route %q: got=%t err=%v", tc.url, got, err)
+		}
 	}
 }
 

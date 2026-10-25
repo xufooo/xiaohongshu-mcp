@@ -381,3 +381,64 @@ func navigateFixtureEval(page *hrod.Page, script string) error {
 		return fmt.Errorf("fixture Eval 超过 watchdog")
 	}
 }
+
+func TestEnsureReadyOnSlowTargetKeepsOriginalPage(t *testing.T) {
+	page := navigateFixturePage(t)
+	var navigations atomic.Int32
+	server := navigateFixtureServer(t, &navigations)
+	target := server.URL + "/explore"
+	if err := navigateFixtureTo(page, target); err != nil {
+		t.Fatal(err)
+	}
+	if err := navigateFixtureWaitLoad(page); err != nil {
+		t.Fatal(err)
+	}
+	hook := installQuickConfirmGate(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- EnsureReadyOn(page.Context(ctx), target, XHSReadyHome, 5*time.Second) }()
+	select {
+	case <-hook.reached:
+		if strings.Contains(hook.message, "ready=true") {
+			close(hook.release)
+			t.Fatal("fixture must exhaust the quick confirmation")
+		}
+		_, err := page.Context(ctx).Eval(`() => { const card = document.createElement('section'); card.className = 'note-item'; document.querySelector('#app').appendChild(card); }`)
+		close(hook.release)
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-ctx.Done():
+		close(hook.release)
+		t.Fatal("slow confirmation never reached the boundary")
+	}
+	select {
+	case err := <-done:
+		if err != nil || navigations.Load() != 1 {
+			t.Fatalf("slow target was reloaded or rejected: navigations=%d err=%v", navigations.Load(), err)
+		}
+	case <-ctx.Done():
+		t.Fatal("continued target wait did not finish")
+	}
+}
+
+func TestHomeFeedRouteAcceptsBothEntryPointsButRejectsDetails(t *testing.T) {
+	for _, tc := range []struct {
+		url  string
+		want bool
+	}{
+		{HomeURL, true},
+		{ExploreURL + "?channel=home", true},
+		{ExploreURL + "/note-id", false},
+		{"https://www.xiaohongshu.com/search_result?keyword=same", false},
+		{"https://other.example/explore", false},
+	} {
+		client := &currentPageURLCDPClient{response: []byte(fmt.Sprintf(`{"targetInfo":{"targetId":"target-1","url":%q}}`, tc.url))}
+		session := newCurrentPageURLSession(t, client)
+		got, err := onHomeFeedPage(session.page)
+		if err != nil || got != tc.want || client.runtimeCall != 0 {
+			t.Fatalf("home route %q: got=%t err=%v", tc.url, got, err)
+		}
+	}
+}

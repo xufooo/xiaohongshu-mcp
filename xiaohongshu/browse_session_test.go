@@ -1312,6 +1312,56 @@ func TestCheckReusableRetriesOnceAfterTimeout(t *testing.T) {
 	}
 }
 
+func TestCheckReusableDeadlineIsUnconfirmedAndKeepsPage(t *testing.T) {
+	page := &hrod.Page{}
+	session := &BrowseSession{
+		page:      page,
+		opToken:   make(chan struct{}, 1),
+		expiresAt: time.Now().Add(time.Minute),
+		evalJS: func(context.Context, *hrod.Page, string) (*proto.RuntimeRemoteObject, error) {
+			return nil, context.DeadlineExceeded
+		},
+	}
+	session.opToken <- struct{}{}
+	check := session.CheckReusable(context.Background())
+	if check.Status != SessionUnconfirmed || check.Ready || check.Risk != "" || session.page != page || session.closed || len(session.opToken) != 1 {
+		t.Fatalf("a safety deadline became unhealthy or lost the page: %+v", check)
+	}
+}
+
+func TestCheckReusableAmbiguousTransportRetainsPage(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		state string
+		err   error
+		want  BrowseSessionStatus
+	}{
+		{"navigation context replaced", "", errors.New("execution context destroyed"), SessionUnconfirmed},
+		{"missing JS state", `{}`, nil, SessionUnconfirmed},
+		{"blank transition", `{"url":"about:blank","readyState":"complete"}`, nil, SessionUnconfirmed},
+		{"fatal renderer", "", ErrFatalRendererError, SessionUnhealthy},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			page := &hrod.Page{}
+			session := &BrowseSession{
+				page: page, opToken: make(chan struct{}, 1), expiresAt: time.Now().Add(time.Minute),
+				evalJS: func(context.Context, *hrod.Page, string) (*proto.RuntimeRemoteObject, error) {
+					if tc.err != nil {
+						return nil, tc.err
+					}
+					encoded, _ := json.Marshal(tc.state)
+					return &proto.RuntimeRemoteObject{Type: proto.RuntimeRemoteObjectTypeString, Value: gson.NewFrom(string(encoded))}, nil
+				},
+			}
+			session.opToken <- struct{}{}
+			check := session.CheckReusable(context.Background())
+			if check.Status != tc.want || check.Ready || session.closed || session.page != page || len(session.opToken) != 1 {
+				t.Fatalf("ambiguous page became ready/closed: %+v", check)
+			}
+		})
+	}
+}
+
 func TestCheckReusableParentContextCanceled(t *testing.T) {
 	page := &hrod.Page{}
 	session := &BrowseSession{
@@ -3834,5 +3884,28 @@ func TestDetailIdentityConflictTerminal(t *testing.T) {
 	joined := errors.Join(errors.New("recovery"), wrapped)
 	if !errors.Is(joined, ErrDetailIdentityConflict) {
 		t.Fatal("recovery 与下游错误 Join 后应保留身份冲突")
+	}
+}
+
+func TestPageStateUsesSuccessfulProbeWithoutRefresh(t *testing.T) {
+	client := &currentPageURLCDPClient{runtimeResponses: [][]byte{
+		[]byte(`{"result":{"type":"string","value":"{\"url\":\"https://www.xiaohongshu.com/explore\",\"scroll_y\":42}"}}`),
+	}}
+	pageSession := newCurrentPageURLSession(t, client)
+	manager := NewBrowseSessionManager(time.Minute)
+	t.Cleanup(manager.CloseAll)
+	session := manager.Create(nil, nil, nil)
+	session.page = pageSession.page
+	refreshes := 0
+	session.evalJS = func(context.Context, *hrod.Page, string) (*proto.RuntimeRemoteObject, error) {
+		refreshes++
+		return nil, errors.New("unexpected refresh")
+	}
+	state, err := session.PageState(context.Background())
+	if err != nil || state == nil {
+		t.Fatalf("page state failed: %v", err)
+	}
+	if state.Session.ScrollY != 42 || state.Session.CurrentURL != "https://www.xiaohongshu.com/explore" || refreshes != 0 || client.runtimeCall != 1 || len(session.opToken) != 1 {
+		t.Fatalf("snapshot not reused: state=%+v refreshes=%d probes=%d tokens=%d", state.Session, refreshes, client.runtimeCall, len(session.opToken))
 	}
 }

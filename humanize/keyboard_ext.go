@@ -177,6 +177,9 @@ func (k *Keyboard) Press(key input.Key) error {
 func (k *Keyboard) press(key input.Key) error {
 	k.state.dispatchMu.Lock()
 	defer k.state.dispatchMu.Unlock()
+	if k.state.inputErr != nil {
+		return k.state.inputErr
+	}
 	bound := k.boundPage()
 	mods := k.state.modifiers() | key.Modifier()
 	if err := key.Encode(proto.InputDispatchKeyEventTypeKeyDown, mods).Call(bound); err != nil {
@@ -192,6 +195,9 @@ func (k *Keyboard) press(key input.Key) error {
 func (k *Keyboard) pressBackspace() error {
 	k.state.dispatchMu.Lock()
 	defer k.state.dispatchMu.Unlock()
+	if k.state.inputErr != nil {
+		return k.state.inputErr
+	}
 	bound := k.boundPage()
 	return proto.InputDispatchKeyEvent{
 		Type:                  proto.InputDispatchKeyEventTypeKeyDown,
@@ -256,6 +262,9 @@ func (k *Keyboard) scrollToCursor(el *rod.Element) error {
 func (k *Keyboard) dispatchScroll(deltaX, deltaY float64) error {
 	k.state.dispatchMu.Lock()
 	defer k.state.dispatchMu.Unlock()
+	if k.state.inputErr != nil {
+		return k.state.inputErr
+	}
 	bound := k.boundPage()
 	snap := k.state.mouseSnapshot()
 	if err := (proto.InputDispatchMouseEvent{
@@ -305,6 +314,9 @@ func (k *Keyboard) viewport() (struct {
 func (k *Keyboard) insertText(text string) error {
 	k.state.dispatchMu.Lock()
 	defer k.state.dispatchMu.Unlock()
+	if k.state.inputErr != nil {
+		return k.state.inputErr
+	}
 	return proto.InputInsertText{Text: text}.Call(k.boundPage())
 }
 

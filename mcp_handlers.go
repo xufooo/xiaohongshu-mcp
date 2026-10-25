@@ -157,7 +157,7 @@ func sessionNextStepCreateSession() xiaohongshu.NextStep {
 	return xiaohongshu.NextStep{
 		Tool:   "start_page",
 		Reason: "当前页面会话不可用或缺少 session_id",
-		Hint:   "先调用 start_page 获取 session_id；会话状态异常时带 force_recreate=true 重建",
+		Hint:   "先调用 start_page 获取 session_id；未确认或超时时稍后检查原会话，不带 force_recreate",
 	}
 }
 
@@ -323,6 +323,16 @@ func (s *AppServer) handleDeleteCookies(ctx context.Context) *MCPToolResult {
 	}
 }
 
+// Publication outcomes are data. In particular, unconfirmed must not invite a
+// generic tool-error retry or be prefixed with a success claim.
+func publishToolResult(result any) *MCPToolResult {
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		encoded, _ = json.Marshal(map[string]string{"status": "unconfirmed", "message": xiaohongshu.PublishUnconfirmedGuidance})
+	}
+	return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: string(encoded)}}}
+}
+
 // handlePublishContent 处理发布内容
 func (s *AppServer) handlePublishContent(ctx context.Context, args PublishContentArgs) *MCPToolResult {
 	logrus.Info("MCP: 发布内容")
@@ -371,13 +381,7 @@ func (s *AppServer) handlePublishContent(ctx context.Context, args PublishConten
 		}
 	}
 
-	resultText := fmt.Sprintf("内容发布成功: %+v", result)
-	return &MCPToolResult{
-		Content: []MCPContent{{
-			Type: "text",
-			Text: resultText,
-		}},
-	}
+	return publishToolResult(result)
 }
 
 // handlePublishVideo 处理发布视频内容（仅本地单个视频文件）
@@ -437,13 +441,7 @@ func (s *AppServer) handlePublishVideo(ctx context.Context, args PublishVideoArg
 		}
 	}
 
-	resultText := fmt.Sprintf("视频发布成功: %+v", result)
-	return &MCPToolResult{
-		Content: []MCPContent{{
-			Type: "text",
-			Text: resultText,
-		}},
-	}
+	return publishToolResult(result)
 }
 
 // handleListFeeds 处理获取Feeds列表
@@ -1026,9 +1024,8 @@ func startPageNextStep(err error) xiaohongshu.NextStep {
 	}
 	return xiaohongshu.NextStep{
 		Tool:   "start_page",
-		Args:   xiaohongshu.NextStepArgs(map[string]any{"force_recreate": true}),
 		Reason: "会话创建失败",
-		Hint:   "用 force_recreate=true 重建会话；若页面仍是登录页，先 get_login_qrcode",
+		Hint:   "稍后调用 start_page 检查原页面，不带 force_recreate；若页面提示登录失效，先 get_login_qrcode",
 	}
 }
 
@@ -1055,12 +1052,17 @@ func startPageBlockedStep(ctx context.Context, info *xiaohongshu.CreateBrowseSes
 			Reason: "会话正在执行其他操作，暂不可复用",
 			Hint:   "等当前操作结束后重新调用 start_page",
 		}
+	case info.Status.Status == xiaohongshu.SessionUnconfirmed:
+		return xiaohongshu.NextStep{
+			Tool:   "start_page",
+			Reason: "页面传输状态尚未确认，原会话已保留",
+			Hint:   "稍后调用 start_page 检查原会话，不带 force_recreate",
+		}
 	default:
 		step := xiaohongshu.NextStep{
 			Tool:   "start_page",
-			Args:   xiaohongshu.NextStepArgs(map[string]any{"force_recreate": true}),
 			Reason: "会话状态不可复用",
-			Hint:   "用 force_recreate=true 关闭旧会话并重建",
+			Hint:   "稍后调用 start_page 检查状态，不带 force_recreate",
 		}
 		if info.Status.Status != "" {
 			step.Reason = "会话状态不可复用: " + string(info.Status.Status)

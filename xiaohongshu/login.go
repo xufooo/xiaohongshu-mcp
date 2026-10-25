@@ -256,7 +256,7 @@ func (a *LoginAction) WaitForLogin(ctx context.Context) (bool, error) {
 		case <-ctx.Done():
 			return false, ctx.Err()
 		case <-ticker.C:
-			exists, _, err := a.page.Has(loginReadySelector)
+			exists, _, err := a.page.Context(ctx).Has(loginReadySelector)
 			if err != nil {
 				return false, err
 			}

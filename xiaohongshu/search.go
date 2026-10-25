@@ -19,20 +19,19 @@ import (
 )
 
 const (
-	searchInputWaitTimeout         = 60 * time.Second
-	searchFilterRefreshWaitTimeout = 20 * time.Second
-	aiResponseWaitTimeout          = 3 * time.Second
-	aiResponsePollInterval         = 500 * time.Millisecond
-	aiResponseTextLimit            = 3_000
+	searchInputWaitTimeout  = 60 * time.Second
+	aiResponseWaitTimeout  = 3 * time.Second
+	aiResponsePollInterval = 500 * time.Millisecond
+	aiResponseTextLimit    = 3_000
 )
 
 // FilterOption 筛选选项结构体
 type FilterOption struct {
-	SortBy      string `json:"sort_by,omitempty" jsonschema:"排序依据: 综合|最新|最多点赞|最多评论|最多收藏,默认为'综合'"`
-	NoteType    string `json:"note_type,omitempty" jsonschema:"笔记类型: 不限|视频|图文,默认为'不限'"`
-	PublishTime string `json:"publish_time,omitempty" jsonschema:"发布时间: 不限|一天内|一周内|半年内,默认为'不限'"`
-	SearchScope string `json:"search_scope,omitempty" jsonschema:"搜索范围: 不限|已看过|未看过|已关注,默认为'不限'"`
-	Location    string `json:"location,omitempty" jsonschema:"位置距离: 不限|同城|附近,默认为'不限'"`
+	SortBy      string `json:"sort_by,omitempty" jsonschema:"排序依据: 综合|最新|最多点赞|最多评论|最多收藏；当前无法确认筛选应用，显式传值将报错，省略保留页面当前条件"`
+	NoteType    string `json:"note_type,omitempty" jsonschema:"笔记类型: 不限|视频|图文；当前无法确认筛选应用，显式传值将报错，省略保留页面当前条件"`
+	PublishTime string `json:"publish_time,omitempty" jsonschema:"发布时间: 不限|一天内|一周内|半年内；当前无法确认筛选应用，显式传值将报错，省略保留页面当前条件"`
+	SearchScope string `json:"search_scope,omitempty" jsonschema:"搜索范围: 不限|已看过|未看过|已关注；当前无法确认筛选应用，显式传值将报错，省略保留页面当前条件"`
+	Location    string `json:"location,omitempty" jsonschema:"位置距离: 不限|同城|附近；当前无法确认筛选应用，显式传值将报错，省略保留页面当前条件"`
 }
 
 // filterGroup 筛选项分组
@@ -58,6 +57,30 @@ var filterGroups = []filterGroup{
 	{Label: "发布时间", Options: []string{"不限", "一天内", "一周内", "半年内"}},
 	{Label: "搜索范围", Options: []string{"不限", "已看过", "未看过", "已关注"}},
 	{Label: "位置距离", Options: []string{"不限", "同城", "附近"}},
+}
+
+// Normalize only supplied conditions; omission does not assert site defaults.
+// Multiple options retain the existing last-value-wins order.
+func effectiveSearchFilter(filters []FilterOption) FilterOption {
+	result := FilterOption{}
+	for _, f := range filters {
+		if f.SortBy != "" {
+			result.SortBy = f.SortBy
+		}
+		if f.NoteType != "" {
+			result.NoteType = f.NoteType
+		}
+		if f.PublishTime != "" {
+			result.PublishTime = f.PublishTime
+		}
+		if f.SearchScope != "" {
+			result.SearchScope = f.SearchScope
+		}
+		if f.Location != "" {
+			result.Location = f.Location
+		}
+	}
+	return result
 }
 
 // collectFilters 校验并展开 FilterOption 为 pendingFilter 列表
@@ -115,17 +138,20 @@ func validateFilterValue(groupLabel, value string) error {
 	return fmt.Errorf("未知的筛选组: %s", groupLabel)
 }
 
-const feedIDsJS = `() => {
-	const feeds = window.__INITIAL_STATE__?.search?.feeds;
-	if (!feeds) return "";
-	const raw = feeds?.value !== undefined ? feeds.value : (feeds?._value !== undefined ? feeds._value : feeds);
-	if (!Array.isArray(raw)) return "";
-	const ids = raw.slice(0, 30).map(item => {
-		const u = item?.id || item?.noteId || item?.note_id || "";
-		return String(u);
-	}).filter(id => id !== "");
-	return ids.join(",");
-}`
+var errSearchFiltersUnconfirmed = errors.New("筛选应用状态及对应结果完成状态无法确认，不执行筛选或返回筛选结果；省略筛选仅读取页面当前条件，不保证重置为默认条件")
+
+func validateSearchFilterRequest(filters []FilterOption) error {
+	for _, f := range filters {
+		pfs, err := collectFilters(f)
+		if err != nil {
+			return err
+		}
+		if len(pfs) > 0 {
+			return errSearchFiltersUnconfirmed
+		}
+	}
+	return nil
+}
 
 type SearchAction struct {
 	page *hrod.Page
@@ -136,6 +162,9 @@ func NewSearchAction(page *hrod.Page) *SearchAction {
 }
 
 func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...FilterOption) (SearchPageResult, error) {
+	if err := validateSearchFilterRequest(filters); err != nil {
+		return SearchPageResult{}, err
+	}
 	preSearchCounter := &evalTimeoutCounter{}
 	var previousAIState *aiStateProbe
 	pageBeforeSearch := s.page.Context(ctx)
@@ -143,9 +172,12 @@ func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...Fi
 	if err != nil {
 		return SearchPageResult{}, err
 	}
-	if !currentSearch || len(filters) > 0 {
+	if !currentSearch {
 		previousAIState = &aiStateProbe{}
 		probe, err := probeAIResponseState(ctx, pageBeforeSearch, preSearchCounter, "", -1)
+		if terminalFeedCollectionError(err) {
+			return SearchPageResult{}, err
+		}
 		if err == nil {
 			previousAIState = &probe
 		}
@@ -161,6 +193,9 @@ func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...Fi
 	postSearchCounter := &evalTimeoutCounter{}
 	aiChat, err := readAIResponseFromState(ctx, page, postSearchCounter, previousAIState)
 	if err != nil {
+		if isFatalWaitError(err) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return SearchPageResult{}, err
+		}
 		logrus.WithError(err).Warn("读取搜索页 AI 回复失败")
 		return result, nil
 	}
@@ -169,17 +204,12 @@ func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...Fi
 }
 
 func (s *SearchAction) searchFeeds(ctx context.Context, counter *evalTimeoutCounter, keyword string, filters ...FilterOption) (*hrod.Page, []Feed, error) {
-	page := s.page.Context(ctx)
-
-	// 导航前校验筛选值，及时报错
-	var pfs []pendingFilter
-	for _, f := range filters {
-		collected, err := collectFilters(f)
-		if err != nil {
-			return nil, nil, err
-		}
-		pfs = append(pfs, collected...)
+	// Validate before navigation. The tracked integration has no applied-filter
+	// or response-completion contract. Do not click or certify a filtered batch.
+	if err := validateSearchFilterRequest(filters); err != nil {
+		return nil, nil, err
 	}
+	page := s.page.Context(ctx)
 
 	// 检查当前页面是否已在该关键词搜索结果上，是则跳过搜索
 	currentSearch, err := isCurrentSearchPage(page, keyword)
@@ -193,7 +223,7 @@ func (s *SearchAction) searchFeeds(ctx context.Context, counter *evalTimeoutCoun
 		humanize.Delay(ctx, humanize.AfterNavigate)
 	}
 
-	feeds, err := s.collectResults(ctx, page, counter, pfs)
+	feeds, err := s.collectResults(ctx, page, counter, nil)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -707,41 +737,6 @@ func ensureFilterSearchRoute(ctx context.Context, page *hrod.Page, counter *eval
 	return nil
 }
 
-// readFeedIDs 从 __INITIAL_STATE__ 读取当前搜索结果 feed ID 列表
-func readFeedIDs(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter) (string, error) {
-	result, err := evalJS(ctx, counter, page, feedIDsJS)
-	if err != nil {
-		return "", err
-	}
-	if result == nil {
-		return "", nil
-	}
-	return result.Value.Str(), nil
-}
-
-// waitFeedsChanged 轮询等待搜索结果 ID 列表发生变化
-func waitFeedsChanged(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, before string, timeout time.Duration) bool {
-	started := time.Now()
-	probes := 0
-	defer func() { observeWaitWithProbes("feeds_changed", time.Since(started), probes) }()
-
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if err := page.Err(); err != nil {
-			return false
-		}
-		probes++
-		after, err := readFeedIDs(ctx, page, counter)
-		if err == nil && after != "" && after != before {
-			return true
-		}
-		if err := page.Sleep(300 * time.Millisecond); err != nil {
-			return false
-		}
-	}
-	return false
-}
-
 type searchInputProbe struct {
 	URL                string   `json:"url"`
 	Title              string   `json:"title"`
@@ -888,148 +883,10 @@ func formatSearchInputProbe(probe searchInputProbe) string {
 }
 
 func (s *SearchAction) collectResults(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter, pfs []pendingFilter) ([]Feed, error) {
-	appliedFilters := false
-	var stateRefreshed bool
-
-	// 如果有筛选条件，则应用筛选
 	if len(pfs) > 0 {
-		stageErr := func(stage string, t0 time.Time, err error, tag string) error {
-			fields := logrus.Fields{
-				"stage":      stage,
-				"elapsed_ms": time.Since(t0).Milliseconds(),
-				"error":      err.Error(),
-			}
-			if tag != "" {
-				fields["tag"] = tag
-			}
-			logrus.WithFields(fields).Error("筛选阶段失败")
-			return fmt.Errorf("筛选阶段 %s 失败: %w", stage, err)
-		}
-
-		filterCtx, cancel := context.WithTimeout(page.Actor().Ctx(), searchFilterRefreshWaitTimeout)
-		defer cancel()
-		filterPage := page.Context(filterCtx)
-
-		t0 := time.Now()
-		filterButton, err := filterPage.Element("div.filter")
-		if err != nil {
-			return nil, stageErr("filter_button_lookup", t0, err, "")
-		}
-
-		before, _ := readFeedIDs(ctx, page, counter)
-
-		for _, pf := range pfs {
-			t0 := time.Now()
-			if err := filterButton.Hover(); err != nil {
-				return nil, stageErr("filter_button_hover", t0, err, pf.OptionText)
-			}
-			humanize.Delay(filterCtx, humanize.BeforeClick)
-
-			t0 = time.Now()
-			stage, panelErr := ensureFilterPanelOpen(filterCtx, counter, filterPage, filterButton)
-			if panelErr != nil {
-				return nil, stageErr(stage, t0, panelErr, pf.OptionText)
-			}
-
-			t0 = time.Now()
-			for {
-				panel, panelErr := evalJS(filterCtx, counter, filterPage, `(groupLabel, optionText) => {
-					const text = (el) => String(el?.textContent || "").replace(/\s+/g, " ").trim();
-					const panel = document.querySelector(".filter-panel");
-					if (!panel) {
-						return false;
-					}
-					const group = Array.from(panel.querySelectorAll(".filters")).find((candidate) =>
-						Array.from(candidate.querySelectorAll(":scope > span")).some((label) => text(label) === groupLabel)
-					);
-					if (!group) {
-						return false;
-					}
-					return Array.from(group.querySelectorAll("div.tags")).some((tag) => {
-						if (text(tag) !== optionText || !tag.isConnected) {
-							return false;
-						}
-						const style = getComputedStyle(tag);
-						if (style.display === "none" || style.visibility === "hidden" || !(parseFloat(style.opacity) > 0)) {
-							return false;
-						}
-						const rect = tag.getBoundingClientRect();
-						if (rect.width <= 0 || rect.height <= 0) {
-							return false;
-						}
-						const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
-						return tag.closest("div.filter-panel") !== null && (hit === tag || tag.contains(hit));
-					});
-				}`, pf.GroupLabel, pf.OptionText)
-				if panelErr != nil {
-					return nil, stageErr("filter_option_ready_wait", t0, panelErr, pf.OptionText)
-				}
-				if panel != nil && panel.Value.Bool() {
-					break
-				}
-				if sleepErr := filterPage.Sleep(300 * time.Millisecond); sleepErr != nil {
-					return nil, stageErr("filter_option_ready_wait", t0, sleepErr, pf.OptionText)
-				}
-			}
-
-			option, err := findFilterOption(filterPage, pf)
-			if err != nil {
-				return nil, stageErr("filter_option_lookup", time.Now(), err, pf.OptionText)
-			}
-
-			// 点击前拟人延迟（跟进上游 humanize.Delay + BeforeClick）
-			humanize.Delay(filterCtx, humanize.BeforeClick)
-			if err := filterCtx.Err(); err != nil {
-				return nil, stageErr("filter_option_delay", time.Now(), err, pf.OptionText)
-			}
-
-			t0 = time.Now()
-			if err := humanize.ClickDirect(option.Rod); err != nil {
-				return nil, stageErr("filter_option_click", t0, err, pf.OptionText)
-			}
-		}
-
-		stateRefreshed = waitFeedsChanged(ctx, page, counter, before, searchFilterRefreshWaitTimeout)
-		t0 = time.Now()
-		if err := ensureFilterSearchRoute(ctx, page, counter); err != nil {
-			return nil, stageErr("filter_route_guard", t0, err, "")
-		}
-		appliedFilters = true
+		return nil, errSearchFiltersUnconfirmed
 	}
-
-	sources, sourceErr := extractSearchFeedSourcesWithRetry(ctx, page, counter, true)
-	domFeeds, stateFeeds := sources.DOM, sources.State
-	domErr, stateErr := sourceErr, sourceErr
-	if sourceErr == nil && len(domFeeds) == 0 {
-		domErr = xerrors.ErrNoFeeds
-	}
-	if sourceErr == nil && len(stateFeeds) == 0 {
-		stateErr = xerrors.ErrNoFeeds
-	}
-
-	if appliedFilters {
-		if stateRefreshed && stateErr == nil && len(stateFeeds) > 0 {
-			return mergeFeedsByID(stateFeeds, domFeeds), nil
-		}
-		if domErr == nil && len(domFeeds) > 0 {
-			return domFeeds, nil
-		}
-		if domErr != nil {
-			return nil, domErr
-		}
-		return nil, stateErr
-	}
-
-	if domErr == nil && len(domFeeds) > 0 {
-		return mergeFeedsByID(domFeeds, stateFeeds), nil
-	}
-	if stateErr == nil && len(stateFeeds) > 0 {
-		return stateFeeds, nil
-	}
-	if domErr != nil {
-		return nil, domErr
-	}
-	return nil, stateErr
+	return collectSearchFeeds(ctx, page, counter)
 }
 
 func collectSearchFeeds(ctx context.Context, page *hrod.Page, counter *evalTimeoutCounter) ([]Feed, error) {
@@ -1652,6 +1509,9 @@ func isCurrentSearchPage(page *hrod.Page, keyword string) (bool, error) {
 	info, err := pageTargetInfo(page.Rod.GetContext(), page)
 	if err != nil {
 		return false, err
+	}
+	if !isSearchResultPage(info.URL) {
+		return false, nil
 	}
 	u, err := url.Parse(info.URL)
 	if err != nil {

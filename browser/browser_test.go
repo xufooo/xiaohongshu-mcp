@@ -47,6 +47,9 @@ type blockedPageCloseCDPClient struct {
 	closeErr              error
 	postCloseErr          error
 	targetInfoCancel      context.CancelFunc
+	targetInfoErr         error
+	targetListErr         error
+	targetListCancel      context.CancelFunc
 }
 
 func (c *blockedPageCloseCDPClient) Event() <-chan *cdp.Event {
@@ -97,6 +100,9 @@ func (c *blockedPageCloseCDPClient) Call(ctx context.Context, _ string, method s
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
+		if c.targetInfoErr != nil {
+			return nil, c.targetInfoErr
+		}
 		if c.targetInfoCancel != nil {
 			c.targetInfoCancel()
 		}
@@ -109,6 +115,15 @@ func (c *blockedPageCloseCDPClient) Call(ctx context.Context, _ string, method s
 		return []byte(`{"result":{"type":"string","value":"{\"url\":\"about:blank\",\"scroll_y\":0}"}}`), nil
 	}
 	if method == "Target.getTargets" {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if c.targetListErr != nil {
+			return nil, c.targetListErr
+		}
+		if c.targetListCancel != nil {
+			c.targetListCancel()
+		}
 		c.mu.Lock()
 		c.targetQueries++
 		afterClose := c.closeCalls > 0
@@ -506,12 +521,159 @@ func TestWarmPageReusableUsesProbeContext(t *testing.T) {
 	}
 	probeCtx, cancelProbe = context.WithCancel(context.Background())
 	defer cancelProbe()
-	client.targetInfoCancel = cancelProbe
+	client.targetListCancel = cancelProbe
 	if warmPageReusable(probeCtx, page, nil, now, now, time.Minute) {
 		t.Fatal("successful target response masked probe cancellation")
 	}
 	if page.Rod.GetContext().Err() != nil || page.Rod.Browser().GetContext().Err() != nil {
 		t.Fatal("probe cancellation changed the page or browser lifetime")
+	}
+}
+
+func TestWarmPageUnknownProbeKeepsOriginalTargetAndExpiry(t *testing.T) {
+	for _, failure := range []error{context.DeadlineExceeded, errors.New("query unavailable"), errors.New("No target with given id found")} {
+		client := &blockedPageCloseCDPClient{}
+		page := newBlockedPageCloseFixture(t, client)
+		client.targetListErr = failure
+		manager := NewManager(nil, WithWarmPageTTL(time.Minute))
+		if !manager.parkWarmPage(page) {
+			t.Fatal("could not park fixture")
+		}
+		manager.mu.Lock()
+		parkedAt := manager.warmPageAt
+		manager.mu.Unlock()
+		t.Cleanup(func() {
+			manager.mu.Lock()
+			manager.clearWarmPageLocked()
+			manager.mu.Unlock()
+		})
+		if err := manager.lockForOwner(context.Background(), "probe-owner"); err != nil {
+			t.Fatal(err)
+		}
+		got, err := manager.takeWarmPage(context.Background(), nil)
+		if len(manager.token) != 0 || manager.owner != "probe-owner" {
+			t.Fatal("ambiguous probe must leave the acquisition token with its caller")
+		}
+		manager.releaseToken()
+		if got != nil || !errors.Is(err, failure) || client.calls() != 0 {
+			t.Fatalf("unknown target was closed/reused: page=%v err=%v closes=%d", got, err, client.calls())
+		}
+		manager.mu.Lock()
+		retained := manager.warmPage == page && manager.warmPageAt.Equal(parkedAt) && manager.warmPageTimer != nil
+		manager.mu.Unlock()
+		if !retained || pendingPageForTest(manager, page) != nil {
+			t.Fatal("cache entry/expiry lost or cleanup responsibility duplicated")
+		}
+		client.targetListErr = nil
+		got, err = manager.takeWarmPage(context.Background(), nil)
+		if got != page || err != nil || client.calls() != 0 {
+			t.Fatalf("retry failed to return the original target: page=%v err=%v", got, err)
+		}
+	}
+}
+
+func TestWarmPageConfirmedAbsentRetiresOwnership(t *testing.T) {
+	client := &blockedPageCloseCDPClient{}
+	page := newBlockedPageCloseFixture(t, client)
+	manager := NewManager(nil, WithIdleTimeout(0), WithWarmPageTTL(time.Minute))
+	if !manager.parkWarmPage(page) {
+		t.Fatal("could not park fixture")
+	}
+	client.markTargetClosed()
+	if err := manager.lockForOwner(context.Background(), "new-owner"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := manager.takeWarmPage(context.Background(), nil)
+	if got != nil || err != nil || client.calls() != 0 {
+		t.Fatalf("absent target must fall through without another close: page=%v err=%v", got, err)
+	}
+	manager.mu.Lock()
+	retired := manager.warmPage == nil && manager.warmPageTimer == nil && len(manager.resetPages) == 0
+	owner := manager.owner
+	manager.mu.Unlock()
+	if !retired || len(manager.token) != 0 || owner != "new-owner" {
+		t.Fatal("absence must retire cache/cleanup ownership while retaining the caller's lease")
+	}
+	// The acquisition caller, not the probe/cleanup path, returns this token.
+	manager.releaseToken()
+	if len(manager.token) != 1 {
+		t.Fatal("acquisition must return exactly one token")
+	}
+	if err := manager.lockForOwner(context.Background(), "next-owner"); err != nil {
+		t.Fatal(err)
+	}
+	defer manager.releaseToken()
+	if got, err := manager.takeWarmPage(context.Background(), nil); got != nil || err != nil {
+		t.Fatalf("next acquisition must reach normal page creation: page=%v err=%v", got, err)
+	}
+}
+
+func TestAcquireReplacesConfirmedAbsentWarmTargetOnly(t *testing.T) {
+	chromeBin := os.Getenv("ROD_BROWSER_BIN")
+	if chromeBin == "" {
+		var ok bool
+		chromeBin, ok = launcher.LookPath()
+		if !ok {
+			t.Skip("Chrome/Chromium unavailable for warm target acquisition fixture")
+		}
+	}
+	factoryCalls := 0
+	profileDir := t.TempDir()
+	manager := NewManager(func(ctx context.Context) (*hrod.Browser, error) {
+		factoryCalls++
+		hb, err := headless_browser.New(ctx,
+			headless_browser.WithChromeBinPath(chromeBin),
+			headless_browser.WithHeadless(true),
+			headless_browser.WithUserDataDir(profileDir),
+			headless_browser.WithStealthJS(false),
+		)
+		if hb == nil {
+			return nil, err
+		}
+		return hrod.NewBrowser(hb, humanize.Config{}), err
+	}, WithIdleTimeout(0), WithWarmPageTTL(time.Minute))
+	t.Cleanup(func() {
+		if len(manager.token) == 0 {
+			manager.releaseToken()
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := manager.Close(ctx); err != nil {
+			t.Errorf("fixture cleanup: %v", err)
+		}
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	page, _, err := manager.AcquireForWithSource(ctx, "first-owner")
+	if err != nil || page == nil {
+		t.Fatalf("initial acquisition: %v", err)
+	}
+	originalBrowser := page.Browser()
+	destroyed, stopWatch := watchPageTargetDestroyed(page)
+	defer stopWatch()
+	manager.Release(page)
+	if _, err := (proto.TargetCloseTarget{TargetID: page.Rod.TargetID}).Call(page.Rod.Browser().Context(ctx)); err != nil {
+		t.Fatalf("remove parked target: %v", err)
+	}
+	select {
+	case <-destroyed:
+	case <-ctx.Done():
+		t.Fatalf("parked target destruction was not confirmed: %v", ctx.Err())
+	}
+	// The next acquisition independently confirms absence from the target list.
+	next, created, err := manager.AcquireForWithSource(ctx, "next-owner")
+	if err != nil || next == nil {
+		t.Fatalf("acquire after confirmed target removal: %v", err)
+	}
+	if !created || next.Rod.TargetID == page.Rod.TargetID || next.Browser() != originalBrowser || factoryCalls != 1 {
+		t.Fatal("acquisition must create one replacement page in the same healthy browser")
+	}
+	if pendingPageForTest(manager, page) != nil || len(manager.token) != 0 || manager.owner != "next-owner" {
+		t.Fatal("old cleanup ownership must be gone and new owner must retain the only token")
+	}
+	manager.Release(next)
+	if len(manager.token) != 1 {
+		t.Fatal("replacement owner must return exactly one token")
 	}
 }
 
@@ -528,7 +690,7 @@ func TestWarmPageReusableRejectsCanceledPageLifetime(t *testing.T) {
 			defer cancelPage()
 			page = page.Context(pageCtx)
 			if cancelDuringProbe {
-				client.targetInfoCancel = cancelPage
+				client.targetListCancel = cancelPage
 			} else {
 				cancelPage()
 			}

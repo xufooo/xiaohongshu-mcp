@@ -9,6 +9,7 @@ ENV GOPROXY=https://goproxy.cn,direct
 ENV GOSUMDB=sum.golang.google.cn
 
 COPY go.mod go.sum ./
+COPY third_party/headless_browser/go.mod third_party/headless_browser/go.sum ./third_party/headless_browser/
 RUN go mod download
 
 COPY . .

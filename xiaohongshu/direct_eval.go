@@ -31,7 +31,7 @@ func newRuntimeEvaluate(ctx context.Context, expression string) proto.RuntimeEva
 // 为什么必须有：`Runtime.evaluate` 在渲染进程卡住时会一直不返回——实测出现过**单次就绪探测阻塞 297s**，
 // 把整次调用的 5 分钟预算吃光，错误信息还只剩"context deadline exceeded"。
 // 这是**传输层的界**，不是"预计页面什么时候好"的预测：正常探测 x86 实测 p90≈274ms、重载 max≈2s，
-// Pi 上慢一个量级也远低于它；真到 15s 说明渲染进程已经不正常，应当如实报错而不是无限等。
+// 此上限仅限制单次传输；超时是结果未知，不能据此判定渲染器故障。
 const defaultEvalTimeout = 15 * time.Second
 
 // withEvalDeadline 保证**每一次页内求值都有界且不超过默认上限**：

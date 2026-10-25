@@ -1,6 +1,7 @@
 package xiaohongshu
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -38,8 +39,8 @@ type IdentityDrift struct {
 	Critical bool   `json:"critical"`
 }
 
-func CaptureIdentityMetadata(page *hrod.Page) (IdentityMetadata, error) {
-	obj, err := page.Eval(`() => {
+func CaptureIdentityMetadata(ctx context.Context, page *hrod.Page) (IdentityMetadata, error) {
+	obj, err := evalJSDirect(ctx, page, `() => {
 		const tz = (() => {
 			try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch (_) { return ""; }
 		})();

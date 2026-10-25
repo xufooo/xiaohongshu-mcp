@@ -74,7 +74,7 @@ func NavigationSkippedCount() int64 {
 }
 
 // readyProbeTimeout 是「已在目标页」时的就绪确认预算：只做一次快速确认，
-// 通过就跳过导航，不通过就走正常导航路径。
+// 通过就跳过导航，未就绪则继续等待当前目标页。
 const readyProbeTimeout = 5 * time.Second
 
 // pageTargetInfo scopes only this browser-level query to the operation context.
@@ -122,6 +122,20 @@ func onExplorePage(page *hrod.Page) (bool, error) {
 	return onURL(page, ExploreURL)
 }
 
+// Both routes are used by the tracked home-feed entry points.
+func onHomeFeedPage(page *hrod.Page) (bool, error) {
+	info, err := pageTargetInfo(page.Rod.GetContext(), page)
+	if err != nil {
+		return false, err
+	}
+	u, err := url.Parse(info.URL)
+	if err != nil {
+		return false, nil
+	}
+	path := strings.TrimRight(u.Path, "/")
+	return u.Scheme == "https" && strings.EqualFold(u.Host, "www.xiaohongshu.com") && (path == "" || path == "/explore"), nil
+}
+
 // EnsureReadyOn 目标页已经就绪时跳过重复导航，否则导航过去再等就绪。
 // 热页面复用（Manager.Release 保留页面）后，这条判断会经常命中：
 // 例如 check_login_status 刚加载过 /explore，紧接着 start_page 不必再加载一次。
@@ -145,6 +159,23 @@ func EnsureReadyOn(page *hrod.Page, target string, kind XHSReadyKind, timeout ti
 			}
 			atomic.AddInt64(&navigationSkipped, 1)
 			logrus.Infof("skip redundant navigation: already ready at %s", target)
+			return nil
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if isFatalWaitError(err) {
+			return err
+		}
+		stillOnTarget, routeErr := onURL(page, target)
+		if routeErr != nil {
+			return routeErr
+		}
+		if stillOnTarget {
+			if err := WaitForXHSReady(page, XHSReadyOptions{Kind: kind, Timeout: timeout}); err != nil {
+				return err
+			}
+			atomic.AddInt64(&navigationSkipped, 1)
 			return nil
 		}
 	}

@@ -37,11 +37,12 @@ const (
 type BrowseSessionStatus string
 
 const (
-	SessionReady     BrowseSessionStatus = "ready"
-	SessionBusy      BrowseSessionStatus = "busy"
-	SessionNotReady  BrowseSessionStatus = "not_ready"
-	SessionExpired   BrowseSessionStatus = "expired"
-	SessionUnhealthy BrowseSessionStatus = "unhealthy"
+	SessionReady       BrowseSessionStatus = "ready"
+	SessionBusy        BrowseSessionStatus = "busy"
+	SessionNotReady    BrowseSessionStatus = "not_ready"
+	SessionExpired     BrowseSessionStatus = "expired"
+	SessionUnhealthy   BrowseSessionStatus = "unhealthy"
+	SessionUnconfirmed BrowseSessionStatus = "unconfirmed"
 )
 
 type BrowseSessionInfo struct {
@@ -75,6 +76,7 @@ type BrowseSessionStatusInfo struct {
 	LastError       string              `json:"last_error,omitempty"`
 	HealthCheckedAt time.Time           `json:"health_checked_at,omitempty"`
 	Ready           bool                `json:"ready"`
+	ReadinessScope  string              `json:"readiness_scope,omitempty"` // page_transport does not assert business readiness
 	Risk            string              `json:"risk,omitempty"`
 }
 
@@ -275,7 +277,8 @@ type BrowseSession struct {
 	closeDiscard       bool
 	closeLeaseReleased bool
 
-	touchOnFinish bool
+	touchOnFinish  bool
+	feedGeneration uint64
 
 	currentURL string
 	sourceURL  string
@@ -741,7 +744,14 @@ func (s *BrowseSession) PageState(ctx context.Context) (state *BrowseSessionPage
 	if err != nil {
 		return nil, err
 	}
-	defer func() { s.finishOperation(err) }()
+	defer func() {
+		if err == nil && state != nil {
+			s.endOperationWithSnapshot(err, true)
+			s.releaseOperation()
+			return
+		}
+		s.finishOperation(err)
+	}()
 
 	s.mu.Lock()
 	page := s.page
@@ -755,6 +765,9 @@ func (s *BrowseSession) PageState(ctx context.Context) (state *BrowseSessionPage
 	page = page.Context(opCtx)
 	probe, err := probeXHSReadyFull(page, feedID)
 	if err != nil {
+		return nil, err
+	}
+	if err := opCtx.Err(); err != nil {
 		return nil, err
 	}
 	risk := riskSignalFromReadyProbe(probe)
@@ -771,6 +784,9 @@ func (s *BrowseSession) PageState(ctx context.Context) (state *BrowseSessionPage
 		}
 	}
 
+	if err := opCtx.Err(); err != nil {
+		return nil, err
+	}
 	s.mu.Lock()
 	if probe.URL != "" {
 		s.currentURL = probe.URL
@@ -827,6 +843,65 @@ func (s *BrowseSession) Search(ctx context.Context, keyword string, filters ...F
 	return feeds, err
 }
 
+func (s *BrowseSession) validateFeedCursor(cursor *FeedCursor, kind FeedPageKind, keyword, filterKey string) error {
+	if cursor == nil {
+		return nil
+	}
+	if err := cursor.Validate(kind, keyword, filterKey); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	position := cursor.position
+	if position == nil || position.session != s || position.generation != s.feedGeneration || position.consumed {
+		return fmt.Errorf("feed cursor 已消费或页面已切换，请重新开始查询")
+	}
+	return nil
+}
+
+func (s *BrowseSession) invalidateFeedCursor() {
+	s.mu.Lock()
+	s.feedGeneration++
+	s.mu.Unlock()
+}
+
+func (s *BrowseSession) advanceFeedCursor(cursor *FeedCursor) {
+	s.mu.Lock()
+	if cursor.position != nil {
+		cursor.position.consumed = true
+	}
+	cursor.position = &feedCursorPosition{session: s, generation: s.feedGeneration}
+	s.mu.Unlock()
+}
+
+// Finalize while still holding opToken, before changing results or consuming a
+// cursor. Cancellation here leaves the input position usable. After this check
+// the batch commits without further CDP work or cancellation rejection.
+func (s *BrowseSession) finalizeFeedBatch(ctx context.Context) error {
+	if err := s.refreshPageState(ctx); err != nil {
+		return err
+	}
+	s.endOperationWithSnapshot(nil, true)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return fmt.Errorf("browse session 已关闭: %s", s.id)
+	}
+	return nil
+}
+
+func cloneFeedBatchCursor(cursor *FeedCursor) *FeedCursor {
+	if cursor == nil {
+		return nil
+	}
+	cloned := *cursor
+	cloned.ReturnedIDs = append([]string(nil), cursor.ReturnedIDs...)
+	return &cloned
+}
+
 // ListFeedsBatch 在 session 浏览器中分页获取首页 Feeds。
 // cursor 为空时执行首页导航/ready；非空时从当前页继续滚动。
 func (s *BrowseSession) ListFeedsBatch(ctx context.Context, cursor *FeedCursor, maxItems int) (feeds []Feed, nextCursor *FeedCursor, hasMore bool, err error) {
@@ -834,7 +909,18 @@ func (s *BrowseSession) ListFeedsBatch(ctx context.Context, cursor *FeedCursor, 
 	if err != nil {
 		return nil, nil, false, err
 	}
-	defer func() { s.finishOperation(err) }()
+	finalized := false
+	defer func() {
+		if !finalized {
+			s.endOperation(err)
+		}
+		s.releaseOperation()
+	}()
+
+	if err := s.validateFeedCursor(cursor, FeedPageHome, "", ""); err != nil {
+		return nil, nil, false, err
+	}
+	cursor = cloneFeedBatchCursor(cursor)
 
 	maxItems = normalizeFeedPageSize(maxItems)
 
@@ -849,6 +935,7 @@ func (s *BrowseSession) ListFeedsBatch(ctx context.Context, cursor *FeedCursor, 
 	isFirstPage := cursor == nil
 
 	if cursor == nil {
+		s.invalidateFeedCursor()
 		action, err := NewFeedsListAction(page.Context(opCtx))
 		if err != nil {
 			return nil, nil, false, err
@@ -860,8 +947,22 @@ func (s *BrowseSession) ListFeedsBatch(ctx context.Context, cursor *FeedCursor, 
 		cursor = &FeedCursor{Kind: FeedPageHome, CreatedAt: time.Now(), ReturnedIDs: make([]string, 0)}
 		feeds = takeNewFeeds(allFeeds, cursor, maxItems)
 		nextCursor = cursor
-		hasMore = len(allFeeds) > len(feeds) || !hasEndSignal(page.Context(opCtx))
+		hasMore = len(allFeeds) > len(feeds)
+		if !hasMore {
+			atEnd, endErr := hasEndSignal(page.Context(opCtx))
+			if endErr != nil {
+				return nil, nil, false, endErr
+			}
+			hasMore = !atEnd
+		}
 	} else {
+		onHome, routeErr := onHomeFeedPage(page.Context(opCtx))
+		if routeErr != nil {
+			return nil, nil, false, routeErr
+		}
+		if !onHome {
+			return nil, nil, false, fmt.Errorf("feed cursor 页面不再是首页")
+		}
 		feeds, nextCursor, hasMore, err = LoadFeedBatch(opCtx, page.Context(opCtx), FeedPageHome, cursor, maxItems, func() ([]Feed, error) {
 			return collectHomeFeeds(page.Context(opCtx))
 		})
@@ -870,6 +971,10 @@ func (s *BrowseSession) ListFeedsBatch(ctx context.Context, cursor *FeedCursor, 
 		}
 	}
 
+	finalized = true
+	if err := s.finalizeFeedBatch(opCtx); err != nil {
+		return nil, nil, false, err
+	}
 	s.mu.Lock()
 	if isFirstPage {
 		s.sourceURL = ""
@@ -891,6 +996,7 @@ func (s *BrowseSession) ListFeedsBatch(ctx context.Context, cursor *FeedCursor, 
 	}
 	s.recordTimelineLocked("list_feeds", "", "ok", time.Now(), fmt.Sprintf("results=%d", len(feeds)))
 	s.mu.Unlock()
+	s.advanceFeedCursor(nextCursor)
 	return feeds, nextCursor, hasMore, nil
 }
 
@@ -920,13 +1026,22 @@ func (s *BrowseSession) searchBatch(ctx context.Context, keyword string, filters
 	if err != nil {
 		return SearchPageResult{}, nil, false, err
 	}
+	finalized := false
 	defer func() {
 		if err != nil && searchCtx.Err() == context.DeadlineExceeded && ctx.Err() == nil {
 			err = fmt.Errorf("搜索操作超过内部时限 %s: %w", sessionSearchTimeout, err)
 		}
 		s.reconcileAfterFailedSearch(opCtx, err)
-		s.finishOperation(err)
+		if !finalized {
+			s.endOperation(err)
+		}
+		s.releaseOperation()
 	}()
+
+	if err := s.validateFeedCursor(cursor, FeedPageSearch, keyword, filterKeyFromFilters(filters)); err != nil {
+		return SearchPageResult{}, nil, false, err
+	}
+	cursor = cloneFeedBatchCursor(cursor)
 
 	maxItems = normalizeFeedPageSize(maxItems)
 
@@ -942,6 +1057,10 @@ func (s *BrowseSession) searchBatch(ctx context.Context, keyword string, filters
 	var aiChat *AIChatReply
 
 	if cursor == nil {
+		if err := validateSearchFilterRequest(filters); err != nil {
+			return SearchPageResult{}, nil, false, err
+		}
+		s.invalidateFeedCursor()
 		action := NewSearchAction(page.Context(opCtx))
 		var allFeeds []Feed
 		if includeAI {
@@ -966,7 +1085,19 @@ func (s *BrowseSession) searchBatch(ctx context.Context, keyword string, filters
 			ReturnedIDs: make([]string, 0),
 		}
 		feeds = takeNewFeeds(allFeeds, cursor, maxItems)
-		hasMore = len(allFeeds) > len(feeds) || !hasEndSignal(page.Context(opCtx))
+		hasMore = len(allFeeds) > len(feeds)
+		if !hasMore {
+			atEnd, endErr := hasEndSignal(page.Context(opCtx))
+			if endErr != nil {
+				return SearchPageResult{}, nil, false, endErr
+			}
+			hasMore = !atEnd
+		}
+		s.probeWatchdogSelectorsForKind(opCtx, XHSReadySearch, "")
+		finalized = true
+		if err := s.finalizeFeedBatch(opCtx); err != nil {
+			return SearchPageResult{}, nil, false, err
+		}
 		s.mu.Lock()
 		s.sourceURL = ""
 		s.currentFeedID = ""
@@ -979,12 +1110,19 @@ func (s *BrowseSession) searchBatch(ctx context.Context, keyword string, filters
 		s.searchKeyword = keyword
 		s.recordTimelineLocked("search", keyword, "ok", time.Now(), fmt.Sprintf("results=%d", len(feeds)))
 		s.mu.Unlock()
-		s.probeWatchdogSelectorsForKind(opCtx, XHSReadySearch, "")
 		result.Feeds = feeds
 		result.AIChat = aiChat
+		s.advanceFeedCursor(cursor)
 		return result, cursor, hasMore, nil
 	}
 
+	currentSearch, routeErr := isCurrentSearchPage(page.Context(opCtx), keyword)
+	if routeErr != nil {
+		return SearchPageResult{}, nil, false, routeErr
+	}
+	if !currentSearch {
+		return SearchPageResult{}, nil, false, fmt.Errorf("feed cursor 页面不再匹配搜索")
+	}
 	counter := &evalTimeoutCounter{}
 	feeds, nextCursor, hasMore, err = LoadFeedBatch(opCtx, page.Context(opCtx), FeedPageSearch, cursor, maxItems, func() ([]Feed, error) {
 		return collectSearchFeeds(opCtx, page.Context(opCtx), counter)
@@ -993,6 +1131,10 @@ func (s *BrowseSession) searchBatch(ctx context.Context, keyword string, filters
 		return SearchPageResult{}, nil, false, err
 	}
 
+	finalized = true
+	if err := s.finalizeFeedBatch(opCtx); err != nil {
+		return SearchPageResult{}, nil, false, err
+	}
 	s.mu.Lock()
 	originalCount := len(feeds)
 	s.results, s.nextResultIndex, feeds = appendSessionResults(s.results, s.nextResultIndex, feeds)
@@ -1001,6 +1143,7 @@ func (s *BrowseSession) searchBatch(ctx context.Context, keyword string, filters
 		trimFeedCursorTail(nextCursor, originalCount-len(feeds))
 	}
 	s.mu.Unlock()
+	s.advanceFeedCursor(nextCursor)
 	return SearchPageResult{Feeds: feeds}, nextCursor, hasMore, nil
 }
 
@@ -1051,6 +1194,7 @@ func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, shareURL, xsecT
 			return fail(fmt.Errorf("读取当前页面URL: share_url_source_url_read_failed"))
 		}
 		sourceURL = sourceURLCandidate
+		s.invalidateFeedCursor()
 		if navErr := page.Context(opCtx).Navigate(parsed.NormalizedURL); navErr != nil {
 			var navigationErr *rod.NavigationError
 			if !parsed.IsShortLink || !errors.As(navErr, &navigationErr) {
@@ -1117,6 +1261,7 @@ func (s *BrowseSession) OpenNote(ctx context.Context, resultRef, shareURL, xsecT
 			if err != nil {
 				return fail(fmt.Errorf("读取当前页面 URL: %w", err))
 			}
+			s.invalidateFeedCursor()
 			opener = NewNoteOpenActionWithState(page.Context(opCtx), s.state)
 			if err := opener.OpenFromCards(opCtx, counter, feed.ID, feed.XsecToken); err != nil {
 				return fail(fmt.Errorf("open_note 卡片操作失败: %w", err))
@@ -1889,6 +2034,7 @@ func (s *BrowseSession) Back(ctx context.Context) (err error) {
 	fromDetail := probe.VisibleDetailCount > 0
 
 	// 通用后退：从任意页面返回上一步
+	s.invalidateFeedCursor()
 	if _, err := evalJS(opCtx, counter, page, `() => window.history.back()`); err != nil {
 		return fmt.Errorf("history.back 失败: %w", err)
 	}
@@ -1961,6 +2107,7 @@ func (s *BrowseSession) ListNotifications(ctx context.Context, rawTab string, cu
 
 	switch {
 	case cursor == "":
+		s.invalidateFeedCursor()
 		list, err = s.startNotificationListLocked(opCtx, page, counter, tab, maxItems)
 	case notif.active && notif.tab == tab && notif.cursor == cursor:
 		list, err = s.continueNotificationListLocked(opCtx, page, counter, tab, maxItems)
@@ -2437,10 +2584,13 @@ func (s *BrowseSession) CheckReusable(ctx context.Context) ReuseCheck {
 		defer cancel()
 		result, err := s.evalJS(evalCtx, page, probeScript)
 		if err != nil || result == nil {
+			if IsFatalRendererError(err) {
+				return nil, err
+			}
 			if errors.Is(ctx.Err(), context.Canceled) {
 				return nil, ctx.Err()
 			}
-			if errors.Is(evalCtx.Err(), context.DeadlineExceeded) {
+			if errors.Is(evalCtx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
 				return nil, errProbeTimeout
 			}
 			return nil, errProbeCDP
@@ -2465,28 +2615,36 @@ func (s *BrowseSession) CheckReusable(ctx context.Context) ReuseCheck {
 			}
 		}
 		if errors.Is(err, errProbeTimeout) {
-			time.Sleep(150 * time.Millisecond)
+			if sleepErr := page.Context(ctx).Sleep(150 * time.Millisecond); sleepErr != nil {
+				return ReuseCheck{Status: SessionUnconfirmed, LastError: "请求已取消或超时", HealthCheckedAt: time.Now()}
+			}
 			pageState, err = probe(healthCheckTimeout - firstProbeBudget - 150*time.Millisecond)
 		}
 		if err != nil {
-			risk := "cdp_disconnected"
-			if errors.Is(err, errProbeJS) {
-				risk = "js_unavailable"
+			if !IsFatalRendererError(err) {
+				// A safety deadline is not proof that a slow page is broken.
+				// The service's unconfirmed branch retains this session/page.
+				return ReuseCheck{
+					Status:          SessionUnconfirmed,
+					LastError:       "页面传输健康状态未确认，请稍后检查原会话",
+					HealthCheckedAt: time.Now(),
+					Ready:           false,
+				}
 			}
 			return ReuseCheck{
 				Status:          SessionUnhealthy,
-				LastError:       err.Error(),
+				LastError:       "页面渲染器不可用",
 				HealthCheckedAt: time.Now(),
 				Ready:           false,
-				Risk:            risk,
+				Risk:            "cdp_disconnected",
 			}
 		}
 	}
 
 	if strings.HasPrefix(pageState.URL, "about:") {
 		return ReuseCheck{
-			Status:          SessionNotReady,
-			LastError:       "页面URL异常",
+			Status:          SessionUnconfirmed,
+			LastError:       "页面仍处于过渡 URL，请稍后检查原会话",
 			HealthCheckedAt: time.Now(),
 			Ready:           false,
 		}
@@ -2496,7 +2654,7 @@ func (s *BrowseSession) CheckReusable(ctx context.Context) ReuseCheck {
 
 	if readyState != "complete" && readyState != "interactive" {
 		return ReuseCheck{
-			Status:          SessionNotReady,
+			Status:          SessionUnconfirmed,
 			LastError:       fmt.Sprintf("页面未就绪: %s", readyState),
 			HealthCheckedAt: time.Now(),
 			Ready:           false,
@@ -2730,6 +2888,10 @@ func (s *BrowseSession) finishOperation(operationErr error) {
 }
 
 func (s *BrowseSession) endOperation(operationErr error) {
+	s.endOperationWithSnapshot(operationErr, false)
+}
+
+func (s *BrowseSession) endOperationWithSnapshot(operationErr error, haveSnapshot bool) {
 	s.mu.Lock()
 	closed := s.closed
 	opCtx := s.opCtx
@@ -2742,7 +2904,7 @@ func (s *BrowseSession) endOperation(operationErr error) {
 		return
 	}
 
-	if !closed && !fatal && opCtx != nil && opCtx.Err() == nil {
+	if !haveSnapshot && !closed && !fatal && opCtx != nil && opCtx.Err() == nil {
 		s.refreshPageState(opCtx)
 	}
 
@@ -2851,7 +3013,7 @@ func (s *BrowseSession) closeExpired(expiresAt time.Time) {
 }
 
 func (s *BrowseSession) reconcileAfterFailedSearch(ctx context.Context, operationErr error) {
-	if operationErr == nil || ctx.Err() != nil {
+	if operationErr == nil || ctx.Err() != nil || isFatalWaitError(operationErr) {
 		return
 	}
 	s.mu.Lock()
@@ -2880,13 +3042,13 @@ func (s *BrowseSession) reconcileAfterFailedSearch(ctx context.Context, operatio
 	}
 }
 
-func (s *BrowseSession) refreshPageState(ctx context.Context) {
+func (s *BrowseSession) refreshPageState(ctx context.Context) error {
 	s.mu.Lock()
 	page := s.page
 	closed := s.closed
 	s.mu.Unlock()
 	if closed || page == nil {
-		return
+		return nil
 	}
 
 	evalCtx, cancel := context.WithTimeout(ctx, browseSessionRefreshTimeout)
@@ -2899,9 +3061,13 @@ func (s *BrowseSession) refreshPageState(ctx context.Context) {
 	}
 	got := false
 	if s.evalJS != nil {
-		if result, err := s.evalJS(evalCtx, page, `() => {`+xhsScrollYJS+`
+		result, err := s.evalJS(evalCtx, page, `() => {`+xhsScrollYJS+`
 			return JSON.stringify({ url: location.href, scroll_y: scrollY() });
-		}`); err == nil && result != nil {
+		}`)
+		if err != nil {
+			return err
+		}
+		if result != nil {
 			if err := json.Unmarshal([]byte(result.Value.Str()), &snapshot); err == nil {
 				got = true
 			}
@@ -2911,7 +3077,7 @@ func (s *BrowseSession) refreshPageState(ctx context.Context) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed || s.page != page {
-		return
+		return nil
 	}
 	if got {
 		if snapshot.URL != nil && *snapshot.URL != "" {
@@ -2921,6 +3087,7 @@ func (s *BrowseSession) refreshPageState(ctx context.Context) {
 			s.scrollY = *snapshot.ScrollY
 		}
 	}
+	return nil
 }
 
 func (s *BrowseSession) probeWatchdogSelectorsForKind(ctx context.Context, kind XHSReadyKind, feedID string) {
@@ -3366,7 +3533,7 @@ func compactTimelineNote(value string) string {
 }
 
 func filterKeyFromFilters(filters []FilterOption) string {
-	data, _ := json.Marshal(filters)
+	data, _ := json.Marshal(effectiveSearchFilter(filters))
 	return string(data)
 }
 

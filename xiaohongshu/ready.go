@@ -33,7 +33,7 @@ const (
 //   - >0 = 硬上限（仅用于「这一步必须很快」的场景，例如一次快速探测）。
 //
 // 超时只是**失败兜底**，不参与"该等多久"：等待由事件决定
-// （DOM 变化 / 网络在途请求），机器慢只是等得久，不会被判超时。
+// （DOM 变化触发重新探测）；到达安全上限只说明未确认就绪，不说明页面损坏。
 type XHSReadyOptions struct {
 	Kind             XHSReadyKind
 	FeedID           string
@@ -42,11 +42,6 @@ type XHSReadyOptions struct {
 }
 
 const (
-	// readyStallBudget 是"页面多久没动静就算卡住"的判定线。
-	// 它量的不是"预计要等多久"，而是"完全没有生命迹象"的持续时间：
-	// 判据只有 DOM 变化与探测指纹变化（不依赖网络事件），故取值放宽到 60s——
-	// 慢机器只是慢，它的 DOM 总会动；一直一动不动才是真卡死。
-	readyStallBudget       = 60 * time.Second
 	homeSearchStableWindow = 3 * time.Second
 	defaultReadyPollMin    = 300 * time.Millisecond
 	defaultReadyPollMax    = 500 * time.Millisecond
@@ -162,7 +157,7 @@ func WaitForXHSReady(page *hrod.Page, opts XHSReadyOptions) error {
 				return "", false, fatalWait(fmt.Errorf("页面出现风险信号: %s; %s", probe.RiskText, formatXHSReadyProbe(probe)))
 			}
 			ready := isXHSReady(probe, opts.Kind, opts.FeedID, false)
-			return formatXHSReadyProbe(probe), xhsReadyDecision(opts.Kind, &stability, time.Now(), ready), nil
+			return readyProgressFingerprint(probe), xhsReadyDecision(opts.Kind, &stability, time.Now(), ready), nil
 		},
 		OnReady: func() { probeWatchdogSelectors(page, opts) },
 		OnExhausted: func() error {
@@ -433,6 +428,13 @@ func inferXHSReadyKindFromURL(rawURL string) XHSReadyKind {
 	default:
 		return XHSReadyHome
 	}
+}
+
+func readyProgressFingerprint(probe xhsReadyProbe) string {
+	probe.Title = ""
+	probe.ScrollY = 0
+	probe.StateFragment = ""
+	return formatXHSReadyProbe(probe)
 }
 
 func formatXHSReadyProbe(probe xhsReadyProbe) string {

@@ -217,11 +217,19 @@ func (m *Manager) acquireFor(ctx context.Context, owner string) (*hrod.Page, boo
 			continue
 		}
 		m.cancelIdleCloseLocked()
+		idleTimeout := m.idleTimeout
 		m.mu.Unlock()
 		if err := checkBrowserHealth(ctx, b); err != nil {
 			if ctx.Err() != nil {
+				m.scheduleIdleCloseAfter(idleTimeout)
 				m.releaseToken()
 				return nil, false, ctx.Err()
+			}
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+				// A bounded health probe cannot prove a slow browser is dead.
+				m.scheduleIdleCloseAfter(idleTimeout)
+				m.releaseToken()
+				return nil, false, err
 			}
 			if closeErr := m.discardBrowser(ctx, b); closeErr != nil {
 				m.releaseToken()
@@ -233,6 +241,7 @@ func (m *Manager) acquireFor(ctx context.Context, owner string) (*hrod.Page, boo
 
 		page, err := m.takeWarmPage(ctx, b)
 		if err != nil {
+			m.scheduleIdleCloseAfter(idleTimeout)
 			m.releaseToken()
 			return nil, false, err
 		}
@@ -273,6 +282,10 @@ func (m *Manager) Stats() BrowserStats {
 	}
 }
 
+// Only a successful browser-level target listing can establish this condition.
+// Transport, timeout and renderer errors never imply that a target is absent.
+var errWarmTargetAbsent = errors.New("warm target confirmed absent")
+
 // takeWarmPage 取出可复用的热页面；取不到（无缓存/已过期/不可用）返回 nil。
 func (m *Manager) takeWarmPage(ctx context.Context, b *hrod.Browser) (*hrod.Page, error) {
 	m.mu.Lock()
@@ -291,8 +304,28 @@ func (m *Manager) takeWarmPage(ctx context.Context, b *hrod.Browser) (*hrod.Page
 		return nil, nil
 	}
 	probeCtx, cancelProbe := context.WithTimeout(ctx, browserHealthTimeout)
-	reusable := warmPageReusable(probeCtx, page, b, parkedAt, time.Now(), ttl)
+	reusable, probeErr := probeWarmPage(probeCtx, page, b, parkedAt, time.Now(), ttl)
 	cancelProbe()
+	if errors.Is(probeErr, errWarmTargetAbsent) {
+		// There is no target left to close. Retire cleanup ownership and its
+		// watcher, but keep the acquisition token for normal newPage below.
+		m.mu.Lock()
+		m.removeResetPageRecordLocked(pending)
+		m.mu.Unlock()
+		return nil, ctx.Err()
+	}
+	if probeErr != nil || ctx.Err() != nil {
+		// Restore the same cache entry and its original expiry; a failed query
+		// must not silently close the target or fall through to newPage.
+		m.mu.Lock()
+		if !m.closed && !m.resetting && m.browser == b && m.warmPage == nil {
+			m.removeResetPageRecordLocked(pending)
+			m.warmPage, m.warmPageAt = page, parkedAt
+			m.warmPageTimer = time.AfterFunc(time.Until(parkedAt.Add(ttl)), func() { m.expireWarmPage(page, b) })
+		}
+		m.mu.Unlock()
+		return nil, errors.Join(probeErr, ctx.Err())
+	}
 	if !reusable || ctx.Err() != nil {
 		err := m.closePendingPageRecord(ctx, pending)
 		if err != nil {
@@ -309,24 +342,39 @@ func (m *Manager) takeWarmPage(ctx context.Context, b *hrod.Browser) (*hrod.Page
 
 // warmPageReusable 判断缓存的热页面是否还能复用：未过期、属于当前浏览器实例、CDP 仍然可用。
 func warmPageReusable(ctx context.Context, page *hrod.Page, b *hrod.Browser, parkedAt, now time.Time, ttl time.Duration) bool {
+	reusable, err := probeWarmPage(ctx, page, b, parkedAt, now, ttl)
+	return reusable && err == nil
+}
+
+func probeWarmPage(ctx context.Context, page *hrod.Page, b *hrod.Browser, parkedAt, now time.Time, ttl time.Duration) (bool, error) {
 	if page == nil || ttl <= 0 {
-		return false
+		return false, nil
 	}
 	if now.Sub(parkedAt) > ttl {
-		return false
+		return false, nil
 	}
 	if b != nil && page.Browser() != b {
-		return false
+		return false, nil
 	}
 	if page.Rod == nil || page.Rod.Browser() == nil {
-		return false
+		return false, nil
 	}
-	if ctx.Err() != nil || page.Rod.GetContext().Err() != nil {
-		return false
+	if ctx.Err() != nil {
+		return false, ctx.Err()
 	}
-	// Rod's Info uses its creating Browser's context, ignoring Page.Context.
-	_, err := (proto.TargetGetTargetInfo{TargetID: page.Rod.TargetID}).Call(page.Rod.Browser().Context(ctx))
-	return err == nil && ctx.Err() == nil && page.Rod.GetContext().Err() == nil
+	if page.Rod.GetContext().Err() != nil {
+		return false, nil
+	}
+	// Query the browser target list with the probe context. A successful list
+	// excluding this ID is authoritative absence, without parsing error strings.
+	closed, err := pageTargetClosed(ctx, page)
+	if err != nil || ctx.Err() != nil {
+		return false, errors.Join(err, ctx.Err())
+	}
+	if closed {
+		return false, errWarmTargetAbsent
+	}
+	return page.Rod.GetContext().Err() == nil, nil
 }
 
 // parkWarmPage 把页面放进热页面缓存，到期自动关闭。返回 false 表示调用方应直接关闭它。

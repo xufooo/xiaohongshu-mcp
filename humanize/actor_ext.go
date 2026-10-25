@@ -31,6 +31,7 @@ type Actor struct {
 type inputState struct {
 	mu         sync.Mutex
 	dispatchMu sync.Mutex
+	inputErr   error
 	pos        Point
 	buttons    map[proto.InputMouseButton]int
 	pressed    map[input.Key]bool

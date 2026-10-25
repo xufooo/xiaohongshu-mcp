@@ -1,9 +1,11 @@
 package xiaohongshu
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 )
 
 // 致命错误（风控信号 / 渲染器已死）必须立刻结束等待，不能被当成"再等等"。
@@ -51,7 +53,7 @@ func TestWaitPollRangeSingleSource(t *testing.T) {
 	}
 }
 
-// 发布成功的判据必须准确：只有"离开发布表单页"才算成功，URL 为空不算。
+// Departure is an observation only; even a plausible success URL is unconfirmed.
 func TestPublishLeftForm(t *testing.T) {
 	cases := map[string]bool{
 		"https://creator.xiaohongshu.com/publish/publish?source=official": false,
@@ -67,6 +69,19 @@ func TestPublishLeftForm(t *testing.T) {
 	}
 }
 
+func TestPublishDepartureRemainsUnconfirmed(t *testing.T) {
+	for _, path := range []string{"publish/success", "login", "error", "explore/abc"} {
+		t.Run(path, func(t *testing.T) {
+			response := []byte(fmt.Sprintf(`{"targetInfo":{"targetId":"target-1","url":"https://creator.xiaohongshu.com/%s"}}`, path))
+			session := newCurrentPageURLSession(t, &currentPageURLCDPClient{response: response})
+			var unconfirmed *PublishUnconfirmedError
+			if err := waitPublishSuccess(session.page); !errors.As(err, &unconfirmed) {
+				t.Fatalf("departure must return a typed unconfirmed outcome: %v", err)
+			}
+		})
+	}
+}
+
 func TestSafePublishURLRedactsSensitiveParts(t *testing.T) {
 	cases := map[string]string{
 		"https://creator.xiaohongshu.com/explore/abc?token=secret#top": "https://creator.xiaohongshu.com/explore/abc",
@@ -76,6 +91,82 @@ func TestSafePublishURLRedactsSensitiveParts(t *testing.T) {
 	for rawURL, want := range cases {
 		if got := safePublishURL(rawURL); got != want {
 			t.Fatalf("safePublishURL(%q) = %q, 期望 %q", rawURL, got, want)
+		}
+	}
+}
+
+func TestReadyProgressIgnoresUnrelatedPageDecoration(t *testing.T) {
+	base := xhsReadyProbe{URL: ExploreURL, AppCount: 1, ReadyState: "interactive"}
+	decorated := base
+	decorated.Title = "animated title"
+	decorated.ScrollY = 200
+	decorated.StateFragment = "unrelated state"
+	if readyProgressFingerprint(base) != readyProgressFingerprint(decorated) {
+		t.Fatal("decoration reset business progress")
+	}
+	decorated.HomeFeedCount = 1
+	if readyProgressFingerprint(base) == readyProgressFingerprint(decorated) {
+		t.Fatal("feed loading did not advance business progress")
+	}
+}
+
+func TestWaitConditionReturnsFatalWithoutWaitingForPageSignal(t *testing.T) {
+	session := newCurrentPageURLSession(t, &currentPageURLCDPClient{})
+	failure := fmt.Errorf("renderer: %w", ErrFatalRendererError)
+	calls := 0
+	err := waitForCondition(waitRound{Page: session.page, Probe: func() (string, bool, error) {
+		calls++
+		return "", false, failure
+	}})
+	if err != failure || calls != 1 {
+		t.Fatalf("fatal probe continued waiting: calls=%d err=%v", calls, err)
+	}
+}
+
+func TestWaitUnchangedStateCanCompleteAfterFormerStallBudget(t *testing.T) {
+	client := &currentPageURLCDPClient{response: runtimeEvaluateStringResponse(t, `{"reason":"max","mutations":0}`)}
+	session := newCurrentPageURLSession(t, client)
+	clock := time.Unix(0, 0)
+	calls := 0
+	err := waitForConditionWithClock(waitRound{
+		Page: session.page, Ceiling: 3 * time.Minute,
+		Probe: func() (string, bool, error) {
+			calls++
+			clock = clock.Add(70 * time.Second)
+			return "unchanged while request runs", calls == 2, nil
+		},
+	}, func() time.Time { return clock })
+	if err != nil || calls != 2 {
+		t.Fatalf("quiet page rejected before target completion: calls=%d err=%v", calls, err)
+	}
+}
+
+func TestWaitSafetyCeilingAndCallerCancellationStillBoundQuietPage(t *testing.T) {
+	for _, cancelProbe := range []bool{false, true} {
+		client := &currentPageURLCDPClient{}
+		session := newCurrentPageURLSession(t, client)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		page := session.page.Context(ctx)
+		clock := time.Unix(0, 0)
+		ceilingErr := errors.New("safety ceiling, outcome unknown")
+		want := ceilingErr
+		if cancelProbe {
+			want = context.Canceled
+		}
+		err := waitForConditionWithClock(waitRound{
+			Page: page, Ceiling: time.Minute,
+			Probe: func() (string, bool, error) {
+				clock = clock.Add(2 * time.Minute)
+				if cancelProbe {
+					cancel()
+				}
+				return "unchanged", cancelProbe, nil
+			},
+			OnExhausted: func() error { return ceilingErr },
+		}, func() time.Time { return clock })
+		if !errors.Is(err, want) || client.runtimeCall != 0 {
+			t.Fatalf("bound lost or another probe issued: err=%v runtime=%d", err, client.runtimeCall)
 		}
 	}
 }

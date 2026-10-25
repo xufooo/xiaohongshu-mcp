@@ -231,7 +231,7 @@ func extractOpenedNoteCommentsFromDOM(ctx context.Context, page *hrod.Page, feed
 
 // ExtractSearchFeedsFromDOM 从渲染后的搜索/首页卡片提取笔记信息。
 func ExtractSearchFeedsFromDOM(page *hrod.Page) ([]Feed, error) {
-	sources, err := extractSearchFeedSources(context.Background(), page, nil, false)
+	sources, err := extractSearchFeedSources(page.Rod.GetContext(), page, nil, false)
 	if err != nil {
 		return nil, err
 	}

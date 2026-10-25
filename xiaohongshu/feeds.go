@@ -3,11 +3,12 @@ package xiaohongshu
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/go-rod/rod"
-	"github.com/xpzouying/xiaohongshu-mcp/errors"
+	xerrors "github.com/xpzouying/xiaohongshu-mcp/errors"
 	hrod "github.com/xpzouying/xiaohongshu-mcp/humanize/rod"
 )
 
@@ -47,7 +48,7 @@ func readHomeFeedsFromState(page *hrod.Page) ([]Feed, error) {
 		result = resultObj.Value.Str()
 	}
 	if result == "" {
-		return nil, errors.ErrNoFeeds
+		return nil, xerrors.ErrNoFeeds
 	}
 	var feeds []Feed
 	if err := json.Unmarshal([]byte(result), &feeds); err != nil {
@@ -58,7 +59,13 @@ func readHomeFeedsFromState(page *hrod.Page) ([]Feed, error) {
 
 func collectHomeFeeds(page *hrod.Page) ([]Feed, error) {
 	domFeeds, domErr := ExtractSearchFeedsFromDOM(page)
+	if terminalFeedCollectionError(domErr) {
+		return nil, domErr
+	}
 	stateFeeds, stateErr := readHomeFeedsFromState(page)
+	if terminalFeedCollectionError(stateErr) {
+		return nil, stateErr
+	}
 	if domErr == nil && len(domFeeds) > 0 {
 		return mergeFeedsByID(domFeeds, stateFeeds), nil
 	}
@@ -69,6 +76,10 @@ func collectHomeFeeds(page *hrod.Page) ([]Feed, error) {
 		return nil, domErr
 	}
 	return nil, stateErr
+}
+
+func terminalFeedCollectionError(err error) bool {
+	return isFatalWaitError(err) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 // GetFeedsList 获取页面的 Feed 列表数据

@@ -860,9 +860,16 @@ npx mcporter list xiaohongshu-mcp
 
 连接成功后，可使用以下 MCP 工具：
 
+校准脚本须连同 `scripts/pi-calibration-reviewed-324b84fd.py` 一起交付；协议、监听归属与进程监督不依赖本地未跟踪助手或外部 fixtures。对应独立契约测试为 `scripts/pi-calibration-reviewed-324b84fd_test.py`；源码审查不代表已完成真机验收。
+
+校准脚本 `scripts/pi-calibrate.sh` 使用已支持的 `-port 127.0.0.1:PORT` 监听地址启动服务（默认 `PORT=18160`），与默认 `http://127.0.0.1:18160/mcp` 一致；自定义数字 loopback `MCP_URL` 时绑定该地址，启动模式仅支持 HTTP。`--accept-existing` 必须显式提供数字 loopback `MCP_URL` 和一致的 `PORT`，服务 MainPID 必须在同一 network namespace 内持有覆盖该地址的监听。IPv6 通配监听请用 `MCP_URL=http://[::1]:18160/mcp PORT=18160`，不能推断 IPv6 通配 socket 覆盖 IPv4；不支持代理或远端端点。
+
 - `check_login_status` - 检查小红书登录状态（无参数）
 - `get_login_qrcode` - 获取登录二维码，返回 Base64 图片和超时时间（无参数）
 - `delete_cookies` - 删除 cookies 文件，重置登录状态，删除后需要重新登录（无参数）
+
+发布图文和视频在提交动作可能已经发出但没有权威回执时，返回 `status: "unconfirmed"` 和人工核实指引；MCP 的 `isError` 为 false，HTTP 返回正常响应封装。这不表示发布成功；请勿重试或自动重发，先人工核实。
+
 - `publish_content` - 发布图文内容到小红书（必需：title, content, images）
   - `images`: 图片路径列表（至少1张），支持 HTTP 链接或本地绝对路径，推荐使用本地路径
   - `tags`: 话题标签列表（可选），如 `["美食", "旅行", "生活"]`
@@ -876,17 +883,17 @@ npx mcporter list xiaohongshu-mcp
   - `schedule_at`: 定时发布时间（可选），ISO8601 格式，支持 1 小时至 14 天内
   - `visibility`: 可见范围（可选），支持 `公开可见`（默认）、`仅自己可见`、`仅互关好友可见`
   - `products`: 商品关键词列表（可选），用于绑定带货商品。填写商品名称或商品ID，系统会自动搜索并选择第一个匹配结果。需账号已开通商品功能。示例: [面膜, 防晒霜SPF50]
-- `start_page` - 创建一个保留同一浏览器页面的页面会话，返回 `session_id`，后续页面操作均需传入 `session_id`（可选：force_recreate）
+- `start_page` - 创建一个保留同一浏览器页面的页面会话，返回 `session_id`，后续页面操作均需传入 `session_id`（可选：force_recreate）。复用时 `ready:true, readiness_scope:page_transport` 只证明页面传输可用；业务就绪由后续操作检查。`blocked/unconfirmed` 返回 `ready:false`，保留原会话，稍后不带 force_recreate 检查
 - `get_page_state` - 获取页面会话的紧凑状态（必需：session_id）
 - `close_page` - 关闭页面会话并释放浏览器页面（必需：session_id）
 - `list_feeds` - 获取页面内首页推荐列表（必需：session_id；可选：cursor, max_items）
 - `search_feeds` - 在保留页面中通过真实 UI 搜索小红书内容（必需：session_id, keyword；可选：filters, cursor, max_items）
-  - `filters`: 筛选选项（可选）
-    - `sort_by`: 排序依据 - `综合`（默认）| `最新` | `最多点赞` | `最多评论` | `最多收藏`
-    - `note_type`: 笔记类型 - `不限`（默认）| `视频` | `图文`
-    - `publish_time`: 发布时间 - `不限`（默认）| `一天内` | `一周内` | `半年内`
-    - `search_scope`: 搜索范围 - `不限`（默认）| `已看过` | `未看过` | `已关注`
-    - `location`: 位置距离 - `不限`（默认）| `同城` | `附近`
+  - `filters`: 筛选选项（可选）。当前缺少可靠的筛选应用及对应响应完成证据，任何显式非空值（包括默认值）均在操作前拒绝；省略或 `{}` 不点击筛选，保留页面当前条件，不保证重置默认值。同关键词重复搜索读取现有结果，不保证刷新
+    - `sort_by`: 排序依据 - `综合` | `最新` | `最多点赞` | `最多评论` | `最多收藏`
+    - `note_type`: 笔记类型 - `不限` | `视频` | `图文`
+    - `publish_time`: 发布时间 - `不限` | `一天内` | `一周内` | `半年内`
+    - `search_scope`: 搜索范围 - `不限` | `已看过` | `未看过` | `已关注`
+    - `location`: 位置距离 - `不限` | `同城` | `附近`
 - `open_note` - 打开笔记并返回首屏标题、正文、作者、互动数据、首屏评论及笔记图片 URL（`data.note.imageList[].urlDefault/urlPre`，图文笔记；可交给 agent vision 理解图片内容）。支持两种互斥方式：(1) result_ref传搜索结果index或feed_id（可配合xsec_token）；(2) share_url传官方完整笔记URL(www.xiaohongshu.com/explore/{24位hex}或/discovery/item/{24位hex})或xhslink.com/xhslink.cn短链，会在当前session page内导航。两种方式恰好传一个（必需：session_id；result_ref与share_url二选一；xsec_token仅与result_ref配合使用）。start_page不支持share_url。失败不保证页面位置回退，但不会提交打开/阅读逻辑状态
 - `get_note_detail` - 读取当前已打开笔记的评论，支持分批加载（必需：session_id；可选：max_items, cursor, click_more_replies, reply_limit, scroll_speed）
 - `go_back` - 在页面会话内后退到上一页（必需：session_id）

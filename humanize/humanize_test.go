@@ -2,12 +2,14 @@ package humanize
 
 import (
 	"context"
+	"errors"
 	"math"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/go-rod/rod"
+	"github.com/go-rod/rod/lib/cdp"
 	"github.com/go-rod/rod/lib/input"
 	"github.com/go-rod/rod/lib/proto"
 	"github.com/stretchr/testify/assert"
@@ -194,5 +196,92 @@ func TestCoverDismissJSShape(t *testing.T) {
 	// aria-label 必须排在泛化的 [class*=close] 之前，否则会点到无关的隐藏 ×。
 	if strings.Index(coverDismissJS, "aria-label") > strings.Index(coverDismissJS, `[class*="close"]`) {
 		t.Fatal("关闭控件优先级不对：应先按 aria-label 找")
+	}
+}
+
+type canceledPressClient struct {
+	events      chan *cdp.Event
+	cancel      context.CancelFunc
+	presses     int
+	releases    int
+	failRelease bool
+	releaseCtx  context.Context
+}
+
+func (c *canceledPressClient) Event() <-chan *cdp.Event { return c.events }
+
+func (c *canceledPressClient) Call(ctx context.Context, _, method string, params interface{}) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if method == "Target.attachToTarget" {
+		return []byte(`{"sessionId":"mouse-session"}`), nil
+	}
+	if method == "Input.dispatchMouseEvent" {
+		request := params.(proto.InputDispatchMouseEvent)
+		if request.Type == proto.InputDispatchMouseEventTypeMousePressed {
+			c.presses++
+			c.cancel()
+		}
+		if request.Type == proto.InputDispatchMouseEventTypeMouseReleased {
+			c.releases++
+			c.releaseCtx = ctx
+			if c.failRelease {
+				return nil, errors.New("release disconnected")
+			}
+		}
+	}
+	return []byte(`{}`), nil
+}
+
+func TestClickCancellationReleasesOrDisablesSharedInput(t *testing.T) {
+	for _, failRelease := range []bool{false, true} {
+		name := "release_confirmed"
+		if failRelease {
+			name = "release_failed"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			client := &canceledPressClient{events: make(chan *cdp.Event), cancel: cancel, failRelease: failRelease}
+			browserCtx, stop := context.WithCancel(context.Background())
+			defer stop()
+			browser := rod.New().Context(browserCtx).NoDefaultDevice().ControlURL("").Client(client)
+			if err := browser.Connect(); err != nil {
+				t.Fatal(err)
+			}
+			browserEvents := browser.Event()
+			defer func() {
+				close(client.events)
+				select {
+				case <-browserEvents:
+				case <-time.After(time.Second):
+					t.Error("mouse fixture event goroutine did not exit")
+				}
+			}()
+			page, err := browser.PageFromTarget("mouse-target")
+			if err != nil {
+				t.Fatal(err)
+			}
+			actor := NewWithContext(page, Config{}, ctx)
+			err = actor.Mouse.clickButton(proto.InputMouseButtonLeft, 1)
+			if !errors.Is(err, context.Canceled) || client.presses != 1 || client.releases != 1 {
+				t.Fatalf("click cancellation: presses=%d releases=%d err=%v", client.presses, client.releases, err)
+			}
+			if deadline, ok := client.releaseCtx.Deadline(); !ok || time.Until(deadline) > 2*time.Second {
+				t.Fatal("release cleanup has no bounded context")
+			}
+			if failRelease {
+				actor.SetContext(context.Background())
+				if err := actor.Mouse.dispatchMouseScroll(0, 1); err == nil {
+					t.Fatal("uncertain button state allowed scrolling")
+				}
+				if err := actor.Keyboard.Press(input.Key('a')); err == nil {
+					t.Fatal("uncertain button state allowed keyboard input")
+				}
+			} else if len(actor.state.buttons) != 0 {
+				t.Fatal("successful release retained pressed button")
+			}
+		})
 	}
 }

@@ -35,6 +35,15 @@ type PublishAction struct {
 	page *hrod.Page
 }
 
+// PublishUnconfirmedError means the submit action may have reached the site.
+// It must survive wrapping so clients receive an outcome, not a retryable failure.
+type PublishUnconfirmedError struct{ Cause error }
+
+const PublishUnconfirmedGuidance = "发布结果未确认；可能已提交，请人工核实，勿重试或自动重发"
+
+func (e *PublishUnconfirmedError) Error() string { return PublishUnconfirmedGuidance }
+func (e *PublishUnconfirmedError) Unwrap() error { return e.Cause }
+
 const (
 	urlOfPublic = `https://creator.xiaohongshu.com/publish/publish?source=official`
 )
@@ -380,15 +389,18 @@ func clickPublishButton(page *hrod.Page) error {
 	if err != nil {
 		return err
 	}
-	return clickPublishWidget(page, btn.elem)
+	if err := clickPublishWidget(page, btn.elem); err != nil {
+		return &PublishUnconfirmedError{Cause: err}
+	}
+	return nil
 }
 
-// waitPublishSuccess 等发布成功的信号：小红书发布成功后会跳转离开发布表单页
-// （URL 不再含 /publish/publish）。用统一机制等待（等事件 + 无进展才报错），
-// 不再固定 15s + 固定间隔轮询。
+// Leaving the form is only a terminal observation, not a publish receipt.
+// No authoritative receipt contract is available in the tracked implementation.
+// Keep the single submission, but never turn an ambiguous outcome into success.
 func waitPublishSuccess(page *hrod.Page) error {
 	var lastURL string
-	return waitForCondition(waitRound{
+	err := waitForCondition(waitRound{
 		Kind: "publish_success",
 		Page: page,
 		Probe: func() (string, bool, error) {
@@ -399,14 +411,17 @@ func waitPublishSuccess(page *hrod.Page) error {
 			lastURL = info.URL
 			return info.URL, publishLeftForm(info.URL), nil
 		},
-		OnReady: func() { slog.Info("发布成功，已跳转离开发布页", "url", safePublishURL(lastURL)) },
 		OnExhausted: func() error {
-			return errors.Errorf("发布未确认成功：点击发布后未跳转离开发布页（可能校验未过或被拦截）: url=%s", safePublishURL(lastURL))
+			return errors.New("未收到可验证的发布回执")
 		},
 	})
+	if err != nil {
+		return &PublishUnconfirmedError{Cause: err}
+	}
+	return &PublishUnconfirmedError{Cause: errors.Errorf("离开表单但没有发布回执: url=%s", safePublishURL(lastURL))}
 }
 
-// publishLeftForm 判断 URL 是否已经离开发布表单页——发布成功的信号。
+// publishLeftForm only detects departure, including login/error/unrelated pages.
 // 独立成函数是为了能被测试钉住（发布链路不便反复真跑）。
 func publishLeftForm(rawURL string) bool {
 	return rawURL != "" && !strings.Contains(rawURL, "/publish/publish")
@@ -431,6 +446,9 @@ func waitForPublishButtonClickable(page *hrod.Page, maxWait time.Duration) (*pub
 	for time.Since(start) < maxWait {
 		btn, disabledReason, err := findPublishButton(page)
 		if err != nil {
+			if terminalFeedCollectionError(err) {
+				return nil, err
+			}
 			slog.Warn("查找发布按钮失败，继续等待", "error", err)
 			if err := page.Sleep(interval); err != nil {
 				return nil, err

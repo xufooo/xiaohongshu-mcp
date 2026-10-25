@@ -42,11 +42,11 @@ type PublishVideoArgs struct {
 
 // FilterOption 筛选选项结构体
 type FilterOption struct {
-	SortBy      string `json:"sort_by,omitempty" jsonschema:"排序依据: 综合|最新|最多点赞|最多评论|最多收藏,默认为'综合'"`
-	NoteType    string `json:"note_type,omitempty" jsonschema:"笔记类型: 不限|视频|图文,默认为'不限'"`
-	PublishTime string `json:"publish_time,omitempty" jsonschema:"发布时间: 不限|一天内|一周内|半年内,默认为'不限'"`
-	SearchScope string `json:"search_scope,omitempty" jsonschema:"搜索范围: 不限|已看过|未看过|已关注,默认为'不限'"`
-	Location    string `json:"location,omitempty" jsonschema:"位置距离: 不限|同城|附近,默认为'不限'"`
+	SortBy      string `json:"sort_by,omitempty" jsonschema:"排序依据: 综合|最新|最多点赞|最多评论|最多收藏；当前无法确认筛选应用，显式传值将报错，省略保留页面当前条件"`
+	NoteType    string `json:"note_type,omitempty" jsonschema:"笔记类型: 不限|视频|图文；当前无法确认筛选应用，显式传值将报错，省略保留页面当前条件"`
+	PublishTime string `json:"publish_time,omitempty" jsonschema:"发布时间: 不限|一天内|一周内|半年内；当前无法确认筛选应用，显式传值将报错，省略保留页面当前条件"`
+	SearchScope string `json:"search_scope,omitempty" jsonschema:"搜索范围: 不限|已看过|未看过|已关注；当前无法确认筛选应用，显式传值将报错，省略保留页面当前条件"`
+	Location    string `json:"location,omitempty" jsonschema:"位置距离: 不限|同城|附近；当前无法确认筛选应用，显式传值将报错，省略保留页面当前条件"`
 }
 
 // UserProfileArgs 获取用户主页的参数
@@ -249,7 +249,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 	mcp.AddTool(server,
 		&mcp.Tool{
 			Name:        "publish_content",
-			Description: "发布小红书图文内容",
+			Description: "发布小红书图文内容；结果 unconfirmed 表示可能已提交但无权威回执，请人工核实，勿重试或自动重发",
 			Annotations: &mcp.ToolAnnotations{
 				Title:           "Publish Content",
 				DestructiveHint: boolPtr(true),
@@ -281,7 +281,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 	mcp.AddTool(server,
 		&mcp.Tool{
 			Name:        "search_feeds",
-			Description: "在保留页面中通过真实UI搜索小红书内容（需要 session_id），返回的 result_ref 可供 open_note 使用",
+			Description: "在保留页面中通过真实UI搜索小红书内容（需要 session_id），返回的 result_ref 可供 open_note 使用。省略筛选保留当前条件，同关键词读取现有结果；显式非空筛选当前无法验证，操作前报错",
 			Annotations: &mcp.ToolAnnotations{
 				Title:        "Search Feeds",
 				ReadOnlyHint: true,
@@ -345,7 +345,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 	mcp.AddTool(server,
 		&mcp.Tool{
 			Name:        "publish_with_video",
-			Description: "发布小红书视频内容（仅支持本地单个视频文件）",
+			Description: "发布小红书视频内容（仅支持本地单个视频文件）；结果 unconfirmed 表示可能已提交但无权威回执，请人工核实，勿重试或自动重发",
 			Annotations: &mcp.ToolAnnotations{
 				Title:           "Publish Video",
 				DestructiveHint: boolPtr(true),
@@ -393,7 +393,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 	mcp.AddTool(server,
 		&mcp.Tool{
 			Name:        "start_page",
-			Description: "创建一个保留同一浏览器页面的页面会话（start_page），用于连续执行搜索、打开、阅读、互动和返回。所有 session 工具的成功响应都带 next_step（唯一推荐的下一步工具及可直接使用的 args）和 available_tools（当前状态允许的工具）；失败响应也带 next_step，照着调用即可，不要自己猜工具",
+			Description: "创建一个保留同一浏览器页面的页面会话（start_page），用于连续执行搜索、打开、阅读、互动和返回。复用的 ready:true 仅代表 readiness_scope:page_transport；blocked/unconfirmed 保留会话且 ready:false，稍后不带 force_recreate 检查。所有 session 工具的成功响应都带 next_step（唯一推荐的下一步工具及可直接使用的 args）和 available_tools（当前状态允许的工具）；失败响应也带 next_step，照着调用即可，不要自己猜工具",
 			Annotations: &mcp.ToolAnnotations{
 				Title:        "Start Page",
 				ReadOnlyHint: true,

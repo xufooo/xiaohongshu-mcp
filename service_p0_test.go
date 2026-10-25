@@ -828,6 +828,44 @@ func TestRunReadyWithColdStartRecoveryRetriesOnlyNarrowStall(t *testing.T) {
 	}
 }
 
+func TestRunReadyWithColdStartRecoveryPreservesWaitContext(t *testing.T) {
+	stall := fmt.Errorf("页面停止推进: %w", context.DeadlineExceeded)
+	for _, budget := range []time.Duration{0, time.Minute, 5 * time.Minute} {
+		t.Run(budget.String(), func(t *testing.T) {
+			parent := context.Background()
+			if budget > 0 {
+				bounded, cancel := context.WithTimeout(parent, budget)
+				defer cancel()
+				parent = bounded
+			}
+			ctx, cancel := context.WithCancel(parent)
+			defer cancel()
+			calls := 0
+			err := runReadyWithColdStartRecovery(ctx, true, false,
+				func(context.Context) error { return stall },
+				func(waitCtx context.Context) error {
+					calls++
+					wantDeadline, wantBound := ctx.Deadline()
+					gotDeadline, gotBound := waitCtx.Deadline()
+					if gotBound != wantBound || !gotDeadline.Equal(wantDeadline) {
+						t.Fatalf("recovery changed request deadline: got %v/%t want %v/%t", gotDeadline, gotBound, wantDeadline, wantBound)
+					}
+					cancel()
+					select {
+					case <-waitCtx.Done():
+						return waitCtx.Err()
+					default:
+						t.Fatal("recovery detached request cancellation")
+						return nil
+					}
+				})
+			if calls != 1 || !errors.Is(err, context.Canceled) {
+				t.Fatalf("recovery cancellation: calls=%d err=%v", calls, err)
+			}
+		})
+	}
+}
+
 func TestHandleSessionOperationErrorClosesFatalSession(t *testing.T) {
 	manager := xiaohongshu.NewBrowseSessionManager(time.Minute)
 	session := manager.Create(nil, nil, nil)
@@ -1113,6 +1151,9 @@ func TestBuildBrowseSessionReuseResultAcceptsExtendedTTL(t *testing.T) {
 	if !result.Status.Ready {
 		t.Fatal("Status.Ready 应为 true")
 	}
+	if result.Status.ReadinessScope != "page_transport" {
+		t.Fatal("reuse response must distinguish transport health from business readiness")
+	}
 	if result.Session == nil || result.Session.ExpiresAt != renewed.ExpiresAt {
 		t.Fatal("顶层 Session 应为续期后信息")
 	}
@@ -1154,6 +1195,157 @@ func TestTryReuseSessionCanceledContextDoesNotDegrade(t *testing.T) {
 	}
 	if _, err := manager.Get(session.ID()); err != nil {
 		t.Fatalf("取消请求不应关闭 session: %v", err)
+	}
+}
+
+type unconfirmedReuseCDPClient struct {
+	sessionCleanupPageClient
+	readyState string
+	timeout    bool
+}
+
+func TestSearchFilterSchemasDescribeUnconfirmedBehavior(t *testing.T) {
+	for _, typ := range []reflect.Type{reflect.TypeOf(FilterOption{}), reflect.TypeOf(xiaohongshu.FilterOption{})} {
+		for i := 0; i < typ.NumField(); i++ {
+			field := typ.Field(i)
+			description := field.Tag.Get("jsonschema")
+			if strings.Contains(description, "默认为") || !strings.Contains(description, "显式传值将报错") || !strings.Contains(description, "省略保留页面当前条件") {
+				t.Fatalf("%s.%s advertises unsupported filter semantics: %s", typ, field.Name, description)
+			}
+		}
+	}
+}
+
+func (c *unconfirmedReuseCDPClient) Call(ctx context.Context, sessionID, method string, params interface{}) ([]byte, error) {
+	raw, _ := json.Marshal(params)
+	if strings.HasPrefix(method, "Runtime.") && strings.Contains(string(raw), "readyState") {
+		if c.timeout {
+			return nil, context.DeadlineExceeded
+		}
+		state, _ := json.Marshal(map[string]string{"url": "https://www.xiaohongshu.com/explore", "readyState": c.readyState})
+		return json.Marshal(map[string]any{"result": map[string]any{"type": "string", "value": string(state)}})
+	}
+	return c.sessionCleanupPageClient.Call(ctx, sessionID, method, params)
+}
+
+func TestUnconfirmedReuseRetainsCandidateAndAdvertisesNondestructiveRetry(t *testing.T) {
+	for _, mode := range []string{"loading", "probe budget"} {
+		t.Run(mode, func(t *testing.T) {
+			client := &unconfirmedReuseCDPClient{
+				sessionCleanupPageClient: sessionCleanupPageClient{events: make(chan *cdp.Event)},
+				readyState:              "loading",
+				timeout:                 mode == "probe budget",
+			}
+			browserCtx, cancelBrowser := context.WithCancel(context.Background())
+			defer cancelBrowser()
+			controller := rod.New().Context(browserCtx).NoDefaultDevice().ControlURL("").Client(client)
+			if err := controller.Connect(); err != nil {
+				t.Fatal(err)
+			}
+			rawPage, err := controller.PageFromTarget("reuse-target")
+			if err != nil {
+				t.Fatal(err)
+			}
+			sessions := xiaohongshu.NewBrowseSessionManager(time.Minute)
+			t.Cleanup(sessions.CloseAll)
+			closed := 0
+			session := sessions.Create(&hrod.Page{Rod: rawPage}, nil, func(*hrod.Page) { closed++ })
+			service := &XiaohongshuService{browseSessions: sessions}
+			result, err := service.tryReuseSession(context.Background())
+			if err != nil || result == nil || result.Status.Status != xiaohongshu.SessionUnconfirmed || result.Status.Ready {
+				t.Fatalf("slow candidate treated as failed/ready: result=%+v err=%v", result, err)
+			}
+			if result.Session != nil || result.Status.Session != nil || result.Status.ReadinessScope != "page_transport" {
+				t.Fatalf("unchecked candidate identity/readiness advertised: %+v", result)
+			}
+			wire := (&AppServer{}).startPageToolResult(context.Background(), result)
+			var payload struct {
+				NextStep xiaohongshu.NextStep `json:"next_step"`
+			}
+			if err := json.Unmarshal([]byte(wire.Content[0].Text), &payload); err != nil {
+				t.Fatal(err)
+			}
+			if payload.NextStep.Tool != "start_page" || len(payload.NextStep.Args) != 0 || closed != 0 {
+				t.Fatalf("retry would recreate/drop candidate: step=%+v closed=%d", payload.NextStep, closed)
+			}
+			if active, ok := sessions.ActiveSessionSnapshot(); !ok || active != session {
+				t.Fatal("unconfirmed candidate was discarded")
+			}
+			client.timeout = false
+			client.readyState = "complete"
+			retry, err := service.tryReuseSession(context.Background())
+			if err != nil || retry == nil || retry.Session == nil || retry.Session.ID != session.ID() || closed != 0 {
+				t.Fatalf("retry did not reuse original page: result=%+v err=%v closed=%d", retry, err, closed)
+			}
+		})
+	}
+}
+
+func TestFeedCursorFailedAttemptAndSuccessfulCommit(t *testing.T) {
+	service := &XiaohongshuService{feedCursorTTL: time.Minute}
+	input := &xiaohongshu.FeedCursor{Kind: xiaohongshu.FeedPageHome, ReturnedIDs: []string{"a"}}
+	service.setFeedCursor("old", feedCursorEntry{SessionID: "session", QueryKey: "home::", Cursor: input})
+	attempt, err := service.loadFeedCursor("old", "session", "home::")
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempt.ReturnedIDs = append(attempt.ReturnedIDs, "b")
+	// A canceled/failed batch does not call commit. Its private mutations must
+	// not change the stored input, and a retry starts from the same IDs.
+	retry, err := service.loadFeedCursor("old", "session", "home::")
+	if err != nil || !reflect.DeepEqual(retry.ReturnedIDs, []string{"a"}) {
+		t.Fatalf("failed attempt changed stored cursor: retry=%+v err=%v", retry, err)
+	}
+	nextID, seen := service.commitFeedCursor("old", "session", "home::", attempt, true)
+	if nextID == "" || seen != 2 {
+		t.Fatalf("success lost successor: id=%q seen=%d", nextID, seen)
+	}
+	if _, err := service.loadFeedCursor("old", "session", "home::"); err == nil {
+		t.Fatal("committed old cursor remained available")
+	}
+	next, err := service.loadFeedCursor(nextID, "session", "home::")
+	if err != nil || !reflect.DeepEqual(next.ReturnedIDs, []string{"a", "b"}) {
+		t.Fatalf("successor not saved: next=%+v err=%v", next, err)
+	}
+	service.delFeedCursor(nextID)
+}
+
+func TestPublishUnconfirmedSurvivesWrappingAndReturnsOutcome(t *testing.T) {
+	for _, cause := range []error{context.Canceled, context.DeadlineExceeded, errors.New("receipt absent")} {
+		wrapped := fmt.Errorf("action wrapper: %w", &xiaohongshu.PublishUnconfirmedError{Cause: cause})
+		status, message, err := publishOutcome(wrapped)
+		if err != nil || status != "unconfirmed" || !strings.Contains(message, "勿重试") || !errors.Is(wrapped, cause) {
+			t.Fatalf("ambiguous submission became failure/success: status=%q message=%q err=%v", status, message, err)
+		}
+		for _, response := range []any{
+			&PublishResponse{Status: status, Message: message},
+			&PublishVideoResponse{Status: status, Message: message},
+		} {
+			wire := publishToolResult(response)
+			var decoded struct {
+				Status  string `json:"status"`
+				Message string `json:"message"`
+			}
+			if wire.IsError || len(wire.Content) != 1 || json.Unmarshal([]byte(wire.Content[0].Text), &decoded) != nil || decoded.Status != "unconfirmed" || decoded.Message != message {
+				t.Fatalf("publish wire invites retry or claims success: %+v", wire)
+			}
+		}
+	}
+	validation := errors.New("invalid before submit")
+	if _, _, err := publishOutcome(validation); err != validation {
+		t.Fatal("pre-submit failure must remain a failure")
+	}
+	if status, _, err := publishOutcome(nil); status != "发布完成" || err != nil {
+		t.Fatal("confirmed outcome changed")
+	}
+}
+
+func TestStartPageFailureHintsNeverForceReplacement(t *testing.T) {
+	for _, failure := range []error{context.Canceled, context.DeadlineExceeded, errors.New("probe unavailable")} {
+		step := startPageNextStep(failure)
+		if step.Tool != "start_page" || len(step.Args) != 0 || !strings.Contains(step.Hint, "不带 force_recreate") {
+			t.Fatalf("ambiguous failure recommends replacement: %+v", step)
+		}
 	}
 }
 
@@ -1361,8 +1553,8 @@ func TestStartPageBlockedStepPointsBackToStartPage(t *testing.T) {
 		Status:  xiaohongshu.BrowseSessionStatusInfo{Status: xiaohongshu.SessionUnhealthy, LastError: "renderer 不可用"},
 	}
 	recreate := startPageBlockedStep(context.Background(), unknown)
-	if recreate.Args["force_recreate"] != true {
-		t.Fatalf("不可复用时应带 force_recreate=true: %v", recreate.Args)
+	if len(recreate.Args) != 0 {
+		t.Fatalf("未确认失败不得建议破坏性重试: %v", recreate.Args)
 	}
 	if !strings.Contains(recreate.Reason, "unhealthy") {
 		t.Fatalf("reason 应说明具体状态: %s", recreate.Reason)
@@ -1422,7 +1614,7 @@ func TestStartPageNextStepByRisk(t *testing.T) {
 		{"验证码要求人工处理", "等待探索页就绪失败: 页面出现风险信号: 请完成安全验证", "start_page", "人工"},
 		{"滑块要求人工处理", "页面出现风险信号: 请拖动滑块", "start_page", "人工"},
 		{"访问异常要求等待", "页面出现风险信号: 操作频繁，请稍后再试", "start_page", "等待"},
-		{"普通失败重建会话", "等待探索页就绪失败: 页面就绪超时", "start_page", "force_recreate=true"},
+		{"超时保留页面", "等待探索页就绪失败: 页面就绪超时", "start_page", "不带 force_recreate"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

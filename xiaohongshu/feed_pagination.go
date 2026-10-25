@@ -2,6 +2,7 @@ package xiaohongshu
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -16,7 +17,14 @@ const (
 	FeedPageSearch FeedPageKind = "search"
 )
 
+type feedCursorPosition struct {
+	session    *BrowseSession
+	generation uint64
+	consumed   bool
+}
+
 type FeedCursor struct {
+	position    *feedCursorPosition
 	Kind        FeedPageKind `json:"kind"`
 	Keyword     string       `json:"keyword,omitempty"`
 	FilterKey   string       `json:"filter_key,omitempty"`
@@ -81,7 +89,7 @@ type feedPageOps struct {
 	collect       func() ([]Feed, error)
 	scroll        func() error
 	waitForGrowth func(context.Context, map[string]bool) (grew bool, atEnd bool, err error)
-	atEnd         func() bool
+	atEnd         func() (bool, error)
 }
 
 func feedKeySet(feeds []Feed) map[string]bool {
@@ -95,8 +103,17 @@ func feedKeySet(feeds []Feed) map[string]bool {
 func loadFeedBatchWithOps(ctx context.Context, cursor *FeedCursor, maxItems int, ops feedPageOps) ([]Feed, bool, error) {
 	batch := make([]Feed, 0, maxItems)
 	for len(batch) < maxItems {
+		if err := ctx.Err(); err != nil {
+			return batch, true, err
+		}
 		feeds, err := ops.collect()
 		if err != nil {
+			if isFatalWaitError(err) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return batch, true, err
+			}
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return batch, true, ctxErr
+			}
 			if len(batch) == 0 {
 				return nil, true, err
 			}
@@ -106,13 +123,26 @@ func loadFeedBatchWithOps(ctx context.Context, cursor *FeedCursor, maxItems int,
 			)
 			return batch, true, nil
 		}
+		if err := ctx.Err(); err != nil {
+			return batch, true, err
+		}
 		batch = append(batch, takeNewFeeds(feeds, cursor, maxItems-len(batch))...)
 		if len(batch) == maxItems {
 			// 本地仍有卡片时必然可续页，无需再发一次 DOM/CDP 末尾探测。
 			if hasUnseenFeeds(feeds, cursor) {
 				return batch, true, nil
 			}
-			atEnd := ops.atEnd != nil && ops.atEnd()
+			atEnd := false
+			if ops.atEnd != nil {
+				var endErr error
+				atEnd, endErr = ops.atEnd()
+				if endErr != nil {
+					return batch, true, endErr
+				}
+			}
+			if err := ctx.Err(); err != nil {
+				return batch, true, err
+			}
 			return batch, !atEnd, nil
 		}
 		if err := ctx.Err(); err != nil {
@@ -121,6 +151,12 @@ func loadFeedBatchWithOps(ctx context.Context, cursor *FeedCursor, maxItems int,
 		// 只有需要滚动等待增长时才构建基线，收满批次时不使用它。
 		before := feedKeySet(feeds)
 		if err := ops.scroll(); err != nil {
+			if isFatalWaitError(err) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return batch, true, err
+			}
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return batch, true, ctxErr
+			}
 			if len(batch) > 0 {
 				return batch, true, nil
 			}
@@ -129,6 +165,12 @@ func loadFeedBatchWithOps(ctx context.Context, cursor *FeedCursor, maxItems int,
 		cursor.Round++
 		grew, atEnd, err := ops.waitForGrowth(ctx, before)
 		if err != nil {
+			if isFatalWaitError(err) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return batch, true, err
+			}
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return batch, true, ctxErr
+			}
 			if len(batch) > 0 {
 				logrus.WithError(err).Warnf(
 					"waitForGrowth failed; returning partial batch: count=%d",
@@ -137,6 +179,9 @@ func loadFeedBatchWithOps(ctx context.Context, cursor *FeedCursor, maxItems int,
 				return batch, true, nil
 			}
 			return nil, true, err
+		}
+		if err := ctx.Err(); err != nil {
+			return batch, true, err
 		}
 		if atEnd {
 			return batch, false, nil
@@ -161,7 +206,7 @@ func LoadFeedBatch(ctx context.Context, page *hrod.Page, kind FeedPageKind, curs
 		scroll: func() error {
 			return page.Actor().Mouse.Scroll(0, 700)
 		},
-		atEnd: func() bool {
+		atEnd: func() (bool, error) {
 			return hasEndSignal(page)
 		},
 		waitForGrowth: func(ctx context.Context, before map[string]bool) (bool, bool, error) {
@@ -180,7 +225,11 @@ func LoadFeedBatch(ctx context.Context, page *hrod.Page, kind FeedPageKind, curs
 						return true, false, nil
 					}
 				}
-				if ops.atEnd() {
+				atEnd, err := ops.atEnd()
+				if err != nil {
+					return false, false, err
+				}
+				if atEnd {
 					return false, true, nil
 				}
 				if err := page.Context(ctx).SleepRandom(300*time.Millisecond, 500*time.Millisecond); err != nil {
@@ -194,13 +243,16 @@ func LoadFeedBatch(ctx context.Context, page *hrod.Page, kind FeedPageKind, curs
 	return feeds, cursor, hasMore, err
 }
 
-func hasEndSignal(page *hrod.Page) bool {
+func hasEndSignal(page *hrod.Page) (bool, error) {
 	result, err := page.Eval(`() => {
 		if (document.querySelector('.end-container, .no-more')) return true;
 		return false;
 	}`)
-	if err != nil || result == nil {
-		return false
+	if err != nil {
+		return false, err
 	}
-	return result.Value.Bool()
+	if result == nil || result.Type != "boolean" {
+		return false, fmt.Errorf("feed end probe returned no boolean")
+	}
+	return result.Value.Bool(), nil
 }

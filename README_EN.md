@@ -763,9 +763,16 @@ Basic configuration template:
 
 After successful connection, you can use the following MCP tools:
 
+Ship calibration together with `scripts/pi-calibration-reviewed-324b84fd.py`; protocol validation, listener ownership and child supervision do not depend on local untracked helpers or external fixtures. Self-contained contract tests are in `scripts/pi-calibration-reviewed-324b84fd_test.py`. Source review does not establish Raspberry Pi runtime acceptance.
+
+Calibration (`scripts/pi-calibrate.sh`) launches with the supported `-port 127.0.0.1:PORT` listen address (default `PORT=18160`), matching `http://127.0.0.1:18160/mcp`. A custom numeric loopback `MCP_URL` selects the exact launched bind address; launched mode supports HTTP only. `--accept-existing` requires an explicit numeric loopback `MCP_URL` and matching `PORT`, in the same network namespace, with a covering listener owned by the service MainPID. For an IPv6 wildcard listener, use `MCP_URL=http://[::1]:18160/mcp PORT=18160`; IPv4 coverage cannot be inferred from an IPv6 wildcard. Proxies and remote endpoints are unsupported.
+
 - `check_login_status` - Check RedNote login status (no parameters)
 - `get_login_qrcode` - Get login QR code, returns Base64 image and timeout (no parameters)
 - `delete_cookies` - Delete cookies file, reset login status, requires re-login after deletion (no parameters)
+
+Image and video publication return `status: "unconfirmed"` with manual verification guidance when submission may have occurred without an authoritative receipt. MCP uses `isError:false`; HTTP uses the normal response envelope. This does not confirm publication. Do not retry or automatically repost; verify manually first.
+
 - `publish_content` - Publish image-text content to RedNote (required: title, content, images)
   - `images`: Image path list (minimum 1), supports HTTP links or local absolute paths, local paths recommended
   - `tags`: Topic tags list (optional), e.g. `["food", "travel", "lifestyle"]`
@@ -777,17 +784,17 @@ After successful connection, you can use the following MCP tools:
   - `tags`: Topic tags list (optional), e.g. `["food", "travel", "lifestyle"]`
   - `schedule_at`: Scheduled publish time (optional), ISO8601 format, supports 1 hour to 14 days ahead
   - `visibility`: Visibility scope (optional), supports `public` (default), `self-only`, `friends-only`
-- `start_page` - Create a page session that retains the same browser page, returns `session_id`; all subsequent page operations require `session_id` (optional: force_recreate)
+- `start_page` - Create a page session that retains the same browser page, returns `session_id`; all subsequent page operations require `session_id` (optional: force_recreate). On reuse, `ready:true, readiness_scope:page_transport` confirms transport only; subsequent operations check business readiness. `blocked/unconfirmed` returns `ready:false` and retains the session; check again without force_recreate
 - `get_page_state` - Get the compact state of the page session (required: session_id)
 - `close_page` - Close the page session and release the browser page (required: session_id)
 - `list_feeds` - Get the recommendation list within the retained page (required: session_id; optional: cursor, max_items)
 - `search_feeds` - Search RedNote content via real UI in the retained page (required: session_id, keyword; optional: filters, cursor, max_items)
-  - `filters`: Filter options (optional)
-    - `sort_by`: Sort by - `comprehensive` (default) | `latest` | `most liked` | `most comments` | `most saved`
-    - `note_type`: Note type - `unlimited` (default) | `video` | `image-text`
-    - `publish_time`: Publish time - `unlimited` (default) | `last day` | `last week` | `last 6 months`
-    - `search_scope`: Search scope - `unlimited` (default) | `viewed` | `not viewed` | `followed`
-    - `location`: Location - `unlimited` (default) | `same city` | `nearby`
+  - `filters`: Filter options (optional). Explicit nonempty values, including defaults, are rejected before actions because applied conditions and response completion cannot be verified. Omission or `{}` leaves current page conditions unchanged without filter clicks; it does not reset defaults. Repeating the same keyword reads existing results without guaranteeing a refresh
+    - `sort_by`: Sort by - `comprehensive` | `latest` | `most liked` | `most comments` | `most saved`
+    - `note_type`: Note type - `unlimited` | `video` | `image-text`
+    - `publish_time`: Publish time - `unlimited` | `last day` | `last week` | `last 6 months`
+    - `search_scope`: Search scope - `unlimited` | `viewed` | `not viewed` | `followed`
+    - `location`: Location - `unlimited` | `same city` | `nearby`
 - `open_note` - Open a note and return first-screen title, content, author, interaction data, first-screen comments and note image URLs (`data.note.imageList[].urlDefault/urlPre`, image-text notes; can be handed to agent vision to understand image content). Supports two mutually exclusive methods: (1) result_ref for search result index or feed_id (can use xsec_token); (2) share_url for official full note URL (www.xiaohongshu.com/explore/{24hex} or /discovery/item/{24hex}) or an xhslink.com/xhslink.cn short link, navigates within current session page. Exactly one of the two methods is required (required: session_id; result_ref or share_url; xsec_token only with result_ref). start_page does not support share_url. Failure does not guarantee page position rollback, but will not commit open/read logical state
 - `get_note_detail` - Read comments of the currently opened note, supports batched loading (required: session_id; optional: max_items, cursor, click_more_replies, reply_limit, scroll_speed)
 - `go_back` - Go back to the previous page within the page session (required: session_id)

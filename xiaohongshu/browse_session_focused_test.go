@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-rod/rod/lib/proto"
 	hrod "github.com/xpzouying/xiaohongshu-mcp/humanize/rod"
 )
 
@@ -157,5 +158,196 @@ func TestFocusedCanceledLifecycleCreationDoesNotStartCleanup(t *testing.T) {
 	}
 	if manager.closing[retained.id] != retained || retained.closeLeaseReleased || len(manager.workers) != 0 {
 		t.Fatal("canceled creation must preserve page and lease without background work")
+	}
+}
+
+func TestFeedCursorRejectsABAAndConsumedClones(t *testing.T) {
+	manager := NewBrowseSessionManager(time.Minute)
+	t.Cleanup(manager.CloseAll)
+	session := manager.Create(nil, nil, nil)
+	filterKey := filterKeyFromFilters(nil)
+	start := func(keyword string) *FeedCursor {
+		t.Helper()
+		if err := session.validateFeedCursor(nil, FeedPageSearch, keyword, filterKey); err != nil {
+			t.Fatal(err)
+		}
+		session.invalidateFeedCursor()
+		cursor := &FeedCursor{Kind: FeedPageSearch, Keyword: keyword, FilterKey: filterKey}
+		session.advanceFeedCursor(cursor)
+		return cursor
+	}
+	oldA := start("A")
+	oldAClone := *oldA
+	start("B")
+	newA := start("A")
+	if err := session.validateFeedCursor(&oldAClone, FeedPageSearch, "A", filterKey); err == nil {
+		t.Fatal("A to B to A revived an old cursor")
+	}
+	clone := *newA
+	if err := session.validateFeedCursor(&clone, FeedPageSearch, "A", "wrong-filter"); err == nil {
+		t.Fatal("filter mismatch accepted")
+	}
+	if err := session.validateFeedCursor(&clone, FeedPageSearch, "A", filterKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.validateFeedCursor(&clone, FeedPageSearch, "A", filterKey); err != nil {
+		t.Fatal("an uncommitted cursor must remain usable after a failed operation")
+	}
+	session.advanceFeedCursor(&clone)
+	if err := session.validateFeedCursor(newA, FeedPageSearch, "A", filterKey); err == nil {
+		t.Fatal("copying a cursor duplicated its consumption right")
+	}
+}
+
+func TestFeedCursorConcurrentClonesConsumeOnceUnderOperationToken(t *testing.T) {
+	client := &searchP0CDPClient{feedBatch: true}
+	rawPage, _ := newSearchP0Element(t, client)
+	manager := NewBrowseSessionManager(time.Minute)
+	t.Cleanup(manager.CloseAll)
+	session := manager.Create(nil, nil, nil)
+	session.page = (&hrod.Page{Rod: rawPage, Keyboard: rawPage.Keyboard}).Context(context.Background())
+	session.evalJS = nil
+	cursor := &FeedCursor{Kind: FeedPageHome}
+	session.advanceFeedCursor(cursor)
+	first, second := *cursor, *cursor
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if _, err := session.beginLockedOperation(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	type result struct {
+		feeds []Feed
+		next  *FeedCursor
+		err   error
+	}
+	results := make(chan result, 2)
+	for _, clone := range []*FeedCursor{&first, &second} {
+		go func(c *FeedCursor) {
+			feeds, next, _, err := session.ListFeedsBatch(ctx, c, 1)
+			results <- result{feeds: feeds, next: next, err: err}
+		}(clone)
+	}
+	session.releaseOperation()
+	successes := 0
+	for range 2 {
+		select {
+		case got := <-results:
+			if got.err == nil {
+				successes++
+				if len(got.feeds) != 1 || got.feeds[0].ID != "a" || got.next == nil {
+					t.Fatalf("successful batch lost its result: %+v", got)
+				}
+			} else if errors.Is(got.err, context.DeadlineExceeded) {
+				t.Fatalf("cursor contender did not finish: %v", got.err)
+			}
+		case <-ctx.Done():
+			t.Fatal("cursor contenders failed to join")
+		}
+	}
+	if successes != 1 || client.collections != 1 || len(session.opToken) != 1 {
+		t.Fatalf("cursor forked or token leaked: successes=%d collections=%d tokens=%d", successes, client.collections, len(session.opToken))
+	}
+}
+
+func TestFeedCursorRejectsWrongLivePageBeforeCollect(t *testing.T) {
+	client := &currentPageURLCDPClient{response: []byte(`{"targetInfo":{"targetId":"target-1","url":"https://www.xiaohongshu.com/search_result?keyword=B"}}`)}
+	pageSession := newCurrentPageURLSession(t, client)
+	manager := NewBrowseSessionManager(time.Minute)
+	t.Cleanup(manager.CloseAll)
+	session := manager.Create(nil, nil, nil)
+	session.page = pageSession.page
+	session.evalJS = nil
+	cursor := &FeedCursor{Kind: FeedPageHome}
+	session.advanceFeedCursor(cursor)
+	_, next, _, err := session.ListFeedsBatch(context.Background(), cursor, 1)
+	if err == nil || next != nil || client.runtimeCall != 0 || len(session.opToken) != 1 {
+		t.Fatalf("wrong live route reached collection: next=%v runtime=%d err=%v", next, client.runtimeCall, err)
+	}
+}
+
+func TestFeedCursorCancellationDuringFinalRefreshRemainsRetryable(t *testing.T) {
+	for _, kind := range []FeedPageKind{FeedPageHome, FeedPageSearch} {
+		t.Run(string(kind), func(t *testing.T) {
+			client := &searchP0CDPClient{feedBatch: true, searchRoute: kind == FeedPageSearch}
+			rawPage, _ := newSearchP0Element(t, client)
+			manager := NewBrowseSessionManager(time.Minute)
+			t.Cleanup(manager.CloseAll)
+			session := manager.Create(nil, nil, nil)
+			session.page = (&hrod.Page{Rod: rawPage, Keyboard: rawPage.Keyboard}).Context(context.Background())
+			cursor := &FeedCursor{Kind: kind, ReturnedIDs: []string{"previous"}}
+			if kind == FeedPageSearch {
+				cursor.Keyword = "same"
+				cursor.FilterKey = filterKeyFromFilters(nil)
+			}
+			session.advanceFeedCursor(cursor)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			refreshes := 0
+			session.evalJS = func(refreshCtx context.Context, _ *hrod.Page, _ string) (*proto.RuntimeRemoteObject, error) {
+				refreshes++
+				if refreshes == 1 {
+					cancel()
+					return nil, refreshCtx.Err()
+				}
+				return nil, nil
+			}
+			batch := func(callCtx context.Context, c *FeedCursor) ([]Feed, *FeedCursor, bool, error) {
+				if kind == FeedPageSearch {
+					return session.SearchBatch(callCtx, "same", nil, c, 1)
+				}
+				return session.ListFeedsBatch(callCtx, c, 1)
+			}
+			feeds, next, _, err := batch(ctx, cursor)
+			if !errors.Is(err, context.Canceled) || feeds != nil || next != nil || refreshes != 1 {
+				t.Fatalf("finalize cancellation returned a batch: feeds=%v next=%v refreshes=%d err=%v", feeds, next, refreshes, err)
+			}
+			if cursor.position.consumed || len(cursor.ReturnedIDs) != 1 || session.nextResultIndex != 0 || len(session.opToken) != 1 {
+				t.Fatal("canceled finalize consumed cursor, registered results, or leaked token")
+			}
+			feeds, next, more, err := batch(context.Background(), cursor)
+			if err != nil || len(feeds) != 1 || feeds[0].ID != "a" || next == nil || !more || refreshes != 2 {
+				t.Fatalf("retry lost batch: feeds=%v next=%v more=%t refreshes=%d err=%v", feeds, next, more, refreshes, err)
+			}
+			if !cursor.position.consumed || len(cursor.ReturnedIDs) != 1 || next.position == cursor.position {
+				t.Fatal("commit must consume only the shared position and return a distinct successor")
+			}
+			if _, _, _, err := batch(context.Background(), cursor); err == nil {
+				t.Fatal("committed input replayed")
+			}
+		})
+	}
+}
+
+func TestFeedCursorFinalRefreshErrorDoesNotConsumePosition(t *testing.T) {
+	for _, kind := range []FeedPageKind{FeedPageHome, FeedPageSearch} {
+		for _, failure := range []error{context.DeadlineExceeded, ErrFatalRendererError} {
+			t.Run(string(kind)+"/"+failure.Error(), func(t *testing.T) {
+				client := &searchP0CDPClient{feedBatch: true, searchRoute: kind == FeedPageSearch}
+				rawPage, _ := newSearchP0Element(t, client)
+				manager := NewBrowseSessionManager(time.Minute)
+				t.Cleanup(manager.CloseAll)
+				session := manager.Create(nil, nil, nil)
+				session.page = (&hrod.Page{Rod: rawPage, Keyboard: rawPage.Keyboard}).Context(context.Background())
+				session.evalJS = func(context.Context, *hrod.Page, string) (*proto.RuntimeRemoteObject, error) {
+					return nil, failure
+				}
+				cursor := &FeedCursor{Kind: kind}
+				if kind == FeedPageSearch {
+					cursor.Keyword = "same"
+					cursor.FilterKey = filterKeyFromFilters(nil)
+				}
+				session.advanceFeedCursor(cursor)
+				var next *FeedCursor
+				var err error
+				if kind == FeedPageSearch {
+					_, next, _, err = session.SearchBatch(context.Background(), "same", nil, cursor, 1)
+				} else {
+					_, next, _, err = session.ListFeedsBatch(context.Background(), cursor, 1)
+				}
+				if !errors.Is(err, failure) || next != nil || cursor.position.consumed || len(cursor.ReturnedIDs) != 0 || session.nextResultIndex != 0 || len(session.opToken) != 1 {
+					t.Fatalf("refresh failure committed batch or lost error: next=%v err=%v", next, err)
+				}
+			})
+		}
 	}
 }

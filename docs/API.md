@@ -40,6 +40,9 @@ reply_notification
 要点：
 
 - `start_page` 返回 `session_id`，所有页面操作都需要传入 `session_id`；`start_page` 不接受 `share_url`。
+- `start_page` 复用返回的 `ready:true` 只在 `readiness_scope: "page_transport"` 范围内成立，不代表业务就绪；`blocked/unconfirmed` 返回 `ready:false` 并保留会话，稍后不带 `force_recreate` 重试检查。
+- `search_feeds` 省略筛选或传 `{}` 时保留页面当前条件，不重置默认值、不点击筛选；同关键词读取现有结果，不保证刷新。任何显式非空筛选（含默认值）因缺少应用状态与对应响应完成证据而在操作前拒绝。
+- 图文及视频发布在提交可能已发生但无权威回执时返回 `data.status: "unconfirmed"`、`data.message` 人工核实指引。MCP `isError:false`；HTTP 正常响应封装的 `success:true` 仅表示调用已处理，不能作为发布成功证据。不要重试或自动重发，先人工核实。
 - 写操作（点赞、收藏、评论、回复、通知点赞、通知回复）使用 `confirm_token` 进行二次确认。
 - `open_note` 支持两种互斥方式：(1) result_ref传搜索结果index或feed_id（可配合xsec_token）；(2) share_url传官方完整笔记URL(www.xiaohongshu.com/explore/{24hex}或/discovery/item/{24hex})或xhslink.com/xhslink.cn短链，会在当前session page内导航。两种方式恰好传一个，share_url不能与xsec_token同时使用。失败不保证页面位置回退，但不会提交打开/阅读逻辑状态。
 - 通知类工具：`get_unread_count`（只读未读数，不点入口不清未读）、`list_notifications`（进入通知页/切换 tab 读取列表，进入或切换会使对应未读被清除）、`like_notification`/`reply_notification`（仅对 `list_notifications` 中 `mentions` tab 的条目，且需使用其 `notification_ref`）。

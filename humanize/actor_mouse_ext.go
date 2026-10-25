@@ -54,6 +54,9 @@ func (m *Mouse) boundPage() *rod.Page {
 func (m *Mouse) dispatchMouseMove(bound *rod.Page, p Point) error {
 	m.state.dispatchMu.Lock()
 	defer m.state.dispatchMu.Unlock()
+	if m.state.inputErr != nil {
+		return m.state.inputErr
+	}
 	snap := m.state.mouseSnapshot()
 	if err := (proto.InputDispatchMouseEvent{
 		Type:      proto.InputDispatchMouseEventTypeMouseMoved,
@@ -83,6 +86,9 @@ func (m *Mouse) posSnapshot() Point {
 func (m *Mouse) dispatchMouseButton(typ proto.InputDispatchMouseEventType, button proto.InputMouseButton, clickCount int) error {
 	m.state.dispatchMu.Lock()
 	defer m.state.dispatchMu.Unlock()
+	if m.state.inputErr != nil {
+		return m.state.inputErr
+	}
 	bound := m.boundPage()
 
 	m.state.mu.Lock()
@@ -124,6 +130,9 @@ func (m *Mouse) dispatchMouseButton(typ proto.InputDispatchMouseEventType, butto
 func (m *Mouse) dispatchMouseScroll(deltaX, deltaY float64) error {
 	m.state.dispatchMu.Lock()
 	defer m.state.dispatchMu.Unlock()
+	if m.state.inputErr != nil {
+		return m.state.inputErr
+	}
 	bound := m.boundPage()
 	snap := m.state.mouseSnapshot()
 	if err := (proto.InputDispatchMouseEvent{
@@ -354,16 +363,7 @@ func (m *Mouse) ClickWithOptions(el *rod.Element, button proto.InputMouseButton,
 		return err
 	}
 
-	if err := m.dispatchMouseButton(proto.InputDispatchMouseEventTypeMousePressed, button, clickCount); err != nil {
-		return err
-	}
-	if err := sleepWithContext(m.ctx, randDuration(40*time.Millisecond, 120*time.Millisecond)); err != nil {
-		return err
-	}
-	if err := m.dispatchMouseButton(proto.InputDispatchMouseEventTypeMouseReleased, button, clickCount); err != nil {
-		return err
-	}
-	return nil
+	return m.clickButton(button, clickCount)
 }
 
 // ClickNoScroll performs a human-like click without scrolling the element into
@@ -405,16 +405,41 @@ func (m *Mouse) ClickNoScroll(el *rod.Element) error {
 		return errors.New("最终点击落点不再命中目标")
 	}
 
-	if err := m.dispatchMouseButton(proto.InputDispatchMouseEventTypeMousePressed, proto.InputMouseButtonLeft, 1); err != nil {
+	return m.clickButton(proto.InputMouseButtonLeft, 1)
+}
+
+func (m *Mouse) clickButton(button proto.InputMouseButton, clickCount int) (err error) {
+	m.state.dispatchMu.Lock()
+	inputErr := m.state.inputErr
+	m.state.dispatchMu.Unlock()
+	if inputErr != nil {
+		return inputErr
+	}
+	if err := m.ctx.Err(); err != nil {
 		return err
 	}
-	if err := sleepWithContext(m.ctx, randDuration(40*time.Millisecond, 120*time.Millisecond)); err != nil {
+	defer func() {
+		if err == nil {
+			return
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(m.ctx), 2*time.Second)
+		defer cancel()
+		cleanup := *m
+		cleanup.ctx = cleanupCtx
+		if releaseErr := cleanup.dispatchMouseButton(proto.InputDispatchMouseEventTypeMouseReleased, button, clickCount); releaseErr != nil {
+			m.state.dispatchMu.Lock()
+			m.state.inputErr = fmt.Errorf("鼠标释放未确认，输入状态不可用: %w", releaseErr)
+			m.state.dispatchMu.Unlock()
+			err = errors.Join(err, releaseErr)
+		}
+	}()
+	if err = m.dispatchMouseButton(proto.InputDispatchMouseEventTypeMousePressed, button, clickCount); err != nil {
 		return err
 	}
-	if err := m.dispatchMouseButton(proto.InputDispatchMouseEventTypeMouseReleased, proto.InputMouseButtonLeft, 1); err != nil {
+	if err = sleepWithContext(m.ctx, randDuration(40*time.Millisecond, 120*time.Millisecond)); err != nil {
 		return err
 	}
-	return nil
+	return m.dispatchMouseButton(proto.InputDispatchMouseEventTypeMouseReleased, button, clickCount)
 }
 
 // Scroll scrolls by deltaY (and optionally deltaX) in human-like increments.
