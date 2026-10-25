@@ -200,6 +200,19 @@ func TestFocusedServiceSessionCloseSkipsWarmCache(t *testing.T) {
 	}
 }
 
+// Fail only the reuse probe, after the initial session snapshot has succeeded.
+type focusedUnhealthyReuseClient struct {
+	sessionCleanupPageClient
+	unhealthy atomic.Bool
+}
+
+func (c *focusedUnhealthyReuseClient) Call(ctx context.Context, sessionID, method string, params interface{}) ([]byte, error) {
+	if c.unhealthy.Load() && method == "Runtime.callFunctionOn" {
+		return nil, xiaohongshu.ErrFatalRendererError
+	}
+	return c.sessionCleanupPageClient.Call(ctx, sessionID, method, params)
+}
+
 func TestFocusedNonForcedCreateCleanupContext(t *testing.T) {
 	for _, mode := range []string{"cancel", "deadline", "shutdown", "sentinel", "success"} {
 		t.Run(mode, func(t *testing.T) {
@@ -224,7 +237,8 @@ func TestFocusedNonForcedCreateCleanupContext(t *testing.T) {
 			service := &XiaohongshuService{browserManager: manager, browseSessions: sessions}
 			browserCtx, cancelBrowser := context.WithCancel(context.Background())
 			defer cancelBrowser()
-			controller := rod.New().Context(browserCtx).NoDefaultDevice().ControlURL("").Client(&sessionCleanupPageClient{events: make(chan *cdp.Event)})
+			client := &focusedUnhealthyReuseClient{sessionCleanupPageClient: sessionCleanupPageClient{events: make(chan *cdp.Event)}}
+			controller := rod.New().Context(browserCtx).NoDefaultDevice().ControlURL("").Client(client)
 			if err := controller.Connect(); err != nil {
 				t.Fatal(err)
 			}
@@ -264,6 +278,9 @@ func TestFocusedNonForcedCreateCleanupContext(t *testing.T) {
 			if !session.Info().ExpiresAt.After(time.Now()) {
 				t.Fatal("candidate must be active and unexpired")
 			}
+			// An ambiguous/about:blank probe must retain the candidate. Only a
+			// confirmed unhealthy candidate should exercise non-forced cleanup.
+			client.unhealthy.Store(true)
 			requestCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 			defer cancel()
 			if mode == "deadline" {

@@ -21,7 +21,7 @@ import (
 // It verifies client/context cancellation, not Chrome-side query completion.
 type serviceTargetCancelClient struct {
 	upstream serviceCDPCaller
-	blockAt  int32
+	method   string
 	calls    atomic.Int32
 	entered  chan struct{}
 	abort    chan struct{}
@@ -31,12 +31,22 @@ type serviceTargetCancelClient struct {
 func (c *serviceTargetCancelClient) Event() <-chan *cdp.Event { return nil }
 
 func (c *serviceTargetCancelClient) Call(ctx context.Context, sessionID, method string, params interface{}) ([]byte, error) {
-	if method == "Target.getTargetInfo" {
-		request, ok := params.(proto.TargetGetTargetInfo)
-		if sessionID != "" || !ok || request.TargetID == "" {
-			return nil, fmt.Errorf("expected browser-level explicit target query: session=%q params=%#v", sessionID, params)
+	if method == c.method {
+		if sessionID != "" {
+			return nil, fmt.Errorf("expected browser-level target query: session=%q", sessionID)
 		}
-		if c.calls.Add(1) == c.blockAt {
+		switch method {
+		case "Target.getTargetInfo":
+			request, ok := params.(proto.TargetGetTargetInfo)
+			if !ok || request.TargetID == "" {
+				return nil, fmt.Errorf("expected explicit target query: params=%#v", params)
+			}
+		case "Target.getTargets":
+			if _, ok := params.(proto.TargetGetTargets); !ok {
+				return nil, fmt.Errorf("expected target list query: params=%#v", params)
+			}
+		}
+		if c.calls.Add(1) == 1 {
 			close(c.entered)
 			select {
 			case <-ctx.Done():
@@ -49,7 +59,7 @@ func (c *serviceTargetCancelClient) Call(ctx context.Context, sessionID, method 
 	return c.upstream.Call(ctx, sessionID, method, params)
 }
 
-func newServiceTargetCancelFixture(t *testing.T, blockAt int32) (*XiaohongshuService, *browser.Manager, *hrod.Page, *serviceTargetCancelClient) {
+func newServiceTargetCancelFixture(t *testing.T, method string) (*XiaohongshuService, *browser.Manager, *hrod.Page, *serviceTargetCancelClient) {
 	t.Helper()
 	profileDir := t.TempDir()
 	manager := browser.NewManager(newServiceBrowserFactory(t, nil, nil, nil, nil, profileDir),
@@ -78,7 +88,7 @@ func newServiceTargetCancelFixture(t *testing.T, blockAt int32) (*XiaohongshuSer
 	}
 	controller := page.Rod.Browser()
 	gate := &serviceTargetCancelClient{
-		upstream: controller.Context(controller.GetContext()), blockAt: blockAt,
+		upstream: controller.Context(controller.GetContext()), method: method,
 		entered: make(chan struct{}), abort: make(chan struct{}),
 	}
 	controller.Client(gate)
@@ -121,8 +131,8 @@ func cancelEnteredServiceTarget(t *testing.T, gate *serviceTargetCancelClient, c
 }
 
 func TestCreateBrowseSessionOnURLCancellationReturnsGateAndLease(t *testing.T) {
-	// Query 1 is Manager's warm probe; query 2 is EnsureReadyOn -> onURL.
-	service, manager, seed, gate := newServiceTargetCancelFixture(t, 2)
+	// Manager probes Target.getTargets; the first getTargetInfo is onURL.
+	service, manager, seed, gate := newServiceTargetCancelFixture(t, "Target.getTargetInfo")
 	lifetime := seed.Rod.Browser().GetContext()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -175,13 +185,16 @@ func TestCreateBrowseSessionOnURLCancellationReturnsGateAndLease(t *testing.T) {
 }
 
 func TestManagerWarmProbeCancellationAfterEntryReturnsLease(t *testing.T) {
-	_, manager, seed, gate := newServiceTargetCancelFixture(t, 1)
+	_, manager, seed, gate := newServiceTargetCancelFixture(t, "Target.getTargets")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
 	var returnedPage atomic.Bool
 	go func() {
 		page, _, err := manager.AcquireForWithSource(ctx, "canceled-warm-probe")
+		if page != nil {
+			defer manager.Release(page)
+		}
 		returnedPage.Store(page != nil)
 		done <- err
 	}()
@@ -199,16 +212,24 @@ func TestManagerWarmProbeCancellationAfterEntryReturnsLease(t *testing.T) {
 	if _, err := (proto.TargetGetTargetInfo{TargetID: seed.Rod.TargetID}).Call(seed.Rod.Browser().Context(probeCtx)); err != nil {
 		t.Fatalf("fresh-context query failed: %v", err)
 	}
-	// The canceled probe's target is retained as pending cleanup, not silently
-	// forgotten. A valid-context cleanup must remain possible before next use.
-	if err := manager.ClosePageContext(probeCtx, seed); err != nil {
-		t.Fatalf("pending warm target cleanup failed: %v", err)
+	// An inconclusive probe restores the same warm entry without closing it.
+	if !manager.Stats().WarmPageCached {
+		t.Fatal("canceled warm probe lost the cached target")
 	}
 	page, fresh, err := manager.AcquireForWithSource(probeCtx, "after-warm-cancel")
-	if err != nil || page == nil || !fresh || page == seed {
-		t.Fatalf("warm probe leaked lease: page=%v fresh=%t err=%v", page, fresh, err)
+	if page != nil {
+		defer manager.Release(page)
 	}
-	if err := manager.ReleaseAndCloseContext(probeCtx, page); err != nil {
-		t.Fatal(err)
+	if err != nil || fresh || page != seed {
+		t.Fatalf("warm probe lost lease or target: page=%v fresh=%t err=%v", page, fresh, err)
+	}
+	contendCtx, cancelContend := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancelContend()
+	contender, _, err := manager.AcquireForWithSource(contendCtx, "contender")
+	if contender != nil {
+		defer manager.Release(contender)
+	}
+	if contender != nil || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("warm probe returned lease more than once: page=%v err=%v", contender, err)
 	}
 }

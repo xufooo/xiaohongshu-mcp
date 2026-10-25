@@ -1279,7 +1279,9 @@ func TestCheckReusableExploreUsesLightweightHealthCheck(t *testing.T) {
 }
 
 func TestCheckReusableRetriesOnceAfterTimeout(t *testing.T) {
-	page := &hrod.Page{}
+	// CheckReusable's backoff binds the request context to a real Rod page.
+	// Only Eval is injected; no Chrome process is needed for this fixture.
+	page := newCurrentPageURLSession(t, &currentPageURLCDPClient{}).page
 	evalCalls := 0
 	session := &BrowseSession{
 		page:      page,
@@ -1288,8 +1290,8 @@ func TestCheckReusableRetriesOnceAfterTimeout(t *testing.T) {
 		evalJS: func(ctx context.Context, p *hrod.Page, script string) (*proto.RuntimeRemoteObject, error) {
 			evalCalls++
 			if evalCalls == 1 {
-				time.Sleep(3 * time.Second)
-				return nil, fmt.Errorf("健康检查超时")
+				<-ctx.Done()
+				return nil, ctx.Err()
 			}
 			return &proto.RuntimeRemoteObject{
 				Type:  proto.RuntimeRemoteObjectTypeString,
@@ -1313,18 +1315,20 @@ func TestCheckReusableRetriesOnceAfterTimeout(t *testing.T) {
 }
 
 func TestCheckReusableDeadlineIsUnconfirmedAndKeepsPage(t *testing.T) {
-	page := &hrod.Page{}
+	page := newCurrentPageURLSession(t, &currentPageURLCDPClient{}).page
+	evalCalls := 0
 	session := &BrowseSession{
 		page:      page,
 		opToken:   make(chan struct{}, 1),
 		expiresAt: time.Now().Add(time.Minute),
 		evalJS: func(context.Context, *hrod.Page, string) (*proto.RuntimeRemoteObject, error) {
+			evalCalls++
 			return nil, context.DeadlineExceeded
 		},
 	}
 	session.opToken <- struct{}{}
 	check := session.CheckReusable(context.Background())
-	if check.Status != SessionUnconfirmed || check.Ready || check.Risk != "" || session.page != page || session.closed || len(session.opToken) != 1 {
+	if check.Status != SessionUnconfirmed || check.Ready || check.Risk != "" || session.page != page || session.closed || len(session.opToken) != 1 || evalCalls != 2 {
 		t.Fatalf("a safety deadline became unhealthy or lost the page: %+v", check)
 	}
 }
